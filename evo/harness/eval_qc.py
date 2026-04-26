@@ -58,12 +58,14 @@ def _run_case(
 
     # Stage B: rule-based reject for missing/invalid required fields.
     query = _resolve_query(session, judge)
+    gt_answer = _normalize_optional_text(judge.gt_answer)
     gt_text = resolve_gt_text(judge)
+    key_points = [str(k) for k in (judge.key or []) if str(k).strip()]
     b_tags = apply_hard_rules(
         query=query,
-        gt_answer=str(judge.gt_answer),
+        gt_answer=gt_answer,
         gt_text=gt_text,
-        key_points=[str(k) for k in (judge.key or []) if str(k).strip()],
+        key_points=key_points,
     )
     feature.b_reject_tags = b_tags
     if b_tags:
@@ -74,9 +76,9 @@ def _run_case(
     # Stage C: LLM edge scoring + normalized threshold checks.
     payload = {
         'query': query,
-        'gt_answer': str(judge.gt_answer),
+        'gt_answer': gt_answer,
         'gt_text': gt_text,
-        'key_points': [str(k) for k in (judge.key or [])],
+        'key_points': key_points,
     }
     parsed = run_eval_qc(session, payload)
     feature.c_summary_reason = str(parsed.get('summary_reason', '') or '')
@@ -91,10 +93,18 @@ def _run_case(
 
 def _resolve_query(session: AnalysisSession, judge: Any) -> str:
     trace = session.get_trace(judge.trace_id)
-    if trace and str(trace.query).strip():
-        return str(trace.query).strip()
-    extra_query = judge.extra.get('query') if isinstance(judge.extra, dict) else ''
-    return str(extra_query).strip()
+    if trace:
+        query = _normalize_optional_text(trace.query)
+        if query:
+            return query
+    extra_query = judge.extra.get('query') if isinstance(judge.extra, dict) else None
+    return _normalize_optional_text(extra_query)
+
+
+def _normalize_optional_text(value: Any) -> str:
+    if value is None:
+        return ''
+    return str(value).strip()
 
 
 def _to_edge_results(raw_edges: Any, session: AnalysisSession) -> dict[str, EdgeResult]:

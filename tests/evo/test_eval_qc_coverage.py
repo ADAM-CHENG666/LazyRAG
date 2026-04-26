@@ -163,6 +163,44 @@ def test_resolve_query_falls_back_to_judge_extra_boundary() -> None:
     assert sent_payload['query'] == 'from_extra'
 
 
+def test_stage_b_rejects_none_gt_answer() -> None:
+    session = create_session(load_config())
+    judge = _judge(trace_id='t1', score=0.1, gt_answer=None)  # type: ignore[arg-type]
+    traces = {'t1': TraceRecord(query='q1')}
+    with session_scope(session):
+        session.set_parsed_corpus(judges={'case_1': judge}, traces=traces, trace_meta=TraceMeta())
+        with patch('evo.harness.eval_qc.run_eval_qc') as mocked:
+            eval_qc_harness.run_eval_qc_step(session)
+    feature = session.eval_features['case_1']
+    assert 'gt_answer_empty' in feature.b_reject_tags
+    mocked.assert_not_called()
+
+
+def test_resolve_query_treats_none_as_empty() -> None:
+    session = create_session(load_config())
+    judge = _judge(trace_id='t1', score=0.1, extra={'query': None})
+    traces = {'t1': TraceRecord(query=None)}  # type: ignore[arg-type]
+    with session_scope(session):
+        session.set_parsed_corpus(judges={'case_1': judge}, traces=traces, trace_meta=TraceMeta())
+        with patch('evo.harness.eval_qc.run_eval_qc') as mocked:
+            eval_qc_harness.run_eval_qc_step(session)
+    feature = session.eval_features['case_1']
+    assert 'query_empty' in feature.b_reject_tags
+    mocked.assert_not_called()
+
+
+def test_stage_c_payload_filters_empty_key_points() -> None:
+    session = create_session(load_config())
+    judge = _judge(trace_id='t1', score=0.1, key=['k1', ' ', ''])
+    traces = {'t1': TraceRecord(query='q1')}
+    with session_scope(session):
+        session.set_parsed_corpus(judges={'case_1': judge}, traces=traces, trace_meta=TraceMeta())
+        with patch('evo.harness.eval_qc.run_eval_qc', return_value={'summary_reason': 'ok', 'edges': _edges(0.8)}) as mocked:
+            eval_qc_harness.run_eval_qc_step(session)
+    sent_payload = mocked.call_args[0][1]
+    assert sent_payload['key_points'] == ['k1']
+
+
 def test_tools_apply_hard_filter_boundary_and_missing() -> None:
     cfg = EvalQCConfig(a_ac_threshold=0.6)
     low = _judge(trace_id='t1', score=0.59)
@@ -176,6 +214,11 @@ def test_tools_apply_hard_filter_boundary_and_missing() -> None:
     missing = _judge(trace_id='t3', score=0.8)
     bad3, tags3, severity3 = eval_qc_tools.apply_hard_filter(missing, score_field='not_exists', config=cfg)
     assert bad3 is True and tags3 == ['ac_missing'] and severity3 == 'high'
+
+    bool_score = _judge(trace_id='t4', score=0.8)
+    bool_score.answer_correctness = True  # type: ignore[assignment]
+    bad4, tags4, severity4 = eval_qc_tools.apply_hard_filter(bool_score, score_field='answer_correctness', config=cfg)
+    assert bad4 is True and tags4 == ['ac_missing'] and severity4 == 'high'
 
 
 def test_tools_normalize_edge_output_error_fallback_and_clamp() -> None:

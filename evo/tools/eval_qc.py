@@ -25,7 +25,7 @@ def apply_hard_filter(
     raw = getattr(judge, score_field, None)
     tags: list[str] = []
     score_val: float | None = None
-    if isinstance(raw, (int, float)):
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
         score_val = float(raw)
     if score_val is None:
         tags.append('ac_missing')
