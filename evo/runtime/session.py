@@ -5,13 +5,14 @@ import uuid
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime
+from types import MappingProxyType
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Mapping
 
 from evo.domain import (
     ClusteringResult, FlowAnalysisResult, JudgeRecord,
     MergedCaseView, NodeInfo, NodeResolver, PerStepClusteringResult,
-    TraceMeta, TraceRecord, get_node,
+    TraceMeta, TraceRecord, EvalFeature, get_node,
 )
 from evo.conductor.handle_store import HandleStore
 from evo.conductor.world_model import WorldModelStore
@@ -112,6 +113,10 @@ class AnalysisSession:
         return self.state.case_step_features
 
     @property
+    def eval_features(self) -> Mapping[str, EvalFeature]:
+        return MappingProxyType(self.state.eval_features)
+
+    @property
     def global_step_analysis(self) -> dict[str, Any]:
         return self.state.global_step_analysis
 
@@ -145,6 +150,19 @@ class AnalysisSession:
 
     def iter_judge(self) -> Iterator[tuple[str, JudgeRecord]]:
         yield from self.state.parsed_judge.items()
+
+    def get_passed_dataset_ids(self) -> set[str]:
+        if not self.config.eval_qc.enabled:
+            return set(self.state.parsed_judge.keys())
+        if not self.state.eval_features:
+            raise RuntimeError('eval_features is empty while eval_qc is enabled.')
+        return {did for did, ef in self.state.eval_features.items() if ef.qc_passed}
+
+    def iter_passed_judge(self) -> Iterator[tuple[str, JudgeRecord]]:
+        passed = self.get_passed_dataset_ids()
+        for did, record in self.iter_judge():
+            if did in passed:
+                yield did, record
 
     def get_judge(self, dataset_id: str) -> JudgeRecord | None:
         return self.state.parsed_judge.get(dataset_id)
@@ -218,6 +236,13 @@ class AnalysisSession:
         self.state.case_step_features = dict(case_features)
         self.state.global_step_analysis = dict(global_features)
         self.telemetry.emit('features.ready', cases=len(case_features))
+
+    def set_eval_features(self, features: dict[str, EvalFeature]) -> None:
+        unknown_ids = sorted(set(features.keys()) - set(self.state.parsed_judge.keys()))
+        if unknown_ids:
+            raise ValueError(f'eval_features contain unknown dataset_id(s): {unknown_ids[:5]}')
+        self.state.eval_features = dict(features)
+        self.telemetry.emit('eval_features.ready', cases=len(features))
 
     def set_clustering_global(self, result: ClusteringResult) -> None:
         self.state.clustering_global = result

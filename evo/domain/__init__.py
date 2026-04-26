@@ -12,6 +12,7 @@ from evo.domain.models import (
     JudgeRecord, LoadSummary, MergedCaseView, ModuleOutput,
     TraceMeta, TraceRecord,
 )
+from evo.domain.eval_feature import EdgeResult, EvalFeature
 from evo.domain.node import NodeInfo, NodeResolver, get_node
 
 __all__ = [
@@ -21,5 +22,6 @@ __all__ = [
     "PerStepClusteringResult", "PerStepSummary", "StepTransition",
     "JudgeRecord", "LoadSummary", "MergedCaseView", "ModuleOutput",
     "TraceMeta", "TraceRecord",
+    "EdgeResult", "EvalFeature",
     "NodeInfo", "NodeResolver", "get_node",
 ]

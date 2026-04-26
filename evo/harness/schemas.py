@@ -106,6 +106,28 @@ ACTION_VERIFIER: dict = {
     },
 }
 
+EVAL_QC: dict = {
+    'type': 'object',
+    'required': ['edges', 'summary_reason'],
+    'properties': {
+        'edges': {
+            'type': 'array',
+            'minItems': 5,
+            'maxItems': 5,
+            'items': {
+                'type': 'object',
+                'required': ['id', 'score', 'reason'],
+                'properties': {
+                    'id': {'type': 'string', 'minLength': 1},
+                    'score': {'type': 'number', 'minimum': 0, 'maximum': 1},
+                    'reason': {'type': 'string', 'minLength': 1},
+                },
+            },
+        },
+        'summary_reason': {'type': 'string'},
+    },
+}
+
 SCHEMAS: dict[str, dict] = {
     "indexer": INDEXER,
     "researcher": RESEARCHER,
@@ -113,6 +135,7 @@ SCHEMAS: dict[str, dict] = {
     "synthesizer": SYNTHESIZER,
     "conductor": CONDUCTOR,
     "action_verifier": ACTION_VERIFIER,
+    "eval_qc": EVAL_QC,
 }
 
 __all__ = [
@@ -123,4 +146,5 @@ __all__ = [
     "SYNTHESIZER",
     "CONDUCTOR",
     "ACTION_VERIFIER",
+    "EVAL_QC",
 ]

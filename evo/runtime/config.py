@@ -51,6 +51,18 @@ class AnalysisConfig:
 
 
 @dataclass(frozen=True)
+class EvalQCConfig:
+    # Master switch for the eval_qc stage in pipeline.
+    enabled: bool = True
+    # Optional A-stage score field; falls back to analysis.badcase_score_field when None.
+    a_score_field: str | None = None
+    # A-stage threshold for "low score" detection.
+    a_ac_threshold: float = 0.6
+    # Shared C-stage threshold for all eval edges.
+    c_edge_default_threshold: float = 0.6
+
+
+@dataclass(frozen=True)
 class ChatInternalConfig:
     base_url: str = 'http://chat:8046'
     token: str = ''
@@ -105,6 +117,7 @@ class EvoConfig:
     chat_source: Path = Path('/app/algorithm/chat')
     code_access: CodeAccessConfig = field(default_factory=CodeAccessConfig)
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
+    eval_qc: EvalQCConfig = field(default_factory=EvalQCConfig)
     llm: ModelGovernanceConfig = field(default_factory=_default_llm_governance)
     embed: ModelGovernanceConfig = field(default_factory=_default_embed_governance)
     chat_internal: ChatInternalConfig = field(default_factory=ChatInternalConfig)
@@ -135,6 +148,10 @@ def load_config(
     data_dir = Path(data_dir or os.getenv('EVO_DATA_DIR', str(evo_root / 'data')))
     base_dir = Path(base_dir or os.getenv('EVO_BASE_DIR', str(project_root / 'data' / 'evo')))
     score_field = badcase_score_field or os.getenv('EVO_BADCASE_SCORE_FIELD', 'answer_correctness')
+    eval_qc_enabled = os.getenv('EVO_EVAL_QC_ENABLED', '1').lower() not in ('0', 'false', 'no')
+    eval_qc_a_score_field = os.getenv('EVO_EVAL_QC_A_SCORE_FIELD') or None
+    eval_qc_a_ac_threshold = float(os.getenv('EVO_EVAL_QC_A_AC_THRESHOLD', '0.6'))
+    eval_qc_c_default_threshold = float(os.getenv('EVO_EVAL_QC_C_EDGE_DEFAULT_THRESHOLD', '0.6'))
 
     if code_map_path is None:
         env_cm = os.getenv('EVO_CODE_MAP')
@@ -165,5 +182,11 @@ def load_config(
         chat_source=chat_source,
         code_access=code_access,
         analysis=AnalysisConfig(badcase_score_field=score_field),
+        eval_qc=EvalQCConfig(
+            enabled=eval_qc_enabled,
+            a_score_field=eval_qc_a_score_field,
+            a_ac_threshold=eval_qc_a_ac_threshold,
+            c_edge_default_threshold=eval_qc_c_default_threshold,
+        ),
         chat_internal=chat_internal,
     )

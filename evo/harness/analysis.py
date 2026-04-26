@@ -13,12 +13,16 @@ def compute_step_features(session: AnalysisSession) -> int:
     # Single session-cached resolver shared across every case.
     resolver = session.resolve_node
     features: dict = {}
+    passed_dataset_ids = session.get_passed_dataset_ids()
     for cid, j in session.iter_judge():
+        if cid not in passed_dataset_ids:
+            continue
         trace = session.get_trace(j.trace_id)
         if trace is None:
             continue
         features[cid] = build_case_step_features(j, trace, pipeline, resolver)
-    global_analysis = aggregate_global_step_analysis(features, session.parsed_judge, pipeline)
+    passed_judges = {cid: session.parsed_judge[cid] for cid in features}
+    global_analysis = aggregate_global_step_analysis(features, passed_judges, pipeline)
     session.set_step_features(features, global_analysis)
     _log.info("Step features: %d cases, %d steps", len(features), len(pipeline))
     return len(features)

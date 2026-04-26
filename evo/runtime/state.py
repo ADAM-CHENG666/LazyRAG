@@ -6,7 +6,7 @@ from typing import Any
 
 from evo.domain import (
     ClusteringResult, FlowAnalysisResult, JudgeRecord,
-    PerStepClusteringResult, TraceMeta, TraceRecord,
+    PerStepClusteringResult, TraceMeta, TraceRecord, EvalFeature,
 )
 
 
@@ -22,6 +22,7 @@ class SessionState:
     warnings: list[str] = field(default_factory=list)
 
     # Feature engineering ---------------------------------------------------
+    eval_features: dict[str, EvalFeature] = field(default_factory=dict)
     case_step_features: dict[str, dict[str, dict[str, float]]] = field(default_factory=dict)
     global_step_analysis: dict[str, Any] = field(default_factory=dict)
 

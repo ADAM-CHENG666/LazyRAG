@@ -129,7 +129,7 @@ def cluster_badcases(
     mcs = min_cluster_size or session.config.cluster_min_size
 
     ranked: list[tuple[str, float]] = []
-    for did, j in session.iter_judge():
+    for did, j in session.iter_passed_judge():
         val = getattr(j, score_field, None)
         if val is not None:
             ranked.append((did, float(val)))
@@ -190,7 +190,7 @@ def cluster_per_step(
     pipeline = session.trace_meta.pipeline
 
     ranked: list[tuple[str, float]] = []
-    for did, j in session.iter_judge():
+    for did, j in session.iter_passed_judge():
         val = getattr(j, score_field, None)
         if val is not None:
             ranked.append((did, float(val)))
