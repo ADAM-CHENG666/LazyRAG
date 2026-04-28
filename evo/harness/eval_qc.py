@@ -3,19 +3,11 @@ from __future__ import annotations
 from typing import Any
 
 from evo.agents.eval_qc import run_eval_qc
-from evo.domain import EdgeResult, EvalFeature
+from evo.domain import EDGE_IDS, EdgeResult, EvalFeature
 from evo.runtime.session import AnalysisSession
 from evo.tools.eval_qc import (
     apply_hard_filter, apply_hard_rules, build_b_reject_reason,
     normalize_edge_output, resolve_gt_text, threshold_for_edge,
-)
-
-EDGE_IDS: tuple[str, ...] = (
-    'query_to_gt_answer',
-    'query_to_gt_text',
-    'query_to_key_points',
-    'gt_text_to_gt_answer',
-    'gt_answer_to_key_points',
 )
 
 

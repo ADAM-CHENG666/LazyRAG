@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from evo.domain import EDGE_IDS
+
 INDEXER: dict = {
     "type": "object",
     "required": ["hypotheses"],
@@ -112,20 +114,34 @@ EVAL_QC: dict = {
     'properties': {
         'edges': {
             'type': 'array',
-            'minItems': 5,
-            'maxItems': 5,
+            'minItems': len(EDGE_IDS),
+            'maxItems': len(EDGE_IDS),
             'items': {
                 'type': 'object',
                 'required': ['id', 'score', 'reason'],
                 'properties': {
-                    'id': {'type': 'string', 'minLength': 1},
+                    'id': {'type': 'string', 'enum': list(EDGE_IDS)},
                     'score': {'type': 'number', 'minimum': 0, 'maximum': 1},
                     'reason': {'type': 'string', 'minLength': 1},
                 },
+                'additionalProperties': False,
             },
+            'allOf': [
+                {
+                    'contains': {
+                        'type': 'object',
+                        'required': ['id'],
+                        'properties': {'id': {'const': edge_id}},
+                    },
+                    'minContains': 1,
+                    'maxContains': 1,
+                }
+                for edge_id in EDGE_IDS
+            ],
         },
         'summary_reason': {'type': 'string'},
     },
+    'additionalProperties': False,
 }
 
 SCHEMAS: dict[str, dict] = {

@@ -1,0 +1,29 @@
+[
+  {
+    "case_id": "stage_c_contract_minimal_001",
+    "notes": "Minimal normal input. Smoke only verifies the live structured-output contract, not score thresholds.",
+    "query": "劳动合同试用期最长可以约定多久？",
+    "gt_answer": "劳动合同约定的试用期最长不得超过六个月。",
+    "gt_text": [
+      "劳动合同可以约定试用期。",
+      "试用期最长不得超过六个月。"
+    ],
+    "key_points": [
+      "劳动合同可以约定试用期",
+      "试用期有法定上限",
+      "最长不得超过六个月"
+    ]
+  },
+  {
+    "case_id": "stage_c_contract_marginal_001",
+    "notes": "Marginal input with very short gt_text. Smoke checks that the live flow does not crash and still returns the contract shape.",
+    "query": "劳动合同试用期最长可以约定多久？",
+    "gt_answer": "劳动合同约定的试用期最长不得超过六个月。",
+    "gt_text": [
+      "六个月。"
+    ],
+    "key_points": [
+      "试用期最长不得超过六个月"
+    ]
+  }
+]

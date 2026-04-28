@@ -230,3 +230,14 @@ def test_runtime_auto_model_dir_cleanup_removes_generated_files(tmp_path, monkey
     get_models_mod._cleanup_runtime_auto_model_dir()
 
     assert not runtime_dir.exists()
+
+
+def test_stagec_runtime_model_config_resolves_deepseek_key(monkeypatch):
+    config_path = Path(__file__).resolve().parents[2] / 'algorithm' / 'chat' / 'runtime_models.stagec.yaml'
+    monkeypatch.setenv('LAZYLLM_DEEPSEEK_API_KEY', 'secret-key')
+
+    config = load_model_config(str(config_path))
+
+    assert config['evo_llm']['source'] == 'deepseek'
+    assert config['evo_llm']['model'] == 'deepseek-chat'
+    assert config['evo_llm']['api_key'] == 'secret-key'

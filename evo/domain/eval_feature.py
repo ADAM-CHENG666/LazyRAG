@@ -3,6 +3,57 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
+@dataclass(frozen=True)
+class EdgeSpec:
+    """A directed edge in the eval-set quality-check graph.
+
+    The judging convention is always: anchor is the reference, target is the item
+    being judged against that reference.
+    """
+
+    id: str
+    anchor: str
+    target: str
+    definition: str
+
+
+EDGE_SPECS: tuple[EdgeSpec, ...] = (
+    EdgeSpec(
+        id='query_to_gt_answer',
+        anchor='query',
+        target='gt_answer',
+        definition='以 query 为锚，判断 gt_answer 是否直接回答问题并覆盖 query 的核心意图。',
+    ),
+    EdgeSpec(
+        id='query_to_gt_text',
+        anchor='query',
+        target='gt_text',
+        definition='以 query 为锚，判断 gt_text 是否提供回答 query 所需的关键依据或相关信息。',
+    ),
+    EdgeSpec(
+        id='query_to_key_points',
+        anchor='query',
+        target='key_points',
+        definition='以 query 为锚，判断 key_points 是否覆盖回答 query 应包含的核心要点。',
+    ),
+    EdgeSpec(
+        id='gt_text_to_gt_answer',
+        anchor='gt_text',
+        target='gt_answer',
+        definition='以 gt_text 为锚，判断 gt_answer 是否能被 gt_text 支持、概括或合理推出。',
+    ),
+    EdgeSpec(
+        id='gt_answer_to_key_points',
+        anchor='gt_answer',
+        target='key_points',
+        definition='以 gt_answer 为锚，判断 key_points 是否提炼了答案中的核心信息，而不是遗漏主要结论。',
+    ),
+)
+
+EDGE_IDS: tuple[str, ...] = tuple(spec.id for spec in EDGE_SPECS)
+EDGE_BY_ID: dict[str, EdgeSpec] = {spec.id: spec for spec in EDGE_SPECS}
+
+
 @dataclass
 class EdgeResult:
     score: float
