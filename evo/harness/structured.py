@@ -27,9 +27,9 @@ _REPAIR_SYSTEM_PROMPT = (
 
 _TYPE_PLACEHOLDER: dict[str, Any] = {
     'string': '<string>',
-    'integer': 0,
-    'number': 0.0,
-    'boolean': False,
+    'integer': '<integer>',
+    'number': '<number>',
+    'boolean': '<boolean>',
     'null': None,
 }
 
@@ -84,6 +84,10 @@ def _skeleton_value(s: dict | None) -> Any:
         return {k: _skeleton_value(v) for k, v in props.items()}
     if t == 'array':
         return [_skeleton_value(s.get('items'))]
+    if t in ('number', 'integer'):
+        lo, hi = s.get('minimum'), s.get('maximum')
+        if lo is not None and hi is not None:
+            return f'<{t} {lo}..{hi}>'
     return _TYPE_PLACEHOLDER.get(t, '<value>')
 
 

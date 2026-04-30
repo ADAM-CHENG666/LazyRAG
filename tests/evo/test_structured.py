@@ -7,8 +7,12 @@ import sys
 import traceback
 from typing import Callable
 
-from evo.harness.schemas import SCHEMAS
-from evo.harness.structured import invoke_structured, parse_and_validate
+from evo.harness.schemas import EVAL_QC, SCHEMAS
+from evo.harness.structured import (
+    _skeleton_value,
+    invoke_structured,
+    parse_and_validate,
+)
 from evo.runtime.config import load_config
 from evo.runtime.session import create_session, session_scope
 
@@ -30,7 +34,7 @@ class _ScriptedInvoker:
         self._idx = 0
         self.calls.clear()
 
-    def invoke(self, user_text: str) -> str:
+    def invoke(self, user_text: str, **_: object) -> str:
         self.calls.append(user_text)
         if self._idx >= len(self._responses):
             return ""
@@ -55,6 +59,26 @@ def test_parse_and_validate_reports_path_and_message() -> None:
         SCHEMAS["synthesizer"],
     )
     assert errors == []
+    print("  -> OK")
+
+
+def test_eval_qc_skeleton_uses_invalid_string_placeholders() -> None:
+    _h("eval_qc skeleton: numeric placeholders are invalid string sentinels")
+    skeleton = _skeleton_value(EVAL_QC)
+    assert isinstance(skeleton, dict)
+    assert isinstance(skeleton["edges"], list)
+    assert skeleton["edges"], "expected a non-empty edge skeleton"
+    for edge in skeleton["edges"]:
+        assert not isinstance(edge["score"], (int, float)), edge
+        assert edge["score"] == "<number 0..1>"
+    print("  -> OK")
+
+
+def test_eval_qc_skeleton_fails_validation() -> None:
+    _h("eval_qc skeleton: placeholder echo fails schema validation")
+    _, errors, _ = parse_and_validate(json.dumps(_skeleton_value(EVAL_QC)), EVAL_QC)
+    assert errors, "expected the skeleton itself to be schema-invalid"
+    assert any("edges.0.score" in err for err in errors), errors
     print("  -> OK")
 
 
@@ -96,6 +120,36 @@ def test_invoke_structured_repair_recovers() -> None:
     print("  -> OK")
 
 
+def test_invoke_structured_repair_recovers_from_eval_qc_skeleton_echo() -> None:
+    _h("invoke_structured: eval_qc skeleton echo triggers repair and returns scores")
+    session = create_session(load_config())
+    invoker = _ScriptedInvoker()
+    repaired_payload = {
+        "edges": [
+            {"id": "query_to_gt_answer", "score": 0.91, "reason": "supported"},
+            {"id": "query_to_gt_text", "score": 0.82, "reason": "aligned"},
+            {"id": "query_to_key_points", "score": 0.74, "reason": "mostly covered"},
+            {"id": "gt_text_to_gt_answer", "score": 0.88, "reason": "consistent"},
+            {"id": "gt_answer_to_key_points", "score": 0.79, "reason": "complete enough"},
+        ],
+        "summary_reason": "scores reflect actual edge judgments",
+    }
+    invoker.script(
+        json.dumps(_skeleton_value(EVAL_QC)),
+        json.dumps(repaired_payload),
+    )
+    with session_scope(session):
+        parsed = invoke_structured(
+            session, invoker, "judge this eval case",
+            agent="eval_qc", schema=EVAL_QC,
+        )
+    assert parsed == repaired_payload
+    assert len(invoker.calls) == 2
+    assert "validation errors" in invoker.calls[1].lower()
+    assert _events(session, "schema_repair_failed") == []
+    print("  -> OK")
+
+
 def test_invoke_structured_emits_failure_event() -> None:
     _h("invoke_structured: repair exhausted -> schema_repair_failed emitted")
     session = create_session(load_config())
@@ -133,7 +187,8 @@ def test_invoke_structured_uses_custom_producer_only_on_first_attempt() -> None:
             producer=producer,
         )
     assert parsed == {"summary": "fixed", "actions": []}
-    assert producer_calls == ["task"]
+    assert len(producer_calls) == 1
+    assert "task" in producer_calls[0]
     assert len(invoker.calls) == 1
     print("  -> OK")
 
@@ -154,8 +209,11 @@ def _run(tests: list[Callable[[], None]]) -> int:
 def main() -> int:
     return _run([
         test_parse_and_validate_reports_path_and_message,
+        test_eval_qc_skeleton_uses_invalid_string_placeholders,
+        test_eval_qc_skeleton_fails_validation,
         test_invoke_structured_happy_path_no_repair,
         test_invoke_structured_repair_recovers,
+        test_invoke_structured_repair_recovers_from_eval_qc_skeleton_echo,
         test_invoke_structured_emits_failure_event,
         test_invoke_structured_uses_custom_producer_only_on_first_attempt,
     ])
