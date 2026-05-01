@@ -126,6 +126,43 @@ def test_stage_c_missing_edge_filled_as_failed() -> None:
     assert feature.qc_passed is False
 
 
+def test_stage_c_claims_edge_uses_computed_score() -> None:
+    session = create_session(load_config())
+    with session_scope(session):
+        session.set_parsed_corpus(
+            judges={'case_1': _judge(score=0.2)},
+            traces={'t1': TraceRecord(query='q1')},
+            trace_meta=TraceMeta(),
+        )
+        with patch(
+            'evo.harness.eval_qc.run_eval_qc',
+            return_value={
+                'summary_reason': 'claims computed',
+                'edges': [
+                    {'id': 'query_to_gt_answer', 'score': 1.0, 'reason': 'ok'},
+                    {'id': 'query_to_gt_text', 'score': 1.0, 'reason': 'ok'},
+                    {'id': 'query_to_key_points', 'score': 1.0, 'reason': 'ok'},
+                    {
+                        'id': 'gt_text_to_gt_answer',
+                        'claims': [
+                            {'text': 'supported', 'judgment': 'supported'},
+                            {'text': 'unsupported', 'judgment': 'unsupported'},
+                        ],
+                        'reason': 'one unsupported claim',
+                    },
+                    {'id': 'gt_answer_to_key_points', 'score': 1.0, 'reason': 'ok'},
+                ],
+            },
+        ):
+            eval_qc_harness.run_eval_qc_step(session)
+
+    feature = session.eval_features['case_1']
+    result = feature.c_edge_results['gt_text_to_gt_answer']
+    assert result.score == 0.25
+    assert result.passed is False
+    assert feature.qc_passed is False
+
+
 def test_eval_qc_disabled_writes_empty_features() -> None:
     cfg = load_config()
     cfg = replace(cfg, eval_qc=replace(cfg.eval_qc, enabled=False))

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from jsonschema import Draft202012Validator
 
+from evo.agents.eval_qc import _enrich_computed_scores
 from evo.domain import EDGE_IDS, JudgeRecord
 from evo.harness.schemas import SCHEMAS
 from evo.runtime.config import EvalQCConfig
 from evo.tools.eval_qc import (
     apply_hard_filter,
     apply_hard_rules,
+    compute_score_from_claims,
     normalize_edge_output,
 )
 
@@ -112,6 +114,72 @@ def test_normalize_edge_output_invalid_and_clamp() -> None:
     assert (invalid_id, invalid_score) == ('query_to_key_points', 0.0)
 
 
+def test_compute_score_from_claims_mapping() -> None:
+    assert compute_score_from_claims(None) == 0.0
+    assert compute_score_from_claims([]) == 0.0
+    assert compute_score_from_claims([
+        {'text': 'a', 'judgment': 'supported'},
+        {'text': 'b', 'judgment': 'supported'},
+    ]) == 0.95
+    assert compute_score_from_claims([
+        {'text': 'a', 'judgment': 'unsupported'},
+    ]) == 0.25
+    assert compute_score_from_claims([
+        {'text': 'a', 'judgment': 'supported'},
+        {'text': 'b', 'judgment': 'unsupported'},
+    ]) == 0.25
+    assert compute_score_from_claims([
+        {'text': 'a', 'judgment': 'supported'},
+        {'text': 'b', 'judgment': 'partial'},
+    ]) == 0.60
+    assert compute_score_from_claims([
+        {'text': 'a', 'judgment': 'partial'},
+        {'text': 'b', 'judgment': 'unsupported'},
+    ]) == 0.25
+
+
+def test_normalize_edge_output_claims_override_score_for_gt_text_edge() -> None:
+    edge_id, score, reason = normalize_edge_output({
+        'id': 'gt_text_to_gt_answer',
+        'score': 0.99,
+        'claims': [
+            {'text': 'a', 'judgment': 'supported'},
+            {'text': 'b', 'judgment': 'unsupported'},
+        ],
+        'reason': 'computed',
+    })
+    assert (edge_id, score, reason) == ('gt_text_to_gt_answer', 0.25, 'computed')
+
+    legacy_id, legacy_score, _ = normalize_edge_output({
+        'id': 'gt_text_to_gt_answer',
+        'score': 0.87,
+        'reason': 'legacy',
+    })
+    assert (legacy_id, legacy_score) == ('gt_text_to_gt_answer', 0.87)
+
+
+def test_enrich_computed_scores_writes_score_back_for_claims_edge() -> None:
+    parsed = {
+        'edges': [
+            {
+                'id': 'gt_text_to_gt_answer',
+                'claims': [
+                    {'text': 'a', 'judgment': 'supported'},
+                    {'text': 'b', 'judgment': 'unsupported'},
+                ],
+                'reason': 'one unsupported',
+            },
+        ],
+        'summary_reason': 'summary',
+    }
+
+    enriched = _enrich_computed_scores(parsed)
+
+    assert enriched is parsed
+    assert parsed['edges'][0]['score'] == 0.25
+    assert 'claims' in parsed['edges'][0]
+
+
 def test_eval_qc_schema_and_edge_ids_contract() -> None:
     assert EDGE_IDS == (
         'query_to_gt_answer',
@@ -130,7 +198,11 @@ def test_eval_qc_schema_and_edge_ids_contract() -> None:
             {'id': 'doc_0', 'score': 0.9, 'reason': 'bad'},
             {'id': 'query_to_gt_text', 'score': 0.9, 'reason': 'ok'},
             {'id': 'query_to_key_points', 'score': 0.9, 'reason': 'ok'},
-            {'id': 'gt_text_to_gt_answer', 'score': 0.9, 'reason': 'ok'},
+            {
+                'id': 'gt_text_to_gt_answer',
+                'claims': [{'text': 'claim', 'judgment': 'supported'}],
+                'reason': 'ok',
+            },
             {'id': 'gt_answer_to_key_points', 'score': 0.9, 'reason': 'ok'},
         ],
         'summary_reason': 'bad id',
@@ -140,7 +212,11 @@ def test_eval_qc_schema_and_edge_ids_contract() -> None:
             {'id': 'query_to_gt_answer', 'score': 0.9, 'reason': 'ok'},
             {'id': 'query_to_gt_answer', 'score': 0.8, 'reason': 'dup'},
             {'id': 'query_to_key_points', 'score': 0.9, 'reason': 'ok'},
-            {'id': 'gt_text_to_gt_answer', 'score': 0.9, 'reason': 'ok'},
+            {
+                'id': 'gt_text_to_gt_answer',
+                'claims': [{'text': 'claim', 'judgment': 'supported'}],
+                'reason': 'ok',
+            },
             {'id': 'gt_answer_to_key_points', 'score': 0.9, 'reason': 'ok'},
         ],
         'summary_reason': 'duplicate id',
@@ -150,7 +226,11 @@ def test_eval_qc_schema_and_edge_ids_contract() -> None:
             {'id': 'query_to_gt_answer', 'score': 0.9, 'reason': 'ok'},
             {'id': 'query_to_gt_text', 'score': 0.9, 'reason': 'ok'},
             {'id': 'query_to_key_points', 'score': 0.9, 'reason': 'ok'},
-            {'id': 'gt_text_to_gt_answer', 'score': 0.9, 'reason': 'ok'},
+            {
+                'id': 'gt_text_to_gt_answer',
+                'claims': [{'text': 'claim', 'judgment': 'supported'}],
+                'reason': 'ok',
+            },
         ],
         'summary_reason': 'missing id',
     }

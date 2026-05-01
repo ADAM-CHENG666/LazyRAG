@@ -40,7 +40,7 @@ EDGE_SPECS: tuple[EdgeSpec, ...] = (
         id='gt_text_to_gt_answer',
         anchor='gt_text',
         target='gt_answer',
-        definition='以 gt_text 为锚，判断 gt_answer 是否能被 gt_text 支持、概括或合理推出。',
+        definition='以 gt_text 为锚，判断 gt_answer 的每个主要结论是否都能被 gt_text 明确支持或直接概括。不得根据常识、背景知识或主观推测补全 gt_text 中没有的信息。',
     ),
     EdgeSpec(
         id='gt_answer_to_key_points',

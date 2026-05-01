@@ -63,14 +63,23 @@ def test_parse_and_validate_reports_path_and_message() -> None:
 
 
 def test_eval_qc_skeleton_uses_invalid_string_placeholders() -> None:
-    _h("eval_qc skeleton: numeric placeholders are invalid string sentinels")
+    _h("eval_qc skeleton: placeholders include score and claims branches")
     skeleton = _skeleton_value(EVAL_QC)
     assert isinstance(skeleton, dict)
     assert isinstance(skeleton["edges"], list)
-    assert skeleton["edges"], "expected a non-empty edge skeleton"
-    for edge in skeleton["edges"]:
+    assert len(skeleton["edges"]) == 5
+    score_edges = [edge for edge in skeleton["edges"] if isinstance(edge, dict) and "score" in edge]
+    claims_edges = [edge for edge in skeleton["edges"] if isinstance(edge, dict) and "claims" in edge]
+    assert len(score_edges) == 4, skeleton["edges"]
+    assert len(claims_edges) == 1, skeleton["edges"]
+    for edge in score_edges:
+        assert "|" not in edge["id"], edge
         assert not isinstance(edge["score"], (int, float)), edge
         assert edge["score"] == "<number 0..1>"
+    claims_edge = claims_edges[0]
+    assert claims_edge["id"] == "gt_text_to_gt_answer"
+    assert len(claims_edge["claims"]) == 1
+    assert "judgment" in claims_edge["claims"][0]
     print("  -> OK")
 
 
@@ -78,7 +87,7 @@ def test_eval_qc_skeleton_fails_validation() -> None:
     _h("eval_qc skeleton: placeholder echo fails schema validation")
     _, errors, _ = parse_and_validate(json.dumps(_skeleton_value(EVAL_QC)), EVAL_QC)
     assert errors, "expected the skeleton itself to be schema-invalid"
-    assert any("edges.0.score" in err for err in errors), errors
+    assert any("edges" in err for err in errors), errors
     print("  -> OK")
 
 
@@ -121,7 +130,7 @@ def test_invoke_structured_repair_recovers() -> None:
 
 
 def test_invoke_structured_repair_recovers_from_eval_qc_skeleton_echo() -> None:
-    _h("invoke_structured: eval_qc skeleton echo triggers repair and returns scores")
+    _h("invoke_structured: eval_qc skeleton echo triggers repair and returns claims")
     session = create_session(load_config())
     invoker = _ScriptedInvoker()
     repaired_payload = {
@@ -129,10 +138,16 @@ def test_invoke_structured_repair_recovers_from_eval_qc_skeleton_echo() -> None:
             {"id": "query_to_gt_answer", "score": 0.91, "reason": "supported"},
             {"id": "query_to_gt_text", "score": 0.82, "reason": "aligned"},
             {"id": "query_to_key_points", "score": 0.74, "reason": "mostly covered"},
-            {"id": "gt_text_to_gt_answer", "score": 0.88, "reason": "consistent"},
+            {
+                "id": "gt_text_to_gt_answer",
+                "claims": [
+                    {"text": "answer claim", "judgment": "supported"},
+                ],
+                "reason": "consistent",
+            },
             {"id": "gt_answer_to_key_points", "score": 0.79, "reason": "complete enough"},
         ],
-        "summary_reason": "scores reflect actual edge judgments",
+        "summary_reason": "claims and scores reflect actual edge judgments",
     }
     invoker.script(
         json.dumps(_skeleton_value(EVAL_QC)),

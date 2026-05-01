@@ -34,6 +34,53 @@ _TYPE_PLACEHOLDER: dict[str, Any] = {
 }
 
 
+def _const_id(schema: dict | None) -> str | None:
+    if not isinstance(schema, dict):
+        return None
+    props = schema.get('properties')
+    if not isinstance(props, dict):
+        return None
+    id_schema = props.get('id')
+    if isinstance(id_schema, dict) and isinstance(id_schema.get('const'), str):
+        return id_schema['const']
+    return None
+
+
+def _branch_for_id(items: dict, edge_id: str) -> dict | None:
+    one_of = items.get('oneOf')
+    if not isinstance(one_of, list):
+        return None
+    for branch in one_of:
+        if not isinstance(branch, dict):
+            continue
+        props = branch.get('properties')
+        if not isinstance(props, dict):
+            continue
+        id_schema = props.get('id')
+        if not isinstance(id_schema, dict):
+            continue
+        if id_schema.get('const') == edge_id:
+            return branch
+        enum = id_schema.get('enum')
+        if isinstance(enum, list) and edge_id in enum:
+            return {**branch, 'properties': {**props, 'id': {'const': edge_id}}}
+    return None
+
+
+def _contained_ids(array_schema: dict) -> list[str]:
+    out: list[str] = []
+    all_of = array_schema.get('allOf')
+    if not isinstance(all_of, list):
+        return out
+    for rule in all_of:
+        if not isinstance(rule, dict):
+            continue
+        edge_id = _const_id(rule.get('contains'))
+        if edge_id:
+            out.append(edge_id)
+    return out
+
+
 def _format_error(err) -> str:
     path = '.'.join(str(p) for p in err.absolute_path) or '<root>'
     return f'{path}: {err.message}'
@@ -68,10 +115,11 @@ def _skeleton_value(s: dict | None) -> Any:
         return None
     if 'const' in s:
         return s['const']
+    one_of = s.get('oneOf')
+    if isinstance(one_of, list) and one_of:
+        return _skeleton_value(one_of[0])
     enum = s.get('enum')
     if isinstance(enum, list) and enum:
-        if all(isinstance(v, str) for v in enum):
-            return '|'.join(enum)
         return enum[0]
     t = s.get('type')
     if isinstance(t, list):
@@ -83,7 +131,19 @@ def _skeleton_value(s: dict | None) -> Any:
         props = s.get('properties') or {}
         return {k: _skeleton_value(v) for k, v in props.items()}
     if t == 'array':
-        return [_skeleton_value(s.get('items'))]
+        items = s.get('items')
+        if isinstance(items, dict):
+            contained = _contained_ids(s)
+            if contained:
+                return [
+                    _skeleton_value(_branch_for_id(items, item_id) or items)
+                    for item_id in contained
+                ]
+        if isinstance(items, dict):
+            one_of_items = items.get('oneOf')
+            if isinstance(one_of_items, list) and one_of_items:
+                return [_skeleton_value(item) for item in one_of_items]
+        return [_skeleton_value(items)]
     if t in ('number', 'integer'):
         lo, hi = s.get('minimum'), s.get('maximum')
         if lo is not None and hi is not None:

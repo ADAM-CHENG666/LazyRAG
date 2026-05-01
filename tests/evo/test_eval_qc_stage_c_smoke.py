@@ -193,6 +193,14 @@ def _assert_edge_contract(parsed: dict[str, Any], *, diagnostics: str) -> dict[s
         assert 0.0 <= float(score) <= 1.0, diagnostics
         reason = str(item.get('reason', '')).strip()
         assert reason, diagnostics
+        if edge_id == 'gt_text_to_gt_answer' and 'claims' in item:
+            claims = item['claims']
+            assert isinstance(claims, list) and claims, diagnostics
+            for claim in claims:
+                assert isinstance(claim, dict), diagnostics
+                assert isinstance(claim.get('text'), str) and claim['text'].strip(), diagnostics
+                assert isinstance(claim.get('supported'), bool), diagnostics
+                assert isinstance(claim.get('evidence'), str) and claim['evidence'].strip(), diagnostics
         by_id[edge_id] = item
 
     assert set(by_id) == set(EDGE_IDS), diagnostics

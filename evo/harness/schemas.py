@@ -117,14 +117,49 @@ EVAL_QC: dict = {
             'minItems': len(EDGE_IDS),
             'maxItems': len(EDGE_IDS),
             'items': {
-                'type': 'object',
-                'required': ['id', 'score', 'reason'],
-                'properties': {
-                    'id': {'type': 'string', 'enum': list(EDGE_IDS)},
-                    'score': {'type': 'number', 'minimum': 0, 'maximum': 1},
-                    'reason': {'type': 'string', 'minLength': 1},
-                },
-                'additionalProperties': False,
+                'oneOf': [
+                    {
+                        'type': 'object',
+                        'required': ['id', 'score', 'reason'],
+                        'properties': {
+                            'id': {
+                                'type': 'string',
+                                'enum': [
+                                    edge_id for edge_id in EDGE_IDS
+                                    if edge_id != 'gt_text_to_gt_answer'
+                                ],
+                            },
+                            'score': {'type': 'number', 'minimum': 0, 'maximum': 1},
+                            'reason': {'type': 'string', 'minLength': 1},
+                        },
+                        'additionalProperties': False,
+                    },
+                    {
+                        'type': 'object',
+                        'required': ['id', 'claims', 'reason'],
+                        'properties': {
+                            'id': {'const': 'gt_text_to_gt_answer'},
+                            'claims': {
+                                'type': 'array',
+                                'minItems': 1,
+                                'items': {
+                                    'type': 'object',
+                                    'required': ['text', 'judgment'],
+                                    'properties': {
+                                        'text': {'type': 'string', 'minLength': 1},
+                                        'judgment': {
+                                            'type': 'string',
+                                            'enum': ['supported', 'partial', 'unsupported'],
+                                        },
+                                    },
+                                    'additionalProperties': False,
+                                },
+                            },
+                            'reason': {'type': 'string', 'minLength': 1},
+                        },
+                        'additionalProperties': False,
+                    },
+                ],
             },
             'allOf': [
                 {

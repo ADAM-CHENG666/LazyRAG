@@ -81,15 +81,41 @@ def _severity_from_score(score_val: float | None, report_bad: bool) -> str | Non
     return 'low'
 
 
+_JUDGMENT_SCORE: dict[str, float] = {
+    'supported': 0.95,
+    'partial': 0.60,
+    'unsupported': 0.25,
+}
+
+
+def compute_score_from_claims(claims: Any) -> float:
+    if not isinstance(claims, list) or not claims:
+        return 0.0
+    worst = 0.95
+    for claim in claims:
+        if not isinstance(claim, dict):
+            continue
+        j = claim.get('judgment', 'supported')
+        s = _JUDGMENT_SCORE.get(j, 0.95)
+        if s < worst:
+            worst = s
+        if worst <= 0.25:
+            break
+    return worst
+
+
 def normalize_edge_output(raw: Any) -> tuple[str, float, str]:
     if not isinstance(raw, dict):
         return '', 0.0, 'invalid edge payload'
     edge_id = str(raw.get('id', '')).strip()
-    score = raw.get('score', 0.0)
-    try:
-        score_val = float(score)
-    except (TypeError, ValueError):
-        score_val = 0.0
+    if edge_id == 'gt_text_to_gt_answer' and 'claims' in raw:
+        score_val = compute_score_from_claims(raw.get('claims'))
+    else:
+        score = raw.get('score', 0.0)
+        try:
+            score_val = float(score)
+        except (TypeError, ValueError):
+            score_val = 0.0
     score_val = max(0.0, min(1.0, score_val))
     reason = str(raw.get('reason', '')).strip()
     return edge_id, score_val, reason
