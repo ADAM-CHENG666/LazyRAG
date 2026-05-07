@@ -199,8 +199,13 @@ def _assert_edge_contract(parsed: dict[str, Any], *, diagnostics: str) -> dict[s
             for claim in claims:
                 assert isinstance(claim, dict), diagnostics
                 assert isinstance(claim.get('text'), str) and claim['text'].strip(), diagnostics
-                assert isinstance(claim.get('supported'), bool), diagnostics
-                assert isinstance(claim.get('evidence'), str) and claim['evidence'].strip(), diagnostics
+                claim_score = claim.get('score')
+                assert isinstance(claim_score, (int, float)), diagnostics
+                assert 0.0 <= float(claim_score) <= 1.0, diagnostics
+                evidence = claim.get('evidence')
+                assert isinstance(evidence, str), diagnostics
+                if float(claim_score) >= 0.2:
+                    assert evidence.strip(), diagnostics
         by_id[edge_id] = item
 
     assert set(by_id) == set(EDGE_IDS), diagnostics

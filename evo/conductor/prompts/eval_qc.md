@@ -8,11 +8,13 @@
 ## 边定义
 {{EDGE_DEFINITIONS}}
 
-## 打分参考（适用于 score 型边）
-- `0.8 ~ 1.0`: 高度一致，明确覆盖
-- `0.5 ~ 0.79`: 部分一致，有缺漏或偏移
-- `0.2 ~ 0.49`: 弱一致，核心内容未被覆盖
-- `0.0 ~ 0.19`: 基本不一致，明显偏题或冲突
+## 打分参考
+| 分段 | edges（score 型边） | claims（claim vs gt_text） |
+|---|---|---|
+| `0.8 ~ 1.0` | 高度一致，明确覆盖 | gt_text 有原文 / 同义改写 / 直接概括支持 |
+| `0.5 ~ 0.79` | 部分一致，有缺漏或偏移 | gt_text 部分支持，关键修饰词或条件缺失 |
+| `0.2 ~ 0.49` | 弱一致，核心内容未被覆盖 | gt_text 仅话题相关，实质性内容未被覆盖 |
+| `0.0 ~ 0.19` | 基本不一致，明显偏题或冲突 | gt_text 中无支持内容（evidence 必空） |
 
 ## 输出格式（严格 JSON，无围栏，无解释）
 {
@@ -27,60 +29,42 @@
 - `edges` 必须包含且仅包含以下边 ID，每个恰好一次：
 {{EDGE_ID_LIST}}
 - `id` 从上面原样拷贝，不能改写、缩写、用编号替代
-- 普通边：`id` + `score`（0~1 浮点） + `reason`
-- `gt_text_to_gt_answer`：`id` + `claims` + `reason`，不要输出 `score`
-- **先分析后判断**：普通边必须先写 `reason`（列出锚点要求、逐条对照评判对象、指出缺漏），再根据分析结果写 `score`；`gt_text_to_gt_answer` 的每条 claim 必须先写 `text`（断言内容），再写 `judgment`。禁止先填分数/判断再补理由
+- 普通边：`id` + `reason` + `score`（0~1 浮点）
+- `gt_text_to_gt_answer`：`id` + `claims` + `reason`，claims 每项为 `{text, score, evidence}`，不要在该边输出顶层 `score`
+- **先分析后判断**：普通边必须先写 `reason`（列出锚点要求、逐条对照评判对象、指出缺漏），再根据分析结果写 `score`；`gt_text_to_gt_answer` 的每条 claim 必须先写 `text`、`evidence`，再写 `score`。禁止先填分数/判断再补理由
+- claims 的 `evidence` 规则：
+  - `score >= 0.2`：必须填可支持的 gt_text 原文片段
+  - `score < 0.2`：必须为空字符串 `""`
+- 拆分 claims 时，每条 claim 只能包含一个独立事实或判断，宁可多拆，不可合并；覆盖 gt_answer 全部实质内容，不能只挑支持的部分
+- 不得以"不冲突""话题相关""常识合理"作为给分依据
+- 需要推理、联想或背景知识时，claim 的 score 必须 ≤ 0.19
 - 证据不足时保持保守，优先中低分
 - `reason`、`summary_reason` 必须以中文回答
 
-## gt_text_to_gt_answer 特殊契约
-这条边不做打分，只做原子断言抽取 + 逐条判断。
-
-输出 `claims` 列表，每条：
-- `text`: 从 gt_answer 拆出的独立断言
-- `judgment`:
-  - `supported`: gt_text 有原文、同义改写或直接概括支持
-  - `partial`: gt_text 部分支持，但有遗漏或偏移
-  - `unsupported`: gt_text 中无支持内容
-
-拆分规则：
-- **每条 claim 只能包含一个独立事实或判断**，宁可多拆，不可合并
-- 覆盖 gt_answer 全部实质内容，不能只挑支持的部分
-- "并""以及""同时""、""；""和""与"连接的多项内容，逐项拆分
-- 每个独立事实、数字、范围、程序、承诺各算 1 条
-- "800-1000 km" 拆成 2 条（下限、上限）
-- 含"等""相关""一系列"等模糊收尾的句子，必须拆开列出每一项，不能用模糊词代替
-- "不冲突""话题相关""常识合理"不能作为 supported 的理由
-
-判断 supported 的硬性标准：
-- gt_text 中必须能找到**原文、同义改写或直接概括**来支持该 claim
-- 如果需要推理、联想、背景知识、或"虽然没写但大概是对的"，必须判 unsupported
-- 判断时必须引用 gt_text 中的相关原文片段作为依据；如果找不到可引用的片段，必须判 unsupported
-
 ## gt_text_to_gt_answer 示例
 
-示例 A（全部 supported → 整体通过）
+示例 A（全部高分 → 整体通过）
 gt_text: "城乡规划体系包括总体规划、详细规划、专项规划、控制性详细规划、修建性详细规划五类。"
 gt_answer: "城乡规划体系包括总规、详规、专规、控规、修详规五类。"
 → claims: [
-  {"text": "包括总规、详规、专规、控规、修详规五类", "judgment": "supported"}
+  {"text": "包括总规、详规、专规、控规、修详规五类", "evidence": "城乡规划体系包括总体规划、详细规划、专项规划、控制性详细规划、修建性详细规划五类", "score": 0.95}
 ]
 
-示例 B（含 partial 和 unsupported → 部分通过）
+示例 B（含部分支持和不支持 → 部分通过）
 gt_text: "城乡规划体系包括总体规划、详细规划、专项规划。年度评估由市级部门负责。"
 gt_answer: "城乡规划体系包括以上五类，并需年度动态评估。"
 → claims: [
-  {"text": "包括总规、详规、专规", "judgment": "supported"},
-  {"text": "包括控制性详细规划", "judgment": "unsupported"},
-  {"text": "需年度动态评估", "judgment": "partial"}
+  {"text": "包括总规、详规、专规", "evidence": "城乡规划体系包括总体规划、详细规划、专项规划", "score": 0.95},
+  {"text": "包括控制性详细规划", "evidence": "", "score": 0.0},
+  {"text": "需年度动态评估", "evidence": "年度评估由市级部门负责", "score": 0.6}
 ]
 
 示例 C（overclaim → 整体失败）
 gt_text: "城乡规划体系包括总体规划、详细规划、专项规划、控制性详细规划、修建性详细规划。"
 gt_answer: "城乡规划体系包括以上五类，并需市级统一审批、年度动态评估、跨部门联审。"
 → claims: [
-  {"text": "包括总规、详规、专规、控规、修详规", "judgment": "supported"},
-  {"text": "需市级统一审批", "judgment": "unsupported"},
-  {"text": "需年度动态评估", "judgment": "unsupported"},
-  {"text": "需跨部门联审", "judgment": "unsupported"}
+  {"text": "包括总规、详规、专规、控规、修详规", "evidence": "城乡规划体系包括总体规划、详细规划、专项规划、控制性详细规划、修建性详细规划", "score": 0.95},
+  {"text": "需市级统一审批", "evidence": "", "score": 0.0},
+  {"text": "需年度动态评估", "evidence": "", "score": 0.0},
+  {"text": "需跨部门联审", "evidence": "", "score": 0.0}
 ]

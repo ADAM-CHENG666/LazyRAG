@@ -79,7 +79,7 @@ def test_eval_qc_skeleton_uses_invalid_string_placeholders() -> None:
     claims_edge = claims_edges[0]
     assert claims_edge["id"] == "gt_text_to_gt_answer"
     assert len(claims_edge["claims"]) == 1
-    assert "judgment" in claims_edge["claims"][0]
+    assert "score" in claims_edge["claims"][0]
     print("  -> OK")
 
 
@@ -141,13 +141,13 @@ def test_invoke_structured_repair_recovers_from_eval_qc_skeleton_echo() -> None:
             {
                 "id": "gt_text_to_gt_answer",
                 "claims": [
-                    {"text": "answer claim", "judgment": "supported"},
+                    {"text": "answer claim", "score": 0.95},
                 ],
                 "reason": "consistent",
             },
             {"id": "gt_answer_to_key_points", "score": 0.79, "reason": "complete enough"},
         ],
-        "summary_reason": "claims and scores reflect actual edge judgments",
+        "summary_reason": "claims and scores reflect actual edge scores",
     }
     invoker.script(
         json.dumps(_skeleton_value(EVAL_QC)),

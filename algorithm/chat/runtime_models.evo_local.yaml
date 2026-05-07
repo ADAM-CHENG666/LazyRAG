@@ -1,0 +1,12 @@
+# Minimal runtime model config for local evo LLM experiments.
+# Only defines the evo_llm role; not suitable for full production deployment.
+# Real API keys must come from environment variables.
+
+evo_llm:
+  source: deepseek
+  type: llm
+  model: ${EVO_STAGEC_MODEL_NAME:-deepseek-v4-flash}
+  api_key: ${LAZYLLM_DEEPSEEK_API_KEY}
+  static_params:
+    response_format:
+      type: json_object

@@ -145,9 +145,10 @@ def test_stage_c_claims_edge_uses_computed_score() -> None:
                     {
                         'id': 'gt_text_to_gt_answer',
                         'claims': [
-                            {'text': 'supported', 'judgment': 'supported'},
-                            {'text': 'unsupported', 'judgment': 'unsupported'},
+                            {'text': 'supported', 'score': 0.95},
+                            {'text': 'unsupported', 'score': 0.0},
                         ],
+                        'score': 0.0,
                         'reason': 'one unsupported claim',
                     },
                     {'id': 'gt_answer_to_key_points', 'score': 1.0, 'reason': 'ok'},
@@ -158,7 +159,7 @@ def test_stage_c_claims_edge_uses_computed_score() -> None:
 
     feature = session.eval_features['case_1']
     result = feature.c_edge_results['gt_text_to_gt_answer']
-    assert result.score == 0.25
+    assert result.score == 0.0
     assert result.passed is False
     assert feature.qc_passed is False
 
