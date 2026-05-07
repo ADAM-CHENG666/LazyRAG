@@ -44,15 +44,38 @@
   - `unsupported`: gt_text 中无支持内容
 
 拆分规则：
+- **每条 claim 只能包含一个独立事实或判断**，宁可多拆，不可合并
 - 覆盖 gt_answer 全部实质内容，不能只挑支持的部分
-- "并""以及""同时""、""；"连接的多项内容，逐项拆分
+- "并""以及""同时""、""；""和""与"连接的多项内容，逐项拆分
 - 每个独立事实、数字、范围、程序、承诺各算 1 条
 - "800-1000 km" 拆成 2 条（下限、上限）
+- 含"等""相关""一系列"等模糊收尾的句子，必须拆开列出每一项，不能用模糊词代替
 - "不冲突""话题相关""常识合理"不能作为 supported 的理由
+
+判断 supported 的硬性标准：
+- gt_text 中必须能找到**原文、同义改写或直接概括**来支持该 claim
+- 如果需要推理、联想、背景知识、或"虽然没写但大概是对的"，必须判 unsupported
+- 判断时必须引用 gt_text 中的相关原文片段作为依据；如果找不到可引用的片段，必须判 unsupported
 
 ## gt_text_to_gt_answer 示例
 
-示例 A（overclaim）
+示例 A（全部 supported → 整体通过）
+gt_text: "城乡规划体系包括总体规划、详细规划、专项规划、控制性详细规划、修建性详细规划五类。"
+gt_answer: "城乡规划体系包括总规、详规、专规、控规、修详规五类。"
+→ claims: [
+  {"text": "包括总规、详规、专规、控规、修详规五类", "judgment": "supported"}
+]
+
+示例 B（含 partial 和 unsupported → 部分通过）
+gt_text: "城乡规划体系包括总体规划、详细规划、专项规划。年度评估由市级部门负责。"
+gt_answer: "城乡规划体系包括以上五类，并需年度动态评估。"
+→ claims: [
+  {"text": "包括总规、详规、专规", "judgment": "supported"},
+  {"text": "包括控制性详细规划", "judgment": "unsupported"},
+  {"text": "需年度动态评估", "judgment": "partial"}
+]
+
+示例 C（overclaim → 整体失败）
 gt_text: "城乡规划体系包括总体规划、详细规划、专项规划、控制性详细规划、修建性详细规划。"
 gt_answer: "城乡规划体系包括以上五类，并需市级统一审批、年度动态评估、跨部门联审。"
 → claims: [
@@ -60,13 +83,4 @@ gt_answer: "城乡规划体系包括以上五类，并需市级统一审批、�
   {"text": "需市级统一审批", "judgment": "unsupported"},
   {"text": "需年度动态评估", "judgment": "unsupported"},
   {"text": "需跨部门联审", "judgment": "unsupported"}
-]
-
-示例 B（部分支持）
-gt_text: "城乡规划体系包括总体规划、详细规划、专项规划。年度评估由市级部门负责。"
-gt_answer: "城乡规划体系包括以上五类，并需年度动态评估。"
-→ claims: [
-  {"text": "包括总规、详规、专规", "judgment": "supported"},
-  {"text": "包括控制性详细规划", "judgment": "unsupported"},
-  {"text": "需年度动态评估", "judgment": "partial"}
 ]
