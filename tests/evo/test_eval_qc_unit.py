@@ -233,7 +233,7 @@ def test_eval_qc_schema_and_edge_ids_contract() -> None:
     assert list(validator.iter_errors(missing_id))
 
 
-def test_eval_qc_two_phase_schemas_contract() -> None:
+def test_eval_qc_claims_eval_schemas_contract() -> None:
     split_validator = Draft202012Validator(SCHEMAS['eval_qc_split'])
     with_claims_validator = Draft202012Validator(SCHEMAS['eval_qc_with_claims'])
 
@@ -293,7 +293,42 @@ def test_patch_gt_text_edge_replaces_only_claims_edge() -> None:
     assert parsed['edges'][1] is replacement
 
 
-def test_run_eval_qc_uses_two_phase_claims_by_default() -> None:
+def test_patch_gt_text_edge_inserts_when_no_claims_edge_in_list() -> None:
+    parsed = {
+        'edges': [
+            {'id': 'query_to_gt_answer', 'score': 1.0, 'reason': 'ok'},
+            {'id': 'query_to_gt_text', 'score': 0.8, 'reason': 'ok'},
+        ],
+        'summary_reason': 'summary',
+    }
+    replacement = {
+        'id': 'gt_text_to_gt_answer',
+        'claims': [{'text': 'c1', 'score': 0.95, 'evidence': 'ctx'}],
+        'reason': 'computed',
+    }
+
+    patched = _patch_gt_text_edge(parsed, replacement)
+
+    assert patched is parsed
+    assert len(parsed['edges']) == 3
+    assert parsed['edges'][2] is replacement
+
+
+def test_patch_gt_text_edge_creates_list_when_edges_missing() -> None:
+    parsed = {'summary_reason': 'summary'}
+    replacement = {
+        'id': 'gt_text_to_gt_answer',
+        'claims': [{'text': 'c1', 'score': 0.0, 'evidence': ''}],
+        'reason': 'first edge',
+    }
+
+    patched = _patch_gt_text_edge(parsed, replacement)
+
+    assert patched is parsed
+    assert parsed['edges'] == [replacement]
+
+
+def test_run_eval_qc_uses_claims_eval_by_default() -> None:
     session = create_session(load_config())
     split_output = {
         'claims': [
@@ -330,7 +365,7 @@ def test_run_eval_qc_uses_two_phase_claims_by_default() -> None:
     assert edge['score'] == 0.0
 
 
-def test_run_eval_qc_two_phase_rejects_claim_shape_drift() -> None:
+def test_run_eval_qc_claims_eval_rejects_claim_shape_drift() -> None:
     session = create_session(load_config())
     split_output = {
         'claims': [
@@ -358,51 +393,36 @@ def test_run_eval_qc_two_phase_rejects_claim_shape_drift() -> None:
     edge = next(item for item in parsed['edges'] if item['id'] == 'gt_text_to_gt_answer')
     assert edge['claims'] == [
         {
-            'id': 'fallback',
-            'text': 'eval_qc fallback failed',
+            'id': 'claims_evaluation_failed',
+            'text': 'eval_qc claims evaluation failed',
             'score': 0.0,
             'evidence': '',
         },
     ]
-    assert edge['reason'] == 'eval_qc two-phase failed'
+    assert edge['reason'] == 'eval_qc claims evaluation failed'
     assert normalize_edge_output(edge)[1] == 0.0
 
 
-def test_run_eval_qc_falls_back_to_single_phase_when_split_is_empty() -> None:
+def test_run_eval_qc_fails_when_split_is_empty() -> None:
     session = create_session(load_config())
     split_output = {'claims': []}
-    fallback_output = {
-        'edges': [
-            {'id': 'query_to_gt_answer', 'score': 1.0, 'reason': 'ok'},
-            {'id': 'query_to_gt_text', 'score': 1.0, 'reason': 'ok'},
-            {'id': 'query_to_key_points', 'score': 1.0, 'reason': 'ok'},
-            {
-                'id': 'gt_text_to_gt_answer',
-                'claims': [
-                    {
-                        'text': 'fallback unsupported claim',
-                        'score': 0.0,
-                        'evidence': '',
-                    },
-                ],
-                'reason': '单阶段兜底完成',
-            },
-            {'id': 'gt_answer_to_key_points', 'score': 1.0, 'reason': 'ok'},
-        ],
-        'summary_reason': 'summary',
-    }
-    llm = _ScriptedLLM(split_output, split_output, fallback_output)
+    llm = _ScriptedLLM(split_output)
 
     with session_scope(session):
         parsed = run_eval_qc(session, _payload(), llm=llm)
 
-    assert len(llm.calls) == 3
-    assert 'gt_answer_claims' not in llm.calls[2]
+    assert len(llm.calls) == 2
+    assert all('gt_answer_claims' not in call for call in llm.calls)
     edge = next(item for item in parsed['edges'] if item['id'] == 'gt_text_to_gt_answer')
     assert edge['claims'] == [
-        {'text': 'fallback unsupported claim', 'score': 0.0, 'evidence': ''},
+        {
+            'id': 'claims_evaluation_failed',
+            'text': 'eval_qc claims evaluation failed',
+            'score': 0.0,
+            'evidence': '',
+        },
     ]
-    assert edge['reason'] == '单阶段兜底完成'
+    assert edge['reason'] == 'eval_qc claims evaluation failed'
     assert normalize_edge_output(edge)[1] == 0.0
 
 

@@ -16,20 +16,11 @@ EVAL_QC_NAME = 'eval_qc'
 _CLAIMS_EDGE_ID = 'gt_text_to_gt_answer'
 _SPLIT_NAME = 'eval_qc_split'
 _WITH_CLAIMS_NAME = 'eval_qc_with_claims'
-_FAILURE_REASON = 'eval_qc two-phase failed'
-_FALLBACK_REASON = 'eval_qc fallback failed'
+_FAILURE_REASON = 'eval_qc claims evaluation failed'
 
 
 def _example_edge(spec: Any) -> str:
     return f'    {{"id": "{spec.id}", "reason": "...", "score": 0.72}}'
-
-
-def _build_eval_qc_prompt() -> str:
-    return _build_eval_qc_with_claims_prompt()
-
-
-def _build_eval_qc_single_phase_prompt() -> str:
-    return _build_prompt(EVAL_QC_NAME)
 
 
 def _build_eval_qc_with_claims_prompt() -> str:
@@ -78,19 +69,15 @@ def _build_split_prompt() -> str:
     return load_prompt(_SPLIT_NAME)
 
 
-def _fallback_failure_claim() -> dict[str, Any]:
-    return {
-        'id': 'fallback',
-        'text': _FALLBACK_REASON,
-        'score': 0.0,
-        'evidence': '',
-    }
-
-
-def _two_phase_failure_edge() -> dict[str, Any]:
+def _claims_failure_edge() -> dict[str, Any]:
     return {
         'id': _CLAIMS_EDGE_ID,
-        'claims': [_fallback_failure_claim()],
+        'claims': [{
+            'id': 'claims_evaluation_failed',
+            'text': _FAILURE_REASON,
+            'score': 0.0,
+            'evidence': '',
+        }],
         'reason': _FAILURE_REASON,
     }
 
@@ -157,53 +144,7 @@ def _run_eval_qc_with_claims(
     )
 
 
-def _run_single_phase_eval_qc(
-    session: AnalysisSession,
-    payload: dict[str, Any],
-    *,
-    llm: Any | None = None,
-) -> dict[str, Any]:
-    invoker = LLMInvoker(
-        session=session,
-        system_prompt=_build_eval_qc_single_phase_prompt(),
-        llm=llm,
-    )
-    user = json.dumps(payload, ensure_ascii=False, indent=2)
-    return invoke_structured(
-        session,
-        invoker,
-        user,
-        agent=EVAL_QC_NAME,
-        schema=SCHEMAS[EVAL_QC_NAME],
-    )
-
-
-def _run_single_phase_fallback(
-    session: AnalysisSession,
-    payload: dict[str, Any],
-    *,
-    llm: Any | None = None,
-    error: str = '',
-) -> dict[str, Any]:
-    if error:
-        session.telemetry.emit(
-            'eval_qc_two_phase_fallback',
-            agent=EVAL_QC_NAME,
-            error=error[:500],
-        )
-    try:
-        parsed = _run_single_phase_eval_qc(session, payload, llm=llm)
-        return _ensure_schema_compatible_eval_output(parsed)
-    except Exception as exc:
-        session.telemetry.emit(
-            'eval_qc_single_phase_fallback_failed',
-            agent=EVAL_QC_NAME,
-            error=str(exc)[:500],
-        )
-        return _eval_qc_failure_output()
-
-
-def _run_two_phase_eval_qc(
+def _run_claims_eval_qc(
     session: AnalysisSession,
     payload: dict[str, Any],
     *,
@@ -216,12 +157,12 @@ def _run_two_phase_eval_qc(
             llm=llm,
         )
         if not split_claims:
-            return _run_single_phase_fallback(
-                session,
-                payload,
-                llm=llm,
+            session.telemetry.emit(
+                'eval_qc_claims_eval_failed',
+                agent=EVAL_QC_NAME,
                 error='split phase returned no claims',
             )
+            return _eval_qc_failure_output()
         parsed = _run_eval_qc_with_claims(
             session,
             payload,
@@ -229,40 +170,35 @@ def _run_two_phase_eval_qc(
             llm=llm,
         )
         if not _ensure_claims_judgment(parsed, split_claims):
-            return _run_single_phase_fallback(
-                session,
-                payload,
-                llm=llm,
+            session.telemetry.emit(
+                'eval_qc_claims_eval_failed',
+                agent=EVAL_QC_NAME,
                 error='two-phase claims_judgment failed validation',
             )
+            return _eval_qc_failure_output()
         schema_errors = _eval_qc_with_claims_schema_errors(parsed)
         if schema_errors:
-            return _run_single_phase_fallback(
-                session,
-                payload,
-                llm=llm,
-                error='; '.join(schema_errors),
+            session.telemetry.emit(
+                'eval_qc_claims_eval_failed',
+                agent=EVAL_QC_NAME,
+                error='; '.join(schema_errors)[:500],
             )
+            return _eval_qc_failure_output()
         return parsed
     except Exception as exc:
         session.telemetry.emit(
-            'eval_qc_two_phase_failed',
+            'eval_qc_claims_eval_failed',
             agent=EVAL_QC_NAME,
             error=str(exc)[:500],
         )
-        return _run_single_phase_fallback(
-            session,
-            payload,
-            llm=llm,
-            error=str(exc),
-        )
+        return _eval_qc_failure_output()
 
 
 def _eval_qc_failure_output() -> dict[str, Any]:
     edges: list[dict[str, Any]] = []
     for spec in EDGE_SPECS:
         if spec.id == _CLAIMS_EDGE_ID:
-            edges.append(_two_phase_failure_edge())
+            edges.append(_claims_failure_edge())
         else:
             edges.append({
                 'id': spec.id,
@@ -275,32 +211,9 @@ def _eval_qc_failure_output() -> dict[str, Any]:
     }
 
 
-def _eval_qc_schema_errors(parsed: dict[str, Any]) -> list[str]:
-    validator = Draft202012Validator(SCHEMAS[EVAL_QC_NAME])
-    return [error.message for error in validator.iter_errors(parsed)]
-
-
 def _eval_qc_with_claims_schema_errors(parsed: dict[str, Any]) -> list[str]:
     validator = Draft202012Validator(SCHEMAS[_WITH_CLAIMS_NAME])
     return [error.message for error in validator.iter_errors(parsed)]
-
-
-def _ensure_schema_compatible_eval_output(parsed: dict[str, Any]) -> dict[str, Any]:
-    edges = parsed.get('edges')
-    if not isinstance(edges, list):
-        return _eval_qc_failure_output()
-    for item in edges:
-        if not isinstance(item, dict) or item.get('id') != _CLAIMS_EDGE_ID:
-            continue
-        claims = item.get('claims')
-        if not isinstance(claims, list) or not claims:
-            _patch_gt_text_edge(parsed, _two_phase_failure_edge())
-        break
-    else:
-        _patch_gt_text_edge(parsed, _two_phase_failure_edge())
-    if _eval_qc_schema_errors(parsed):
-        return _eval_qc_failure_output()
-    return parsed
 
 
 def _ensure_claims_judgment(
@@ -327,10 +240,6 @@ def _ensure_claims_judgment(
             return False
         score = float(score_raw)
         if score < 0.0 or score > 1.0:
-            return False
-        if score >= 0.2 and not evidence:
-            return False
-        if score < 0.2 and evidence:
             return False
         out_by_id[claim_id] = {
             'id': claim_id,
@@ -363,4 +272,4 @@ def run_eval_qc(
     *,
     llm: Any | None = None,
 ) -> dict[str, Any]:
-    return _enrich_computed_scores(_run_two_phase_eval_qc(session, payload, llm=llm))
+    return _enrich_computed_scores(_run_claims_eval_qc(session, payload, llm=llm))
