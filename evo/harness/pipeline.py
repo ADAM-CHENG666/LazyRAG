@@ -9,7 +9,7 @@ from evo.agents.indexer import run_indexer
 from evo.agents.synthesizer import run_synthesizer
 from evo.conductor.conductor import Conductor
 from evo.harness import analysis as analysis_steps
-from evo.harness import data_loader, report as report_mod
+from evo.harness import data_loader, eval_qc as eval_qc_step, report as report_mod
 from evo.harness.plan import Plan, Step, StepContext
 from evo.runtime.session import AnalysisSession
 
@@ -43,6 +43,9 @@ def build_standard_plan(
 
     def _features(ctx: StepContext) -> Any:
         return analysis_steps.compute_step_features(ctx.session)
+
+    def _eval_qc(ctx: StepContext) -> Any:
+        return eval_qc_step.run_eval_qc_step(ctx.session)
 
     def _cluster_global(ctx: StepContext) -> Any:
         return analysis_steps.cluster_global(
@@ -85,6 +88,7 @@ def build_standard_plan(
     return Plan(
         steps=[
             Step('load', _load, description='Load corpus (judge+trace)'),
+            Step('eval_qc', _eval_qc, description='Quality-check evaluation cases'),
             Step('features', _features, description='Compute per-case step features'),
             Step('cluster_global', _cluster_global, description='Global badcase clustering'),
             Step('cluster_per_step', _cluster_per_step, optional=True, description='Per-step clustering'),

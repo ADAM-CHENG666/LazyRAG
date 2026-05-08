@@ -111,7 +111,7 @@ def cluster_badcases(
     effective_method = method or session.config.cluster_method
     mcs = min_cluster_size or session.config.cluster_min_size
     ranked: list[tuple[str, float]] = []
-    for did, j in session.iter_judge():
+    for did, j in session.iter_passed_judge():
         val = getattr(j, score_field, None)
         if val is not None:
             ranked.append((did, float(val)))
@@ -125,7 +125,7 @@ def cluster_badcases(
             ids.append(cid)
             frows.append(flat)
     if not frows:
-        for did, judge in session.iter_judge():
+        for did, judge in session.iter_passed_judge():
             ids.append(did)
             key_count = max(1, len(judge.key))
             frows.append(
@@ -173,7 +173,7 @@ def cluster_per_step(
     mcs = min_cluster_size or session.config.cluster_min_size
     pipeline = session.trace_meta.pipeline
     ranked: list[tuple[str, float]] = []
-    for did, j in session.iter_judge():
+    for did, j in session.iter_passed_judge():
         val = getattr(j, score_field, None)
         if val is not None:
             ranked.append((did, float(val)))

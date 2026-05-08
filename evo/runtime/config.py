@@ -49,6 +49,14 @@ class AnalysisConfig:
 
 
 @dataclass(frozen=True)
+class EvalQCConfig:
+    enabled: bool = True
+    a_score_field: str | None = None
+    a_ac_threshold: float = 0.6
+    c_edge_default_threshold: float = 0.6
+
+
+@dataclass(frozen=True)
 class EvoModelConfig:
     llm_role: str = 'evo_llm'
     embed_role: str = 'evo_embed'
@@ -128,6 +136,7 @@ class EvoConfig:
     chat_source: Path = Path('/app/algorithm/chat')
     code_access: CodeAccessConfig = field(default_factory=CodeAccessConfig)
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
+    eval_qc: EvalQCConfig = field(default_factory=EvalQCConfig)
     llm: ModelGovernanceConfig = field(default_factory=_default_llm_governance)
     embed: ModelGovernanceConfig = field(default_factory=_default_embed_governance)
     model_config: EvoModelConfig = field(default_factory=EvoModelConfig)
@@ -187,6 +196,12 @@ def load_config(
         chunk_base_url=os.getenv('EVO_CHUNK_BASE_URL', 'http://localhost:8055'),
         max_workers=int(os.getenv('EVO_DATASETGEN_MAX_WORKERS', '5')),
     )
+    eval_qc = EvalQCConfig(
+        enabled=os.getenv('EVO_EVAL_QC_ENABLED', '1').lower() not in {'0', 'false', 'no', 'off'},
+        a_score_field=os.getenv('EVO_EVAL_QC_A_SCORE_FIELD') or None,
+        a_ac_threshold=float(os.getenv('EVO_EVAL_QC_A_AC_THRESHOLD', '0.6')),
+        c_edge_default_threshold=float(os.getenv('EVO_EVAL_QC_C_EDGE_DEFAULT_THRESHOLD', '0.6')),
+    )
     eval_run = EvalRunConfig(
         provider=os.getenv('EVO_EVAL_PROVIDER', ''),
         base_url=os.getenv('EVO_EVAL_BASE_URL', ''),
@@ -203,6 +218,7 @@ def load_config(
         chat_source=chat_source,
         code_access=code_access,
         analysis=analysis,
+        eval_qc=eval_qc,
         model_config=model_config,
         dataset_gen=dataset_gen,
         eval_run=eval_run,

@@ -10,6 +10,7 @@ from evo.domain.clustering import (
 )
 from evo.domain.models import JudgeRecord, LoadSummary, MergedCaseView, ModuleOutput, TraceMeta, TraceRecord
 from evo.domain.node import NodeInfo, NodeResolver
+from evo.domain.eval_feature import EDGE_BY_ID, EDGE_IDS, EDGE_SPECS, EdgeResult, EdgeSpec, EvalFeature
 
 __all__ = [
     'ErrorCode',
@@ -31,4 +32,10 @@ __all__ = [
     'TraceRecord',
     'NodeInfo',
     'NodeResolver',
+    'EDGE_BY_ID',
+    'EDGE_IDS',
+    'EDGE_SPECS',
+    'EdgeResult',
+    'EdgeSpec',
+    'EvalFeature',
 ]

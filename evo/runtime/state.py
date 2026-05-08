@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 from evo.domain import (
     ClusteringResult,
+    EvalFeature,
     FlowAnalysisResult,
     JudgeRecord,
     PerStepClusteringResult,
@@ -19,6 +20,7 @@ class SessionState:
     trace_meta: TraceMeta = field(default_factory=TraceMeta)
     eval_report_meta: dict[str, Any] | None = None
     warnings: list[str] = field(default_factory=list)
+    eval_features: dict[str, EvalFeature] = field(default_factory=dict)
     case_step_features: dict[str, dict[str, dict[str, float]]] = field(default_factory=dict)
     global_step_analysis: dict[str, Any] = field(default_factory=dict)
     clustering_global: ClusteringResult | None = None

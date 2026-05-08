@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from evo.domain import EDGE_IDS
+
+_CLAIMS_EDGE_ID = 'gt_text_to_gt_answer'
+SCORE_EDGE_IDS = tuple(edge_id for edge_id in EDGE_IDS if edge_id != _CLAIMS_EDGE_ID)
+
 INDEXER: dict = {
     'type': 'object',
     'required': ['hypotheses'],
@@ -98,6 +103,142 @@ ACTION_VERIFIER: dict = {
         'notes': {'type': 'array'},
     },
 }
+EVAL_QC: dict = {
+    'type': 'object',
+    'required': ['edges', 'summary_reason'],
+    'properties': {
+        'edges': {
+            'type': 'array',
+            'minItems': len(EDGE_IDS),
+            'maxItems': len(EDGE_IDS),
+            'items': {
+                'oneOf': [
+                    {
+                        'type': 'object',
+                        'required': ['id', 'score', 'reason'],
+                        'properties': {
+                            'id': {
+                                'type': 'string',
+                                'enum': [edge_id for edge_id in EDGE_IDS if edge_id != _CLAIMS_EDGE_ID],
+                            },
+                            'score': {'type': 'number', 'minimum': 0, 'maximum': 1},
+                            'reason': {'type': 'string', 'minLength': 1},
+                        },
+                        'additionalProperties': False,
+                    },
+                    {
+                        'type': 'object',
+                        'required': ['id', 'claims', 'reason'],
+                        'properties': {
+                            'id': {'const': _CLAIMS_EDGE_ID},
+                            'claims': {
+                                'type': 'array',
+                                'minItems': 1,
+                                'items': {
+                                    'type': 'object',
+                                    'required': ['text', 'score'],
+                                    'properties': {
+                                        'id': {'type': 'string', 'minLength': 1},
+                                        'text': {'type': 'string', 'minLength': 1},
+                                        'score': {'type': 'number', 'minimum': 0, 'maximum': 1},
+                                        'evidence': {'type': 'string'},
+                                    },
+                                    'additionalProperties': False,
+                                },
+                            },
+                            'reason': {'type': 'string', 'minLength': 1},
+                        },
+                        'additionalProperties': False,
+                    },
+                ],
+            },
+            'allOf': [
+                {
+                    'contains': {
+                        'type': 'object',
+                        'required': ['id'],
+                        'properties': {'id': {'const': edge_id}},
+                    },
+                    'minContains': 1,
+                    'maxContains': 1,
+                }
+                for edge_id in EDGE_IDS
+            ],
+        },
+        'summary_reason': {'type': 'string'},
+    },
+    'additionalProperties': False,
+}
+EVAL_QC_SPLIT: dict = {
+    'type': 'object',
+    'required': ['claims'],
+    'properties': {
+        'claims': {
+            'type': 'array',
+            'minItems': 1,
+            'items': {
+                'type': 'object',
+                'required': ['id', 'text'],
+                'properties': {
+                    'id': {'type': 'string', 'minLength': 1},
+                    'text': {'type': 'string', 'minLength': 1},
+                },
+                'additionalProperties': False,
+            },
+        },
+    },
+    'additionalProperties': False,
+}
+EVAL_QC_WITH_CLAIMS: dict = {
+    'type': 'object',
+    'required': ['edges', 'claims_judgment', 'summary_reason'],
+    'properties': {
+        'edges': {
+            'type': 'array',
+            'minItems': len(SCORE_EDGE_IDS),
+            'maxItems': len(SCORE_EDGE_IDS),
+            'items': {
+                'type': 'object',
+                'required': ['id', 'score', 'reason'],
+                'properties': {
+                    'id': {'type': 'string', 'enum': list(SCORE_EDGE_IDS)},
+                    'score': {'type': 'number', 'minimum': 0, 'maximum': 1},
+                    'reason': {'type': 'string', 'minLength': 1},
+                },
+                'additionalProperties': False,
+            },
+            'allOf': [
+                {
+                    'contains': {
+                        'type': 'object',
+                        'required': ['id'],
+                        'properties': {'id': {'const': edge_id}},
+                    },
+                    'minContains': 1,
+                    'maxContains': 1,
+                }
+                for edge_id in SCORE_EDGE_IDS
+            ],
+        },
+        'claims_judgment': {
+            'type': 'array',
+            'minItems': 1,
+            'items': {
+                'type': 'object',
+                'required': ['id', 'text', 'score', 'evidence'],
+                'properties': {
+                    'id': {'type': 'string', 'minLength': 1},
+                    'text': {'type': 'string', 'minLength': 1},
+                    'score': {'type': 'number', 'minimum': 0, 'maximum': 1},
+                    'evidence': {'type': 'string'},
+                },
+                'additionalProperties': False,
+            },
+        },
+        'summary_reason': {'type': 'string'},
+    },
+    'additionalProperties': False,
+}
 SCHEMAS: dict[str, dict] = {
     'indexer': INDEXER,
     'researcher': RESEARCHER,
@@ -105,5 +246,19 @@ SCHEMAS: dict[str, dict] = {
     'synthesizer': SYNTHESIZER,
     'conductor': CONDUCTOR,
     'action_verifier': ACTION_VERIFIER,
+    'eval_qc': EVAL_QC,
+    'eval_qc_split': EVAL_QC_SPLIT,
+    'eval_qc_with_claims': EVAL_QC_WITH_CLAIMS,
 }
-__all__ = ['SCHEMAS', 'INDEXER', 'RESEARCHER', 'CRITIC', 'SYNTHESIZER', 'CONDUCTOR', 'ACTION_VERIFIER']
+__all__ = [
+    'SCHEMAS',
+    'INDEXER',
+    'RESEARCHER',
+    'CRITIC',
+    'SYNTHESIZER',
+    'CONDUCTOR',
+    'ACTION_VERIFIER',
+    'EVAL_QC',
+    'EVAL_QC_SPLIT',
+    'EVAL_QC_WITH_CLAIMS',
+]
