@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -67,6 +68,12 @@ class AnalysisConfig:
     cluster_method: str = 'hdbscan'
     cluster_min_size: int | None = None
     enable_embed_features: bool = False
+
+
+@dataclass(frozen=True)
+class EvalQCConfig:
+    # A logic passes when its bucket level reaches this threshold.
+    threshold: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -154,6 +161,7 @@ class EvoConfig:
     model_config: EvoModelConfig = field(default_factory=EvoModelConfig)
     dataset_gen: DatasetGenConfig = field(default_factory=DatasetGenConfig)
     eval_run: EvalRunConfig = field(default_factory=EvalRunConfig)
+    eval_qc: EvalQCConfig = field(default_factory=EvalQCConfig)
     profile: str = 'dev'
 
     @property
@@ -209,6 +217,9 @@ def load_config(
     eval_run = EvalRunConfig(
         target_chat_url=EVO_TARGET_CHAT_URL,
     )
+    eval_qc = EvalQCConfig(
+        threshold=float(os.getenv('EVO_EVAL_QC_THRESHOLD', '0.5')),
+    )
     profile = 'dev'
     cfg = EvoConfig(
         data_dir=data_dir,
@@ -221,6 +232,7 @@ def load_config(
         model_config=model_config,
         dataset_gen=dataset_gen,
         eval_run=eval_run,
+        eval_qc=eval_qc,
         profile=profile,
     )
     return cfg

@@ -10,8 +10,10 @@ from evo.domain.clustering import (
 )
 from evo.domain.models import JudgeRecord, LoadSummary, MergedCaseView, ModuleOutput, TraceMeta, TraceRecord
 from evo.domain.node import NodeInfo, NodeResolver
+from evo.domain.eval_qc import LOGIC_IDS
 
 __all__ = [
+    'LOGIC_IDS',
     'ErrorCode',
     'ToolError',
     'ToolFailure',
