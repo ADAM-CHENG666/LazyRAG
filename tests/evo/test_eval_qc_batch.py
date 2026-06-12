@@ -5,7 +5,7 @@ import json
 import pytest
 
 from evo.apply.errors import ApplyError
-from evo.harness.eval_qc_batch import run_eval_qc_batch
+from evo.eval_qc import run_eval_qc_batch
 
 
 # ---- Fakes & factories ----------------------------------------------------

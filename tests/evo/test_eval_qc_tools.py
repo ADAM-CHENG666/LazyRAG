@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from evo.domain import LOGIC_IDS
-from evo.tools.eval_qc import missing_required_fields
+from evo.eval_qc.constants import LOGIC_IDS
+from evo.eval_qc.fields import missing_required_fields
 
 
 def test_logic_ids_contract() -> None:

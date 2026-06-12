@@ -1,25 +1,12 @@
-"""Standalone, session-free entrypoint for eval-set quality check.
-
-The callable handed to the backend: takes a batch of cases plus an injected
-`judge_llm`, runs field validation (B) then the three query-anchored logic
-judgments (C) per case, and returns one result per case in the public contract.
-
-Per-case contract:
-    in : {id, query, gt_answer, gt_text, key_points}
-    out: {id, passed, [reject], [logics], summary}
-
-See docs/domains/eval_qc/design/02_task_endpoint_design.md for the full spec.
-"""
 
 from __future__ import annotations
 
 from typing import Any, Callable, Sequence
 
-from evo.agents.eval_qc import run_eval_qc
-from evo.domain import LOGIC_IDS
+from evo.eval_qc.constants import LOGIC_IDS
+from evo.eval_qc.fields import missing_required_fields
+from evo.eval_qc.judge import EvalQcRunState, run_eval_qc
 from evo.runtime.config import EvoConfig, load_config
-from evo.runtime.session import create_session, session_scope
-from evo.tools.eval_qc import missing_required_fields
 
 
 def run_eval_qc_batch(
@@ -31,32 +18,25 @@ def run_eval_qc_batch(
     cancel: Callable[[], bool] | None = None,
 ) -> list[dict[str, Any]]:
     """Run eval_qc over a batch of cases.
-
-    Args:
-        cases: each is {id, query, gt_answer, gt_text, key_points}.
-        judge_llm: injected LLM callable (replaces the session-bound client).
-        config: full EvoConfig (threshold lives in config.eval_qc); load_config() if None.
-        on_progress: called with (done, total) after each case.
-        cancel: polled before each case; returns True to stop early (partial results).
-
-    Returns:
-        One result dict per processed case, in input order.
     """
+    
     cfg = config if isinstance(config, EvoConfig) else load_config()
     threshold = cfg.eval_qc.threshold
     total = len(cases)
+    state = EvalQcRunState()
     results: list[dict[str, Any]] = []
-    with session_scope(session := create_session(cfg)):
-        for index, case in enumerate(cases):
-            if cancel is not None and cancel():
-                break
-            results.append(_check_case(session, case, judge_llm=judge_llm, threshold=threshold))
-            if on_progress is not None:
-                on_progress(index + 1, total)
+    for index, case in enumerate(cases):
+        if cancel is not None and cancel():
+            break
+        results.append(_check_case(case, judge_llm=judge_llm, threshold=threshold, state=state))
+        if on_progress is not None:
+            on_progress(index + 1, total)
     return results
 
 
-def _check_case(session: Any, case: dict[str, Any], *, judge_llm: Any, threshold: float) -> dict[str, Any]:
+def _check_case(
+    case: dict[str, Any], *, judge_llm: Any, threshold: float, state: EvalQcRunState
+) -> dict[str, Any]:
     case_id = case.get('id')
     query = _text(case.get('query'))
     gt_answer = _text(case.get('gt_answer'))
@@ -73,11 +53,11 @@ def _check_case(session: Any, case: dict[str, Any], *, judge_llm: Any, threshold
             'summary': f"{'、'.join(missing)} 为空",
         }
 
-    # Stage C: three query-anchored logic judgments via the (session-driven) LLM.
+    # Stage C: three query-anchored logic judgments via the injected LLM.
     parsed = run_eval_qc(
-        session,
         {'query': query, 'gt_answer': gt_answer, 'gt_text': gt_text, 'key_points': key_points},
         llm=judge_llm,
+        state=state,
     )
     logics = _judge_logics(parsed.get('judgments'), threshold)
     passed = len(logics) == len(LOGIC_IDS) and all(logic['passed'] for logic in logics.values())
