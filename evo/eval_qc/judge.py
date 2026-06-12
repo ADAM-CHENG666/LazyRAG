@@ -81,7 +81,7 @@ def _structured_call(
             {'failures': state.schema_failures, 'last_errors': errors[:5]},
             kind='permanent',
         )
-    return parsed
+    return {}
 
 
 # ---- Stage 1: extract — decompose the query into core/qualifier -----------

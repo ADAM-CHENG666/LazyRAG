@@ -47,6 +47,14 @@ def _bad_judge() -> dict:
             'summary_reason': 's'}
 
 
+def _schema_invalid_high_score_judge() -> dict:
+    judge = _judge()
+    judge['extra'] = 'forbidden'
+    for entry in judge['judgments']:
+        entry['extra'] = 'forbidden'
+    return judge
+
+
 def _case(case_id: str = 'c1', **overrides: object) -> dict:
     case = {
         'id': case_id,
@@ -146,6 +154,18 @@ def test_repair_recovers_to_valid_judgment() -> None:
 def test_persistent_bad_output_falls_back_to_unpassed() -> None:
     # Judge never validates (3 attempts) -> failure output -> error_unpassed, all 0.1.
     llm = _ScriptedLLM(_extract(), _bad_judge(), _bad_judge(), _bad_judge())
+    [result] = run_eval_qc_batch([_case()], judge_llm=llm)
+
+    assert result['passed'] is False
+    assert result['reject'] == {'type': 'error_unpassed'}
+    assert all(l['level'] == 0.1 for l in result['logics'].values())
+
+
+def test_schema_invalid_high_scores_fail_closed_after_repairs() -> None:
+    # Extra fields fail JSON schema even though the weaker business validator
+    # would otherwise see three high-scoring logic judgments.
+    bad = _schema_invalid_high_score_judge()
+    llm = _ScriptedLLM(_extract(), bad, bad, bad)
     [result] = run_eval_qc_batch([_case()], judge_llm=llm)
 
     assert result['passed'] is False
