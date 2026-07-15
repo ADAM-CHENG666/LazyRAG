@@ -79,7 +79,7 @@ input_payload:
       umap_n_components:
         type: integer
         required: false
-        default: 2
+        default: 10
         validation:
           - positive_integer
       min_cluster_size:

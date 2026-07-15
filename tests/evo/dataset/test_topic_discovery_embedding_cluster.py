@@ -1,6 +1,6 @@
 import pytest
 
-from evo.operations.dataset.topic_discovery import topic_discovery_embedding_cluster
+from evo.operations.dataset.topic_discovery import EmbeddingClusterParams, topic_discovery_embedding_cluster
 
 
 def _chunk(index, vector):
@@ -23,6 +23,15 @@ def _inputs(params=None):
             'min_cluster_size': 2,
             'min_samples': 1,
         },
+    }
+
+
+def test_embedding_cluster_uses_documented_default_parameters():
+    assert EmbeddingClusterParams.from_dict({}).to_dict() == {
+        'umap_n_neighbors': 15,
+        'umap_n_components': 10,
+        'min_cluster_size': 2,
+        'min_samples': 2,
     }
 
 
