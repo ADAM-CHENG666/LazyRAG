@@ -6,16 +6,18 @@ from evo.artifact_runtime.evo import catalog as C
 from evo.artifact_runtime.evo.adapter import build_evo_artifact_adapter
 from evo.artifact_runtime.evo.flow_ops import default_evo_ops
 from evo.artifact_runtime.kernel import ArtifactKey, SQLiteArtifactStore
-from evo.operations.dataset.chunks_build import build_chunks, build_chunks_manifest
+from evo.operations.dataset.chunks_build import build_chunk_candidates, build_chunks, build_chunks_manifest
 
 
 class FakeKnowledgeBaseClient:
     def __init__(self, chunks=None):
         self.chunks = chunks or {}
+        self.calls = []
 
     def iter_chunks(self, kb_id, doc_ids, groups, page_size):
         for doc_id in doc_ids:
             for group in groups:
+                self.calls.append((doc_id, group))
                 for batch in self.chunks.get((doc_id, group), []):
                     yield batch
 
@@ -35,7 +37,7 @@ def test_build_chunks_fixed_ops_materialize_partitioned_chunks_and_manifest(tmp_
     ops = {
         op.op_id: op
         for op in default_evo_ops(('chunk_0001', 'chunk_0002', 'chunk_0003'))
-        if op.op_id in {'dataset.build_chunks', 'dataset.build_chunks_manifest'}
+        if op.op_id in {'dataset.build_chunk_candidates', 'dataset.build_chunks', 'dataset.build_chunks_manifest'}
     }
     store = SQLiteArtifactStore(tmp_path / 'store')
     client = FakeKnowledgeBaseClient(chunks={
@@ -46,7 +48,8 @@ def test_build_chunks_fixed_ops_materialize_partitioned_chunks_and_manifest(tmp_
         store,
         tuple(ops.values()),
         {
-            'dataset.build_chunks': lambda ctx, inputs: build_chunks(ctx, inputs, kb_client=client),
+            'dataset.build_chunk_candidates': lambda ctx, inputs: build_chunk_candidates(ctx, inputs, kb_client=client),
+            'dataset.build_chunks': build_chunks,
             'dataset.build_chunks_manifest': build_chunks_manifest,
         },
     )
@@ -88,9 +91,10 @@ def test_build_chunks_fixed_ops_materialize_partitioned_chunks_and_manifest(tmp_
     assert built_record is not None
     assert built_record.value['chunks'] == [
         {'available': True, 'chunk_id': 'chunk-1', 'doc_id': 'doc-1', 'filename': 'a.pdf',
-         'group': 'block', 'partition': 'chunk_0001'},
+         'group': 'block', 'type': 'text', 'partition': 'chunk_0001'},
         {'available': True, 'chunk_id': 'chunk-2', 'doc_id': 'doc-1', 'filename': 'a.pdf',
-         'group': 'block', 'partition': 'chunk_0002'},
+         'group': 'block', 'type': 'text', 'partition': 'chunk_0002'},
         {'available': True, 'chunk_id': 'chunk-3', 'doc_id': 'doc-2', 'filename': 'b.pdf',
-         'group': 'block', 'partition': 'chunk_0003'},
+         'group': 'block', 'type': 'text', 'partition': 'chunk_0003'},
     ]
+    assert client.calls == [('doc-1', 'block'), ('doc-2', 'block')]

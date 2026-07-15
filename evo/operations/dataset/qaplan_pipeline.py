@@ -6,7 +6,7 @@ from typing import Any
 
 from evo.llm import LazyLLMClient
 
-from .chunks_build import build_chunks, build_chunks_manifest
+from .chunks_build import build_chunk_candidates, build_chunks, build_chunks_manifest
 from .entities import chunk_entities_extract, chunk_entities_extract_manifest
 from .qaplan import qaplan_generate, qaplan_generate_manifest, qaplan_plan, qaplan_spec
 from .select_docs import select_docs
@@ -49,6 +49,7 @@ def qaplan_dataset_materializers(case_ids: tuple[str, ...]) -> dict[str, Any]:
 
     return {
         'dataset.select_docs': select_docs,
+        'dataset.build_chunk_candidates': build_chunk_candidates,
         'dataset.build_chunks': build_chunks,
         'dataset.build_chunks_manifest': build_chunks_manifest,
         'dataset.chunk_entities_extract': lambda ctx, inputs: chunk_entities_extract(

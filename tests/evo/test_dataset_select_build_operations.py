@@ -3,7 +3,13 @@ from types import SimpleNamespace
 import pytest
 
 from evo.artifact_runtime.kernel import ArtifactKey, ArtifactRef
-from evo.operations.dataset import build_chunks, build_chunks_manifest, select_docs
+from evo.operations.dataset import (
+    BuildChunksParams,
+    build_chunk_candidates,
+    build_chunks,
+    build_chunks_manifest,
+    select_docs,
+)
 import evo.operations.dataset.chunks_build as chunks_build_module
 
 
@@ -84,6 +90,14 @@ def chunk_ctx(partition):
     return SimpleNamespace(output_key_by_name={'chunk': ArtifactKey('dataset.chunk', partition)})
 
 
+def candidate_payload(selected, params, client):
+    return build_chunk_candidates(
+        None,
+        {'selected_docs': selected, 'build_chunks_params': params},
+        client,
+    )['build_chunk_candidates']
+
+
 def manifest_ctx(partitions):
     refs = {ArtifactKey.of('dataset.selected_docs'): ArtifactRef(ArtifactKey.of('dataset.selected_docs'), 1)}
     refs.update({
@@ -91,6 +105,9 @@ def manifest_ctx(partitions):
         for index, partition in enumerate(partitions, start=1)
     })
     return SimpleNamespace(input_ref_by_key=refs)
+
+
+DEFAULT_ALLOWED_TYPES = ['text', 'paragraph', 'table', 'formula', 'equation', 'unknown']
 
 
 def test_select_docs_materializer_outputs_selected_docs():
@@ -179,11 +196,8 @@ def test_build_chunks_materializer_outputs_partitioned_chunk(monkeypatch):
         ('doc-2', 'block'): [[node('chunk-3', text='three', group='block', embedding={'default': [3.0]})]],
     })
 
-    output = build_chunks(
-        chunk_ctx('chunk_0002'),
-        {'selected_docs': selected, 'build_chunks_params': {'groups': ['block', 'line']}},
-        client,
-    )
+    candidates = candidate_payload(selected, {'groups': ['block', 'line']}, client)
+    output = build_chunks(chunk_ctx('chunk_0002'), {'build_chunk_candidates': candidates})
 
     assert output == {'chunk': {
         'available': True,
@@ -194,12 +208,12 @@ def test_build_chunks_materializer_outputs_partitioned_chunk(monkeypatch):
         'type': 'text',
         'text': 'two',
         'embedding': {'model': 'default', 'vector': [0.4472135954999579, 0.8944271909999159]},
-        'metadata': {
-            'doc': {'doc_id': 'doc-1', 'filename': 'a.pdf', 'file_type': 'pdf',
-                    'status': 'success', 'group_counts': {'block': 2}},
-            'node_metadata': {'type': 'text', 'page': 1},
-            'node_global_metadata': {'filename': 'fallback.pdf'},
-        },
+            'metadata': {
+                'doc': {'doc_id': 'doc-1', 'filename': 'a.pdf', 'file_type': 'pdf',
+                        'status': 'success', 'group_counts': {'block': 2}},
+                'node_metadata': {'type': 'text', 'page': 1},
+                'node_global_metadata': {'filename': 'fallback.pdf'},
+            },
     }}
     assert [(call['doc_id'], call['group']) for call in client.chunk_calls] == [
         ('doc-1', 'block'),
@@ -219,6 +233,13 @@ def test_build_chunks_manifest_materializer_outputs_built_chunks():
         'stats': {'matched': 2, 'selected': 2},
         'params': {'kb_id': 'kb-1', 'max_docs': 2, 'target_case_count': 2},
     }
+    candidates = {
+        'chunks': [],
+        'selection_stats': {'scanned_count': 3, 'accepted_count': 3, 'filtered_count_by_type': {}},
+        'target_chunk_count': 3,
+        'fallback_used': False,
+        'params': {'groups': ['block', 'line']},
+    }
     output = build_chunks_manifest(
         manifest_ctx(('chunk_0001', 'chunk_0002', 'chunk_0003')),
         {
@@ -231,7 +252,7 @@ def test_build_chunks_manifest_materializer_outputs_built_chunks():
                 {'available': True, 'chunk_id': 'chunk-3', 'doc_id': 'doc-2', 'filename': 'b.pdf',
                  'group': 'block', 'type': 'text', 'text': 'three', 'embedding': {}, 'metadata': {}},
             ),
-            'build_chunks_params': {'groups': ['block', 'line']},
+            'build_chunk_candidates': candidates,
         },
     )
 
@@ -239,16 +260,19 @@ def test_build_chunks_manifest_materializer_outputs_built_chunks():
         'source': {'kb_id': 'kb-1', 'selected_docs_ref': 'dataset.selected_docs@v1'},
         'chunks': [
             {'available': True, 'chunk_id': 'chunk-1', 'doc_id': 'doc-1', 'filename': 'a.pdf',
-             'group': 'block', 'partition': 'chunk_0001'},
+             'group': 'block', 'type': 'text', 'partition': 'chunk_0001'},
             {'available': True, 'chunk_id': 'chunk-2', 'doc_id': 'doc-1', 'filename': 'a.pdf',
-             'group': 'block', 'partition': 'chunk_0002'},
+             'group': 'block', 'type': 'text', 'partition': 'chunk_0002'},
             {'available': True, 'chunk_id': 'chunk-3', 'doc_id': 'doc-2', 'filename': 'b.pdf',
-             'group': 'block', 'partition': 'chunk_0003'},
+             'group': 'block', 'type': 'text', 'partition': 'chunk_0003'},
         ],
         'stats': {
             'chunk_count': 3,
             'slot_count': 3,
             'empty_count': 0,
+            'scanned_count': 3,
+            'accepted_count': 3,
+            'filtered_count_by_type': {},
             'target_chunk_count': 3,
             'doc_count': 2,
             'group_counts': {'block': 3},
@@ -259,8 +283,92 @@ def test_build_chunks_manifest_materializer_outputs_built_chunks():
             'fallback_used': False,
             'warnings': [],
         },
-        'params': {'groups': ['block', 'line']},
+        'params': {'groups': ['block', 'line'], 'allowed_types': DEFAULT_ALLOWED_TYPES},
     }}
+
+
+def test_build_chunks_params_defaults_and_explicit_allowed_types_replace_defaults():
+    assert BuildChunksParams.from_dict({'groups': ['block']}).to_dict() == {
+        'groups': ['block'],
+        'allowed_types': DEFAULT_ALLOWED_TYPES,
+    }
+    assert BuildChunksParams.from_dict({
+        'groups': [' block '],
+        'allowed_types': [' TABLE ', 'unknown'],
+    }).to_dict() == {
+        'groups': ['block'],
+        'allowed_types': ['table', 'unknown'],
+    }
+
+
+def test_build_chunks_filters_types_before_consuming_doc_group_quota():
+    selected = {
+        'kb_id': 'kb-1',
+        'docs': [{'doc_id': 'doc-1', 'filename': 'a.pdf', 'file_type': 'pdf', 'status': 'success',
+                  'group_counts': {'block': 5}}],
+        'params': {'target_case_count': 2},
+    }
+    client = FakeKnowledgeBaseClient(chunks={
+        ('doc-1', 'block'): [[
+            node('heading-1', text='Chapter 1', metadata={'type': 'heading'}),
+            node('paragraph-1', text='Body', metadata={'type': 'paragraph'}),
+            node('list-1', text='- item', metadata={'type': 'list'}),
+            node('table-1', text='| key | value |', metadata={'type': 'table'}),
+            node('formula-1', text='x = y', metadata={'type': 'formula'}),
+        ]],
+    })
+    params = {'groups': ['block']}
+
+    candidates = candidate_payload(selected, params, client)
+    first = build_chunks(chunk_ctx('chunk_0001'), {'build_chunk_candidates': candidates})['chunk']
+    second = build_chunks(chunk_ctx('chunk_0002'), {'build_chunk_candidates': candidates})['chunk']
+    third = build_chunks(chunk_ctx('chunk_0003'), {'build_chunk_candidates': candidates})['chunk']
+    assert first['chunk_id'] == 'paragraph-1'
+    assert second['chunk_id'] == 'table-1'
+    assert third['chunk_id'] == 'formula-1'
+    assert third['type'] == 'formula'
+    assert candidates['selection_stats'] == {
+        'scanned_count': 5,
+        'accepted_count': 3,
+        'filtered_count_by_type': {'heading': 1, 'list': 1},
+    }
+
+
+def test_build_chunks_manifest_exposes_type_and_selection_stats():
+    selected = {
+        'kb_id': 'kb-1',
+        'docs': [{'doc_id': 'doc-1', 'filename': 'a.pdf', 'file_type': 'pdf', 'status': 'success',
+                  'group_counts': {'block': 5}}],
+        'params': {'target_case_count': 2},
+    }
+    stats = {'scanned_count': 5, 'accepted_count': 3, 'filtered_count_by_type': {'heading': 1, 'list': 1}}
+    chunks = tuple({
+        'available': True,
+        'chunk_id': chunk_id,
+        'doc_id': 'doc-1',
+        'filename': 'a.pdf',
+        'group': 'block',
+        'type': chunk_type,
+        'text': chunk_id,
+        'embedding': {},
+        'metadata': {},
+    } for chunk_id, chunk_type in (
+        ('paragraph-1', 'paragraph'), ('table-1', 'table'), ('formula-1', 'formula'),
+    ))
+
+    built = build_chunks_manifest(
+        manifest_ctx(('chunk_0001', 'chunk_0002', 'chunk_0003')),
+        {'selected_docs': selected, 'chunk': chunks, 'build_chunk_candidates': {
+            'chunks': list(chunks), 'selection_stats': stats, 'target_chunk_count': 3,
+            'fallback_used': False, 'params': {'groups': ['block']},
+        }},
+    )['build_chunks_manifest']
+
+    assert [item['type'] for item in built['chunks']] == ['paragraph', 'table', 'formula']
+    assert built['stats']['scanned_count'] == 5
+    assert built['stats']['accepted_count'] == 3
+    assert built['stats']['filtered_count_by_type'] == {'heading': 1, 'list': 1}
+    assert built['params']['allowed_types'] == DEFAULT_ALLOWED_TYPES
 
 
 def test_build_chunks_manifest_materializer_samples_group_first_and_falls_back():
@@ -292,7 +400,10 @@ def test_build_chunks_manifest_materializer_samples_group_first_and_falls_back()
                 {'available': True, 'chunk_id': 'doc-2-line-1', 'doc_id': 'doc-2', 'filename': 'b.pdf',
                  'group': 'line', 'type': 'text', 'text': '5', 'embedding': {}, 'metadata': {}},
             ),
-            'build_chunks_params': {'groups': ['block', 'line']},
+            'build_chunk_candidates': {
+                'chunks': [], 'selection_stats': {'scanned_count': 5, 'accepted_count': 5, 'filtered_count_by_type': {}},
+                'target_chunk_count': 5, 'fallback_used': True, 'params': {'groups': ['block', 'line']},
+            },
         },
     )
 
@@ -320,11 +431,8 @@ def test_build_chunks_materializer_outputs_placeholder_when_actual_chunks_below_
         ('doc-1', 'block'): [[node('chunk-1', group='block'), node('chunk-2', group='block')]],
     })
 
-    output = build_chunks(
-        chunk_ctx('chunk_0008'),
-        {'selected_docs': selected, 'build_chunks_params': {'groups': ['block']}},
-        client,
-    )
+    candidates = candidate_payload(selected, {'groups': ['block']}, client)
+    output = build_chunks(chunk_ctx('chunk_0008'), {'build_chunk_candidates': candidates})
 
     assert output == {'chunk': {
         'available': False,
@@ -364,7 +472,10 @@ def test_build_chunks_manifest_materializer_warns_when_actual_chunks_below_targe
 
     output = build_chunks_manifest(
         manifest_ctx(partitions),
-        {'selected_docs': selected, 'chunk': chunks, 'build_chunks_params': {'groups': ['block']}},
+        {'selected_docs': selected, 'chunk': chunks, 'build_chunk_candidates': {
+            'chunks': [], 'selection_stats': {'scanned_count': 2, 'accepted_count': 2, 'filtered_count_by_type': {}},
+            'target_chunk_count': 8, 'fallback_used': False, 'params': {'groups': ['block']},
+        }},
     )
 
     stats = output['build_chunks_manifest']['stats']
@@ -386,11 +497,7 @@ def test_build_chunks_materializer_rejects_empty_sampling_plan():
     }
 
     with pytest.raises(ValueError, match='sampling plan is empty'):
-        build_chunks(
-            chunk_ctx('case_0001'),
-            {'selected_docs': selected, 'build_chunks_params': {'groups': ['block']}},
-            FakeKnowledgeBaseClient(),
-        )
+        candidate_payload(selected, {'groups': ['block']}, FakeKnowledgeBaseClient())
 
 
 def test_build_chunks_manifest_materializer_rejects_chunk_tuple_count_mismatch():
@@ -414,6 +521,9 @@ def test_build_chunks_manifest_materializer_rejects_chunk_tuple_count_mismatch()
                     {'available': True, 'chunk_id': 'chunk-2', 'doc_id': 'doc-1', 'filename': 'a.pdf',
                      'group': 'block', 'type': 'text', 'text': '2', 'embedding': {}, 'metadata': {}},
                 ),
-                'build_chunks_params': {'groups': ['block']},
+                'build_chunk_candidates': {
+                    'chunks': [], 'selection_stats': {'scanned_count': 0, 'accepted_count': 0, 'filtered_count_by_type': {}},
+                    'target_chunk_count': 3, 'fallback_used': False, 'params': {'groups': ['block']},
+                },
             },
         )

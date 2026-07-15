@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .assemble import assemble_dataset
-from .chunks_build import BuildChunksParams, build_chunks, build_chunks_manifest
+from .chunks_build import BuildChunksParams, build_chunk_candidates, build_chunks, build_chunks_manifest
 from .csv_loader import AUDIT_FIELDS, CASE_FIELDS, load_eval_dataset_csv, normalize_eval_case
 from .entities import chunk_entities_extract, chunk_entities_extract_manifest
 from .generation import dataset_materializers, generate_case
@@ -25,6 +25,7 @@ __all__ = [
     'ChunkSource',
     'SelectDocsParams',
     'BuildChunksParams',
+    'build_chunk_candidates',
     'assemble_dataset',
     'build_chunks',
     'build_chunks_manifest',

@@ -6,15 +6,9 @@ operation:
 
 fixed_op:
   inputs:
-    selected_docs:
-      artifact_id: dataset.selected_docs
+    build_chunk_candidates:
+      artifact_id: dataset.build_chunk_candidates
       required: true
-      partition: unpartitioned
-      mapping: unpartitioned_to_all
-    build_chunks_params:
-      artifact_id: dataset.build_chunks_params
-      required: true
-      partition: unpartitioned
       mapping: unpartitioned_to_all
   outputs:
     chunk:
@@ -27,50 +21,17 @@ materializer:
     - chunk
 
 input_payload:
-  selected_docs:
+  build_chunk_candidates:
     fields:
-      kb_id:
-        type: string
-        required: true
-      docs:
+      chunks:
         type: array
         required: true
-        item:
-          type: object
-          fields:
-            doc_id:
-              type: string
-              required: true
-            filename:
-              type: string
-              required: false
-            file_type:
-              type: string
-              required: false
-            status:
-              type: string
-              required: false
-            group_counts:
-              type: object
-              required: false
-              value_type: integer
+      target_chunk_count:
+        type: integer
+        required: true
       params:
         type: object
-        required: false
-        fields:
-          target_case_count:
-            type: integer
-            required: false
-            default: 100
-  build_chunks_params:
-    fields:
-      groups:
-        type: list[string]
-        required: false
-        default:
-          - block
-        validation:
-          - non_empty_id_items
+        required: true
 
 output_payload:
   chunk:
@@ -101,17 +62,8 @@ output_payload:
         type: object
 
 execution_flow:
-  - 读取并校验 selected_docs input payload。
-  - 读取 build_chunks_params.groups；为空时使用 ["block"]。
-  - 根据 selected_docs.params.target_case_count 在 graph 创建前确定 chunk slot 数量为 1.5 倍并向上取整。
-  - 当 selected_docs.docs 为空时失败。
-  - 要求 runtime 预先提供 target_chunk_count 个独立 chunk partitions。
-  - 按 group-first 策略生成采样计划。
-  - 当采样计划为空时失败。
-  - 按采样计划调用 KnowledgeBaseClient.iter_chunks(kb_id, [doc_id], [group], page_size) 读取 DocNode。
-  - 从知识库读取含 embedding 的 DocNode；缺失 embedding 时失败，不延迟到 topic 阶段处理。
-  - 将每个 DocNode 的唯一 embedding 选择为 {model, vector}，校验数值、维度和正范数，并在此处完成 L2 归一化。
-  - 将读取到的 DocNode 转换为 chunk payload；chunk_id 与 doc_id 必须保留知识库原始标识。
+  - 读取 build_chunk_candidates。
+  - 按 runtime output partition 的 index 从候选列表选择一个 chunk。
   - 按 runtime output chunk partition 选择当前 slot 对应的 chunk，真实 chunk 输出 available=true。
   - 当当前 slot 超过实际 chunk 数量时，输出 available=false 的空占位 chunk payload。
   - 返回仅包含当前 partition slot 的 {"chunk": payload}。
@@ -119,15 +71,7 @@ execution_flow:
 tests:
   - contract
   - success
-  - default_groups
-  - validation_error
-  - empty_selected_docs_error
-  - target_chunk_count_from_selected_docs
-  - group_first_sampling_plan
-  - proportional_doc_quota
-  - fallback_group_warning
   - insufficient_chunks_placeholder
-  - normalize_docnode_payload
   - partitioned_chunk_output
   - return_keys_match_outputs
   - partition

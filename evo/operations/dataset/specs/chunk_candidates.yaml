@@ -1,0 +1,52 @@
+operation:
+  op_id: dataset.build_chunk_candidates
+  flow: dataset
+  stage: build_chunk_candidates
+  description: 一次读取知识库并按内容类型筛选，生成供所有 chunk partition 复用的候选列表。
+
+fixed_op:
+  inputs:
+    selected_docs:
+      artifact_id: dataset.selected_docs
+      required: true
+      partition: unpartitioned
+    build_chunks_params:
+      artifact_id: dataset.build_chunks_params
+      required: true
+      partition: unpartitioned
+  outputs:
+    build_chunk_candidates:
+      artifact_id: dataset.build_chunk_candidates
+      partition: unpartitioned
+
+materializer:
+  function: build_chunk_candidates
+  return_keys:
+    - build_chunk_candidates
+
+output_payload:
+  build_chunk_candidates:
+    json_compatible: true
+    fields:
+      chunks:
+        type: array
+      selection_stats:
+        type: object
+      target_chunk_count:
+        type: integer
+      fallback_used:
+        type: boolean
+      params:
+        type: object
+
+execution_flow:
+  - 一次读取 selected_docs 和 build_chunks_params。
+  - 一次扫描知识库、归一化 type，并按 allowed_types 筛选。
+  - 被过滤节点不消耗配额；读取到合格配额或 doc/group 耗尽。
+  - 返回完整候选列表及 selection_stats，供后续所有 partition 复用。
+
+tests:
+  - scans_kb_once
+  - allowed_type_filtering
+  - filtered_nodes_do_not_consume_quota
+  - selection_stats

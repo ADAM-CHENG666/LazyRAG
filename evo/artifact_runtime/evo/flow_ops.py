@@ -24,21 +24,26 @@ def default_evo_ops(cases: tuple[str, ...]) -> tuple[type[FixedOp], ...]:
     class BuildChunks(FixedOp):
         op_id = 'dataset.build_chunks'
         inputs = {
-            'selected_docs': ArtifactInput(C.DATASET_SELECTED_DOCS, partition_mapping=unpartitioned_to_all()),
-            'build_chunks_params': ArtifactInput(C.DATASET_BUILD_CHUNKS_PARAMS, partition_mapping=unpartitioned_to_all()),
+            'build_chunk_candidates': ArtifactInput(C.DATASET_BUILD_CHUNK_CANDIDATES, partition_mapping=unpartitioned_to_all()),
         }
         outputs = {'chunk': ArtifactOutput(C.DATASET_CHUNK, partitions)}
+
+    class BuildChunkCandidates(FixedOp):
+        op_id = 'dataset.build_chunk_candidates'
+        inputs = {'selected_docs': ArtifactInput(C.DATASET_SELECTED_DOCS),
+                  'build_chunks_params': ArtifactInput(C.DATASET_BUILD_CHUNKS_PARAMS)}
+        outputs = {'build_chunk_candidates': ArtifactOutput(C.DATASET_BUILD_CHUNK_CANDIDATES)}
 
     class BuildChunksManifest(FixedOp):
         op_id = 'dataset.build_chunks_manifest'
         inputs = {
             'selected_docs': ArtifactInput(C.DATASET_SELECTED_DOCS),
+            'build_chunk_candidates': ArtifactInput(C.DATASET_BUILD_CHUNK_CANDIDATES),
             'chunk': ArtifactInput(
                 C.DATASET_CHUNK,
                 partition_spec=partitions,
                 partition_mapping=all_to_unpartitioned(),
             ),
-            'build_chunks_params': ArtifactInput(C.DATASET_BUILD_CHUNKS_PARAMS),
         }
         outputs = {'build_chunks_manifest': ArtifactOutput(C.DATASET_BUILD_CHUNKS_MANIFEST)}
 
@@ -334,6 +339,7 @@ def default_evo_ops(cases: tuple[str, ...]) -> tuple[type[FixedOp], ...]:
 
     return (
         SelectDocs,
+        BuildChunkCandidates,
         BuildChunks,
         BuildChunksManifest,
         ChunkEntitiesExtract,
@@ -401,17 +407,22 @@ def qaplan_dataset_evo_ops(spec: DatasetFlowSpec) -> tuple[type[FixedOp], ...]:
     class BuildChunks(FixedOp):
         op_id = 'dataset.build_chunks'
         inputs = {
-            'selected_docs': ArtifactInput(C.DATASET_SELECTED_DOCS, partition_mapping=unpartitioned_to_all()),
-            'build_chunks_params': ArtifactInput(C.DATASET_BUILD_CHUNKS_PARAMS, partition_mapping=unpartitioned_to_all()),
+            'build_chunk_candidates': ArtifactInput(C.DATASET_BUILD_CHUNK_CANDIDATES, partition_mapping=unpartitioned_to_all()),
         }
         outputs = {'chunk': ArtifactOutput(C.DATASET_CHUNK, chunks)}
+
+    class BuildChunkCandidates(FixedOp):
+        op_id = 'dataset.build_chunk_candidates'
+        inputs = {'selected_docs': ArtifactInput(C.DATASET_SELECTED_DOCS),
+                  'build_chunks_params': ArtifactInput(C.DATASET_BUILD_CHUNKS_PARAMS)}
+        outputs = {'build_chunk_candidates': ArtifactOutput(C.DATASET_BUILD_CHUNK_CANDIDATES)}
 
     class BuildChunksManifest(FixedOp):
         op_id = 'dataset.build_chunks_manifest'
         inputs = {
             'selected_docs': ArtifactInput(C.DATASET_SELECTED_DOCS),
+            'build_chunk_candidates': ArtifactInput(C.DATASET_BUILD_CHUNK_CANDIDATES),
             'chunk': ArtifactInput(C.DATASET_CHUNK, partition_spec=chunks, partition_mapping=all_to_unpartitioned()),
-            'build_chunks_params': ArtifactInput(C.DATASET_BUILD_CHUNKS_PARAMS),
         }
         outputs = {'build_chunks_manifest': ArtifactOutput(C.DATASET_BUILD_CHUNKS_MANIFEST)}
 
@@ -507,7 +518,7 @@ def qaplan_dataset_evo_ops(spec: DatasetFlowSpec) -> tuple[type[FixedOp], ...]:
         outputs = {'qaplan_generate_manifest': ArtifactOutput(C.DATASET_QAPLAN_GENERATE_MANIFEST)}
 
     return (
-        SelectDocs, BuildChunks, BuildChunksManifest, ChunkEntitiesExtract, ChunkEntitiesManifest,
+        SelectDocs, BuildChunkCandidates, BuildChunks, BuildChunksManifest, ChunkEntitiesExtract, ChunkEntitiesManifest,
         EntityGraph, EntityClusters, EmbeddingCandidates, EmbeddingClusters, TopicManifest,
         QaplanPlan, QaplanSpec, QaplanGenerate, QaplanGenerationManifest,
     )

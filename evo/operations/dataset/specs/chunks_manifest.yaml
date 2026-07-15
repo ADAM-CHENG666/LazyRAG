@@ -10,15 +10,15 @@ fixed_op:
       artifact_id: dataset.selected_docs
       required: true
       partition: unpartitioned
+    build_chunk_candidates:
+      artifact_id: dataset.build_chunk_candidates
+      required: true
+      partition: unpartitioned
     chunk:
       artifact_id: dataset.chunk
       required: true
       partition: partitioned
       mapping: all_to_unpartitioned
-    build_chunks_params:
-      artifact_id: dataset.build_chunks_params
-      required: true
-      partition: unpartitioned
   outputs:
     build_chunks_manifest:
       artifact_id: dataset.build_chunks_manifest
@@ -65,6 +65,31 @@ input_payload:
             type: integer
             required: false
             default: 100
+  build_chunk_candidates:
+    fields:
+      chunks:
+        type: array
+        required: true
+      selection_stats:
+        type: object
+        required: true
+        fields:
+          scanned_count:
+            type: integer
+          accepted_count:
+            type: integer
+          filtered_count_by_type:
+            type: object
+            value_type: integer
+      target_chunk_count:
+        type: integer
+        required: true
+      fallback_used:
+        type: boolean
+        required: true
+      params:
+        type: object
+        required: true
   chunk:
     tuple: true
     item:
@@ -101,15 +126,6 @@ input_payload:
           type: object
           required: false
           default: {}
-  build_chunks_params:
-    fields:
-      groups:
-        type: list[string]
-        required: false
-        default:
-          - block
-        validation:
-          - non_empty_id_items
 
 output_payload:
   build_chunks_manifest:
@@ -138,6 +154,8 @@ output_payload:
               type: string
             group:
               type: string
+            type:
+              type: string
             partition:
               type: string
       stats:
@@ -149,6 +167,13 @@ output_payload:
             type: integer
           empty_count:
             type: integer
+          scanned_count:
+            type: integer
+          accepted_count:
+            type: integer
+          filtered_count_by_type:
+            type: object
+            value_type: integer
           doc_count:
             type: integer
           group_counts:
@@ -177,18 +202,21 @@ output_payload:
         fields:
           groups:
             type: list[string]
+          allowed_types:
+            type: list[string]
           target_chunk_count:
             type: integer
 
 execution_flow:
   - 读取并校验 selected_docs input payload。
-  - 读取并归一化 build_chunks_params。
+  - 读取 build_chunk_candidates 的 target、筛选统计和参数。
   - 读取 all_to_unpartitioned 汇总后的 chunk tuple。
   - 要求 chunk tuple 的数量等于 target_chunk_count。
   - 按 runtime partition 顺序将 chunk slots 归一化为 build_chunks_manifest.chunks 项。
-  - 每个 manifest 项保留 available、chunk_id、doc_id、filename、group 和 partition。
+  - 每个 manifest 项保留 available、chunk_id、doc_id、filename、group、type 和 partition。
   - 统计 available=true 的真实 chunk 数量为 chunk_count。
   - 统计 available=false 的占位 slot 数量为 empty_count。
+  - 直接使用候选构建阶段提供的 scanned_count、accepted_count 和 filtered_count_by_type。
   - 汇总 slot_count、target_chunk_count、doc_count、group_counts、doc_group_stats、fallback_used 和 warnings。
   - 返回 {"build_chunks_manifest": payload}。
 
@@ -200,6 +228,8 @@ tests:
   - target_chunk_count_from_selected_docs
   - tuple_count_mismatch_error
   - unavailable_chunk_manifest_item
+  - manifest_chunk_type
+  - selection_stats
   - build_chunks_manifest
   - stats
   - return_keys_match_outputs
