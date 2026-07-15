@@ -1,0 +1,391 @@
+operation:
+  op_id: dataset.qaplan_plan
+  flow: dataset
+  stage: qaplan_plan
+  description: 基于 topic discovery manifest、六路 case 比例、目标 case 总数和全部 chunk 正文，生成全局 QA case 计划。
+
+fixed_op:
+  inputs:
+    source_config:
+      artifact_id: corpus.source_config
+      required: true
+      partition: unpartitioned
+    topic_discovery_manifest:
+      artifact_id: dataset.topic_discovery_manifest
+      required: true
+      partition: unpartitioned
+    chunk:
+      artifact_id: dataset.chunk
+      required: true
+      partition: partitioned
+      mapping: all_to_unpartitioned
+    qaplan_plan_params:
+      artifact_id: dataset.qaplan_plan_params
+      required: true
+      partition: unpartitioned
+  outputs:
+    qaplan_plan:
+      artifact_id: dataset.qaplan_plan
+      partition: unpartitioned
+
+materializer:
+  function: qaplan_plan
+  return_keys:
+    - qaplan_plan
+
+input_payload:
+  source_config:
+    fields:
+      kb_id:
+        type: string
+        required: true
+        validation:
+          - non_empty_after_strip
+      target_case_count:
+        type: integer
+        required: true
+        validation:
+          - positive_integer
+          - max_value: 100000
+  topic_discovery_manifest:
+    fields:
+      clusters:
+        type: array
+        required: true
+        item:
+          type: object
+          fields:
+            cluster_id:
+              type: string
+              required: true
+              validation:
+                - non_empty_after_strip
+            cluster_type:
+              type: string
+              required: true
+              enum:
+                - entity
+                - embedding
+            topics:
+              type: list[string]
+              required: true
+              validation:
+                - non_empty
+                - non_empty_after_strip_items
+            chunk_ids:
+              type: list[string]
+              required: true
+              validation:
+                - non_empty
+                - non_empty_after_strip_items
+            chunk_count:
+              type: integer
+              required: true
+              validation:
+                - positive_integer
+      stats:
+        type: object
+        required: false
+      params:
+        type: object
+        required: false
+  chunk:
+    tuple: true
+    item:
+      fields:
+        available:
+          type: boolean
+          required: true
+        chunk_id:
+          type: string
+          required: true
+          validation:
+            - non_empty_after_strip
+        doc_id:
+          type: string
+          required: true
+          validation:
+            - non_empty_after_strip
+        text:
+          type: string
+          required: true
+        filename:
+          type: string
+          required: false
+          default: ""
+        group:
+          type: string
+          required: false
+          default: ""
+        type:
+          type: string
+          required: false
+          default: text
+        embedding:
+          type: object
+          required: false
+          default: {}
+        metadata:
+          type: object
+          required: false
+          default: {}
+  qaplan_plan_params:
+    fields:
+      lane_ratios:
+        type: object
+        required: false
+        default:
+          entity_precision_easy: 1
+          entity_precision_medium: 1
+          entity_precision_hard: 1
+          embedding_reasoning_easy: 1
+          embedding_reasoning_medium: 1
+          embedding_reasoning_hard: 1
+        fields:
+          entity_precision_easy:
+            type: number
+            required: false
+            default: 1
+            validation:
+              - non_negative_number
+          entity_precision_medium:
+            type: number
+            required: false
+            default: 1
+            validation:
+              - non_negative_number
+          entity_precision_hard:
+            type: number
+            required: false
+            default: 1
+            validation:
+              - non_negative_number
+          embedding_reasoning_easy:
+            type: number
+            required: false
+            default: 1
+            validation:
+              - non_negative_number
+          embedding_reasoning_medium:
+            type: number
+            required: false
+            default: 1
+            validation:
+              - non_negative_number
+          embedding_reasoning_hard:
+            type: number
+            required: false
+            default: 1
+            validation:
+              - non_negative_number
+
+output_payload:
+  qaplan_plan:
+    json_compatible: true
+    fields:
+      source:
+        type: object
+        fields:
+          kb_id:
+            type: string
+      items:
+        type: array
+        item:
+          type: object
+          fields:
+            plan_item_id:
+              type: string
+            lane:
+              type: string
+              enum:
+                - entity_precision_easy
+                - entity_precision_medium
+                - entity_precision_hard
+                - embedding_reasoning_easy
+                - embedding_reasoning_medium
+                - embedding_reasoning_hard
+            question_type:
+              type: string
+              enum:
+                - precision
+                - reasoning
+            difficulty:
+              type: string
+              enum:
+                - easy
+                - medium
+                - hard
+            cluster_id:
+              type: string
+            cluster_type:
+              type: string
+              enum:
+                - entity
+                - embedding
+            topic:
+              type: string
+            references:
+              type: array
+              item:
+                type: object
+                fields:
+                  chunk_id:
+                    type: string
+                  doc_id:
+                    type: string
+                  text:
+                    type: string
+            selection_round:
+              type: integer
+      stats:
+        type: object
+        fields:
+          # source_config 中指定的本次 dataset case 总数。
+          target_case_count:
+            type: integer
+          # 实际生成的计划项数量；成功时必须等于 target_case_count。
+          planned_case_count:
+            type: integer
+          # 六路计划的展示摘要，顺序固定为 lane_order。
+          lane_summaries:
+            type: array
+            item:
+              type: object
+              fields:
+                # 六路中的固定 lane 标识。
+                lane:
+                  type: string
+                # 根据 lane_ratios 和 target_case_count 换算出的整数 case 数。
+                allocated_case_count:
+                  type: integer
+                # 同时满足该 lane 来源类型和难度门槛的 cluster 数。
+                candidate_cluster_count:
+                  type: integer
+                # 可用于该 lane 的 cluster-topic 总数，也是该 lane 最大可生成 case 数。
+                topic_capacity:
+                  type: integer
+                # 实际选中并至少生成一个 case 的不同 cluster 数，用于观察来源多样性。
+                selected_cluster_count:
+                  type: integer
+      params:
+        type: object
+        fields:
+          # 用户输入的六路相对权重，允许小数；不要求和为 1 或 100。
+          lane_ratios:
+            type: object
+            value_type: number
+          # 由最大余数法换算得到的六路整数配额，便于准确复现本次 plan。
+          resolved_lane_quotas:
+            type: object
+            value_type: integer
+          # 余数相同时的稳定分配顺序，也是 items 的 lane 块顺序。
+          lane_order:
+            type: list[string]
+
+execution_flow:
+  - 读取 source_config.target_case_count；要求其等于 flow 的 runtime case 分区总数。
+  - 读取并归一化 qaplan_plan_params.lane_ratios；默认六路均为 1，所有 ratio 必须非负且总和大于 0。
+  - 按固定 lane 顺序使用最大余数法，将 target_case_count 换算为六路整数配额；先分配各路向下取整值，再按小数余数从大到小补齐，余数相同时按固定 lane 顺序补齐。
+  - 汇总可用 chunk 并校验 manifest；通过 chunk_id 原样补齐选中引用的 doc_id 与完整 text，不分析或转换正文。
+  - 逐 lane 按来源类型和累积难度筛选 cluster，校验 topic_capacity 不小于该 lane 整数配额；按 manifest 原始 cluster 顺序和 topic 轮次选取 cluster-topic。
+  - 每个计划项按难度引用 cluster.chunk_ids 原始顺序前 1、2 或 3 个 chunk，按 lane 块顺序生成稳定 plan_item_id。
+  - 生成 source、items、简明 stats、lane_ratios、resolved_lane_quotas 和 lane_order；返回 {"qaplan_plan": payload}。
+
+tests:
+  plan_construction:
+    # 计划主逻辑：验证六路 case 如何从 manifest 中按固定顺序、原始 cluster 顺序和 topic 轮次生成全局 qaplan.items。
+    cases:
+      # 空参数时六路均使用默认 ratio=1，并按 target_case_count 平均分配整数 case 数。
+      # 例子：target_case_count=6 时，六路各获得 1 个 case。
+      - default_equal_lane_ratios
+      # lane_ratios 表示相对权重，不要求和为 1 或 100；相同比例缩放必须得到相同整数配额。
+      # 例子：1:1:1:1:1:1 与 10:10:10:10:10:10 在 target_case_count=60 时均分配为每路 10 个。
+      - ratio_normalization
+      # 目标总数不能整除比例时使用最大余数法，先向下取整，再将剩余 case 分给小数余数最大的 lane。
+      # 例子：target_case_count=5、ratios=1:1:1:1:1:1 时先各得 0，余下 5 个按 lane_order 分给前五路。
+      - largest_remainder_allocation
+      # 最大余数相同的 lane 必须按固定 lane 顺序获得剩余 case，确保计划可复现。
+      # 例子：target_case_count=100、默认比例时，前四路各 17，后两路各 16。
+      - largest_remainder_tie_break_by_lane_order
+      # 输出 items 先按固定 lane 块顺序排列，再在单个 lane 内按 topic 轮次和 cluster 原始顺序排列。
+      # 例子：entity_precision_easy 的所有项必须出现在 entity_precision_medium 之前，即使后者的 cluster 更早出现。
+      - fixed_lane_block_order
+      # entity source 只能生成 precision case，embedding source 只能生成 reasoning case。
+      # 例子：entity_precision_easy 的每个 item 都必须是 cluster_type=entity 且 question_type=precision。
+      - source_to_question_type_mapping
+      # 每个 lane 保持 topic_discovery_manifest.clusters 的原始相对顺序，不按 chunk_count、scores 或 topic 文本排序。
+      # 例子：输入 cluster 顺序为 [cluster_b, cluster_a] 时，第一轮选材也必须先取 cluster_b 的 topic。
+      - preserves_manifest_cluster_order
+      # 同一 lane 先覆盖每个候选 cluster 的第一个 topic，再开始第二个 topic 轮次，以优先提升 cluster 多样性。
+      # 例子：A.topics=[a1,a2]、B.topics=[b1,b2]、配额=3 时，选择顺序应为 A/a1、B/b1、A/a2。
+      - cluster_diversity_before_next_topic_round
+      # 单一路内不允许重复同一个 cluster_id + topic，但不同 lane 可以独立复用同一对来源。
+      # 例子：entity_precision_easy 与 entity_precision_medium 都可选中 entity_000001 / topic_a；各自在本 lane 内最多出现一次。
+      - cluster_topic_uniqueness_scope
+      # plan_item_id 按最终全局 items 顺序稳定编号，且不依赖 runtime case id。
+      # 例子：第一个和第二个 item 固定为 qaplan_item_000001、qaplan_item_000002。
+      - stable_plan_item_ids
+  quota_and_capacity:
+    # 比例、难度和容量：验证总数来源、六路独立校验，以及三档难度的累积 chunk 门槛。
+    cases:
+      # source_config.target_case_count 是唯一的总 case 数来源，并且必须等于 runtime flow 预创建的 case 分区总数。
+      # 例子：source_config.target_case_count=6 而 runtime 只有 5 个 case 分区时，应直接失败。
+      - target_case_count_source_and_runtime_partition_match
+      # ratio 为 0 的 lane 获得 0 个 case，不参与候选容量校验。
+      # 例子：embedding_reasoning_hard=0 且没有 embedding hard cluster 时，其他 lane 仍可成功。
+      - zero_ratio_lane_skipped
+      # 所有 lane ratio 之和必须大于 0；全为 0 时无法把 target_case_count 分配到任何 lane，应直接失败。
+      - zero_total_ratio_error
+      # easy、medium、hard 分别接受 chunk_count>=1、>=2、>=3 的 cluster，且是累积而非互斥分类。
+      # 例子：chunk_count=3 的 entity cluster 同时可用于 entity_precision_easy、medium、hard。
+      - cumulative_difficulty_thresholds
+      # 每一路容量是候选 cluster 的 topic 总数，而不是 cluster 总数或 chunk 数。
+      # 例子：两个候选 cluster 分别有 2 和 3 个 topic 时，该 lane 容量为 5。
+      - lane_capacity_is_sum_of_topics
+      # 任一非零整数配额 lane 的容量不足时整个 operation 失败，并在错误中包含 lane、resolved quota 和 available capacity。
+      # 例子：medium lane 配额为 3 但符合 chunk_count>=2 的 topics 总数仅为 2 时直接失败。
+      - insufficient_lane_capacity_error
+  reference_materialization:
+    # 参考资料装配：验证全局侧如何通过 chunk_id 将选中的引用补全为可直接生成 QA 的完整正文材料；不做正文语义处理。
+    cases:
+      # all_to_unpartitioned 能按 runtime 稳定分区顺序把所有 chunk 聚合为 tuple，供单个全局 plan operation 查询。
+      - all_to_unpartitioned_chunk_tuple
+      # easy、medium、hard 的每个计划项分别携带 1、2、3 份 references。
+      # 例子：hard item 的 references 必须恰好包含该 cluster.chunk_ids 的前三项。
+      - reference_chunk_count_matches_difficulty
+      # references 保持 cluster.chunk_ids 的原始顺序，不随 chunk tuple 顺序或 doc_id 排序而变化。
+      # 例子：cluster.chunk_ids=[c2,c1] 时，easy item 引用 c2，medium item 引用 [c2,c1]。
+      - references_keep_cluster_chunk_id_order
+      # 每份 reference 原样携带 chunk_id、doc_id 和完整 text；正文不截断、不重写、不做 LLM 分析。
+      - references_include_chunk_id_doc_id_and_full_text
+      # manifest 引用不存在的 chunk、available=false 的 chunk 或 text 为空的 chunk 时直接失败，避免下游生成无依据 case。
+      - unavailable_or_missing_referenced_chunk_error
+  stats_and_contract:
+    # 展示统计与输入契约：验证用户可见的总体/分路摘要能够如实反映计划结果，且坏输入不产生部分 qaplan。
+    cases:
+      # target_case_count 来自 source_config，planned_case_count 等于 items 数量；成功时二者相等。
+      - target_and_planned_case_counts
+      # 每个 lane_summary 如实反映最大余数法分配结果、候选 cluster 数、topic 容量和实际选中 cluster 数。
+      # 例子：allocated_case_count=3、topic_capacity=2 时不会产出成功 qaplan；容量足够时 selected_cluster_count 不大于 allocated_case_count。
+      - lane_summary_stats
+      # manifest 的 cluster_id 必须唯一，topics/chunk_ids 必须是合法非空字符串列表，chunk_count 必须等于 chunk_ids 数量。
+      - manifest_contract
+      # cluster_id 不能重复，否则无法唯一标识计划来源。
+      # 例子：两个 manifest cluster 都是 entity_000001 时，应直接失败。
+      - duplicate_cluster_id_error
+      # chunk_count 必须等于 chunk_ids 数量，避免难度判定和实际可引用 chunk 数不一致。
+      # 例子：chunk_count=3 而 chunk_ids 只有 2 项时，应直接失败。
+      - chunk_count_mismatch_error
+      # 可用 chunk 的 chunk_id 不能重复，否则引用材料无法确定。
+      # 例子：两个 chunk tuple 项均为 chunk_id=chunk_001 时，不能不确定地选择其中任一项。
+      - duplicate_chunk_id_error
+      # 六路 ratio 只能是非负数，且至少一路为正数。
+      # 例子：easy=-1、medium=true、六路均为 0 时都应直接失败；medium=0.5 是允许的。
+      - lane_ratio_validation_error
+      # materializer 返回结构固定为 {"qaplan_plan": payload}，不混入额外 output key。
+      - return_keys_match_outputs
+  runtime_wiring:
+    # fixed op 接线：验证 partitioned chunk 聚合到单个 qaplan_plan，且 source_config、topic manifest 与 params 均作为全局输入读取。
+    cases:
+      # runtime 能稳定汇总全部 chunk 分区，并只产生一个无分区 dataset.qaplan_plan artifact。
+      - partition
