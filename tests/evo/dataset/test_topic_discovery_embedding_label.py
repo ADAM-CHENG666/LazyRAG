@@ -152,7 +152,7 @@ def test_topic_discovery_embedding_label_limits_source_chunks_and_truncates_text
 
 
 def test_topic_discovery_embedding_label_rejects_too_many_topics():
-    with pytest.raises(ValueError, match='LLM JSON call failed after 3 attempts'):
+    with pytest.raises(ValueError, match='LLM JSON call failed after 2 attempts'):
         topic_discovery_embedding_label(
             None,
             _inputs(
@@ -213,10 +213,10 @@ def test_topic_discovery_embedding_label_rejects_missing_or_invalid_source_chunk
     ('response', 'match'),
     [
         ('{"topics":[]}', 'topics must be non-empty'),
-        ('{"topics":[""]}', 'LLM JSON call failed after 3 attempts'),
-        ('not-json', 'LLM JSON call failed after 3 attempts'),
-        ('{"label":"x"}', 'LLM JSON call failed after 3 attempts'),
-        ('{"topics":"x"}', 'LLM JSON call failed after 3 attempts'),
+        ('{"topics":[""]}', 'LLM JSON call failed after 2 attempts'),
+        ('not-json', 'LLM JSON call failed after 2 attempts'),
+        ('{"label":"x"}', 'LLM JSON call failed after 2 attempts'),
+        ('{"topics":"x"}', 'LLM JSON call failed after 2 attempts'),
     ],
 )
 def test_topic_discovery_embedding_label_rejects_invalid_llm_output(response, match):

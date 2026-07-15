@@ -205,6 +205,7 @@ def qaplan_generate(
         complete,
         _generation_prompt(instruction, topic, references),
         lambda value: _generated_fields(value, reference_aliases),
+        repair_instruction=lambda error: _generation_repair_instruction(error, reference_aliases),
     )
 
     return {'case': {
@@ -422,6 +423,19 @@ def _generation_prompt(instruction: str, topic: str, references: list[dict[str, 
         f'{SHARED_GENERATION_PROMPT}\n\n'
         f'Topic: {topic}\n\n'
         f'Reference materials:\n{materials}'
+    )
+
+
+def _generation_repair_instruction(
+    error: Exception,
+    reference_aliases: Mapping[str, str],
+) -> str:
+    aliases = ', '.join(sorted(reference_aliases))
+    return (
+        '上一份 JSON 未通过校验，请重新生成完整 JSON，不要解释或复述失败内容。\n'
+        f'校验错误：{error}\n'
+        f'硬性要求：key_points 必须有 1 至 5 条；evidence_reference_ids 只能使用 {aliases}，'
+        f'且所有 key_points 的引用并集必须覆盖 {aliases}。'
     )
 
 

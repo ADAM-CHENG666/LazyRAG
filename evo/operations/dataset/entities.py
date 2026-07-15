@@ -112,7 +112,6 @@ def _extract_entities(text: str, params: ChunkEntitiesExtractParams, complete: C
         complete,
         prompt,
         lambda value: _parse_entities_response(value, params.max_entities_per_chunk),
-        max_retries=2,
     )
 
 

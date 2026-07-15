@@ -115,6 +115,24 @@ def test_qaplan_generate_returns_canonical_case_with_real_kb_references():
     }
 
 
+def test_qaplan_generate_retries_with_reference_coverage_feedback():
+    prompts = []
+    incomplete = _response()
+    incomplete['key_points'] = incomplete['key_points'][:1]
+    responses = iter((json.dumps(incomplete), json.dumps(_response())))
+
+    def complete(prompt):
+        prompts.append(prompt)
+        return next(responses)
+
+    case = qaplan_generate(_context(), _inputs(), llm_complete=complete)['case']
+
+    assert case['id'] == 'case_0001'
+    assert len(prompts) == 2
+    assert 'key_points evidence_reference_ids must cover all provided references' in prompts[1]
+    assert 'ref_1, ref_2' in prompts[1]
+
+
 @pytest.mark.parametrize(
     'response',
     [
