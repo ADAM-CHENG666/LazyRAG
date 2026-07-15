@@ -504,23 +504,23 @@ def qaplan_dataset_evo_ops(spec: DatasetFlowSpec) -> tuple[type[FixedOp], ...]:
         inputs = {'qaplan_plan': ArtifactInput(C.DATASET_QAPLAN_PLAN, partition_mapping=unpartitioned_to_all())}
         outputs = {'qaplan_spec': ArtifactOutput(C.DATASET_QAPLAN_SPEC, cases)}
 
-    class QaplanGenerate(FixedOp):
-        op_id = 'dataset.qaplan_generate'
+    class Generate(FixedOp):
+        op_id = 'dataset.generate'
         inputs = {
             'qaplan_spec': ArtifactInput(C.DATASET_QAPLAN_SPEC, partition_spec=cases),
             'run_config': ArtifactInput(C.RUN_CONFIG, partition_mapping=unpartitioned_to_all()),
         }
         outputs = {'case': ArtifactOutput(C.DATASET_CASE, cases)}
 
-    class QaplanGenerationManifest(FixedOp):
-        op_id = 'dataset.qaplan_generate_manifest'
+    class GenerateManifest(FixedOp):
+        op_id = 'dataset.generate_manifest'
         inputs = {'cases': ArtifactInput(C.DATASET_CASE, partition_spec=cases, partition_mapping=all_to_unpartitioned())}
-        outputs = {'qaplan_generate_manifest': ArtifactOutput(C.DATASET_QAPLAN_GENERATE_MANIFEST)}
+        outputs = {'generate_manifest': ArtifactOutput(C.DATASET_GENERATE_MANIFEST)}
 
     return (
         SelectDocs, BuildChunkCandidates, BuildChunks, BuildChunksManifest, ChunkEntitiesExtract, ChunkEntitiesManifest,
         EntityGraph, EntityClusters, EmbeddingCandidates, EmbeddingClusters, TopicManifest,
-        QaplanPlan, QaplanSpec, QaplanGenerate, QaplanGenerationManifest,
+        QaplanPlan, QaplanSpec, Generate, GenerateManifest,
     )
 
 

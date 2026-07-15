@@ -1,8 +1,8 @@
 operation:
-  op_id: dataset.qaplan_generate
+  op_id: dataset.generate
   flow: dataset
-  stage: qaplan_generate
-  description: 基于单个 qaplan spec 的指令和参考资料生成最终 QA case。
+  stage: generate
+  description: 基于单个 qaplan spec 的指令和参考资料，生成 QA 原型 case。
 
 fixed_op:
   inputs:
@@ -22,7 +22,7 @@ fixed_op:
       partition: partitioned
 
 materializer:
-  function: qaplan_generate
+  function: generate
   return_keys:
     - case
 
@@ -126,35 +126,15 @@ output_payload:
           - easy
           - medium
           - hard
-      # 由模型生成、面向被评测 RAG 系统的自然语言问题。
+      # LLM 生成、面向被评测 RAG 系统的自然语言问题。
       question:
         type: string
       # 由参考资料唯一支持的标准答案。
       answer:
         type: string
-      # 1–5 条原子化评分事实；每项保留其真实知识库证据 chunk_id。
-      key_points:
-        type: array
-        validation:
-          - min_items: 1
-          - max_items: 5
-        item:
-          type: object
-          fields:
-            statement:
-              type: string
-            evidence_chunk_ids:
-              type: list[string]
-      # 本 case 的单条指导性判分说明，不机械复述 key_points。
+      # 简约说明本题的考察或设计逻辑，供后续判罚辅助使用。
       grading_guidance:
         type: string
-      # 本 case 高风险、且被 references 明确否定的错误结论。
-      forbidden_claims:
-        type: list[string]
-        validation:
-          - min_items: 0
-          - max_items: 3
-          - non_empty_after_strip_items
       # 真实知识库 chunk_id 到完整参考正文的映射，供 groundedness 判分。
       reference_context:
         type: object
@@ -171,69 +151,60 @@ output_payload:
         fields:
           kb_id:
             type: string
-      generation:
-        type: object
-        fields:
-          # 固定 prompt 契约版本，便于之后演进生成模板。
-          prompt_version:
-            type: string
-          # 实际调用模型的标识；无法获得时允许为空字符串。
-          model:
-            type: string
 
 execution_flow:
   - 读取当前 case 输出分区，要求它与同分区 qaplan_spec.id 一致。
   - 校验 qaplan_spec 的 question_type、difficulty、instruction、topic、source 和 references；references 必须非空，且每项的 chunk_id、doc_id、text 均为真实知识库标识或正文。
   - 按 references 原始顺序为每份资料添加稳定短别名，例如 <reference id="ref_1">、<reference id="ref_2">，并保留完整正文。
-  - 使用 qaplan_spec.instruction、topic 和带短别名参考资料构造生成 prompt；要求模型只使用给定资料、覆盖全部 references，生成 question、answer、key_points、grading_guidance 和 forbidden_claims。
-  - 调用 run_config.llm_config 指定的生成模型，并要求返回严格 JSON object：question、answer、key_points、grading_guidance、forbidden_claims；key_points 中先引用短别名。
-  - 校验模型输出：question、answer、grading_guidance 为非空字符串；key_points 为 1–5 个含非空 statement 与合法 evidence_reference_ids 的对象，且证据别名并集覆盖全部 references；forbidden_claims 为 0–3 条非空字符串。JSON 非法、字段缺失或类型错误时直接失败。
-  - 构造 case：复制 id、question_type、difficulty；将 key_points 的 evidence_reference_ids 映射为真实 evidence_chunk_ids；将真实 references 转换为 reference_context、reference_chunk_ids 与 reference_doc_ids；仅写入 source_preparation={kb_id}。
-  - 返回 {"case": payload}。
+  - 先写入通用 QA 约束与三字段输出契约，再追加 qaplan_spec.instruction、topic 和带短别名参考资料；要求模型只使用给定资料，question 与 answer 均实质使用全部 references，不补充外部事实。
+  - 调用 run_config.llm_config 指定的生成模型，并要求返回 JSON object：question、answer、grading_guidance。
+  - 使用 dataset.llm_json 基础设施解析与修复 JSON；校验 question、answer、grading_guidance 均为非空字符串。JSON 无法解析、字段缺失或类型错误时，按基础设施规则携带校验错误重试一次，仍失败则直接报错。
+  - 构造 case：复制 id、question_type、difficulty；将真实 references 转换为 reference_context、reference_chunk_ids 与 reference_doc_ids；仅写入 source_preparation={kb_id}。
+  - 返回 {"case": payload}。key_points 与 forbidden_claims 不属于本 operation，由后续 enhancement 流程负责。
 
 tests:
   prompt_construction:
-    # Prompt 构造：验证 generation 只消费 qaplan_spec 的确定性材料，并按稳定顺序组织为模型可理解的输入。
+    # Prompt 构造：验证 generate 仅消费同分区 qaplan_spec 的确定性材料，并将三字段输出契约明确交给模型。
     cases:
-      # instruction、topic 和每份完整 reference text 都进入 prompt；不再重新选择 cluster、topic 或 chunk。
+      # instruction、topic 和每份完整 reference text 都进入 prompt；不重新选择 cluster、topic 或 chunk。
       - uses_preparation_as_only_generation_source
-      # references 按 qaplan_spec 中的原始顺序标记为 ref_1、ref_2 等，避免模型混淆材料来源。
+      # references 按 qaplan_spec 原始顺序标记为 ref_1、ref_2 等，避免模型混淆材料来源。
       # 例子：references=[chunk_b, chunk_a] 时，chunk_b 必须是 ref_1。
       - stable_reference_labels_and_order
-      # Prompt 明确要求 question 与 answer 均覆盖全部参考资料，并只依据参考资料生成，不能补充外部事实；forbidden_claims 作为顶层输出字段。
-      - grounded_generation_instruction
+      # prompt 明确要求 question 与 answer 均实质使用全部参考资料，并且只依据参考资料生成，不补充外部事实。
+      - grounded_question_and_answer_instruction
+      # prompt 只要求 question、answer、grading_guidance 三个 LLM 输出字段；不再要求 key_points、forbidden_claims 或证据短别名字段。
+      - requests_only_question_answer_and_grading_guidance
   case_generation:
-    # 成功路径：验证模型 JSON 如何与 qaplan_spec 的确定性字段合并为最终 case。
+    # 成功路径：验证三字段模型输出与 qaplan_spec 的确定性元数据合并为基础 QA prototype。
     cases:
-      # 合法模型输出生成一个包含 id、question_type、difficulty、question、answer、key_points、grading_guidance 和 forbidden_claims 的 case。
+      # 合法模型 JSON 能生成仅含 question、answer、grading_guidance 与确定性元数据的 case。
       - success
-      # precision 与 reasoning 均沿用 qaplan_spec 的问题类型；生成 operation 不重新解释或改写其类型。
+      # precision 与 reasoning 均沿用 qaplan_spec 的问题类型；generate 不重新解释或改写其类型。
       - preserves_question_type
-      # easy、medium、hard 均沿用 qaplan_spec 的难度；生成 operation 不根据答案长度或评分点数量重新分类。
+      # easy、medium、hard 均沿用 qaplan_spec 的难度；generate 不根据答案长度或 guidance 内容重新分类。
       - preserves_difficulty
-      # case 将真实知识库 references 转换为 reference_context、reference_chunk_ids、reference_doc_ids，source_preparation 仅保留 kb_id。
+      # case 保留真实知识库 references，转换为 reference_context、reference_chunk_ids 与 reference_doc_ids。
       - preserves_kb_reference_ids_and_context
-      # key_points 必须有 1–5 条带真实 evidence_chunk_ids 的独立断言，且证据并集覆盖全部 references。
-      - key_points_contract
-      # grading_guidance 是单条 case 特有指导性判分说明；forbidden_claims 是 0–3 条 case 特有高风险错误结论。
-      - grading_guidance_contract
-      # generation 写入固定 prompt_version=qaplan_v1 和实际调用的模型标识。
-      - generation_metadata
+      # source_preparation 只保留上游提供的 kb_id，保证 case 能追溯到原始知识库。
+      - preserves_source_preparation
       # materializer 返回结构固定为 {"case": payload}，不混入额外 output key。
       - return_keys_match_outputs
   model_output_validation:
-    # 模型输出契约：验证非结构化或不完整回答不能静默进入 dataset.case。
+    # 模型输出与 repair：验证 JSON 基础设施只保障结构化三字段契约，不重新引入增强字段校验。
     cases:
-      # 模型返回非 JSON、JSON array 或空 object 时直接失败。
+      # 模型返回非 JSON、JSON array 或空 object 时，经一次 repair 重试后仍无法解析则失败。
       - invalid_json_object_error
-      # question、answer、grading_guidance、forbidden_claims 缺失或类型错误，key_points 不满足 1–5 条、证据别名非法或未覆盖全部 references 时直接失败。
+      # question、answer、grading_guidance 缺失、类型错误或空白时直接进入基础设施的内容修复路径。
       - required_text_field_error
-      # 模型调用异常直接向上抛出，不生成部分 case 或伪造默认答案。
+      # 首次内容校验失败时，将校验错误交给 llm_json 的统一 repair 机制；第二次仍失败才报错。
+      - one_repair_retry_on_content_validation_error
+      # LLM 调用异常直接向上抛出，不生成部分 case 或伪造默认 QA。
       - llm_failure_error
   qaplan_spec_validation:
-    # 上游 qaplan_spec 契约：验证生成前就拒绝 case 标识错位、缺失指令或不完整参考资料。
+    # 上游 qaplan_spec 契约：验证生成前即拒绝分区错位、必填信息缺失或不完整参考资料。
     cases:
-      # qaplan_spec.id 必须等于当前 case 输出分区，避免并行执行时把答案写到错误 case。
+      # qaplan_spec.id 必须等于当前 case 输出分区，避免并行执行时把 QA 写到错误 case。
       - same_partition_case_id_error
       # question_type、difficulty、instruction、topic、source、qaplan 均为必填且必须合法。
       - qaplan_spec_contract_error
@@ -244,5 +215,5 @@ tests:
   runtime_wiring:
     # fixed op 接线：验证 qaplan_spec 使用 same_partition 输入，run_config 使用 unpartitioned_to_all 广播，并产生同分区 dataset.case。
     cases:
-      # runtime 为每个 case 分区创建一个 dataset.qaplan_generate[case_xxxx] 实例，读取对应 qaplan_spec 并写入对应 dataset.case 分区。
+      # runtime 为每个 case 分区创建一个 dataset.generate[case_xxxx] 实例，读取对应 qaplan_spec 并写入对应 dataset.case 分区。
       - partition

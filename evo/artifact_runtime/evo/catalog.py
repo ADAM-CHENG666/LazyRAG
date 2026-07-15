@@ -41,7 +41,7 @@ DATASET_QAPLAN_PLAN_PARAMS = 'dataset.qaplan_plan_params'
 DATASET_QAPLAN_PLAN = 'dataset.qaplan_plan'
 DATASET_QAPLAN_SPEC = 'dataset.qaplan_spec'
 DATASET_CASE = 'dataset.case'
-DATASET_QAPLAN_GENERATE_MANIFEST = 'dataset.qaplan_generate_manifest'
+DATASET_GENERATE_MANIFEST = 'dataset.generate_manifest'
 EVAL_CASE_PREPARATION = 'eval.case_preparation'
 EVAL_CASE = 'eval.case'
 EVAL_DATASET = 'eval.dataset'
@@ -98,7 +98,7 @@ OUTPUTS = MappingProxyType({
         OutputSpec(DATASET_QAPLAN_PLAN),
         OutputSpec(DATASET_QAPLAN_SPEC, True),
         OutputSpec(DATASET_CASE, True),
-        OutputSpec(DATASET_QAPLAN_GENERATE_MANIFEST),
+        OutputSpec(DATASET_GENERATE_MANIFEST),
     ),
     'eval': (
         OutputSpec(EVAL_RAG_ANSWER, True),

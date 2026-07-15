@@ -6,7 +6,7 @@ from evo.artifact_runtime.evo.flow import DatasetFlowSpec
 from evo.artifact_runtime.evo.flow_ops import qaplan_dataset_evo_ops
 from evo.artifact_runtime.kernel import ArtifactKey, SQLiteArtifactStore
 from evo.operations.dataset.chunks_build import build_chunks
-from evo.operations.dataset.qaplan import qaplan_generate
+from evo.operations.dataset.generate import generate
 from evo.operations.dataset.qaplan_pipeline import qaplan_dataset_materializers
 from evo.operations.dataset.select_docs import select_docs
 from evo.operations.dataset.topic_discovery import topic_discovery_embedding_cluster, topic_discovery_embedding_label
@@ -54,13 +54,10 @@ def test_topic_discovery_waits_for_chunk_entities_extract_manifest(tmp_path):
         'dataset.topic_discovery_embedding_label': lambda ctx, inputs: topic_discovery_embedding_label(
             ctx, inputs, llm_complete=lambda prompt: '{"topics":["battery warranty"]}'
         ),
-        'dataset.qaplan_generate': lambda ctx, inputs: qaplan_generate(
+        'dataset.generate': lambda ctx, inputs: generate(
             ctx, inputs, llm_complete=lambda prompt: '{"question":"What does the warranty cover?",'
             '"answer":"It covers battery defects under stated conditions.",'
-            '"key_points":[{"statement":"Battery defects are covered.",'
-            '"evidence_reference_ids":["ref_1"]}],'
-            '"grading_guidance":"Require the stated coverage conclusion.",'
-            '"forbidden_claims":[]}'
+            '"grading_guidance":"Assess coverage under the stated conditions."}'
         ),
     })
     adapter = build_evo_artifact_adapter(store, qaplan_dataset_evo_ops(spec), materializers)
@@ -96,13 +93,10 @@ def test_qaplan_dataset_runtime_converts_three_chunks_into_two_cases(tmp_path):
         'dataset.topic_discovery_embedding_label': lambda ctx, inputs: topic_discovery_embedding_label(
             ctx, inputs, llm_complete=lambda prompt: '{"topics":["battery warranty"]}'
         ),
-        'dataset.qaplan_generate': lambda ctx, inputs: qaplan_generate(
+        'dataset.generate': lambda ctx, inputs: generate(
             ctx, inputs, llm_complete=lambda prompt: '{"question":"What does the warranty cover?",'
             '"answer":"It covers battery defects under stated conditions.",'
-            '"key_points":[{"statement":"Battery defects are covered.",'
-            '"evidence_reference_ids":["ref_1"]}],'
-            '"grading_guidance":"Require the stated coverage conclusion.",'
-            '"forbidden_claims":[]}'
+            '"grading_guidance":"Assess coverage under the stated conditions."}'
         ),
     })
     adapter = build_evo_artifact_adapter(store, qaplan_dataset_evo_ops(spec), materializers)
@@ -112,13 +106,13 @@ def test_qaplan_dataset_runtime_converts_three_chunks_into_two_cases(tmp_path):
     for _ in range(30):
         tick = adapter.tick(run_id)
         assert tick.status == 'ok', tick.ops
-        if ArtifactKey.of(C.DATASET_QAPLAN_GENERATE_MANIFEST) in adapter.effective_artifacts(run_id):
+        if ArtifactKey.of(C.DATASET_GENERATE_MANIFEST) in adapter.effective_artifacts(run_id):
             break
     else:
         raise AssertionError('qaplan generation manifest was not materialized')
 
     effective = adapter.effective_artifacts(run_id)
-    manifest = adapter.get(run_id, effective[ArtifactKey.of(C.DATASET_QAPLAN_GENERATE_MANIFEST)]).value
+    manifest = adapter.get(run_id, effective[ArtifactKey.of(C.DATASET_GENERATE_MANIFEST)]).value
     assert manifest['stats']['case_count'] == 2
     assert [item['id'] for item in manifest['cases']] == ['case_0001', 'case_0002']
     assert ArtifactKey(C.DATASET_CHUNK, 'chunk_0003') in effective

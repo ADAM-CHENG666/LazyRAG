@@ -1,0 +1,77 @@
+operation:
+  op_id: dataset.generate_manifest
+  flow: dataset
+  stage: generate_manifest
+  description: 汇总所有 generate 分区结果，作为基础 QA case 生成阶段的完成标记。
+
+fixed_op:
+  inputs:
+    cases:
+      artifact_id: dataset.case
+      required: true
+      partition: partitioned
+      mapping: all_to_unpartitioned
+  outputs:
+    generate_manifest:
+      artifact_id: dataset.generate_manifest
+      partition: unpartitioned
+
+materializer:
+  function: generate_manifest
+  return_keys:
+    - generate_manifest
+
+input_payload:
+  cases:
+    tuple: true
+    item:
+      fields:
+        id:
+          type: string
+          required: true
+        question_type:
+          type: string
+          required: true
+        difficulty:
+          type: string
+          required: true
+        reference_chunk_ids:
+          type: list[string]
+          required: true
+
+output_payload:
+  generate_manifest:
+    json_compatible: true
+    fields:
+      cases:
+        type: array
+      stats:
+        type: object
+        fields:
+          case_count:
+            type: integer
+          question_type_counts:
+            type: object
+          difficulty_counts:
+            type: object
+
+execution_flow:
+  - 汇总 all_to_unpartitioned 的 case tuple。
+  - 校验每个 case 的稳定 id、问题类型、难度和 reference_chunk_ids，并拒绝重复 id。
+  - 输出基础 case 的轻量审计索引与分布统计；不改写 case 内容，不依赖任何 enhancement 字段，也不承担 assemble 职责。
+
+tests:
+  manifest_summary:
+    # 汇总主逻辑：验证所有基础 case 聚合为轻量完成标记，且不读取或输出 enhancement 字段。
+    cases:
+      # 合法分区 case 能汇总出 cases 审计索引与按问题类型、难度统计的分布。
+      - success
+      # 同一轮生成中 case.id 必须唯一，避免不同分区的结果在 manifest 中发生歧义。
+      - duplicate_id_error
+      # materializer 返回结构固定为 {"generate_manifest": payload}，不混入额外 output key。
+      - return_keys_match_outputs
+  input_validation:
+    # 基础 case 契约：验证 manifest 只依赖 id、question_type、difficulty、reference_chunk_ids，不再要求 key_points 或 forbidden_claims。
+    cases:
+      # 基础字段缺失、类型非法，或 question_type / difficulty 不属于允许枚举时应直接失败。
+      - base_case_contract_error

@@ -1,12 +1,8 @@
 from __future__ import annotations
 
-import json
 from decimal import Decimal, ROUND_FLOOR
 from math import isfinite
-from collections.abc import Callable
 from typing import Any, Mapping
-
-from .llm_json import call_json
 
 
 LANES = (
@@ -19,38 +15,13 @@ LANES = (
 )
 LANE_NAMES = tuple(lane[0] for lane in LANES)
 REFERENCE_COUNTS = {'easy': 1, 'medium': 2, 'hard': 3}
-SHARED_GENERATION_PROMPT = '''你将基于给定的 topic 和 reference materials，生成一条可用于 RAG 评测的 QA。
-
-只能依据提供的 reference materials 生成内容；topic 仅用于选题引导，不能作为额外事实来源。
-question 和 answer 都必须实质性使用全部提供的 references，不得只基于其中的子集生成内容。
-question 必须指代明确、范围不超过 references，且应存在唯一、可判定的答案；不得生成开放式、主观性或并列拼接的多个问题。
-question、answer、key_points 与 grading_guidance 使用 references 的主要语言，并保留必要的专有名词和缩写。
-answer 必须是简短、完整、直接给出准确结论的陈述句；不要展示推理过程、附加背景信息或使用 Markdown。
-
-只返回一个 JSON object，不要包含 Markdown 或其他字段：
-{
-  "question": "...",
-  "answer": "...",
-  "key_points": [{"statement": "...", "evidence_reference_ids": ["ref_1"]}],
-  "grading_guidance": "...",
-  "forbidden_claims": ["..."]
-}
-
-生成 1 至 5 个 key_points。每个 statement 必须是 answer 中的一个独立、完整、可单独判断的事实，并能被其 evidence_reference_ids 指向的 references 支持。
-一个 statement 只能表达一个事实；将 answer 中必须命中的条件、对象、数值、时间、地点、因果关系拆成不同 statement。
-不要加入背景、修饰语、解释性废话，或 answer 中没有的信息。
-evidence_reference_ids 只能使用提供的短别名。每个 key point 至少关联一个 reference，所有 key points 的 evidence_reference_ids 并集必须覆盖全部提供的 references。
-
-grading_guidance 只生成一条本 case 特有的指导性判分说明，说明答案怎样才算覆盖完整、条件正确或推理成立；不要机械复述 key_points。
-forbidden_claims 生成 0 至 3 条。只列 references 明确否定、且本 case 容易出现的具体错误结论；不要写通用禁止语。'''
 PRECISION_INSTRUCTION = '''- 必须围绕给定 topic 组织问题，并在 question 中显式出现该 topic 名称。
-- question 只围绕一个对象和一个连贯的问题目标。多个 references 可以共同补足唯一答案，但不能被拼接成多个并列子问。
+- question 只围绕一个问题目标。多个 references 可以共同补足唯一答案，但不能被拼接成多个并列子问。
 - answer 的结论必须完全由 references 中可直接找到的事实组成。允许抽取、并列、去重和格式化整合直接事实。
 - 不得要求或使用计算、比较、资格判断、时间先后判断、因果推断或其他新关系建立；'''
 REASONING_INSTRUCTION = '''- 围绕给定 topic 选择问题；topic 是选题引导，references 是唯一事实依据。
 - question 必须指向一个唯一、可判定的最终结论，而不能是多个并列问题。
-- 最终结论不能只是任一 reference 中一句话的直接复述；必须将 references 中明确给出的事实、条件或关系进行闭合的归纳或推导后得出。
-- 可以基于一个 reference 内的多个明确事实推导，也可以综合多个 references 推导；无论哪种情况，都必须实质性使用全部提供的 references。
+- answer 不能只是任一 reference 中一句话的直接复述；必须将 references 中明确给出的事实、条件或关系进行闭合的归纳或推导后得出。
 - 不得依赖外部常识、主观判断、开放式总结或资料未建立的关系。'''
 
 
@@ -176,97 +147,6 @@ def qaplan_spec(ctx: Any, inputs: Mapping[str, object]) -> dict[str, object]:
         'references': references,
     }
     return {'qaplan_spec': preparation}
-
-
-def qaplan_generate(
-    ctx: Any,
-    inputs: Mapping[str, object],
-    llm_complete: Callable[[str], str] | None = None,
-) -> dict[str, object]:
-    output_key = getattr(ctx, 'output_key_by_name', {}).get('case')
-    case_id = _text(getattr(output_key, 'partition', None), 'case output partition')
-    preparation = _mapping(inputs.get('qaplan_spec'), 'qaplan_spec')
-    if _text(preparation.get('id'), 'qaplan_spec.id') != case_id:
-        raise ValueError('qaplan_spec.id must match case output partition')
-
-    question_type = _choice(preparation.get('question_type'), ('precision', 'reasoning'), 'question_type')
-    difficulty = _choice(preparation.get('difficulty'), ('easy', 'medium', 'hard'), 'difficulty')
-    instruction = _text(preparation.get('instruction'), 'instruction')
-    topic = _text(preparation.get('topic'), 'topic')
-    references = _build_references(preparation.get('references'), difficulty)
-    source = _mapping(preparation.get('source'), 'qaplan_spec.source')
-    _mapping(preparation.get('qaplan'), 'qaplan_spec.qaplan')
-
-    run_config = _mapping(inputs.get('run_config'), 'run_config')
-    llm_config = _mapping(run_config.get('llm_config'), 'run_config.llm_config')
-    complete = llm_complete or _llm_complete(llm_config)
-    reference_aliases = {f'ref_{index}': item['chunk_id'] for index, item in enumerate(references, 1)}
-    generated = call_json(
-        complete,
-        _generation_prompt(instruction, topic, references),
-        lambda value: _generated_fields(value, reference_aliases),
-        repair_instruction=lambda error: _generation_repair_instruction(error, reference_aliases),
-    )
-
-    return {'case': {
-        'id': case_id,
-        'question_type': question_type,
-        'difficulty': difficulty,
-        'question': generated['question'],
-        'answer': generated['answer'],
-        'key_points': [
-            {
-                'statement': item['statement'],
-                'evidence_chunk_ids': [reference_aliases[reference_id] for reference_id in item['evidence_reference_ids']],
-            }
-            for item in generated['key_points']
-        ],
-        'grading_guidance': generated['grading_guidance'],
-        'forbidden_claims': generated['forbidden_claims'],
-        'reference_context': {item['chunk_id']: item['text'] for item in references},
-        'reference_chunk_ids': [item['chunk_id'] for item in references],
-        'reference_doc_ids': list(dict.fromkeys(item['doc_id'] for item in references)),
-        'source_preparation': {'kb_id': _text(source.get('kb_id'), 'qaplan_spec.source.kb_id')},
-    }}
-
-
-def qaplan_generate_manifest(ctx: Any, inputs: Mapping[str, object]) -> dict[str, object]:
-    values = inputs.get('cases')
-    if not isinstance(values, tuple) or not values:
-        raise ValueError('cases must be a non-empty partitioned tuple')
-    cases = []
-    for index, raw in enumerate(values, 1):
-        case = _mapping(raw, f'cases[{index}]')
-        reference_chunk_ids = _string_list(case.get('reference_chunk_ids'), 'reference_chunk_ids')
-        key_points = _key_points(case.get('key_points'), 'evidence_chunk_ids')
-        evidence_chunk_ids = {chunk_id for item in key_points for chunk_id in item['evidence_chunk_ids']}
-        if not evidence_chunk_ids.issubset(set(reference_chunk_ids)):
-            raise ValueError('key_points evidence_chunk_ids must reference case reference_chunk_ids')
-        if evidence_chunk_ids != set(reference_chunk_ids):
-            raise ValueError('key_points evidence_chunk_ids must cover case reference_chunk_ids')
-        cases.append({
-            'id': _text(case.get('id'), 'id'),
-            'question_type': _choice(case.get('question_type'), ('precision', 'reasoning'), 'question_type'),
-            'difficulty': _choice(case.get('difficulty'), ('easy', 'medium', 'hard'), 'difficulty'),
-            'key_point_count': len(key_points),
-            'reference_count': len(reference_chunk_ids),
-        })
-    if len({item['id'] for item in cases}) != len(cases):
-        raise ValueError('id values must be unique')
-    return {'qaplan_generate_manifest': {
-        'cases': cases,
-        'stats': {
-            'case_count': len(cases),
-            'question_type_counts': {
-                name: sum(1 for item in cases if item['question_type'] == name)
-                for name in ('precision', 'reasoning')
-            },
-            'difficulty_counts': {
-                name: sum(1 for item in cases if item['difficulty'] == name)
-                for name in ('easy', 'medium', 'hard')
-            },
-        },
-    }}
 
 
 def _case_ids(ctx: Any, operation: str) -> tuple[str, ...]:
@@ -413,76 +293,6 @@ def _instruction(question_type: str, topic: str, reference_count: int) -> str:
     return REASONING_INSTRUCTION
 
 
-def _generation_prompt(instruction: str, topic: str, references: list[dict[str, str]]) -> str:
-    materials = '\n\n'.join(
-        f'<reference id="ref_{index}">\n{item["text"]}\n</reference>'
-        for index, item in enumerate(references, 1)
-    )
-    return (
-        f'{instruction}\n\n'
-        f'{SHARED_GENERATION_PROMPT}\n\n'
-        f'Topic: {topic}\n\n'
-        f'Reference materials:\n{materials}'
-    )
-
-
-def _generation_repair_instruction(
-    error: Exception,
-    reference_aliases: Mapping[str, str],
-) -> str:
-    aliases = ', '.join(sorted(reference_aliases))
-    return (
-        '上一份 JSON 未通过校验，请重新生成完整 JSON，不要解释或复述失败内容。\n'
-        f'校验错误：{error}\n'
-        f'硬性要求：key_points 必须有 1 至 5 条；evidence_reference_ids 只能使用 {aliases}，'
-        f'且所有 key_points 的引用并集必须覆盖 {aliases}。'
-    )
-
-
-def _generated_fields(raw: object, reference_aliases: Mapping[str, str]) -> dict[str, object]:
-    value = raw if isinstance(raw, Mapping) else json.loads(str(raw))
-    if not isinstance(value, Mapping):
-        raise ValueError('LLM output must be a JSON object')
-    key_points = _key_points(value.get('key_points'), 'evidence_reference_ids')
-    evidence_reference_ids = {reference_id for item in key_points for reference_id in item['evidence_reference_ids']}
-    expected_reference_ids = set(reference_aliases)
-    if not evidence_reference_ids.issubset(expected_reference_ids):
-        raise ValueError('key_points evidence_reference_ids must reference provided references')
-    if evidence_reference_ids != expected_reference_ids:
-        raise ValueError('key_points evidence_reference_ids must cover all provided references')
-    return {
-        'question': _text(value.get('question'), 'generated question'),
-        'answer': _text(value.get('answer'), 'generated answer'),
-        'key_points': key_points,
-        'grading_guidance': _text(value.get('grading_guidance'), 'generated grading_guidance'),
-        'forbidden_claims': _string_list(value.get('forbidden_claims'), 'generated forbidden_claims', minimum=0, maximum=3),
-    }
-
-
-def _key_points(value: object, evidence_field: str) -> list[dict[str, list[str] | str]]:
-    if not isinstance(value, list) or not 1 <= len(value) <= 5:
-        raise ValueError('key_points must contain 1 to 5 items')
-    points = []
-    for raw in value:
-        item = _mapping(raw, 'key_points[]')
-        points.append({
-            'statement': _text(item.get('statement'), 'key_points[].statement'),
-            evidence_field: _string_list(item.get(evidence_field), f'key_points[].{evidence_field}'),
-        })
-    return points
-
-
-def _llm_complete(llm_config: Mapping[str, object]) -> Callable[[str], str]:
-    from evo.llm import LazyLLMClient
-
-    return LazyLLMClient(llm_config=llm_config)
-
-
-def _model_name(llm_config: Mapping[str, object]) -> str:
-    value = llm_config.get('evo_llm')
-    return value.get('model', '') if isinstance(value, Mapping) else ''
-
-
 def _mapping(value: object, name: str) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise ValueError(f'{name} must be a mapping')
@@ -492,12 +302,6 @@ def _mapping(value: object, name: str) -> Mapping[str, object]:
 def _text_list(value: object, name: str) -> list[str]:
     if not isinstance(value, list) or not value:
         raise ValueError(f'{name} must be a non-empty list')
-    return [_text(item, name) for item in value]
-
-
-def _string_list(value: object, name: str, minimum: int = 1, maximum: int | None = None) -> list[str]:
-    if not isinstance(value, list) or len(value) < minimum or (maximum is not None and len(value) > maximum):
-        raise ValueError(f'{name} must contain {minimum} to {maximum or "more"} non-empty strings')
     return [_text(item, name) for item in value]
 
 
