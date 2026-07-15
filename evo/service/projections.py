@@ -27,6 +27,7 @@ ARTIFACT_KIND_BY_STEP = {
     'abtest': 'abtests',
 }
 EVENT_TYPE_BY_ARTIFACT = {
+    C.DATASET_SELECTED_DOCS: 'dataset.select_docs',
     C.CORPUS_REPORT: 'dataset.load_corpus',
     C.CORPUS_SNAPSHOT: 'dataset.build_snapshot',
     C.EVAL_CASE_PREPARATION: 'dataset.prepare_case',

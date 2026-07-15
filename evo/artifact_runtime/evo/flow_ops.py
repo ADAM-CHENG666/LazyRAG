@@ -10,14 +10,130 @@ from ..kernel import (
 )
 
 from . import catalog as C
+from .flow import DatasetFlowSpec
 
 
 def default_evo_ops(cases: tuple[str, ...]) -> tuple[type[FixedOp], ...]:
     partitions = StaticPartitions(cases)
-    case_inputs = {
-        'config': ArtifactInput(C.RUN_CONFIG, partition_mapping=unpartitioned_to_all()),
-        'snapshot': ArtifactInput(C.CORPUS_SNAPSHOT, partition_mapping=unpartitioned_to_all()),
-    }
+
+    class SelectDocs(FixedOp):
+        op_id = 'dataset.select_docs'
+        inputs = {'source_config': ArtifactInput(C.CORPUS_SOURCE_CONFIG)}
+        outputs = {'selected_docs': ArtifactOutput(C.DATASET_SELECTED_DOCS)}
+
+    class BuildChunks(FixedOp):
+        op_id = 'dataset.build_chunks'
+        inputs = {
+            'selected_docs': ArtifactInput(C.DATASET_SELECTED_DOCS, partition_mapping=unpartitioned_to_all()),
+            'build_chunks_params': ArtifactInput(C.DATASET_BUILD_CHUNKS_PARAMS, partition_mapping=unpartitioned_to_all()),
+        }
+        outputs = {'chunk': ArtifactOutput(C.DATASET_CHUNK, partitions)}
+
+    class BuildChunksManifest(FixedOp):
+        op_id = 'dataset.build_chunks_manifest'
+        inputs = {
+            'selected_docs': ArtifactInput(C.DATASET_SELECTED_DOCS),
+            'chunk': ArtifactInput(
+                C.DATASET_CHUNK,
+                partition_spec=partitions,
+                partition_mapping=all_to_unpartitioned(),
+            ),
+            'build_chunks_params': ArtifactInput(C.DATASET_BUILD_CHUNKS_PARAMS),
+        }
+        outputs = {'build_chunks_manifest': ArtifactOutput(C.DATASET_BUILD_CHUNKS_MANIFEST)}
+
+    class ChunkEntitiesExtract(FixedOp):
+        op_id = 'dataset.chunk_entities_extract'
+        inputs = {
+            'chunk': ArtifactInput(C.DATASET_CHUNK, partition_spec=partitions),
+            'chunk_entities_extract_params': ArtifactInput(
+                C.DATASET_CHUNK_ENTITIES_EXTRACT_PARAMS,
+                partition_mapping=unpartitioned_to_all(),
+            ),
+        }
+        outputs = {'chunk_entity': ArtifactOutput(C.DATASET_CHUNK_ENTITY, partitions)}
+
+    class ChunkEntitiesExtractManifest(FixedOp):
+        op_id = 'dataset.chunk_entities_extract_manifest'
+        inputs = {
+            'build_chunks_manifest': ArtifactInput(C.DATASET_BUILD_CHUNKS_MANIFEST),
+            'chunk_entities': ArtifactInput(
+                C.DATASET_CHUNK_ENTITY,
+                partition_spec=partitions,
+                partition_mapping=all_to_unpartitioned(),
+            ),
+            'chunk_entities_extract_manifest_params': ArtifactInput(
+                C.DATASET_CHUNK_ENTITIES_EXTRACT_MANIFEST_PARAMS
+            ),
+        }
+        outputs = {'chunk_entities_extract_manifest': ArtifactOutput(C.DATASET_CHUNK_ENTITIES_EXTRACT_MANIFEST)}
+
+    class TopicDiscoveryEntityBuildGraph(FixedOp):
+        op_id = 'dataset.topic_discovery_entity_build_graph'
+        inputs = {
+            'chunk_entity': ArtifactInput(
+                C.DATASET_CHUNK_ENTITY,
+                partition_spec=partitions,
+                partition_mapping=all_to_unpartitioned(),
+            ),
+            'topic_discovery_entity_build_graph_params': ArtifactInput(
+                C.DATASET_TOPIC_DISCOVERY_ENTITY_BUILD_GRAPH_PARAMS
+            ),
+        }
+        outputs = {'entity_graph': ArtifactOutput(C.DATASET_TOPIC_DISCOVERY_ENTITY_GRAPH)}
+
+    class TopicDiscoveryEntityCluster(FixedOp):
+        op_id = 'dataset.topic_discovery_entity_cluster'
+        inputs = {
+            'entity_graph': ArtifactInput(C.DATASET_TOPIC_DISCOVERY_ENTITY_GRAPH),
+            'topic_discovery_entity_cluster_params': ArtifactInput(
+                C.DATASET_TOPIC_DISCOVERY_ENTITY_CLUSTER_PARAMS
+            ),
+        }
+        outputs = {'entity_clusters': ArtifactOutput(C.DATASET_TOPIC_DISCOVERY_ENTITY_CLUSTERS)}
+
+    class TopicDiscoveryEmbeddingCluster(FixedOp):
+        op_id = 'dataset.topic_discovery_embedding_cluster'
+        inputs = {
+            'chunk': ArtifactInput(
+                C.DATASET_CHUNK,
+                partition_spec=partitions,
+                partition_mapping=all_to_unpartitioned(),
+            ),
+            'topic_discovery_embedding_cluster_params': ArtifactInput(
+                C.DATASET_TOPIC_DISCOVERY_EMBEDDING_CLUSTER_PARAMS
+            ),
+        }
+        outputs = {
+            'embedding_cluster_candidates': ArtifactOutput(
+                C.DATASET_TOPIC_DISCOVERY_EMBEDDING_CLUSTER_CANDIDATES
+            )
+        }
+
+    class TopicDiscoveryEmbeddingLabel(FixedOp):
+        op_id = 'dataset.topic_discovery_embedding_label'
+        inputs = {
+            'embedding_cluster_candidates': ArtifactInput(
+                C.DATASET_TOPIC_DISCOVERY_EMBEDDING_CLUSTER_CANDIDATES
+            ),
+            'chunk': ArtifactInput(
+                C.DATASET_CHUNK,
+                partition_spec=partitions,
+                partition_mapping=all_to_unpartitioned(),
+            ),
+            'topic_discovery_embedding_label_params': ArtifactInput(
+                C.DATASET_TOPIC_DISCOVERY_EMBEDDING_LABEL_PARAMS
+            ),
+        }
+        outputs = {'embedding_clusters': ArtifactOutput(C.DATASET_TOPIC_DISCOVERY_EMBEDDING_CLUSTERS)}
+
+    class TopicDiscoveryManifest(FixedOp):
+        op_id = 'dataset.topic_discovery_manifest'
+        inputs = {
+            'entity_clusters': ArtifactInput(C.DATASET_TOPIC_DISCOVERY_ENTITY_CLUSTERS),
+            'embedding_clusters': ArtifactInput(C.DATASET_TOPIC_DISCOVERY_EMBEDDING_CLUSTERS),
+        }
+        outputs = {'topic_discovery_manifest': ArtifactOutput(C.DATASET_TOPIC_DISCOVERY_MANIFEST)}
 
     class LoadCorpus(FixedOp):
         op_id = 'dataset.load_corpus'
@@ -32,15 +148,16 @@ def default_evo_ops(cases: tuple[str, ...]) -> tuple[type[FixedOp], ...]:
         }
         outputs = {'snapshot': ArtifactOutput(C.CORPUS_SNAPSHOT)}
 
-    class PrepareCase(FixedOp):
-        op_id = 'dataset.prepare_case'
-        inputs = case_inputs
-        outputs = {'preparation': ArtifactOutput(C.EVAL_CASE_PREPARATION, partitions)}
-
     class GenerateCase(FixedOp):
         op_id = 'dataset.generate_case'
-        inputs = {**case_inputs, 'preparation': ArtifactInput(C.EVAL_CASE_PREPARATION, partition_spec=partitions)}
-        outputs = {'case': ArtifactOutput(C.EVAL_CASE, partitions)}
+        inputs = {
+            'config': ArtifactInput(C.RUN_CONFIG, partition_mapping=unpartitioned_to_all()),
+            'snapshot': ArtifactInput(C.CORPUS_SNAPSHOT, partition_mapping=unpartitioned_to_all()),
+        }
+        outputs = {
+            'preparation': ArtifactOutput(C.EVAL_CASE_PREPARATION, partitions),
+            'case': ArtifactOutput(C.EVAL_CASE, partitions),
+        }
 
     class AssembleDataset(FixedOp):
         op_id = 'dataset.assemble'
@@ -57,7 +174,6 @@ def default_evo_ops(cases: tuple[str, ...]) -> tuple[type[FixedOp], ...]:
         op_id = 'eval.answer'
         inputs = {
             'case': ArtifactInput(C.EVAL_CASE, partition_spec=partitions),
-            'dataset': ArtifactInput(C.ROOTS['dataset'], partition_mapping=unpartitioned_to_all()),
             'target_config': ArtifactInput(C.EVAL_TARGET_CONFIG, partition_mapping=unpartitioned_to_all()),
         }
         outputs = {'answer': ArtifactOutput(C.EVAL_RAG_ANSWER, partitions)}
@@ -87,7 +203,6 @@ def default_evo_ops(cases: tuple[str, ...]) -> tuple[type[FixedOp], ...]:
         inputs = {
             'case': ArtifactInput(C.EVAL_CASE, partition_spec=partitions),
             'answer': ArtifactInput(C.EVAL_RAG_ANSWER, partition_spec=partitions),
-            'eval_summary': ArtifactInput(C.ROOTS['eval'], partition_mapping=unpartitioned_to_all()),
         }
         outputs = {'summary': ArtifactOutput(C.ANALYSIS_TRACE_SUMMARY, partitions)}
 
@@ -127,7 +242,6 @@ def default_evo_ops(cases: tuple[str, ...]) -> tuple[type[FixedOp], ...]:
     class BuildRepairPlan(FixedOp):
         op_id = 'repair.plan'
         inputs = {
-            'analysis_summary': ArtifactInput(C.ROOTS['analysis']),
             'classifications': ArtifactInput(
                 C.ANALYSIS_CASE_CLASSIFICATION,
                 partition_spec=partitions,
@@ -219,9 +333,18 @@ def default_evo_ops(cases: tuple[str, ...]) -> tuple[type[FixedOp], ...]:
         outputs = {'comparison': ArtifactOutput(C.ROOTS['abtest'])}
 
     return (
+        SelectDocs,
+        BuildChunks,
+        BuildChunksManifest,
+        ChunkEntitiesExtract,
+        ChunkEntitiesExtractManifest,
+        TopicDiscoveryEntityBuildGraph,
+        TopicDiscoveryEntityCluster,
+        TopicDiscoveryEmbeddingCluster,
+        TopicDiscoveryEmbeddingLabel,
+        TopicDiscoveryManifest,
         LoadCorpus,
         BuildCorpusSnapshot,
-        PrepareCase,
         GenerateCase,
         AssembleDataset,
         EvalAnswer,
@@ -244,11 +367,161 @@ def default_evo_ops(cases: tuple[str, ...]) -> tuple[type[FixedOp], ...]:
 
 
 def dataset_evo_ops(cases: tuple[str, ...]) -> tuple[type[FixedOp], ...]:
-    return default_evo_ops(cases)[:5]
+    op_ids = (
+        'dataset.select_docs',
+        'dataset.build_chunks',
+        'dataset.build_chunks_manifest',
+        'dataset.chunk_entities_extract',
+        'dataset.chunk_entities_extract_manifest',
+        'dataset.topic_discovery_entity_build_graph',
+        'dataset.topic_discovery_entity_cluster',
+        'dataset.topic_discovery_embedding_cluster',
+        'dataset.topic_discovery_embedding_label',
+        'dataset.topic_discovery_manifest',
+        'dataset.load_corpus',
+        'dataset.build_corpus_snapshot',
+        'dataset.generate_case',
+        'dataset.assemble',
+    )
+    ops = {op.op_id: op for op in default_evo_ops(cases)}
+    return tuple(ops[op_id] for op_id in op_ids)
+
+
+def qaplan_dataset_evo_ops(spec: DatasetFlowSpec) -> tuple[type[FixedOp], ...]:
+    """The new dataset-only graph with independent chunk and case partitions."""
+
+    chunks = StaticPartitions(spec.chunk_ids)
+    cases = StaticPartitions(spec.case_ids)
+
+    class SelectDocs(FixedOp):
+        op_id = 'dataset.select_docs'
+        inputs = {'source_config': ArtifactInput(C.CORPUS_SOURCE_CONFIG)}
+        outputs = {'selected_docs': ArtifactOutput(C.DATASET_SELECTED_DOCS)}
+
+    class BuildChunks(FixedOp):
+        op_id = 'dataset.build_chunks'
+        inputs = {
+            'selected_docs': ArtifactInput(C.DATASET_SELECTED_DOCS, partition_mapping=unpartitioned_to_all()),
+            'build_chunks_params': ArtifactInput(C.DATASET_BUILD_CHUNKS_PARAMS, partition_mapping=unpartitioned_to_all()),
+        }
+        outputs = {'chunk': ArtifactOutput(C.DATASET_CHUNK, chunks)}
+
+    class BuildChunksManifest(FixedOp):
+        op_id = 'dataset.build_chunks_manifest'
+        inputs = {
+            'selected_docs': ArtifactInput(C.DATASET_SELECTED_DOCS),
+            'chunk': ArtifactInput(C.DATASET_CHUNK, partition_spec=chunks, partition_mapping=all_to_unpartitioned()),
+            'build_chunks_params': ArtifactInput(C.DATASET_BUILD_CHUNKS_PARAMS),
+        }
+        outputs = {'build_chunks_manifest': ArtifactOutput(C.DATASET_BUILD_CHUNKS_MANIFEST)}
+
+    class ChunkEntitiesExtract(FixedOp):
+        op_id = 'dataset.chunk_entities_extract'
+        inputs = {
+            'chunk': ArtifactInput(C.DATASET_CHUNK, partition_spec=chunks),
+            'build_chunks_manifest': ArtifactInput(C.DATASET_BUILD_CHUNKS_MANIFEST, partition_mapping=unpartitioned_to_all()),
+            'chunk_entities_extract_params': ArtifactInput(C.DATASET_CHUNK_ENTITIES_EXTRACT_PARAMS, partition_mapping=unpartitioned_to_all()),
+            'run_config': ArtifactInput(C.RUN_CONFIG, partition_mapping=unpartitioned_to_all()),
+        }
+        outputs = {'chunk_entity': ArtifactOutput(C.DATASET_CHUNK_ENTITY, chunks)}
+
+    class ChunkEntitiesManifest(FixedOp):
+        op_id = 'dataset.chunk_entities_extract_manifest'
+        inputs = {
+            'build_chunks_manifest': ArtifactInput(C.DATASET_BUILD_CHUNKS_MANIFEST),
+            'chunk_entities': ArtifactInput(C.DATASET_CHUNK_ENTITY, partition_spec=chunks, partition_mapping=all_to_unpartitioned()),
+            'chunk_entities_extract_manifest_params': ArtifactInput(C.DATASET_CHUNK_ENTITIES_EXTRACT_MANIFEST_PARAMS),
+        }
+        outputs = {'chunk_entities_extract_manifest': ArtifactOutput(C.DATASET_CHUNK_ENTITIES_EXTRACT_MANIFEST)}
+
+    class EntityGraph(FixedOp):
+        op_id = 'dataset.topic_discovery_entity_build_graph'
+        inputs = {
+            'chunk_entity': ArtifactInput(C.DATASET_CHUNK_ENTITY, partition_spec=chunks, partition_mapping=all_to_unpartitioned()),
+            'chunk_entities_extract_manifest': ArtifactInput(C.DATASET_CHUNK_ENTITIES_EXTRACT_MANIFEST),
+            'topic_discovery_entity_build_graph_params': ArtifactInput(C.DATASET_TOPIC_DISCOVERY_ENTITY_BUILD_GRAPH_PARAMS),
+        }
+        outputs = {'entity_graph': ArtifactOutput(C.DATASET_TOPIC_DISCOVERY_ENTITY_GRAPH)}
+
+    class EntityClusters(FixedOp):
+        op_id = 'dataset.topic_discovery_entity_cluster'
+        inputs = {
+            'entity_graph': ArtifactInput(C.DATASET_TOPIC_DISCOVERY_ENTITY_GRAPH),
+            'topic_discovery_entity_cluster_params': ArtifactInput(C.DATASET_TOPIC_DISCOVERY_ENTITY_CLUSTER_PARAMS),
+        }
+        outputs = {'entity_clusters': ArtifactOutput(C.DATASET_TOPIC_DISCOVERY_ENTITY_CLUSTERS)}
+
+    class EmbeddingCandidates(FixedOp):
+        op_id = 'dataset.topic_discovery_embedding_cluster'
+        inputs = {
+            'chunk': ArtifactInput(C.DATASET_CHUNK, partition_spec=chunks, partition_mapping=all_to_unpartitioned()),
+            'chunk_entities_extract_manifest': ArtifactInput(C.DATASET_CHUNK_ENTITIES_EXTRACT_MANIFEST),
+            'topic_discovery_embedding_cluster_params': ArtifactInput(C.DATASET_TOPIC_DISCOVERY_EMBEDDING_CLUSTER_PARAMS),
+        }
+        outputs = {'embedding_cluster_candidates': ArtifactOutput(C.DATASET_TOPIC_DISCOVERY_EMBEDDING_CLUSTER_CANDIDATES)}
+
+    class EmbeddingClusters(FixedOp):
+        op_id = 'dataset.topic_discovery_embedding_label'
+        inputs = {
+            'embedding_cluster_candidates': ArtifactInput(C.DATASET_TOPIC_DISCOVERY_EMBEDDING_CLUSTER_CANDIDATES),
+            'chunk': ArtifactInput(C.DATASET_CHUNK, partition_spec=chunks, partition_mapping=all_to_unpartitioned()),
+            'topic_discovery_embedding_label_params': ArtifactInput(C.DATASET_TOPIC_DISCOVERY_EMBEDDING_LABEL_PARAMS),
+            'run_config': ArtifactInput(C.RUN_CONFIG),
+        }
+        outputs = {'embedding_clusters': ArtifactOutput(C.DATASET_TOPIC_DISCOVERY_EMBEDDING_CLUSTERS)}
+
+    class TopicManifest(FixedOp):
+        op_id = 'dataset.topic_discovery_manifest'
+        inputs = {
+            'entity_clusters': ArtifactInput(C.DATASET_TOPIC_DISCOVERY_ENTITY_CLUSTERS),
+            'embedding_clusters': ArtifactInput(C.DATASET_TOPIC_DISCOVERY_EMBEDDING_CLUSTERS),
+        }
+        outputs = {'topic_discovery_manifest': ArtifactOutput(C.DATASET_TOPIC_DISCOVERY_MANIFEST)}
+
+    class QaplanPlan(FixedOp):
+        op_id = 'dataset.qaplan_plan'
+        inputs = {
+            'source_config': ArtifactInput(C.CORPUS_SOURCE_CONFIG),
+            'topic_discovery_manifest': ArtifactInput(C.DATASET_TOPIC_DISCOVERY_MANIFEST),
+            'chunk': ArtifactInput(C.DATASET_CHUNK, partition_spec=chunks, partition_mapping=all_to_unpartitioned()),
+            'qaplan_plan_params': ArtifactInput(C.DATASET_QAPLAN_PLAN_PARAMS),
+        }
+        outputs = {'qaplan_plan': ArtifactOutput(C.DATASET_QAPLAN_PLAN)}
+
+    class QaplanSpec(FixedOp):
+        op_id = 'dataset.qaplan_spec'
+        inputs = {'qaplan_plan': ArtifactInput(C.DATASET_QAPLAN_PLAN, partition_mapping=unpartitioned_to_all())}
+        outputs = {'qaplan_spec': ArtifactOutput(C.DATASET_QAPLAN_SPEC, cases)}
+
+    class QaplanGenerate(FixedOp):
+        op_id = 'dataset.qaplan_generate'
+        inputs = {
+            'qaplan_spec': ArtifactInput(C.DATASET_QAPLAN_SPEC, partition_spec=cases),
+            'run_config': ArtifactInput(C.RUN_CONFIG, partition_mapping=unpartitioned_to_all()),
+        }
+        outputs = {'case': ArtifactOutput(C.DATASET_CASE, cases)}
+
+    class QaplanGenerationManifest(FixedOp):
+        op_id = 'dataset.qaplan_generate_manifest'
+        inputs = {'cases': ArtifactInput(C.DATASET_CASE, partition_spec=cases, partition_mapping=all_to_unpartitioned())}
+        outputs = {'qaplan_generate_manifest': ArtifactOutput(C.DATASET_QAPLAN_GENERATE_MANIFEST)}
+
+    return (
+        SelectDocs, BuildChunks, BuildChunksManifest, ChunkEntitiesExtract, ChunkEntitiesManifest,
+        EntityGraph, EntityClusters, EmbeddingCandidates, EmbeddingClusters, TopicManifest,
+        QaplanPlan, QaplanSpec, QaplanGenerate, QaplanGenerationManifest,
+    )
 
 
 def eval_evo_ops(cases: tuple[str, ...]) -> tuple[type[FixedOp], ...]:
-    return default_evo_ops(cases)[:8]
+    op_ids = (
+        *[op.op_id for op in dataset_evo_ops(cases)],
+        'eval.answer',
+        'eval.judge',
+        'eval.summary',
+    )
+    ops = {op.op_id: op for op in default_evo_ops(cases)}
+    return tuple(ops[op_id] for op_id in op_ids)
 
 
 def analysis_evo_ops(cases: tuple[str, ...]) -> tuple[type[FixedOp], ...]:

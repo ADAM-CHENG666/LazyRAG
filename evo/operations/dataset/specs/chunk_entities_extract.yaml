@@ -1,0 +1,122 @@
+operation:
+  op_id: dataset.chunk_entities_extract
+  flow: dataset
+  stage: chunk_entities_extract
+  description: 为单个 dataset chunk 抽取命名实体；占位 chunk 直接生成占位 chunk entity。
+
+fixed_op:
+  inputs:
+    chunk:
+      artifact_id: dataset.chunk
+      required: true
+      partition: partitioned
+      mapping: same_partition
+    chunk_entities_extract_params:
+      artifact_id: dataset.chunk_entities_extract_params
+      required: true
+      partition: unpartitioned
+      mapping: unpartitioned_to_all
+  outputs:
+    chunk_entity:
+      artifact_id: dataset.chunk_entity
+      partition: partitioned
+
+materializer:
+  function: chunk_entities_extract
+  return_keys:
+    - chunk_entity
+
+input_payload:
+  chunk:
+    fields:
+      available:
+        type: boolean
+        required: false
+        default: true
+      chunk_id:
+        type: string
+        required: true
+        validation:
+          - non_empty_after_strip
+      doc_id:
+        type: string
+        required: true
+        validation:
+          - non_empty_after_strip
+      filename:
+        type: string
+        required: false
+        default: ""
+      group:
+        type: string
+        required: true
+        validation:
+          - non_empty_after_strip
+      type:
+        type: string
+        required: false
+        default: text
+      text:
+        type: string
+        required: true
+        validation:
+          - non_empty_after_strip
+      embedding:
+        type: object
+        required: false
+        default: {}
+      metadata:
+        type: object
+        required: false
+        default: {}
+  chunk_entities_extract_params:
+    fields:
+      max_entities_per_chunk:
+        type: integer
+        required: false
+        default: 10
+        validation:
+          - positive_integer
+          - max_value: 100
+
+output_payload:
+  chunk_entity:
+    json_compatible: true
+    fields:
+      available:
+        type: boolean
+      chunk_id:
+        type: string
+      doc_id:
+        type: string
+      group:
+        type: string
+      entities:
+        type: list[string]
+
+
+execution_flow:
+  - 读取并校验 chunk input payload。
+  - 读取并归一化 chunk_entities_extract_params。
+  - 当 chunk.available=false 时，跳过 LLM 调用并返回 available=false、entities=[] 的占位 chunk_entity。
+  - 使用 max_entities_per_chunk 和 chunk.text 构造实体抽取 prompt。
+  - 调用 LLM 获取实体抽取结果。
+  - 解析 LLM 返回 JSON，并校验 entities 字段。
+  - 如果解析或校验失败，则带上错误反馈重试一次。
+  - 重试后仍失败时抛出 validation error。
+  - 返回仅包含 available、chunk_id、doc_id、group 和 entities 的 {"chunk_entity": payload}。
+
+tests:
+  single_chunk_logic:
+    - success
+    - default_params
+    - validation_error
+    - empty_entities_allowed
+    - max_entities_limit
+    - return_keys_match_outputs
+  llm_interaction:
+    - placeholder_chunk_skip_llm
+    - invalid_llm_output_retry
+    - invalid_llm_output_after_retry_error
+  runtime_wiring:
+    - partition

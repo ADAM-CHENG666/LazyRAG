@@ -1,0 +1,178 @@
+operation:
+  op_id: dataset.chunk_entities_extract_manifest
+  flow: dataset
+  stage: chunk_entities_extract_manifest
+  description: 汇总所有 chunk entity，按 chunk manifest 中的 chunk 顺序生成实体清单 manifest。
+
+fixed_op:
+  inputs:
+    build_chunks_manifest:
+      artifact_id: dataset.build_chunks_manifest
+      required: true
+      partition: unpartitioned
+    chunk_entities:
+      artifact_id: dataset.chunk_entity
+      required: true
+      partition: partitioned
+      mapping: all_to_unpartitioned
+    chunk_entities_extract_manifest_params:
+      artifact_id: dataset.chunk_entities_extract_manifest_params
+      required: true
+      partition: unpartitioned
+  outputs:
+    chunk_entities_extract_manifest:
+      artifact_id: dataset.chunk_entities_extract_manifest
+      partition: unpartitioned
+
+materializer:
+  function: chunk_entities_extract_manifest
+  return_keys:
+    - chunk_entities_extract_manifest
+
+input_payload:
+  build_chunks_manifest:
+    fields:
+      chunks:
+        type: array
+        required: true
+        item:
+          type: object
+          fields:
+            chunk_id:
+              type: string
+              required: true
+              validation:
+                - non_empty_after_strip
+            available:
+              type: boolean
+              required: false
+              default: true
+            doc_id:
+              type: string
+              required: true
+              validation:
+                - non_empty_after_strip
+            group:
+              type: string
+              required: true
+              validation:
+                - non_empty_after_strip
+            partition:
+              type: string
+              required: false
+        validation:
+          - non_empty
+      stats:
+        type: object
+        required: false
+      params:
+        type: object
+        required: false
+  chunk_entities:
+    tuple: true
+    item:
+      fields:
+        available:
+          type: boolean
+          required: false
+          default: true
+        chunk_id:
+          type: string
+          required: true
+          validation:
+            - non_empty_after_strip
+        doc_id:
+          type: string
+          required: true
+          validation:
+            - non_empty_after_strip
+        group:
+          type: string
+          required: true
+          validation:
+            - non_empty_after_strip
+        entities:
+          type: list[string]
+          required: true
+          validation:
+            - string_items
+  chunk_entities_extract_manifest_params:
+    fields:
+      max_entities_per_chunk:
+        type: integer
+        required: false
+        default: 10
+        validation:
+          - positive_integer
+          - max_value: 100
+
+output_payload:
+  chunk_entities_extract_manifest:
+    json_compatible: true
+    fields:
+      chunks:
+        type: array
+        item:
+          type: object
+          fields:
+            available:
+              type: boolean
+            chunk_id:
+              type: string
+            doc_id:
+              type: string
+            group:
+              type: string
+            partition:
+              type: string
+              required: false
+            entities:
+              type: list[string]
+      stats:
+        type: object
+        fields:
+          slot_count:
+            type: integer
+          available_count:
+            type: integer
+          entity_count:
+            type: integer
+          empty_entity_count:
+            type: integer
+          placeholder_count:
+            type: integer
+          doc_count:
+            type: integer
+          group_counts:
+            type: object
+            value_type: integer
+      params:
+        type: object
+        fields:
+          max_entities_per_chunk:
+            type: integer
+
+execution_flow:
+  - 读取并校验 build_chunks_manifest input payload。
+  - 读取并归一化 chunk_entities_extract_manifest_params。
+  - 读取 all_to_unpartitioned 汇总后的 chunk_entities tuple。
+  - 建立 chunk_id 到 ChunkEntity payload 的映射。
+  - 拒绝重复 chunk_id。
+  - 拒绝缺失任意 build_chunks_manifest.chunks 对应 ChunkEntity 的输入集合。
+  - 按 build_chunks_manifest.chunks 顺序生成带 available、partition 和 entities 的 chunks。
+  - 汇总 slot_count、available_count、placeholder_count、entity_count、empty_entity_count、doc_count 和 group_counts。
+  - 返回 {"chunk_entities_extract_manifest": payload}。
+
+tests:
+  manifest_logic:
+    - success
+    - default_params
+    - validation_error
+    - return_keys_match_outputs
+  assembly_contract:
+    - missing_chunk_entity_error
+    - duplicate_chunk_entity_error
+    - preserves_built_chunk_order
+    - stats
+  runtime_wiring:
+    - partition

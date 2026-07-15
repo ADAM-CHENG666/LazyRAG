@@ -19,6 +19,28 @@ ABTEST_CANDIDATE_CONFIG = 'abtest.candidate_config'
 
 CORPUS_REPORT = 'corpus.report'
 CORPUS_SNAPSHOT = 'corpus.snapshot'
+DATASET_SELECTED_DOCS = 'dataset.selected_docs'
+DATASET_BUILD_CHUNKS_PARAMS = 'dataset.build_chunks_params'
+DATASET_BUILD_CHUNKS_MANIFEST = 'dataset.build_chunks_manifest'
+DATASET_CHUNK = 'dataset.chunk'
+DATASET_CHUNK_ENTITIES_EXTRACT_PARAMS = 'dataset.chunk_entities_extract_params'
+DATASET_CHUNK_ENTITY = 'dataset.chunk_entity'
+DATASET_CHUNK_ENTITIES_EXTRACT_MANIFEST_PARAMS = 'dataset.chunk_entities_extract_manifest_params'
+DATASET_CHUNK_ENTITIES_EXTRACT_MANIFEST = 'dataset.chunk_entities_extract_manifest'
+DATASET_TOPIC_DISCOVERY_ENTITY_BUILD_GRAPH_PARAMS = 'dataset.topic_discovery_entity_build_graph_params'
+DATASET_TOPIC_DISCOVERY_ENTITY_GRAPH = 'dataset.topic_discovery_entity_graph'
+DATASET_TOPIC_DISCOVERY_ENTITY_CLUSTER_PARAMS = 'dataset.topic_discovery_entity_cluster_params'
+DATASET_TOPIC_DISCOVERY_ENTITY_CLUSTERS = 'dataset.topic_discovery_entity_clusters'
+DATASET_TOPIC_DISCOVERY_EMBEDDING_CLUSTER_PARAMS = 'dataset.topic_discovery_embedding_cluster_params'
+DATASET_TOPIC_DISCOVERY_EMBEDDING_CLUSTER_CANDIDATES = 'dataset.topic_discovery_embedding_cluster_candidates'
+DATASET_TOPIC_DISCOVERY_EMBEDDING_LABEL_PARAMS = 'dataset.topic_discovery_embedding_label_params'
+DATASET_TOPIC_DISCOVERY_EMBEDDING_CLUSTERS = 'dataset.topic_discovery_embedding_clusters'
+DATASET_TOPIC_DISCOVERY_MANIFEST = 'dataset.topic_discovery_manifest'
+DATASET_QAPLAN_PLAN_PARAMS = 'dataset.qaplan_plan_params'
+DATASET_QAPLAN_PLAN = 'dataset.qaplan_plan'
+DATASET_QAPLAN_SPEC = 'dataset.qaplan_spec'
+DATASET_CASE = 'dataset.case'
+DATASET_QAPLAN_GENERATE_MANIFEST = 'dataset.qaplan_generate_manifest'
 EVAL_CASE_PREPARATION = 'eval.case_preparation'
 EVAL_CASE = 'eval.case'
 EVAL_DATASET = 'eval.dataset'
@@ -60,11 +82,22 @@ ROOTS = MappingProxyType({
 
 OUTPUTS = MappingProxyType({
     'dataset': (
+        OutputSpec(DATASET_SELECTED_DOCS),
+        OutputSpec(DATASET_BUILD_CHUNKS_MANIFEST),
+        OutputSpec(DATASET_CHUNK, True),
+        OutputSpec(DATASET_CHUNK_ENTITY, True),
+        OutputSpec(DATASET_CHUNK_ENTITIES_EXTRACT_MANIFEST),
+        OutputSpec(DATASET_TOPIC_DISCOVERY_ENTITY_GRAPH),
+        OutputSpec(DATASET_TOPIC_DISCOVERY_ENTITY_CLUSTERS),
+        OutputSpec(DATASET_TOPIC_DISCOVERY_EMBEDDING_CLUSTER_CANDIDATES),
+        OutputSpec(DATASET_TOPIC_DISCOVERY_EMBEDDING_CLUSTERS),
+        OutputSpec(DATASET_TOPIC_DISCOVERY_MANIFEST),
         OutputSpec(CORPUS_REPORT),
         OutputSpec(CORPUS_SNAPSHOT),
-        OutputSpec(EVAL_CASE_PREPARATION, True),
-        OutputSpec(EVAL_CASE, True),
-        OutputSpec(EVAL_DATASET),
+        OutputSpec(DATASET_QAPLAN_PLAN),
+        OutputSpec(DATASET_QAPLAN_SPEC, True),
+        OutputSpec(DATASET_CASE, True),
+        OutputSpec(DATASET_QAPLAN_GENERATE_MANIFEST),
     ),
     'eval': (
         OutputSpec(EVAL_RAG_ANSWER, True),

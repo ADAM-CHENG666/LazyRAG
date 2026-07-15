@@ -1,0 +1,419 @@
+from types import SimpleNamespace
+
+import pytest
+
+from evo.artifact_runtime.kernel import ArtifactKey, ArtifactRef
+from evo.operations.dataset import build_chunks, build_chunks_manifest, select_docs
+import evo.operations.dataset.chunks_build as chunks_build_module
+
+
+class FakeContext:
+    def __init__(self, artifact_graph, *, params=None, input_refs=None, operation_run_id='op_1'):
+        self.artifact_graph = artifact_graph
+        self.params = params or {}
+        self.input_refs = input_refs or []
+        self.operation_run_id = operation_run_id
+        self.progress = []
+        self.call_recorder = FakeCallRecorder()
+
+    def check_interrupt(self):
+        return None
+
+    def report_progress(self, **payload):
+        self.progress.append(payload)
+
+
+class FakeCallRecorder:
+    def __init__(self):
+        self.records = []
+
+    def succeeded(self, idempotency_key, *, idempotency_scope='operation'):
+        return None
+
+    def record(self, adapter_type, request, response=None, *, phase='', item_ref='', status='succeeded',
+               idempotency_key='', idempotency_scope='operation', error=None):
+        record = SimpleNamespace(
+            operation_run_id='op_1',
+            adapter_type=adapter_type,
+            request=request,
+            response=response,
+            phase=phase,
+            item_ref=item_ref,
+            status=status,
+            idempotency_key=idempotency_key,
+            idempotency_scope=idempotency_scope,
+            error=error,
+            call_id=f'call_{len(self.records) + 1}',
+            record_ref='',
+        )
+        self.records.append(record)
+        return record
+
+
+class FakeKnowledgeBaseClient:
+    def __init__(self, documents=None, chunks=None):
+        self.documents = documents or []
+        self.chunks = chunks or {}
+        self.list_calls = []
+        self.chunk_calls = []
+
+    def list_documents(self, kb_id):
+        self.list_calls.append(kb_id)
+        return list(self.documents)
+
+    def iter_chunks(self, kb_id, doc_ids, groups, page_size):
+        for doc_id in doc_ids:
+            for group in groups:
+                self.chunk_calls.append({'kb_id': kb_id, 'doc_id': doc_id, 'group': group, 'page_size': page_size})
+                for batch in self.chunks.get((doc_id, group), []):
+                    yield batch
+
+
+def node(uid, text='chunk text', group='block', embedding=None, metadata=None, global_metadata=None):
+    return SimpleNamespace(
+        uid=uid,
+        text=text,
+        embedding=embedding if embedding is not None else {'default': [1.0, 2.0]},
+        group=group,
+        metadata=metadata if metadata is not None else {'type': 'text', 'page': 1},
+        global_metadata=global_metadata if global_metadata is not None else {'filename': 'fallback.pdf'},
+    )
+
+
+def chunk_ctx(partition):
+    return SimpleNamespace(output_key_by_name={'chunk': ArtifactKey('dataset.chunk', partition)})
+
+
+def manifest_ctx(partitions):
+    refs = {ArtifactKey.of('dataset.selected_docs'): ArtifactRef(ArtifactKey.of('dataset.selected_docs'), 1)}
+    refs.update({
+        ArtifactKey('dataset.chunk', partition): ArtifactRef(ArtifactKey('dataset.chunk', partition), index)
+        for index, partition in enumerate(partitions, start=1)
+    })
+    return SimpleNamespace(input_ref_by_key=refs)
+
+
+def test_select_docs_materializer_outputs_selected_docs():
+    client = FakeKnowledgeBaseClient([
+        {'doc_id': 'doc-1', 'filename': 'a.pdf', 'file_type': 'pdf', 'upload_status': 'success',
+         'group_counts': {'block': 8, 'line': 2}},
+        {'doc_id': 'doc-2', 'filename': 'b.docx', 'file_type': 'docx', 'upload_status': 'success',
+         'group_counts': {'block': 0, 'line': 0}},
+        {'doc_id': 'doc-3', 'filename': 'c.txt', 'file_type': 'txt', 'upload_status': 'pending'},
+    ])
+
+    output = select_docs(None, {'source_config': {'kb_id': 'kb-1', 'max_docs': 2, 'target_case_count': 37}}, client)
+
+    assert output == {'selected_docs': {
+        'kb_id': 'kb-1',
+        'docs': [
+            {'doc_id': 'doc-1', 'filename': 'a.pdf', 'file_type': 'pdf', 'status': 'success',
+             'group_counts': {'block': 8, 'line': 2}},
+            {'doc_id': 'doc-2', 'filename': 'b.docx', 'file_type': 'docx', 'status': 'success',
+             'group_counts': {'block': 0, 'line': 0}},
+        ],
+        'stats': {'matched': 3, 'selected': 2},
+        'params': {'kb_id': 'kb-1', 'max_docs': 2, 'target_case_count': 37},
+    }}
+    assert client.list_calls == ['kb-1']
+
+
+def test_select_docs_materializer_rejects_empty_selection():
+    with pytest.raises(ValueError, match='selected no documents'):
+        select_docs(None, {'source_config': {'kb_id': 'kb-1'}}, FakeKnowledgeBaseClient([]))
+
+
+def test_select_docs_materializer_defaults_target_case_count():
+    client = FakeKnowledgeBaseClient([
+        {'doc_id': 'doc-1', 'filename': 'a.pdf', 'file_type': 'pdf', 'upload_status': 'success',
+         'group_counts': {'block': 8}},
+    ])
+
+    output = select_docs(None, {'source_config': {'kb_id': 'kb-1'}}, client)
+
+    assert output['selected_docs']['params'] == {'kb_id': 'kb-1', 'max_docs': 100, 'target_case_count': 100}
+
+
+@pytest.mark.parametrize('params, match', [
+    ({'kb_id': ''}, 'kb_id'),
+    ({'kb_id': 'kb-1', 'max_docs': 0}, 'max_docs must be a positive integer'),
+    ({'kb_id': 'kb-1', 'target_case_count': 'bad'}, 'target_case_count must be a positive integer'),
+])
+def test_select_docs_materializer_rejects_invalid_params(params, match):
+    with pytest.raises(ValueError, match=match):
+        select_docs(None, {'source_config': params}, FakeKnowledgeBaseClient([{'doc_id': 'doc-1'}]))
+
+
+def test_select_docs_materializer_normalizes_optional_doc_fields():
+    client = FakeKnowledgeBaseClient([
+        {'doc_id': 'doc-1', 'display_name': 'fallback-name.pdf', 'upload_status': 'ready',
+         'group_counts': {'block': '4', 'line': None, 'bad': 'x', 'negative': -2, '': 5}},
+        {'doc_id': 'doc-2', 'group_counts': 'not-a-map'},
+    ])
+
+    output = select_docs(None, {'source_config': {'kb_id': 'kb-1', 'max_docs': 2}}, client)
+
+    assert output['selected_docs']['docs'] == [
+        {'doc_id': 'doc-1', 'filename': 'fallback-name.pdf', 'file_type': '', 'status': 'ready',
+         'group_counts': {'block': 4, 'line': 0, 'bad': 0, 'negative': 0}},
+        {'doc_id': 'doc-2', 'filename': 'doc-2', 'file_type': '', 'status': '', 'group_counts': {}},
+    ]
+
+
+def test_build_chunks_materializer_outputs_partitioned_chunk(monkeypatch):
+    monkeypatch.setattr(chunks_build_module, 'CHUNK_PAGE_SIZE', 2)
+    selected = {
+        'kb_id': 'kb-1',
+        'docs': [
+            {'doc_id': 'doc-1', 'filename': 'a.pdf', 'file_type': 'pdf', 'status': 'success',
+             'group_counts': {'block': 2}},
+            {'doc_id': 'doc-2', 'filename': 'b.pdf', 'file_type': 'pdf', 'status': 'success',
+             'group_counts': {'block': 1}},
+        ],
+        'stats': {'matched': 2, 'selected': 2},
+        'params': {'kb_id': 'kb-1', 'max_docs': 2, 'target_case_count': 2},
+    }
+    client = FakeKnowledgeBaseClient(chunks={
+        ('doc-1', 'block'): [[node('chunk-1', text='one', group='block'),
+                              node('chunk-2', text='two', group='block')]],
+        ('doc-2', 'block'): [[node('chunk-3', text='three', group='block', embedding={'default': [3.0]})]],
+    })
+
+    output = build_chunks(
+        chunk_ctx('chunk_0002'),
+        {'selected_docs': selected, 'build_chunks_params': {'groups': ['block', 'line']}},
+        client,
+    )
+
+    assert output == {'chunk': {
+        'available': True,
+        'chunk_id': 'chunk-2',
+        'doc_id': 'doc-1',
+        'filename': 'a.pdf',
+        'group': 'block',
+        'type': 'text',
+        'text': 'two',
+        'embedding': {'model': 'default', 'vector': [0.4472135954999579, 0.8944271909999159]},
+        'metadata': {
+            'doc': {'doc_id': 'doc-1', 'filename': 'a.pdf', 'file_type': 'pdf',
+                    'status': 'success', 'group_counts': {'block': 2}},
+            'node_metadata': {'type': 'text', 'page': 1},
+            'node_global_metadata': {'filename': 'fallback.pdf'},
+        },
+    }}
+    assert [(call['doc_id'], call['group']) for call in client.chunk_calls] == [
+        ('doc-1', 'block'),
+        ('doc-2', 'block'),
+    ]
+
+
+def test_build_chunks_manifest_materializer_outputs_built_chunks():
+    selected = {
+        'kb_id': 'kb-1',
+        'docs': [
+            {'doc_id': 'doc-1', 'filename': 'a.pdf', 'file_type': 'pdf', 'status': 'success',
+             'group_counts': {'block': 2}},
+            {'doc_id': 'doc-2', 'filename': 'b.pdf', 'file_type': 'pdf', 'status': 'success',
+             'group_counts': {'block': 1}},
+        ],
+        'stats': {'matched': 2, 'selected': 2},
+        'params': {'kb_id': 'kb-1', 'max_docs': 2, 'target_case_count': 2},
+    }
+    output = build_chunks_manifest(
+        manifest_ctx(('chunk_0001', 'chunk_0002', 'chunk_0003')),
+        {
+            'selected_docs': selected,
+            'chunk': (
+                {'available': True, 'chunk_id': 'chunk-1', 'doc_id': 'doc-1', 'filename': 'a.pdf',
+                 'group': 'block', 'type': 'text', 'text': 'one', 'embedding': {}, 'metadata': {}},
+                {'available': True, 'chunk_id': 'chunk-2', 'doc_id': 'doc-1', 'filename': 'a.pdf',
+                 'group': 'block', 'type': 'text', 'text': 'two', 'embedding': {}, 'metadata': {}},
+                {'available': True, 'chunk_id': 'chunk-3', 'doc_id': 'doc-2', 'filename': 'b.pdf',
+                 'group': 'block', 'type': 'text', 'text': 'three', 'embedding': {}, 'metadata': {}},
+            ),
+            'build_chunks_params': {'groups': ['block', 'line']},
+        },
+    )
+
+    assert output == {'build_chunks_manifest': {
+        'source': {'kb_id': 'kb-1', 'selected_docs_ref': 'dataset.selected_docs@v1'},
+        'chunks': [
+            {'available': True, 'chunk_id': 'chunk-1', 'doc_id': 'doc-1', 'filename': 'a.pdf',
+             'group': 'block', 'partition': 'chunk_0001'},
+            {'available': True, 'chunk_id': 'chunk-2', 'doc_id': 'doc-1', 'filename': 'a.pdf',
+             'group': 'block', 'partition': 'chunk_0002'},
+            {'available': True, 'chunk_id': 'chunk-3', 'doc_id': 'doc-2', 'filename': 'b.pdf',
+             'group': 'block', 'partition': 'chunk_0003'},
+        ],
+        'stats': {
+            'chunk_count': 3,
+            'slot_count': 3,
+            'empty_count': 0,
+            'target_chunk_count': 3,
+            'doc_count': 2,
+            'group_counts': {'block': 3},
+            'doc_group_stats': [
+                {'doc_id': 'doc-1', 'filename': 'a.pdf', 'total': 2, 'groups': {'block': 2}},
+                {'doc_id': 'doc-2', 'filename': 'b.pdf', 'total': 1, 'groups': {'block': 1}},
+            ],
+            'fallback_used': False,
+            'warnings': [],
+        },
+        'params': {'groups': ['block', 'line']},
+    }}
+
+
+def test_build_chunks_manifest_materializer_samples_group_first_and_falls_back():
+    selected = {
+        'kb_id': 'kb-1',
+        'docs': [
+            {'doc_id': 'doc-1', 'filename': 'a.pdf', 'file_type': 'pdf', 'status': 'success',
+             'group_counts': {'block': 2, 'line': 4}},
+            {'doc_id': 'doc-2', 'filename': 'b.pdf', 'file_type': 'pdf', 'status': 'success',
+             'group_counts': {'block': 1, 'line': 4}},
+        ],
+        'stats': {'matched': 2, 'selected': 2},
+        'params': {'kb_id': 'kb-1', 'max_docs': 2, 'target_case_count': 3},
+    }
+
+    output = build_chunks_manifest(
+        manifest_ctx(('chunk_0001', 'chunk_0002', 'chunk_0003', 'chunk_0004', 'chunk_0005')),
+        {
+            'selected_docs': selected,
+            'chunk': (
+                {'available': True, 'chunk_id': 'doc-1-block-1', 'doc_id': 'doc-1', 'filename': 'a.pdf',
+                 'group': 'block', 'type': 'text', 'text': '1', 'embedding': {}, 'metadata': {}},
+                {'available': True, 'chunk_id': 'doc-1-block-2', 'doc_id': 'doc-1', 'filename': 'a.pdf',
+                 'group': 'block', 'type': 'text', 'text': '2', 'embedding': {}, 'metadata': {}},
+                {'available': True, 'chunk_id': 'doc-2-block-1', 'doc_id': 'doc-2', 'filename': 'b.pdf',
+                 'group': 'block', 'type': 'text', 'text': '3', 'embedding': {}, 'metadata': {}},
+                {'available': True, 'chunk_id': 'doc-1-line-1', 'doc_id': 'doc-1', 'filename': 'a.pdf',
+                 'group': 'line', 'type': 'text', 'text': '4', 'embedding': {}, 'metadata': {}},
+                {'available': True, 'chunk_id': 'doc-2-line-1', 'doc_id': 'doc-2', 'filename': 'b.pdf',
+                 'group': 'line', 'type': 'text', 'text': '5', 'embedding': {}, 'metadata': {}},
+            ),
+            'build_chunks_params': {'groups': ['block', 'line']},
+        },
+    )
+
+    built = output['build_chunks_manifest']
+    assert [chunk['chunk_id'] for chunk in built['chunks']] == [
+        'doc-1-block-1', 'doc-1-block-2', 'doc-2-block-1', 'doc-1-line-1', 'doc-2-line-1',
+    ]
+    assert built['stats']['group_counts'] == {'block': 3, 'line': 2}
+    assert built['stats']['target_chunk_count'] == 5
+    assert built['stats']['fallback_used'] is True
+    assert built['stats']['warnings'] == ['fallback group sampling was used']
+
+
+def test_build_chunks_materializer_outputs_placeholder_when_actual_chunks_below_target():
+    selected = {
+        'kb_id': 'kb-1',
+        'docs': [
+            {'doc_id': 'doc-1', 'filename': 'a.pdf', 'file_type': 'pdf', 'status': 'success',
+             'group_counts': {'block': 5}},
+        ],
+        'stats': {'matched': 1, 'selected': 1},
+        'params': {'kb_id': 'kb-1', 'max_docs': 1, 'target_case_count': 5},
+    }
+    client = FakeKnowledgeBaseClient(chunks={
+        ('doc-1', 'block'): [[node('chunk-1', group='block'), node('chunk-2', group='block')]],
+    })
+
+    output = build_chunks(
+        chunk_ctx('chunk_0008'),
+        {'selected_docs': selected, 'build_chunks_params': {'groups': ['block']}},
+        client,
+    )
+
+    assert output == {'chunk': {
+        'available': False,
+        'chunk_id': 'unavailable:chunk_0008',
+        'doc_id': '__unavailable__',
+        'filename': '',
+        'group': 'block',
+        'type': 'placeholder',
+        'text': 'Unavailable chunk placeholder.',
+        'embedding': {'model': '', 'vector': []},
+        'metadata': {'partition': 'chunk_0008', 'available': False},
+    }}
+
+
+def test_build_chunks_manifest_materializer_warns_when_actual_chunks_below_target():
+    selected = {
+        'kb_id': 'kb-1',
+        'docs': [
+            {'doc_id': 'doc-1', 'filename': 'a.pdf', 'file_type': 'pdf', 'status': 'success',
+             'group_counts': {'block': 5}},
+        ],
+        'stats': {'matched': 1, 'selected': 1},
+        'params': {'kb_id': 'kb-1', 'max_docs': 1, 'target_case_count': 5},
+    }
+    partitions = tuple(f'chunk_{index:04d}' for index in range(1, 9))
+    chunks = tuple(
+        {'available': index < 2, 'chunk_id': f'chunk-{index + 1}' if index < 2 else f'unavailable:{partitions[index]}',
+         'doc_id': 'doc-1' if index < 2 else '__unavailable__',
+         'filename': 'a.pdf' if index < 2 else '',
+         'group': 'block',
+         'type': 'text' if index < 2 else 'placeholder',
+         'text': 'chunk text' if index < 2 else 'Unavailable chunk placeholder.',
+         'embedding': {},
+         'metadata': {}}
+        for index in range(8)
+    )
+
+    output = build_chunks_manifest(
+        manifest_ctx(partitions),
+        {'selected_docs': selected, 'chunk': chunks, 'build_chunks_params': {'groups': ['block']}},
+    )
+
+    stats = output['build_chunks_manifest']['stats']
+    assert stats['chunk_count'] == 2
+    assert stats['slot_count'] == 8
+    assert stats['empty_count'] == 6
+    assert stats['target_chunk_count'] == 8
+    assert stats['fallback_used'] is False
+    assert stats['warnings'] == ['chunk build produced 2 chunks, below target 8; continuing']
+
+
+def test_build_chunks_materializer_rejects_empty_sampling_plan():
+    selected = {
+        'kb_id': 'kb-1',
+        'docs': [{'doc_id': 'doc-1', 'filename': 'a.pdf', 'file_type': 'pdf', 'status': 'success',
+                  'group_counts': {}}],
+        'stats': {'matched': 1, 'selected': 1},
+        'params': {'kb_id': 'kb-1', 'max_docs': 1},
+    }
+
+    with pytest.raises(ValueError, match='sampling plan is empty'):
+        build_chunks(
+            chunk_ctx('case_0001'),
+            {'selected_docs': selected, 'build_chunks_params': {'groups': ['block']}},
+            FakeKnowledgeBaseClient(),
+        )
+
+
+def test_build_chunks_manifest_materializer_rejects_chunk_tuple_count_mismatch():
+    selected = {
+        'kb_id': 'kb-1',
+        'docs': [
+            {'doc_id': 'doc-1', 'filename': 'a.pdf', 'file_type': 'pdf', 'status': 'success',
+             'group_counts': {'block': 3}},
+        ],
+        'params': {'target_case_count': 2},
+    }
+
+    with pytest.raises(ValueError, match='requires 3 chunk slots, got 2'):
+        build_chunks_manifest(
+            manifest_ctx(('chunk_0001', 'chunk_0002')),
+            {
+                'selected_docs': selected,
+                'chunk': (
+                    {'available': True, 'chunk_id': 'chunk-1', 'doc_id': 'doc-1', 'filename': 'a.pdf',
+                     'group': 'block', 'type': 'text', 'text': '1', 'embedding': {}, 'metadata': {}},
+                    {'available': True, 'chunk_id': 'chunk-2', 'doc_id': 'doc-1', 'filename': 'a.pdf',
+                     'group': 'block', 'type': 'text', 'text': '2', 'embedding': {}, 'metadata': {}},
+                ),
+                'build_chunks_params': {'groups': ['block']},
+            },
+        )

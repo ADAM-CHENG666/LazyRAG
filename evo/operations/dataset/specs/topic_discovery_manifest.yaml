@@ -1,0 +1,205 @@
+operation:
+  op_id: dataset.topic_discovery_manifest
+  flow: dataset
+  stage: topic_discovery_manifest
+  description: 聚合 entity 与 embedding 两路主题发现结果，生成最终 topic discovery manifest。
+
+fixed_op:
+  inputs:
+    entity_clusters:
+      artifact_id: dataset.topic_discovery_entity_clusters
+      required: true
+      partition: unpartitioned
+    embedding_clusters:
+      artifact_id: dataset.topic_discovery_embedding_clusters
+      required: true
+      partition: unpartitioned
+  outputs:
+    topic_discovery_manifest:
+      artifact_id: dataset.topic_discovery_manifest
+      partition: unpartitioned
+
+materializer:
+  function: topic_discovery_manifest
+  return_keys:
+    - topic_discovery_manifest
+
+input_payload:
+  entity_clusters:
+    fields:
+      clusters:
+        type: array
+        required: true
+        item:
+          type: object
+          fields:
+            cluster_id:
+              type: string
+              required: true
+            cluster_type:
+              type: string
+              required: true
+              enum:
+                - entity
+            topics:
+              type: list[string]
+              required: true
+              validation:
+                - non_empty
+            chunk_ids:
+              type: list[string]
+              required: true
+              validation:
+                - non_empty
+            chunk_count:
+              type: integer
+              required: true
+            scores:
+              type: object
+              required: false
+              default: {}
+            metadata:
+              type: object
+              required: false
+              default: {}
+      stats:
+        type: object
+        required: false
+      params:
+        type: object
+        required: false
+  embedding_clusters:
+    fields:
+      clusters:
+        type: array
+        required: true
+        item:
+          type: object
+          fields:
+            cluster_id:
+              type: string
+              required: true
+            cluster_type:
+              type: string
+              required: true
+              enum:
+                - embedding
+            topics:
+              type: list[string]
+              required: true
+              validation:
+                - non_empty
+            chunk_ids:
+              type: list[string]
+              required: true
+              validation:
+                - non_empty
+            chunk_count:
+              type: integer
+              required: true
+            scores:
+              type: object
+              required: false
+              default: {}
+            metadata:
+              type: object
+              required: false
+              default: {}
+      skipped_chunks:
+        type: array
+        required: false
+        default: []
+      stats:
+        type: object
+        required: false
+      params:
+        type: object
+        required: false
+
+output_payload:
+  topic_discovery_manifest:
+    json_compatible: true
+    fields:
+      clusters:
+        type: array
+        item:
+          type: object
+          fields:
+            cluster_id:
+              type: string
+            cluster_type:
+              type: string
+              enum:
+                - entity
+                - embedding
+            topics:
+              type: list[string]
+            chunk_ids:
+              type: list[string]
+            chunk_count:
+              type: integer
+            scores:
+              type: object
+            metadata:
+              type: object
+              required: false
+      stats:
+        type: object
+        fields:
+          entity_cluster_count:
+            type: integer
+          embedding_cluster_count:
+            type: integer
+          total_cluster_count:
+            type: integer
+          unique_chunk_count:
+            type: integer
+      params:
+        type: object
+
+
+execution_flow:
+  - 读取并校验 entity_clusters 与 embedding_clusters。
+  - 校验两路所有 clusters 的 topics 均为非空 list[string]。
+  - 按 entity first、embedding second 合并 clusters。
+  - 生成稳定最终 cluster_id，例如 entity_000001、embedding_000001。
+  - 保留 cluster_type、topics、chunk_ids、chunk_count、scores 和 metadata。
+  - 汇总 entity_cluster_count、embedding_cluster_count、total_cluster_count 和 unique_chunk_count。
+  - 返回 {"topic_discovery_manifest": payload}。
+
+tests:
+  manifest_merge_logic:
+    # 合并主逻辑：看 entity path 与 embedding path 如何按固定顺序合并，并生成稳定 cluster_id 与 stats。
+    cases:
+      # 正常两路 cluster 输入能合并出最终 manifest，保留 topics、chunk_ids、chunk_count、scores 和 metadata。
+      - success
+      # 最终 clusters 顺序固定为 entity first、embedding second，不按 topic 或 chunk 数重新排序。
+      # 例子：即使 embedding path 的 cluster 在输入里更早准备好，最终输出也必须先列出所有 entity clusters，再列出 embedding clusters。
+      - entity_first_embedding_second
+      # 不做跨来源去重：即使 entity 与 embedding path 命中同一批 chunk，也保留两条 cluster 记录。
+      # 例子：entity cluster 和 embedding cluster 都引用 ['chunk-1', 'chunk-2'] 时，最终 manifest 仍保留两条记录，而不是合并成一条。
+      - no_cross_source_dedup
+      # 最终 cluster_id 稳定生成为 entity_000001、embedding_000001 这类形式，不复用上游 id。
+      # 例子：上游传入 entity_cluster_000005 和 embedding_cluster_000010，最终仍重新编号为 entity_000001、embedding_000001。
+      - stable_cluster_ids
+      # entity_cluster_count、embedding_cluster_count、total_cluster_count、unique_chunk_count 与输出一致。
+      - stats
+      # materializer 返回结构固定为 {"topic_discovery_manifest": payload}，不混入额外字段。
+      - return_keys_match_outputs
+  input_validation:
+    # 输入契约与失败路径：看两路 clusters 的 topics / chunk_ids / cluster_type 是否合法，坏输入是否立即失败。
+    cases:
+      # entity_clusters.clusters 与 embedding_clusters.clusters 都必须是 list，且 cluster_type 必须与来源匹配。
+      # 例子：entity_clusters.clusters 不是 list，或 entity 路里混入 cluster_type=embedding，都应直接失败。
+      - contract
+      # chunk_count、scores、metadata 等字段类型非法时应立即抛错，不生成部分 manifest。
+      # 例子：chunk_count=0、scores 不是 object、metadata 不是 object 时，都应直接失败。
+      - validation_error
+      # 任一路 cluster 的 topics 为空、含空字符串或不是 list[string] 时直接失败。
+      # 例子：topics=[]、topics=['']、topics='Tesla' 都应直接失败。
+      - empty_topics_error
+  runtime_wiring:
+    # fixed op 接线：看两路 unpartitioned clusters 在 runtime 中是否能汇总为最终 manifest。
+    cases:
+      # runtime 中 entity_clusters 与 embedding_clusters 能稳定汇总为单个 topic_discovery_manifest。
+      - partition

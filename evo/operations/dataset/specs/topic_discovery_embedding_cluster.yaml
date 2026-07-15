@@ -1,0 +1,219 @@
+operation:
+  op_id: dataset.topic_discovery_embedding_cluster
+  flow: dataset
+  stage: topic_discovery_embedding_cluster
+  description: 基于 chunk embedding 发现 embedding cluster candidates。
+
+fixed_op:
+  inputs:
+    chunk:
+      artifact_id: dataset.chunk
+      required: true
+      partition: partitioned
+      mapping: all_to_unpartitioned
+    chunk_entities_extract_manifest:
+      artifact_id: dataset.chunk_entities_extract_manifest
+      required: true
+      partition: unpartitioned
+    topic_discovery_embedding_cluster_params:
+      artifact_id: dataset.topic_discovery_embedding_cluster_params
+      required: true
+      partition: unpartitioned
+  outputs:
+    embedding_cluster_candidates:
+      artifact_id: dataset.topic_discovery_embedding_cluster_candidates
+      partition: unpartitioned
+
+materializer:
+  function: topic_discovery_embedding_cluster
+  return_keys:
+    - embedding_cluster_candidates
+
+input_payload:
+  chunk:
+    tuple: true
+    item:
+      fields:
+        available:
+          type: boolean
+          required: false
+          default: true
+        chunk_id:
+          type: string
+          required: true
+          validation:
+            - non_empty_after_strip
+        doc_id:
+          type: string
+          required: true
+        group:
+          type: string
+          required: true
+        text:
+          type: string
+          required: false
+          default: ""
+        embedding:
+          type: object
+          required: true
+          fields:
+            model:
+              type: string
+              required: true
+            vector:
+              type: list[number]
+              required: true
+  chunk_entities_extract_manifest:
+    fields:
+      chunks:
+        type: array
+        required: true
+  topic_discovery_embedding_cluster_params:
+    fields:
+      umap_n_neighbors:
+        type: integer
+        required: false
+        default: 15
+        validation:
+          - integer_greater_than_one
+      umap_n_components:
+        type: integer
+        required: false
+        default: 2
+        validation:
+          - positive_integer
+      min_cluster_size:
+        type: integer
+        required: false
+        default: 2
+        validation:
+          - integer_greater_than_one
+      min_samples:
+        type: integer
+        required: false
+        default: 2
+        validation:
+          - positive_integer
+
+output_payload:
+  embedding_cluster_candidates:
+    json_compatible: true
+    fields:
+      clusters:
+        type: array
+        item:
+          type: object
+          fields:
+            candidate_id:
+              type: string
+            cluster_type:
+              type: string
+              enum:
+                - embedding
+            topics:
+              type: list[string]
+            chunk_ids:
+              type: list[string]
+            chunk_count:
+              type: integer
+            scores:
+              type: object
+            metadata:
+              type: object
+              required: false
+      skipped_chunks:
+        type: array
+        item:
+          type: object
+          fields:
+            chunk_id:
+              type: string
+            reason:
+              type: string
+            detail:
+              type: string
+      stats:
+        type: object
+        fields:
+          source_chunk_count:
+            type: integer
+          embedding_chunk_count:
+            type: integer
+          skipped_chunk_count:
+            type: integer
+          candidate_count:
+            type: integer
+          noise_candidate_count:
+            type: integer
+      params:
+        type: object
+        fields:
+          umap_n_neighbors:
+            type: integer
+          umap_n_components:
+            type: integer
+          min_cluster_size:
+            type: integer
+          min_samples:
+            type: integer
+
+
+execution_flow:
+  - 读取 chunk_entities_extract_manifest 作为上阶段完成栅栏；materializer 不使用其内容做 embedding 聚类。
+  - 解析并校验 topic_discovery_embedding_cluster_params。
+  - 读取 chunk tuple 并保持 runtime partition 稳定顺序。
+  - 跳过 available=false 的 chunk。
+  - 消费 build_chunks 已规范化的 embedding.model 与 embedding.vector；只校验向量非空、正范数与维度一致。
+  - 如果有效 embedding chunk 数不足以执行该路径的降维或聚类，则 operation 失败，输出数据异常由后续流程判罚。
+  - 使用 UMAP 将 embedding 降到 umap_n_components 维；缺少 UMAP 依赖时失败。
+  - 使用 HDBSCAN 聚类；缺少 HDBSCAN 依赖时失败。
+  - 按 HDBSCAN label 构建 clusters；label=-1 每个 chunk 单独生成 singleton candidate。
+  - 汇总 skipped_chunks、stats 和 params。
+  - 返回 {"embedding_cluster_candidates": payload}。
+
+tests:
+  embedding_cluster_logic:
+    # 聚类主逻辑：看 embedding 过滤、降维、聚类、噪声点单独成 candidate，以及 stats 是否一致。
+    cases:
+      # 正常 chunk tuple 能完成 embedding 归一化、降维、聚类，并输出 candidates、stats 和 params。
+      - success
+      # 空参数输入时使用默认 umap / hdbscan 参数，并将默认值回写到 params。
+      - default_params
+      # 有效 embedding chunk 数不足以执行当前参数下的降维或聚类时，直接抛错而不是产出空 candidates。
+      # 例子：只有 2 个有效 embedding chunk，但 umap_n_neighbors=3 或 min_cluster_size=3 时，不足以执行当前路径，应直接失败。
+      - insufficient_embedding_count_error
+      # embedding 缺少 model/vector、向量为空或 norm 为 0 的 chunk 会被跳过，并写入 skipped_chunks。
+      - invalid_embedding_skipped
+      # embedding 维度与首个有效向量不一致的 chunk 会被跳过，并给出 dimension_mismatch 原因。
+      # 例子：第一个有效 chunk 是 2 维向量，后续 3 维向量应被跳过，并记录 expected 维度不匹配。
+      - dimension_mismatch_skipped
+      # HDBSCAN label=-1 的噪声点会各自生成 singleton candidate，而不是被丢弃。
+      # 例子：labels=[0, -1, -1] 时，后两个 chunk 应各自产生 singleton candidate，而不是合并成一个噪声桶。
+      - noise_chunks_as_singleton_candidates
+      # candidate 顺序稳定，按 chunk 在输入 tuple 中的首次出现顺序生成。
+      # 例子：即使 label 数值顺序不同，最终 candidate 的输出顺序也按各自 chunk 在输入 tuple 中首次出现的位置决定。
+      - stable_cluster_order
+      # source_chunk_count、embedding_chunk_count、skipped_chunk_count、candidate_count、noise_candidate_count 与输出一致。
+      - stats
+      # materializer 返回结构固定为 {"embedding_cluster_candidates": payload}，不混入额外字段。
+      - return_keys_match_outputs
+  dependency_and_validation:
+    # 依赖与校验：看输入契约、参数合法性，以及缺少 UMAP / HDBSCAN 时是否明确报错。
+    cases:
+      # chunk 必须是 partitioned tuple，tuple 内每项必须是 mapping，且包含合法 chunk_id / embedding。
+      # 例子：chunk 传 list、tuple 内某一项不是 mapping、或 chunk_id 为空时，都应直接失败。
+      - contract
+      # umap_n_neighbors 与 min_cluster_size 必须为大于 1 的整数；umap_n_components 与 min_samples 必须为正整数。
+      # 例子：前两者为 1，或任一参数为 0、负数、浮点数或布尔值时，都应直接失败。
+      - validation_error
+      # 没有 UMAP 依赖时应明确报错，不 silently fallback。
+      # 例子：不传 reducer 且运行环境缺少 umap 时，应直接抛出 UMAP dependency is required。
+      - missing_umap_error
+      # 没有 HDBSCAN 依赖时应明确报错，不 silently fallback。
+      # 例子：不传 clusterer 且运行环境缺少 hdbscan 时，应直接抛出 HDBSCAN dependency is required。
+      - missing_hdbscan_error
+  runtime_wiring:
+    # fixed op 接线：看 partitioned chunk 输入在 runtime 中是否能聚合为单个 embedding_cluster_candidates。
+    cases:
+      # runtime 能正确汇总 partitioned chunk 输入，并产出单个 unpartitioned embedding_cluster_candidates。
+      - partition

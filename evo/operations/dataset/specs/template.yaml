@@ -1,0 +1,54 @@
+operation:
+  op_id: dataset.xxx
+  flow: dataset
+  stage: xxx
+  description: xxx
+
+fixed_op:
+  inputs:
+    upstream_input:
+      artifact_id: some.input
+      required: true
+      partition: unpartitioned
+    xxx_params:
+      artifact_id: flow.xxx_params
+      required: true
+      partition: unpartitioned
+  outputs:
+    output_name:
+      artifact_id: some.output
+      partition: unpartitioned
+
+materializer:
+  function: xxx
+  return_keys:
+    - output_name
+
+input_payload:
+  upstream_input:
+    fields:
+      field_a:
+        type: string
+        required: true
+  xxx_params:
+    fields:
+      param_a:
+        type: string
+        required: false
+        default: xxx
+
+output_payload:
+  output_name:
+    json_compatible: true
+    fields:
+      result:
+        type: object
+
+execution_flow:
+  - xxx
+
+
+tests:
+  - contract
+  - success
+  - validation_error

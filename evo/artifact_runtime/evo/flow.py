@@ -11,6 +11,41 @@ from .catalog import OUTPUTS, READ_CASE, RERUN_CASE_STAGE, ROOTS, SEEDS, STEPS
 
 
 @dataclass(frozen=True)
+class DatasetFlowSpec:
+    """Static partition layout for the qaplan dataset pipeline."""
+
+    chunk_ids: tuple[str, ...]
+    case_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        for name, values, prefix in (
+            ('chunk_ids', self.chunk_ids, 'chunk'),
+            ('case_ids', self.case_ids, 'case'),
+        ):
+            if not isinstance(values, tuple) or not values:
+                raise ValueError(f'{name} must be a non-empty tuple[str, ...]')
+            if len(set(values)) != len(values):
+                raise ValueError(f'{name} must be unique')
+            for value in values:
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError(f'{name} must contain non-empty strings')
+                if not value.startswith(f'{prefix}_'):
+                    raise ValueError(f'{name} entries must start with {prefix}_')
+
+    @classmethod
+    def from_case_count(cls, target_case_count: int) -> 'DatasetFlowSpec':
+        if not isinstance(target_case_count, int) or isinstance(target_case_count, bool):
+            raise TypeError('target_case_count must be int')
+        if target_case_count < 1:
+            raise ValueError('target_case_count must be >= 1')
+        target_chunk_count = (target_case_count * 3 + 1) // 2
+        return cls(
+            chunk_ids=tuple(f'chunk_{index:04d}' for index in range(1, target_chunk_count + 1)),
+            case_ids=tuple(f'case_{index:04d}' for index in range(1, target_case_count + 1)),
+        )
+
+
+@dataclass(frozen=True)
 class EvoFlowSpec:
     cases: tuple[str, ...]
 
@@ -104,4 +139,4 @@ class EvoFlowSpec:
         self._require_known(step, OUTPUTS, 'step')
 
 
-__all__ = ['EvoFlowSpec']
+__all__ = ['DatasetFlowSpec', 'EvoFlowSpec']

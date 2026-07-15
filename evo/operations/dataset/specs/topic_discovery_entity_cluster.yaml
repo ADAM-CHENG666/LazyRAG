@@ -1,0 +1,200 @@
+operation:
+  op_id: dataset.topic_discovery_entity_cluster
+  flow: dataset
+  stage: topic_discovery_entity_cluster
+  description: 基于 entity-specific subgraph 发现 entity 主题 clusters。
+
+fixed_op:
+  inputs:
+    entity_graph:
+      artifact_id: dataset.topic_discovery_entity_graph
+      required: true
+      partition: unpartitioned
+    topic_discovery_entity_cluster_params:
+      artifact_id: dataset.topic_discovery_entity_cluster_params
+      required: true
+      partition: unpartitioned
+  outputs:
+    entity_clusters:
+      artifact_id: dataset.topic_discovery_entity_clusters
+      partition: unpartitioned
+
+materializer:
+  function: topic_discovery_entity_cluster
+  return_keys:
+    - entity_clusters
+
+input_payload:
+  entity_graph:
+    fields:
+      nodes:
+        type: array
+        required: true
+        item:
+          type: object
+          fields:
+            chunk_id:
+              type: string
+              required: true
+              validation:
+                - non_empty_after_strip
+            doc_id:
+              type: string
+              required: true
+            group:
+              type: string
+              required: true
+            entities:
+              type: list[string]
+              required: true
+              validation:
+                - string_items
+      edges:
+        type: array
+        required: true
+        item:
+          type: object
+          fields:
+            source_chunk_id:
+              type: string
+              required: true
+            target_chunk_id:
+              type: string
+              required: true
+            score:
+              type: number
+              required: true
+            overlapped_items:
+              type: list[string]
+              required: true
+              validation:
+                - string_items
+      skipped_chunks:
+        type: array
+        required: false
+        default: []
+      stats:
+        type: object
+        required: false
+      params:
+        type: object
+        required: false
+  topic_discovery_entity_cluster_params:
+    fields:
+      topic_merge_similarity_threshold:
+        type: number
+        required: false
+        default: 0.95
+        validation:
+          - range: [0, 1]
+
+output_payload:
+  entity_clusters:
+    json_compatible: true
+    fields:
+      clusters:
+        type: array
+        item:
+          type: object
+          fields:
+            cluster_id:
+              type: string
+            cluster_type:
+              type: string
+              enum:
+                - entity
+            topics:
+              type: list[string]
+            chunk_ids:
+              type: list[string]
+            chunk_count:
+              type: integer
+            scores:
+              type: object
+            metadata:
+              type: object
+              required: false
+      stats:
+        type: object
+        fields:
+          source_node_count:
+            type: integer
+          source_edge_count:
+            type: integer
+          edge_cluster_count:
+            type: integer
+          singleton_cluster_count:
+            type: integer
+          cluster_count:
+            type: integer
+          topic_merge_count:
+            type: integer
+      params:
+        type: object
+        fields:
+          topic_merge_similarity_threshold:
+            type: number
+
+
+execution_flow:
+  - 解析并校验 topic_discovery_entity_cluster_params。
+  - 校验 entity_graph.nodes 和 edges。
+  - 建立 chunk_id 到 node order 的索引。
+  - 遍历 edges.overlapped_items，构建 topic -> edges 倒排索引。
+  - 对每个 topic 的 edges 构建子图并求 connected components。
+  - 将每个 component 归一化为 cluster_type=entity、topics=[topic] 的 cluster。
+  - 对 edge-derived clusters 按 topic_merge_similarity_threshold 做二次 Jaro-Winkler merge。
+  - 找出未进入任意 edge-derived cluster 的 nodes，并按 graph node 顺序追加 singleton cluster；singleton cluster 的 topics 使用 node.entities。
+  - 为所有 cluster 生成稳定 cluster_id。
+  - 汇总 stats。
+  - 返回 {"entity_clusters": payload}。
+
+tests:
+  cluster_build_logic:
+    # 聚类主逻辑：看 entity-specific 子图、topic merge、singleton 补全后的 cluster 组成与顺序。
+    cases:
+      # 正常 graph 输入能产出 edge-derived clusters、singleton clusters、stats 和 params。
+      - success
+      # 空参数输入时使用默认 merge 阈值，并将默认值回写到 params。
+      - default_params
+      # 同一 topic 的边只在各自子图内求 connected components，不跨 topic 串联。
+      # 例子：Tesla 相关边先形成 Tesla 子图，SpaceX 相关边先形成 SpaceX 子图；两类边即使共享某个 chunk，
+      # 也先分别在各自 topic 下求连通分量，而不是先混成一个总图。
+      - entity_specific_subgraph_components
+      # 一个 chunk 可以因命中不同 topic 出现在多个 edge-derived clusters 中。
+      # 例子：某个 chunk 同时与 Tesla 和 EV 两类 topic 的边相连时，可以同时出现在 Tesla cluster 和 EV cluster。
+      - overlapping_cluster_membership
+      # 二次 topic merge 只作用于 edge-derived clusters，不改变 singleton 的独立性。
+      # 例子：两个 edge-derived clusters 的 topics 高相似时可以合并，但一个 singleton cluster 即使 topic 相似，
+      # 也不应被吸收到已有 edge-derived cluster。
+      - topic_merge_edge_clusters_only
+      # 未被任何 edge-derived cluster 覆盖的 nodes 会按 graph node 顺序补成 singleton clusters。
+      # 例子：某个 node 没有出现在任何 edge 对应的 topic 子图里时，会在所有 edge-derived clusters 之后补成 singleton。
+      - singleton_clusters_appended
+      # singleton cluster 的 topics 直接来自对应 node.entities，而不是空值或 edge topic。
+      # 例子：一个孤立 node 的 entities=['SpaceX', 'Shanghai']，对应 singleton cluster 的 topics 也应是这两个值。
+      - singleton_topics_from_node_entities
+      # singleton clusters 不参与 topic merge，即使 topics 与已有 cluster 相似也保持独立。
+      # 例子：一个 singleton 的 topics=['Tesla Inc']，即使与已有 Tesla cluster 高相似，也保持单独输出。
+      - singleton_clusters_not_merged
+      # cluster 顺序稳定：先 edge-derived，再 singleton，并保持图内原始顺序。
+      # 例子：先按 edges.overlapped_items 的出现顺序输出 edge-derived clusters，再按 nodes 原顺序追加 singleton clusters。
+      - stable_cluster_order
+      # source_node_count、source_edge_count、edge_cluster_count、singleton_cluster_count、cluster_count、topic_merge_count 与输出一致。
+      - stats
+      # materializer 返回结构固定为 {"entity_clusters": payload}，不混入额外字段。
+      - return_keys_match_outputs
+  input_validation:
+    # 输入契约与失败路径：看 entity_graph 的 nodes / edges 结构是否合法，坏输入是否立即失败。
+    cases:
+      # entity_graph.nodes 必须是非空 list，chunk_id 不可重复，entities 必须是非空 list[string]。
+      # 例子：nodes 为空、chunk_id 重复、entities 不是 list[string]、或 entities 里出现空字符串，都应直接失败。
+      - contract
+      # edge endpoint 必须属于 entity_graph.nodes；非法 graph 或非法参数应立即抛错。
+      # 例子：edge 引用了 nodes 中不存在的 chunk_id，或者 topic_merge_similarity_threshold 超出 [0, 1]，都应立即失败。
+      - validation_error
+  runtime_wiring:
+    # fixed op 接线：看上游 entity_graph 是否能在 runtime 中稳定交给下游 manifest。
+    cases:
+      # runtime 中 entity_graph 产物能稳定进入 entity_clusters，并继续供最终 manifest 消费。
+      - partition

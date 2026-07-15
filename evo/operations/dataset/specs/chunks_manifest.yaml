@@ -1,0 +1,206 @@
+operation:
+  op_id: dataset.build_chunks_manifest
+  flow: dataset
+  stage: build_chunks_manifest
+  description: 汇总 build_chunks 输出的所有 chunk slots，生成全局 chunk manifest。
+
+fixed_op:
+  inputs:
+    selected_docs:
+      artifact_id: dataset.selected_docs
+      required: true
+      partition: unpartitioned
+    chunk:
+      artifact_id: dataset.chunk
+      required: true
+      partition: partitioned
+      mapping: all_to_unpartitioned
+    build_chunks_params:
+      artifact_id: dataset.build_chunks_params
+      required: true
+      partition: unpartitioned
+  outputs:
+    build_chunks_manifest:
+      artifact_id: dataset.build_chunks_manifest
+      partition: unpartitioned
+
+materializer:
+  function: build_chunks_manifest
+  return_keys:
+    - build_chunks_manifest
+
+input_payload:
+  selected_docs:
+    fields:
+      kb_id:
+        type: string
+        required: true
+      docs:
+        type: array
+        required: true
+        item:
+          type: object
+          fields:
+            doc_id:
+              type: string
+              required: true
+            filename:
+              type: string
+              required: false
+            file_type:
+              type: string
+              required: false
+            status:
+              type: string
+              required: false
+            group_counts:
+              type: object
+              required: false
+              value_type: integer
+      params:
+        type: object
+        required: false
+        fields:
+          target_case_count:
+            type: integer
+            required: false
+            default: 100
+  chunk:
+    tuple: true
+    item:
+      fields:
+        available:
+          type: boolean
+          required: true
+        chunk_id:
+          type: string
+          required: true
+        doc_id:
+          type: string
+          required: true
+        filename:
+          type: string
+          required: false
+          default: ""
+        group:
+          type: string
+          required: true
+        type:
+          type: string
+          required: false
+          default: text
+        text:
+          type: string
+          required: false
+          default: ""
+        embedding:
+          type: object
+          required: false
+          default: {}
+        metadata:
+          type: object
+          required: false
+          default: {}
+  build_chunks_params:
+    fields:
+      groups:
+        type: list[string]
+        required: false
+        default:
+          - block
+        validation:
+          - non_empty_id_items
+
+output_payload:
+  build_chunks_manifest:
+    json_compatible: true
+    fields:
+      source:
+        type: object
+        fields:
+          kb_id:
+            type: string
+          selected_docs_ref:
+            type: string
+            required: false
+      chunks:
+        type: array
+        item:
+          type: object
+          fields:
+            available:
+              type: boolean
+            chunk_id:
+              type: string
+            doc_id:
+              type: string
+            filename:
+              type: string
+            group:
+              type: string
+            partition:
+              type: string
+      stats:
+        type: object
+        fields:
+          chunk_count:
+            type: integer
+          slot_count:
+            type: integer
+          empty_count:
+            type: integer
+          doc_count:
+            type: integer
+          group_counts:
+            type: object
+            value_type: integer
+          doc_group_stats:
+            type: array
+            item:
+              type: object
+              fields:
+                doc_id:
+                  type: string
+                filename:
+                  type: string
+                total:
+                  type: integer
+                groups:
+                  type: object
+                  value_type: integer
+          fallback_used:
+            type: boolean
+          warnings:
+            type: list[string]
+      params:
+        type: object
+        fields:
+          groups:
+            type: list[string]
+          target_chunk_count:
+            type: integer
+
+execution_flow:
+  - 读取并校验 selected_docs input payload。
+  - 读取并归一化 build_chunks_params。
+  - 读取 all_to_unpartitioned 汇总后的 chunk tuple。
+  - 要求 chunk tuple 的数量等于 target_chunk_count。
+  - 按 runtime partition 顺序将 chunk slots 归一化为 build_chunks_manifest.chunks 项。
+  - 每个 manifest 项保留 available、chunk_id、doc_id、filename、group 和 partition。
+  - 统计 available=true 的真实 chunk 数量为 chunk_count。
+  - 统计 available=false 的占位 slot 数量为 empty_count。
+  - 汇总 slot_count、target_chunk_count、doc_count、group_counts、doc_group_stats、fallback_used 和 warnings。
+  - 返回 {"build_chunks_manifest": payload}。
+
+tests:
+  - contract
+  - success
+  - default_groups
+  - validation_error
+  - target_chunk_count_from_selected_docs
+  - tuple_count_mismatch_error
+  - unavailable_chunk_manifest_item
+  - build_chunks_manifest
+  - stats
+  - return_keys_match_outputs
+  - partition

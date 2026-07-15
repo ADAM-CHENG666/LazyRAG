@@ -1,0 +1,208 @@
+operation:
+  op_id: dataset.topic_discovery_entity_build_graph
+  flow: dataset
+  stage: topic_discovery_entity_build_graph
+  description: 基于 partitioned chunk_entity 结果构建 entity 主题发现关系图。
+
+fixed_op:
+  inputs:
+    chunk_entity:
+      artifact_id: dataset.chunk_entity
+      required: true
+      partition: partitioned
+      mapping: all_to_unpartitioned
+    chunk_entities_extract_manifest:
+      artifact_id: dataset.chunk_entities_extract_manifest
+      required: true
+      partition: unpartitioned
+    topic_discovery_entity_build_graph_params:
+      artifact_id: dataset.topic_discovery_entity_build_graph_params
+      required: true
+      partition: unpartitioned
+  outputs:
+    entity_graph:
+      artifact_id: dataset.topic_discovery_entity_graph
+      partition: unpartitioned
+
+materializer:
+  function: topic_discovery_entity_build_graph
+  return_keys:
+    - entity_graph
+
+input_payload:
+  chunk_entity:
+    tuple: true
+    item:
+      fields:
+        available:
+          type: boolean
+          required: false
+          default: true
+        chunk_id:
+          type: string
+          required: true
+          validation:
+            - non_empty_after_strip
+        doc_id:
+          type: string
+          required: true
+          validation:
+            - non_empty_after_strip
+        group:
+          type: string
+          required: true
+          validation:
+            - non_empty_after_strip
+        entities:
+          type: list[string]
+          required: true
+          validation:
+            - string_items
+  chunk_entities_extract_manifest:
+    fields:
+      chunks:
+        type: array
+        required: true
+  topic_discovery_entity_build_graph_params:
+    fields:
+      entity_similarity_threshold:
+        type: number
+        required: false
+        default: 0.9
+        validation:
+          - range: [0, 1]
+      edge_score_threshold:
+        type: number
+        required: false
+        default: 0.01
+        validation:
+          - range: [0, 1]
+      noisy_entity_top_percent:
+        type: number
+        required: false
+        default: 0.05
+        validation:
+          - range: [0, 1]
+
+output_payload:
+  entity_graph:
+    json_compatible: true
+    fields:
+      nodes:
+        type: array
+        item:
+          type: object
+          fields:
+            chunk_id:
+              type: string
+            doc_id:
+              type: string
+            group:
+              type: string
+            entities:
+              type: list[string]
+      edges:
+        type: array
+        item:
+          type: object
+          fields:
+            source_chunk_id:
+              type: string
+            target_chunk_id:
+              type: string
+            score:
+              type: number
+            overlapped_items:
+              type: list[string]
+      skipped_chunks:
+        type: array
+        item:
+          type: object
+          fields:
+            chunk_id:
+              type: string
+            reason:
+              type: string
+              enum:
+                - unavailable_chunk
+                - empty_entities
+            detail:
+              type: string
+      stats:
+        type: object
+        fields:
+          source_chunk_count:
+            type: integer
+          node_count:
+            type: integer
+          edge_count:
+            type: integer
+          skipped_chunk_count:
+            type: integer
+          noisy_entity_count:
+            type: integer
+      params:
+        type: object
+        fields:
+          entity_similarity_threshold:
+            type: number
+          edge_score_threshold:
+            type: number
+          noisy_entity_top_percent:
+            type: number
+
+
+execution_flow:
+  - 读取 chunk_entities_extract_manifest 作为上阶段完成栅栏；materializer 不使用其内容计算图。
+  - 解析并校验 topic_discovery_entity_build_graph_params。
+  - 读取 all_to_unpartitioned 汇总后的 chunk_entity tuple。
+  - 按 chunk_entity.available 判断是否为有效 chunk。
+  - 遍历 chunk_entity tuple，构建有效 nodes 和 skipped_chunks。
+  - 如果没有有效 node，则 operation 失败。
+  - 基于有效 nodes 统计 noisy entities。
+  - 遍历 node pairs，过滤 noisy entities 后计算 overlapped_items 和 score。
+  - 对满足 edge_score_threshold 的 pair 生成 edge。
+  - 汇总 stats。
+  - 返回 {"entity_graph": payload}。
+
+tests:
+  graph_build_logic:
+    # 构图主逻辑：看哪些 chunk 会成为 node，哪些重叠实体会形成 edge，以及 stats 是否与实际构图结果一致。
+    cases:
+      # 正常 chunk_entity tuple 能产出 nodes、edges、stats 和 params，返回键只包含 entity_graph。
+      - success
+      # 空参数输入时使用默认阈值，并将默认值原样回写到 params。
+      - default_params
+      # available=false 的 chunk 不进入 nodes，而是进入 skipped_chunks。
+      - unavailable_chunk_skipped
+      # entities=[] 的 chunk 不进入 nodes，而是以 empty_entities 原因进入 skipped_chunks。
+      - empty_entities_skipped
+      # 高频噪声实体会在 pairwise overlap 计算前被过滤，不应主导最终 edges。
+      # 例子：多个 chunk 都共享 Tesla，同时各自带一个不同实体；当 noisy_entity_top_percent 足够大时，Tesla 会被过滤，
+      # 原本只靠 Tesla 连起来的边会消失。
+      - noisy_entity_filter
+      # 两个近似实体命中阈值时，overlapped_items 保留更长、更可读的实体文本。
+      # 例子：Tesla 与 Tesla Inc 命中阈值时，最终记录 Tesla Inc，而不是更短的 Tesla。
+      - overlap_item_uses_longer_entity
+      # 仅当 overlap score 达到阈值时才生成 edge；低于阈值的 pair 被丢弃。
+      # 例子：同一对 chunk 在 edge_score_threshold=0.5 时保留，在 0.6 时被过滤。
+      - edge_score_threshold
+      # source_chunk_count、node_count、edge_count、skipped_chunk_count、noisy_entity_count 与实际输出一致。
+      - stats
+      # materializer 返回结构固定为 {"entity_graph": payload}，不混入额外字段。
+      - return_keys_match_outputs
+  input_validation:
+    # 输入契约与失败路径：看坏输入是立即失败，还是被明确跳过。
+    cases:
+      # chunk_entity 必须是 partitioned tuple，tuple 内每项必须是 mapping，且包含合法 chunk_id/doc_id/group/entities。
+      # 例子：chunk_entity 传 list、tuple 内某一项不是 mapping、entities 不是 list[string]、或 entities 内含空字符串，都应直接失败。
+      - contract
+      # 参数必须是 0 到 1 之间的数字；当没有任何有效 node 时直接抛错，不生成空 graph。
+      # 例子：entity_similarity_threshold / edge_score_threshold / noisy_entity_top_percent 任一越界都应失败；
+      # 全部 chunk 都是 unavailable 或 empty_entities 时，也应失败。
+      - validation_error
+  runtime_wiring:
+    # fixed op 接线：看 all_to_unpartitioned 输入聚合后，运行时能否把 entity_graph 继续交给下游 entity_cluster。
+    cases:
+      # runtime 能正确汇总 partitioned chunk_entity 输入，并产出单个 unpartitioned entity_graph。
+      - partition
