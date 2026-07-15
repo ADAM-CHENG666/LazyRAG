@@ -59,6 +59,9 @@ def test_topic_discovery_waits_for_chunk_entities_extract_manifest(tmp_path):
             '"answer":"It covers battery defects under stated conditions.",'
             '"grading_guidance":"Assess coverage under the stated conditions."}'
         ),
+        'dataset.generate_enhance': lambda ctx, inputs: {
+            'case_enhance': {'key_points': [], 'forbidden_claims': []}
+        },
     })
     adapter = build_evo_artifact_adapter(store, qaplan_dataset_evo_ops(spec), materializers)
     _seed(adapter, 'manifest-barrier')
@@ -98,6 +101,9 @@ def test_qaplan_dataset_runtime_converts_three_chunks_into_two_cases(tmp_path):
             '"answer":"It covers battery defects under stated conditions.",'
             '"grading_guidance":"Assess coverage under the stated conditions."}'
         ),
+        'dataset.generate_enhance': lambda ctx, inputs: {
+            'case_enhance': {'key_points': [], 'forbidden_claims': []}
+        },
     })
     adapter = build_evo_artifact_adapter(store, qaplan_dataset_evo_ops(spec), materializers)
     run_id = 'qaplan-runtime'
@@ -117,6 +123,7 @@ def test_qaplan_dataset_runtime_converts_three_chunks_into_two_cases(tmp_path):
     assert [item['id'] for item in manifest['cases']] == ['case_0001', 'case_0002']
     assert ArtifactKey(C.DATASET_CHUNK, 'chunk_0003') in effective
     assert ArtifactKey(C.DATASET_CASE, 'case_0002') in effective
+    assert ArtifactKey(C.DATASET_CASE_ENHANCE, 'case_0002') in effective
 
 
 def _seed(adapter, run_id):

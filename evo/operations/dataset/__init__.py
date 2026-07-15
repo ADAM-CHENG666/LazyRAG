@@ -8,6 +8,7 @@ from .generation import dataset_materializers, generate_case
 from .kb_loader import build_corpus_snapshot, load_corpus
 from .models import Chunk, ChunkSource, chunk_from_docnode, chunks_from_docnodes
 from .generate import generate, generate_manifest
+from .generate_enhance import generate_enhance
 from .qaplan import qaplan_plan, qaplan_spec
 from .qaplan_pipeline import qaplan_dataset_materializers
 from .select_docs import SelectDocsParams, select_docs
@@ -43,6 +44,7 @@ __all__ = [
     'qaplan_dataset_materializers',
     'generate',
     'generate_manifest',
+    'generate_enhance',
     'qaplan_plan',
     'qaplan_spec',
     'select_docs',

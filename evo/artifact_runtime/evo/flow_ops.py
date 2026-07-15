@@ -512,6 +512,14 @@ def qaplan_dataset_evo_ops(spec: DatasetFlowSpec) -> tuple[type[FixedOp], ...]:
         }
         outputs = {'case': ArtifactOutput(C.DATASET_CASE, cases)}
 
+    class GenerateEnhance(FixedOp):
+        op_id = 'dataset.generate_enhance'
+        inputs = {
+            'case': ArtifactInput(C.DATASET_CASE, partition_spec=cases),
+            'run_config': ArtifactInput(C.RUN_CONFIG, partition_mapping=unpartitioned_to_all()),
+        }
+        outputs = {'case_enhance': ArtifactOutput(C.DATASET_CASE_ENHANCE, cases)}
+
     class GenerateManifest(FixedOp):
         op_id = 'dataset.generate_manifest'
         inputs = {'cases': ArtifactInput(C.DATASET_CASE, partition_spec=cases, partition_mapping=all_to_unpartitioned())}
@@ -520,7 +528,7 @@ def qaplan_dataset_evo_ops(spec: DatasetFlowSpec) -> tuple[type[FixedOp], ...]:
     return (
         SelectDocs, BuildChunkCandidates, BuildChunks, BuildChunksManifest, ChunkEntitiesExtract, ChunkEntitiesManifest,
         EntityGraph, EntityClusters, EmbeddingCandidates, EmbeddingClusters, TopicManifest,
-        QaplanPlan, QaplanSpec, Generate, GenerateManifest,
+        QaplanPlan, QaplanSpec, Generate, GenerateEnhance, GenerateManifest,
     )
 
 

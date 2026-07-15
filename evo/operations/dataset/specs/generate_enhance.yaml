@@ -1,0 +1,130 @@
+operation:
+  op_id: dataset.generate_enhance
+  flow: dataset
+  stage: generate_enhance
+  description: 基于冻结的基础 case，分别提取可判罚 key points 与高风险 forbidden claims。
+
+fixed_op:
+  inputs:
+    case:
+      artifact_id: dataset.case
+      required: true
+      partition: partitioned
+      mapping: same_partition
+    run_config:
+      artifact_id: run.config
+      required: true
+      partition: unpartitioned
+      mapping: unpartitioned_to_all
+  outputs:
+    case_enhance:
+      artifact_id: dataset.case_enhance
+      partition: partitioned
+
+materializer:
+  function: generate_enhance
+  return_keys:
+    - case_enhance
+
+input_payload:
+  case:
+    fields:
+      question:
+        type: string
+        required: true
+        validation:
+          - non_empty_after_strip
+      answer:
+        type: string
+        required: true
+        validation:
+          - non_empty_after_strip
+      reference_context:
+        type: object
+        required: true
+        value_type: string
+      reference_chunk_ids:
+        type: list[string]
+        required: true
+        validation:
+          - non_empty
+  run_config:
+    fields:
+      llm_config:
+        type: object
+        required: true
+
+output_payload:
+  case_enhance:
+    json_compatible: true
+    fields:
+      # answer 中必须命中的原子事实，以及其真实知识库证据。
+      key_points:
+        type: array
+        validation:
+          - min_items: 1
+          - max_items: 5
+        item:
+          type: object
+          fields:
+            # 仅在当前 case 内唯一，按稳定输出顺序生成，例如 key_point_1。
+            id:
+              type: string
+            # 只表述 answer 已包含、且由 evidence_chunk_ids 支持的一项原子事实。
+            statement:
+              type: string
+            # 真实 chunk_id，必须属于输入 case.reference_chunk_ids。
+            evidence_chunk_ids:
+              type: list[string]
+      # references 明确否定、且本题容易误答的具体结论；允许为空。
+      forbidden_claims:
+        type: list[string]
+        validation:
+          - min_items: 0
+          - max_items: 3
+          - non_empty_after_strip_items
+
+execution_flow:
+  - 读取同分区的基础 case；只使用 question、answer、reference_context 和 reference_chunk_ids，不读取 qaplan_spec 或 grading_guidance。
+  - 按 reference_chunk_ids 原始顺序为完整 reference_context 添加稳定短别名，供两个 LLM 调用引用；短别名只在 operation 内部使用，最终输出映射回真实 chunk_id。
+  - 第一次调用 LLM：基于 question、answer 和 references，提取 1–5 条 answer 已包含的原子 key points；每条必须由一个或多个 references 支持，不能引入 answer 未出现的新事实。
+  - 校验 key points 的结构、证据短别名和 statement；将证据映射为真实 evidence_chunk_ids，并按输出顺序赋予 key_point_1、key_point_2 等 case 内稳定 id。不要求 key points 覆盖全部 references。
+  - 第二次独立调用 LLM：基于同一份 question、answer 和 references，提取 0–3 条与本题相关、被 references 明确否定且易误答的 forbidden claims；允许返回空列表。
+  - 两次调用分别复用 dataset.llm_json 的 JSON 解析与一次 repair。任一次最终失败时 operation 失败，不写入部分 case_enhance。
+  - '返回 {"case_enhance": {"key_points": [...], "forbidden_claims": [...]}}；不复制或改写基础 case 字段。'
+
+tests:
+  input_contract:
+    # 输入边界：验证 enhancement 只依赖冻结 case 的 QA 与参考资料，不重新读取 planning 信息或出题 guidance。
+    cases:
+      # question、answer、reference_context、reference_chunk_ids 均为必填；缺失、空白或类型错误时直接失败。
+      - base_case_contract_error
+      # grading_guidance 与 qaplan_spec 即使存在也不进入任一增强 prompt，避免以设计意图扩写事实。
+      - ignores_guidance_and_qaplan_spec
+      # reference_context 中必须包含 reference_chunk_ids 对应的完整文本，且原始 chunk 顺序稳定用于短别名映射。
+      - reference_context_contract_and_stable_aliases
+  key_points_generation:
+    # 第一次 LLM 调用：验证它只将冻结 answer 拆解为可追溯的原子事实。
+    cases:
+      # 合法输出生成 1–5 条 key points；每项写入按输出顺序生成的 key_point_1、key_point_2 等 id 和真实 evidence_chunk_ids。
+      - success
+      # prompt 明确要求 statement 只拆解 answer 中、且由 references 支持的事实；运行时拒绝空 statement、非法或空 evidence 短别名。
+      - answer_bounded_prompt_and_evidence_validation
+      # key points 的证据只需属于 reference_chunk_ids，不要求其并集覆盖全部 references。
+      - no_all_reference_coverage_requirement
+      # 非 JSON、字段缺失或结构错误时仅对此调用执行一次 llm_json repair；第二次仍失败则整个 operation 失败。
+      - repair_then_fail_without_partial_output
+  forbidden_claims_generation:
+    # 第二次 LLM 调用：验证它与 key points 调用独立，只提取资料明确否定的高风险错误结论。
+    cases:
+      # 合法输出为 0–3 条非空字符串；空列表是合法结果。
+      - success_and_empty_list
+      # prompt 明确要求只生成与当前问题相关、且被 references 明确否定的具体结论；不得生成通用禁止语或无证据推测。
+      - grounded_negative_claims_prompt
+      # 此调用自身的 JSON 或内容校验最终失败时，整个 operation 失败，不返回仅含 key_points 的部分结果。
+      - repair_then_fail_without_partial_output
+  runtime_wiring:
+    # fixed op 接线：验证 case 使用 same_partition 输入，run_config 使用 unpartitioned_to_all 广播，并输出同分区 dataset.case_enhance。
+    cases:
+      # runtime 为每个 case 分区创建一个 dataset.generate_enhance[case_xxxx] 实例，并写入对应 dataset.case_enhance 分区。
+      - partition
