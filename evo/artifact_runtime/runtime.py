@@ -6,19 +6,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .artifact import ArtifactMutation, ArtifactRecord, ArtifactRef, CollectionMutation
-from .errors import DefinitionError
 from .operation import Operation
 from .planning import RuntimeDefinition, compile_operations
 from .session import RunSession
 from .state import RuntimeSnapshot
 from .store import ArtifactStore
-
-
-def _text(value: object, name: str) -> None:
-    if not isinstance(value, str):
-        raise TypeError(f'{name} must be str')
-    if not value.strip():
-        raise DefinitionError(f'{name} must be non-empty')
+from .utils import _positive_int, _positive_number, _text
 
 
 @dataclass(frozen=True)
@@ -45,12 +38,8 @@ class ArtifactRuntime:
         cls, root: str | Path, operations: Sequence[Operation], *,
         max_concurrency: int = 4, terminate_timeout: float = 1.0,
     ) -> ArtifactRuntime:
-        if not isinstance(max_concurrency, int) or isinstance(max_concurrency, bool):
-            raise TypeError('max_concurrency must be int')
-        if max_concurrency < 1:
-            raise DefinitionError('max_concurrency must be >= 1')
-        if terminate_timeout <= 0:
-            raise DefinitionError('terminate_timeout must be positive')
+        _positive_int(max_concurrency, 'max_concurrency')
+        _positive_number(terminate_timeout, 'terminate_timeout')
         definition = compile_operations(operations)
         return cls(
             await ArtifactStore.open(root),

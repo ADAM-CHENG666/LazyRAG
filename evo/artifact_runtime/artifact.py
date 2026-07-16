@@ -6,13 +6,7 @@ from types import MappingProxyType
 from typing import Literal
 
 from .errors import DefinitionError
-
-
-def _text(value: object, name: str) -> None:
-    if not isinstance(value, str):
-        raise TypeError(f'{name} must be str')
-    if not value.strip():
-        raise DefinitionError(f'{name} must be non-empty')
+from .utils import _positive_int, _string, _text
 
 
 @dataclass(frozen=True, order=True)
@@ -22,8 +16,7 @@ class ArtifactKey:
 
     def __post_init__(self) -> None:
         _text(self.artifact_id, 'artifact_id')
-        if not isinstance(self.item_key, str):
-            raise TypeError('item_key must be str')
+        _string(self.item_key, 'item_key')
         if self.item_key and not self.item_key.strip():
             raise DefinitionError('item_key must be non-empty when set')
 
@@ -45,10 +38,7 @@ class ArtifactRef:
     def __post_init__(self) -> None:
         if not isinstance(self.key, ArtifactKey):
             raise TypeError('key must be ArtifactKey')
-        if not isinstance(self.version, int) or isinstance(self.version, bool):
-            raise TypeError('version must be int')
-        if self.version < 1:
-            raise DefinitionError('version must be >= 1')
+        _positive_int(self.version, 'version')
 
 
 @dataclass(frozen=True)

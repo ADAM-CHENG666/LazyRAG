@@ -27,13 +27,7 @@ from .operation import (
     OperationInvocation,
     OperationSpec,
 )
-
-
-def _text(value: object, name: str) -> None:
-    if not isinstance(value, str):
-        raise TypeError(f'{name} must be str')
-    if not value.strip():
-        raise DefinitionError(f'{name} must be non-empty')
+from .utils import _text
 
 
 @dataclass(frozen=True)

@@ -18,13 +18,7 @@ from .artifact import (
     OperationWriteSet,
 )
 from .errors import DefinitionError
-
-
-def _text(value: object, name: str) -> None:
-    if not isinstance(value, str):
-        raise TypeError(f'{name} must be str')
-    if not value.strip():
-        raise DefinitionError(f'{name} must be non-empty')
+from .utils import _positive_int, _string, _text
 
 
 BindingMode = Literal['one', 'each', 'keyed', 'all']
@@ -192,10 +186,7 @@ class OperationSpec:
 
         if self.execution not in {'async', 'isolated'}:
             raise DefinitionError(f'unknown execution mode: {self.execution}')
-        if not isinstance(self.max_concurrency, int) or isinstance(self.max_concurrency, bool):
-            raise TypeError('max_concurrency must be int')
-        if self.max_concurrency < 1:
-            raise DefinitionError('max_concurrency must be >= 1')
+        _positive_int(self.max_concurrency, 'max_concurrency')
 
         object.__setattr__(self, 'inputs', MappingProxyType(inputs))
         object.__setattr__(self, 'outputs', MappingProxyType(outputs))
@@ -211,8 +202,7 @@ class OperationContext:
     def __post_init__(self) -> None:
         _text(self.run_id, 'run_id')
         _text(self.invocation_id, 'invocation_id')
-        if not isinstance(self.item_key, str):
-            raise TypeError('item_key must be str')
+        _string(self.item_key, 'item_key')
 
 
 @dataclass(frozen=True)
@@ -319,8 +309,7 @@ class OperationInvocation:
             raise DefinitionError('invocation output keys must match operation outputs')
         if len(set(outputs.values())) != len(outputs):
             raise DefinitionError('invocation output artifact keys must be unique')
-        if not isinstance(self.item_key, str):
-            raise TypeError('item_key must be str')
+        _string(self.item_key, 'item_key')
 
         for name, binding in self.operation.spec.inputs.items():
             binding.validate_value(name, inputs[name], self.item_key)

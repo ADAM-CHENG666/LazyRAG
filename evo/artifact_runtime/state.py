@@ -7,13 +7,7 @@ from typing import Literal
 
 from .artifact import ArtifactKey, ArtifactRef, CollectionSnapshot
 from .errors import DefinitionError
-
-
-def _text(value: object, name: str) -> None:
-    if not isinstance(value, str):
-        raise TypeError(f'{name} must be str')
-    if not value.strip():
-        raise DefinitionError(f'{name} must be non-empty')
+from .utils import _string, _text
 
 
 RunStatus = Literal[
@@ -37,8 +31,7 @@ class InvocationSnapshot:
     def __post_init__(self) -> None:
         _text(self.invocation_id, 'invocation_id')
         _text(self.operation_id, 'operation_id')
-        if not isinstance(self.item_key, str):
-            raise TypeError('item_key must be str')
+        _string(self.item_key, 'item_key')
 
 
 @dataclass(frozen=True)

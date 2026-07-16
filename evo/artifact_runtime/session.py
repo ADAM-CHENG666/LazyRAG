@@ -15,13 +15,7 @@ from .operation import OperationContext, OperationInvocation, OperationResult
 from .planning import PlanningDecision, PlanningView, RuntimeDefinition, plan_next
 from .state import InvocationSnapshot, RunStatus, RuntimeErrorInfo, RuntimeSnapshot
 from .store import ArtifactStore
-
-
-def _text(value: object, name: str) -> None:
-    if not isinstance(value, str):
-        raise TypeError(f'{name} must be str')
-    if not value.strip():
-        raise DefinitionError(f'{name} must be non-empty')
+from .utils import _positive_int, _positive_number, _text
 
 
 @dataclass(frozen=True)
@@ -58,12 +52,8 @@ class RunSession:
         _text(run_id, 'run_id')
         if not isinstance(store, ArtifactStore):
             raise TypeError('store must be ArtifactStore')
-        if not isinstance(max_concurrency, int) or isinstance(max_concurrency, bool):
-            raise TypeError('max_concurrency must be int')
-        if max_concurrency < 1:
-            raise DefinitionError('max_concurrency must be >= 1')
-        if terminate_timeout <= 0:
-            raise DefinitionError('terminate_timeout must be positive')
+        _positive_int(max_concurrency, 'max_concurrency')
+        _positive_number(terminate_timeout, 'terminate_timeout')
         if not isinstance(definition, RuntimeDefinition):
             raise TypeError('definition must be RuntimeDefinition')
 
