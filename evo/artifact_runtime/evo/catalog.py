@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import MappingProxyType
+from typing import Literal
 
 
 @dataclass(frozen=True)
 class OutputSpec:
     artifact_id: str
-    partitioned: bool = False
+    partition: Literal['none', 'chunk', 'case'] = 'none'
 
 
 RUN_CONFIG = 'run.config'
@@ -19,6 +20,32 @@ ABTEST_CANDIDATE_CONFIG = 'abtest.candidate_config'
 
 CORPUS_REPORT = 'corpus.report'
 CORPUS_SNAPSHOT = 'corpus.snapshot'
+DATASET_SELECTED_DOCS = 'dataset.selected_docs'
+DATASET_BUILD_CHUNKS_PARAMS = 'dataset.build_chunks_params'
+DATASET_BUILD_CHUNK_CANDIDATES = 'dataset.build_chunk_candidates'
+DATASET_BUILD_CHUNKS_MANIFEST = 'dataset.build_chunks_manifest'
+DATASET_CHUNK = 'dataset.chunk'
+DATASET_CHUNK_ENTITIES_EXTRACT_PARAMS = 'dataset.chunk_entities_extract_params'
+DATASET_CHUNK_ENTITY = 'dataset.chunk_entity'
+DATASET_CHUNK_ENTITIES_EXTRACT_MANIFEST_PARAMS = 'dataset.chunk_entities_extract_manifest_params'
+DATASET_CHUNK_ENTITIES_EXTRACT_MANIFEST = 'dataset.chunk_entities_extract_manifest'
+DATASET_TOPIC_DISCOVERY_ENTITY_BUILD_GRAPH_PARAMS = 'dataset.topic_discovery_entity_build_graph_params'
+DATASET_TOPIC_DISCOVERY_ENTITY_GRAPH = 'dataset.topic_discovery_entity_graph'
+DATASET_TOPIC_DISCOVERY_ENTITY_CLUSTER_PARAMS = 'dataset.topic_discovery_entity_cluster_params'
+DATASET_TOPIC_DISCOVERY_ENTITY_CLUSTERS = 'dataset.topic_discovery_entity_clusters'
+DATASET_TOPIC_DISCOVERY_EMBEDDING_CLUSTER_PARAMS = 'dataset.topic_discovery_embedding_cluster_params'
+DATASET_TOPIC_DISCOVERY_EMBEDDING_CLUSTER_CANDIDATES = 'dataset.topic_discovery_embedding_cluster_candidates'
+DATASET_TOPIC_DISCOVERY_EMBEDDING_LABEL_PARAMS = 'dataset.topic_discovery_embedding_label_params'
+DATASET_TOPIC_DISCOVERY_EMBEDDING_CLUSTERS = 'dataset.topic_discovery_embedding_clusters'
+DATASET_TOPIC_DISCOVERY_MANIFEST = 'dataset.topic_discovery_manifest'
+DATASET_QAPLAN_PLAN_PARAMS = 'dataset.qaplan_plan_params'
+DATASET_QAPLAN_PLAN = 'dataset.qaplan_plan'
+DATASET_QAPLAN_SPEC = 'dataset.qaplan_spec'
+DATASET_QAPLAN_MANIFEST = 'dataset.qaplan_manifest'
+DATASET_CASE = 'dataset.case'
+DATASET_CASE_ENHANCE = 'dataset.case_enhance'
+DATASET_GENERATE_MANIFEST = 'dataset.generate_manifest'
+DATASET_GENERATE_ENHANCE_MANIFEST = 'dataset.generate_enhance_manifest'
 EVAL_CASE_PREPARATION = 'eval.case_preparation'
 EVAL_CASE = 'eval.case'
 EVAL_DATASET = 'eval.dataset'
@@ -39,7 +66,17 @@ ABTEST_CANDIDATE_JUDGE_RESULT = 'abtest.candidate_judge_result'
 ABTEST_CANDIDATE_EVAL_SUMMARY = 'abtest.candidate_eval_summary'
 ABTEST_COMPARISON = 'abtest.comparison'
 
-STEPS = ('dataset', 'eval', 'analysis', 'repair', 'abtest')
+STEPS = (
+    'dataset.build_chunks',
+    'dataset.topic_discovery',
+    'dataset.qaplan',
+    'dataset.generate',
+    'dataset.generate_enhance',
+    'eval',
+    'analysis',
+    'repair',
+    'abtest',
+)
 
 SEEDS = (
     RUN_CONFIG,
@@ -51,7 +88,11 @@ SEEDS = (
 )
 
 ROOTS = MappingProxyType({
-    'dataset': EVAL_DATASET,
+    'dataset.build_chunks': DATASET_BUILD_CHUNKS_MANIFEST,
+    'dataset.topic_discovery': DATASET_TOPIC_DISCOVERY_MANIFEST,
+    'dataset.qaplan': DATASET_QAPLAN_MANIFEST,
+    'dataset.generate': DATASET_GENERATE_MANIFEST,
+    'dataset.generate_enhance': DATASET_GENERATE_ENHANCE_MANIFEST,
     'eval': EVAL_SUMMARY,
     'analysis': ANALYSIS_SUMMARY,
     'repair': REPAIR_VERIFIED_PATCH,
@@ -59,21 +100,42 @@ ROOTS = MappingProxyType({
 })
 
 OUTPUTS = MappingProxyType({
-    'dataset': (
-        OutputSpec(CORPUS_REPORT),
-        OutputSpec(CORPUS_SNAPSHOT),
-        OutputSpec(EVAL_CASE_PREPARATION, True),
-        OutputSpec(EVAL_CASE, True),
-        OutputSpec(EVAL_DATASET),
+    'dataset.build_chunks': (
+        OutputSpec(DATASET_SELECTED_DOCS),
+        OutputSpec(DATASET_BUILD_CHUNK_CANDIDATES),
+        OutputSpec(DATASET_BUILD_CHUNKS_MANIFEST),
+        OutputSpec(DATASET_CHUNK, 'chunk'),
+    ),
+    'dataset.topic_discovery': (
+        OutputSpec(DATASET_CHUNK_ENTITY, 'chunk'),
+        OutputSpec(DATASET_CHUNK_ENTITIES_EXTRACT_MANIFEST),
+        OutputSpec(DATASET_TOPIC_DISCOVERY_ENTITY_GRAPH),
+        OutputSpec(DATASET_TOPIC_DISCOVERY_ENTITY_CLUSTERS),
+        OutputSpec(DATASET_TOPIC_DISCOVERY_EMBEDDING_CLUSTER_CANDIDATES),
+        OutputSpec(DATASET_TOPIC_DISCOVERY_EMBEDDING_CLUSTERS),
+        OutputSpec(DATASET_TOPIC_DISCOVERY_MANIFEST),
+    ),
+    'dataset.qaplan': (
+        OutputSpec(DATASET_QAPLAN_PLAN),
+        OutputSpec(DATASET_QAPLAN_SPEC, 'case'),
+        OutputSpec(DATASET_QAPLAN_MANIFEST),
+    ),
+    'dataset.generate': (
+        OutputSpec(DATASET_CASE, 'case'),
+        OutputSpec(DATASET_GENERATE_MANIFEST),
+    ),
+    'dataset.generate_enhance': (
+        OutputSpec(DATASET_CASE_ENHANCE, 'case'),
+        OutputSpec(DATASET_GENERATE_ENHANCE_MANIFEST),
     ),
     'eval': (
-        OutputSpec(EVAL_RAG_ANSWER, True),
-        OutputSpec(EVAL_JUDGE_RESULT, True),
+        OutputSpec(EVAL_RAG_ANSWER, 'case'),
+        OutputSpec(EVAL_JUDGE_RESULT, 'case'),
         OutputSpec(EVAL_SUMMARY),
     ),
     'analysis': (
-        OutputSpec(ANALYSIS_TRACE_SUMMARY, True),
-        OutputSpec(ANALYSIS_CASE_CLASSIFICATION, True),
+        OutputSpec(ANALYSIS_TRACE_SUMMARY, 'case'),
+        OutputSpec(ANALYSIS_CASE_CLASSIFICATION, 'case'),
         OutputSpec(ANALYSIS_TRACE_CLUSTERS),
         OutputSpec(ANALYSIS_SUMMARY),
     ),
@@ -85,15 +147,15 @@ OUTPUTS = MappingProxyType({
     ),
     'abtest': (
         OutputSpec(ABTEST_CANDIDATE_SERVICE),
-        OutputSpec(ABTEST_CANDIDATE_RAG_ANSWER, True),
-        OutputSpec(ABTEST_CANDIDATE_JUDGE_RESULT, True),
+        OutputSpec(ABTEST_CANDIDATE_RAG_ANSWER, 'case'),
+        OutputSpec(ABTEST_CANDIDATE_JUDGE_RESULT, 'case'),
         OutputSpec(ABTEST_CANDIDATE_EVAL_SUMMARY),
         OutputSpec(ABTEST_COMPARISON),
     ),
 })
 
 READ_CASE = MappingProxyType({
-    'dataset_case': EVAL_CASE,
+    'dataset_case': DATASET_CASE,
     'eval_answer': EVAL_RAG_ANSWER,
     'eval_judge': EVAL_JUDGE_RESULT,
     'analysis_trace': ANALYSIS_TRACE_SUMMARY,
@@ -103,7 +165,8 @@ READ_CASE = MappingProxyType({
 })
 
 RERUN_CASE_STAGE = MappingProxyType({
-    'dataset': (EVAL_CASE_PREPARATION, EVAL_CASE),
+    'dataset.generate': (DATASET_CASE, DATASET_CASE_ENHANCE),
+    'dataset.generate_enhance': (DATASET_CASE_ENHANCE,),
     'eval': (EVAL_RAG_ANSWER, EVAL_JUDGE_RESULT),
     'analysis': (ANALYSIS_TRACE_SUMMARY, ANALYSIS_CASE_CLASSIFICATION),
     'abtest': (ABTEST_CANDIDATE_RAG_ANSWER, ABTEST_CANDIDATE_JUDGE_RESULT),

@@ -16,7 +16,6 @@ from evo.artifact_runtime.kernel import ArtifactKey, ArtifactRef, ConcurrencyLim
 from evo.operations.abtest import abtest_materializers
 from evo.operations.analysis import analysis_materializers
 from evo.operations.dataset import dataset_materializers
-from evo.operations.dataset.csv_loader import as_text, norm_text
 from evo.operations.eval import eval_materializers
 from evo.operations.repair import repair_materializers
 
@@ -28,6 +27,16 @@ CONFIG_ARTIFACTS = {
     'repair_policy': C.REPAIR_POLICY,
     'candidate_config': C.ABTEST_CANDIDATE_CONFIG,
 }
+_DATASET_DEFAULT_PARAMS = (
+    C.DATASET_BUILD_CHUNKS_PARAMS,
+    C.DATASET_CHUNK_ENTITIES_EXTRACT_PARAMS,
+    C.DATASET_CHUNK_ENTITIES_EXTRACT_MANIFEST_PARAMS,
+    C.DATASET_TOPIC_DISCOVERY_ENTITY_BUILD_GRAPH_PARAMS,
+    C.DATASET_TOPIC_DISCOVERY_ENTITY_CLUSTER_PARAMS,
+    C.DATASET_TOPIC_DISCOVERY_EMBEDDING_CLUSTER_PARAMS,
+    C.DATASET_TOPIC_DISCOVERY_EMBEDDING_LABEL_PARAMS,
+    C.DATASET_QAPLAN_PLAN_PARAMS,
+)
 EVO_MAX_IN_FLIGHT = 8
 EVO_PARTITION_OP_LIMIT = 4
 
@@ -51,7 +60,7 @@ class RuntimePort:
             store,
             default_evo_ops(spec.cases),
             {
-                **dataset_materializers(spec.cases, duplicate_questions=self._duplicate_case_questions),
+                **dataset_materializers(spec.cases),
                 **eval_materializers(),
                 **analysis_materializers(),
                 **repair_materializers(),
@@ -66,7 +75,15 @@ class RuntimePort:
             SQLiteFlowGate(self.store_root),
             adapter_factory=lambda: self.adapter(num_case),
             spec=spec,
-            checkpoint_policy=CheckpointPolicy(('dataset', 'eval', 'analysis', 'repair')),
+            checkpoint_policy=CheckpointPolicy((
+                'dataset.build_chunks',
+                'dataset.topic_discovery',
+                'dataset.qaplan',
+                'dataset.generate',
+                'eval',
+                'analysis',
+                'repair',
+            )),
             tick_limit=max(50, num_case * 8 + 20),
         )
 
@@ -95,6 +112,14 @@ class RuntimePort:
                     idempotency_key=f'seed:{run_id}:{artifact_id}:{request_hash}',
                     metadata={'kind': 'thread_seed'},
                 )
+            for artifact_id in _DATASET_DEFAULT_PARAMS:
+                store.commit_external(
+                    run_id,
+                    ArtifactKey.of(artifact_id),
+                    {},
+                    idempotency_key=f'seed:{run_id}:{artifact_id}:{request_hash}',
+                    metadata={'kind': 'dataset_default_params'},
+                )
         finally:
             store.close()
 
@@ -104,24 +129,6 @@ class RuntimePort:
             ref = store.effective_artifacts(run_id).get(ArtifactKey.of(C.RUN_CONFIG))
             record = store.get(run_id, ref) if ref is not None else None
             return record.value if record is not None and isinstance(record.value, Mapping) else None
-        finally:
-            store.close()
-
-    def _duplicate_case_questions(self, run_id: str, case_id: str, row: Mapping[str, Any]) -> list[str]:
-        question = norm_text(row.get('question'))
-        if not question:
-            return []
-        store = self.store()
-        try:
-            duplicates = []
-            for key, ref in store.effective_artifacts(run_id).items():
-                if key.artifact_id != C.EVAL_CASE or key.partition == case_id:
-                    continue
-                record = store.get(run_id, ref)
-                value = record.value if record is not None else None
-                if isinstance(value, Mapping) and norm_text(value.get('question')) == question:
-                    duplicates.append(as_text(value.get('question')))
-            return list(dict.fromkeys(item for item in duplicates if item))
         finally:
             store.close()
 
@@ -166,8 +173,11 @@ class RuntimePort:
         return ConcurrencyLimits(
             max_in_flight=EVO_MAX_IN_FLIGHT,
             per_materializer={
-                'dataset.prepare_case': EVO_PARTITION_OP_LIMIT,
-                'dataset.generate_case': EVO_PARTITION_OP_LIMIT,
+                'dataset.build_chunks': EVO_PARTITION_OP_LIMIT,
+                'dataset.chunk_entities_extract': EVO_PARTITION_OP_LIMIT,
+                'dataset.qaplan_spec': EVO_PARTITION_OP_LIMIT,
+                'dataset.generate': EVO_PARTITION_OP_LIMIT,
+                'dataset.generate_enhance': EVO_PARTITION_OP_LIMIT,
                 'eval.answer': EVO_PARTITION_OP_LIMIT,
                 'eval.judge': EVO_PARTITION_OP_LIMIT,
                 'analysis.trace_summary': EVO_PARTITION_OP_LIMIT,

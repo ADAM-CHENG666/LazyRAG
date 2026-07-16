@@ -11,8 +11,54 @@ from .catalog import OUTPUTS, READ_CASE, RERUN_CASE_STAGE, ROOTS, SEEDS, STEPS
 
 
 @dataclass(frozen=True)
+class DatasetFlowSpec:
+    """Static chunk and case partition layout for the dataset pipeline."""
+
+    chunk_ids: tuple[str, ...]
+    case_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        for name, values, prefix in (
+            ('chunk_ids', self.chunk_ids, 'chunk'),
+            ('case_ids', self.case_ids, 'case'),
+        ):
+            if not isinstance(values, tuple) or not values:
+                raise ValueError(f'{name} must be a non-empty tuple[str, ...]')
+            if len(set(values)) != len(values):
+                raise ValueError(f'{name} must be unique')
+            for value in values:
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError(f'{name} must contain non-empty strings')
+                if not value.startswith(f'{prefix}_'):
+                    raise ValueError(f'{name} entries must start with {prefix}_')
+
+    @classmethod
+    def from_case_count(cls, target_case_count: int) -> 'DatasetFlowSpec':
+        if not isinstance(target_case_count, int) or isinstance(target_case_count, bool):
+            raise TypeError('target_case_count must be int')
+        if target_case_count < 1:
+            raise ValueError('target_case_count must be >= 1')
+        target_chunk_count = (target_case_count * 3 + 1) // 2
+        return cls(
+            chunk_ids=tuple(f'chunk_{index:04d}' for index in range(1, target_chunk_count + 1)),
+            case_ids=tuple(f'case_{index:04d}' for index in range(1, target_case_count + 1)),
+        )
+
+    @classmethod
+    def from_case_ids(cls, case_ids: tuple[str, ...]) -> 'DatasetFlowSpec':
+        if not isinstance(case_ids, tuple) or not case_ids:
+            raise ValueError('case_ids must be a non-empty tuple[str, ...]')
+        target_chunk_count = (len(case_ids) * 3 + 1) // 2
+        return cls(
+            chunk_ids=tuple(f'chunk_{index:04d}' for index in range(1, target_chunk_count + 1)),
+            case_ids=case_ids,
+        )
+
+
+@dataclass(frozen=True)
 class EvoFlowSpec:
     cases: tuple[str, ...]
+    dataset: DatasetFlowSpec | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.cases, tuple):
@@ -23,6 +69,10 @@ class EvoFlowSpec:
             raise ValueError('cases must be unique')
         for case_id in self.cases:
             self._require_member(case_id, 'case_id')
+        dataset = self.dataset or DatasetFlowSpec.from_case_ids(self.cases)
+        if dataset.case_ids != self.cases:
+            raise ValueError('dataset.case_ids must match cases')
+        object.__setattr__(self, 'dataset', dataset)
 
     @staticmethod
     def case_ids(count: int) -> tuple[str, ...]:
@@ -31,6 +81,10 @@ class EvoFlowSpec:
         if count < 1:
             raise ValueError('count must be >= 1')
         return tuple(f'case_{index:04d}' for index in range(1, count + 1))
+
+    @classmethod
+    def from_case_count(cls, count: int) -> 'EvoFlowSpec':
+        return cls(cls.case_ids(count))
 
     @property
     def steps(self) -> tuple[str, ...]:
@@ -47,9 +101,9 @@ class EvoFlowSpec:
     def step_output_keys(self, step: str) -> tuple[ArtifactKey, ...]:
         self._require_step(step)
         return tuple(
-            ArtifactKey(output.artifact_id, case_id)
+            ArtifactKey(output.artifact_id, partition)
             for output in OUTPUTS[step]
-            for case_id in (self.cases if output.partitioned else ('',))
+            for partition in self._partitions_for(output.partition)
         )
 
     def read_step_root(self, step: str) -> ArtifactKey:
@@ -103,5 +157,14 @@ class EvoFlowSpec:
     def _require_step(self, step: str) -> None:
         self._require_known(step, OUTPUTS, 'step')
 
+    def _partitions_for(self, partition: str) -> tuple[str, ...]:
+        if partition == 'none':
+            return ('',)
+        if partition == 'chunk':
+            return self.dataset.chunk_ids
+        if partition == 'case':
+            return self.cases
+        raise ValueError(f'unknown output partition: {partition}')
 
-__all__ = ['EvoFlowSpec']
+
+__all__ = ['DatasetFlowSpec', 'EvoFlowSpec']
