@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from evo.operations.dataset.qaplan import qaplan_spec
+from evo.operations.dataset.qaplan import qaplan_manifest, qaplan_spec
 
 
 def _reference(index):
@@ -72,7 +72,7 @@ def test_qaplan_spec_renders_precision_behavior_without_disclosing_qa_type_or_co
 
     assert preparation['instruction'] == (
         '- 必须围绕给定 topic 组织问题，并在 question 中显式出现该 topic 名称。\n'
-        '- question 只围绕一个对象和一个连贯的问题目标。多个 references 可以共同补足唯一答案，但不能被拼接成多个并列子问。\n'
+        '- question 只围绕一个问题目标。多个 references 可以共同补足唯一答案，但不能被拼接成多个并列子问。\n'
         '- answer 的结论必须完全由 references 中可直接找到的事实组成。允许抽取、并列、去重和格式化整合直接事实。\n'
         '- 不得要求或使用计算、比较、资格判断、时间先后判断、因果推断或其他新关系建立；'
     )
@@ -87,8 +87,7 @@ def test_qaplan_spec_renders_reasoning_behavior_without_disclosing_qa_type_or_co
     assert preparation['instruction'] == (
         '- 围绕给定 topic 选择问题；topic 是选题引导，references 是唯一事实依据。\n'
         '- question 必须指向一个唯一、可判定的最终结论，而不能是多个并列问题。\n'
-        '- 最终结论不能只是任一 reference 中一句话的直接复述；必须将 references 中明确给出的事实、条件或关系进行闭合的归纳或推导后得出。\n'
-        '- 可以基于一个 reference 内的多个明确事实推导，也可以综合多个 references 推导；无论哪种情况，都必须实质性使用全部提供的 references。\n'
+        '- answer 不能只是任一 reference 中一句话的直接复述；必须将 references 中明确给出的事实、条件或关系进行闭合的归纳或推导后得出。\n'
         '- 不得依赖外部常识、主观判断、开放式总结或资料未建立的关系。'
     )
     assert '资源调度' not in preparation['instruction']
@@ -150,3 +149,30 @@ def test_qaplan_spec_rejects_plan_and_runtime_count_mismatches(qaplan, case_id, 
 def test_qaplan_spec_rejects_invalid_instruction_or_reference_inputs(item, match):
     with pytest.raises(ValueError, match=match):
         qaplan_spec(_context('case_0001', 1), {'qaplan_plan': _qaplan([item])})
+
+
+def test_qaplan_manifest_is_the_minimal_completion_marker_for_all_specs():
+    # The manifest deliberately records only completion count; qaplan_plan and
+    # the partitioned specs remain the authoritative planning artifacts.
+    result = qaplan_manifest(None, {
+        'qaplan_plan': _qaplan([_item(1), _item(2)]),
+        'qaplan_specs': ({'id': 'case_0001'}, {'id': 'case_0002'}),
+    })
+
+    assert result == {'qaplan_manifest': {'case_count': 2}}
+
+
+@pytest.mark.parametrize(
+    ('plan', 'specs', 'match'),
+    [
+        # A plan cannot declare completion before every planned case has a spec.
+        (_qaplan([_item(1), _item(2)]), ({'id': 'case_0001'},), 'planned_case_count'),
+        # Duplicate spec ids would make the all-partitions completion marker ambiguous.
+        (_qaplan([_item(1), _item(2)]), ({'id': 'case_0001'}, {'id': 'case_0001'}), 'unique'),
+        # The operation requires the runtime all_to_unpartitioned tuple, not an arbitrary list.
+        (_qaplan([_item(1)]), [{'id': 'case_0001'}], 'partitioned tuple'),
+    ],
+)
+def test_qaplan_manifest_rejects_incomplete_or_invalid_specs(plan, specs, match):
+    with pytest.raises(ValueError, match=match):
+        qaplan_manifest(None, {'qaplan_plan': plan, 'qaplan_specs': specs})

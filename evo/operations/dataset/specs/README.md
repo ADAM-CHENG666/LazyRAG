@@ -68,7 +68,7 @@ artifact id: <flow>.<operation_name>_params
 build_chunks_params -> dataset.build_chunks_params
 ```
 
-这样 operation 可以独立运行：只要上游依赖 artifact 和 params artifact 都存在，runtime 就能调度它。`run.config` 是线程级共享运行配置，不作为单个 operation 的专属参数入口。
+这样 operation 可以独立运行：只要上游依赖 artifact 和 params artifact 都存在，runtime 就能调度它。`RuntimePort.seed()` 会为 dataset 的 params artifact 写入空对象，以启用各 operation 自身的默认值；`run.config` 是线程级共享运行配置，不作为单个 operation 的专属参数入口。
 
 ## 4. YAML 字段含义
 

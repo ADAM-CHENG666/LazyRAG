@@ -1,0 +1,72 @@
+operation:
+  op_id: dataset.qaplan_manifest
+  flow: dataset
+  stage: qaplan
+  description: 汇总全局 QA plan 与全部 case 分区的 qaplan spec，作为 QA 计划阶段的完成凭证。
+
+fixed_op:
+  inputs:
+    qaplan_plan:
+      artifact_id: dataset.qaplan_plan
+      required: true
+      partition: unpartitioned
+    qaplan_specs:
+      artifact_id: dataset.qaplan_spec
+      required: true
+      partition: partitioned
+      mapping: all_to_unpartitioned
+  outputs:
+    qaplan_manifest:
+      artifact_id: dataset.qaplan_manifest
+      partition: unpartitioned
+
+materializer:
+  function: qaplan_manifest
+  return_keys:
+    - qaplan_manifest
+
+input_payload:
+  qaplan_plan:
+    fields:
+      items:
+        type: array
+        required: true
+      stats:
+        type: object
+        required: true
+        fields:
+          planned_case_count:
+            type: integer
+            required: true
+  qaplan_specs:
+    tuple: true
+    item:
+      fields:
+        id:
+          type: string
+          required: true
+          validation:
+            - non_empty_after_strip
+
+output_payload:
+  qaplan_manifest:
+    json_compatible: true
+    fields:
+      case_count:
+        type: integer
+
+execution_flow:
+  - 等待 all_to_unpartitioned 的全部 qaplan_spec 分区完成。
+  - 校验 qaplan_plan 的计划数量与 qaplan_spec 数量一致，拒绝重复或空的 spec id。
+  - 仅输出 case_count，作为 dataset.qaplan 阶段的最小完成凭证。
+
+tests:
+  manifest_completion:
+    # manifest 只负责收口 plan 与全部 qaplan spec，不重复保存计划内容。
+    cases:
+      # 全部 spec 到齐且 id 唯一时，输出稳定的 case_count。
+      - success
+      # plan 数量、spec 数量或 spec id 不合法时必须失败，避免提前声明阶段完成。
+      - incomplete_or_invalid_specs_error
+      # 返回结构固定为单一 qaplan_manifest output。
+      - return_keys_match_outputs

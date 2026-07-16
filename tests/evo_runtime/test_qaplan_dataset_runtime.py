@@ -3,11 +3,11 @@ from types import SimpleNamespace
 from evo.artifact_runtime.evo import catalog as C
 from evo.artifact_runtime.evo.adapter import build_evo_artifact_adapter
 from evo.artifact_runtime.evo.flow import DatasetFlowSpec
-from evo.artifact_runtime.evo.flow_ops import qaplan_dataset_evo_ops
+from evo.artifact_runtime.evo.flow_ops import dataset_evo_ops
 from evo.artifact_runtime.kernel import ArtifactKey, SQLiteArtifactStore
-from evo.operations.dataset.chunks_build import build_chunks
+from evo.operations.dataset.chunks_build import build_chunk_candidates
 from evo.operations.dataset.generate import generate
-from evo.operations.dataset.qaplan_pipeline import qaplan_dataset_materializers
+from evo.operations.dataset.qaplan_pipeline import dataset_materializers
 from evo.operations.dataset.select_docs import select_docs
 from evo.operations.dataset.topic_discovery import topic_discovery_embedding_cluster, topic_discovery_embedding_label
 
@@ -34,11 +34,12 @@ class FakeKnowledgeBaseClient:
 def test_topic_discovery_waits_for_chunk_entities_extract_manifest(tmp_path):
     spec = DatasetFlowSpec.from_case_count(2)
     store = SQLiteArtifactStore(tmp_path / 'store')
-    materializers = qaplan_dataset_materializers(spec.case_ids)
+    materializers = dataset_materializers(spec.case_ids)
     client = FakeKnowledgeBaseClient()
     materializers.update({
         'dataset.select_docs': lambda ctx, inputs: select_docs(ctx, inputs, kb_client=client),
-        'dataset.build_chunks': lambda ctx, inputs: build_chunks(ctx, inputs, kb_client=client),
+        # Candidate construction owns KB access; build_chunks only materializes a selected slot.
+        'dataset.build_chunk_candidates': lambda ctx, inputs: build_chunk_candidates(ctx, inputs, kb_client=client),
         'dataset.chunk_entities_extract': lambda ctx, inputs: {
             'chunk_entity': {
                 'available': inputs['chunk']['available'],
@@ -63,7 +64,7 @@ def test_topic_discovery_waits_for_chunk_entities_extract_manifest(tmp_path):
             'case_enhance': {'key_points': [], 'forbidden_claims': []}
         },
     })
-    adapter = build_evo_artifact_adapter(store, qaplan_dataset_evo_ops(spec), materializers)
+    adapter = build_evo_artifact_adapter(store, dataset_evo_ops(spec), materializers)
     _seed(adapter, 'manifest-barrier')
 
     tick = adapter.tick('manifest-barrier')
@@ -79,11 +80,12 @@ def test_qaplan_dataset_runtime_converts_three_chunks_into_two_cases(tmp_path):
     spec = DatasetFlowSpec.from_case_count(2)
     assert len(spec.chunk_ids) == 3
     store = SQLiteArtifactStore(tmp_path / 'store')
-    materializers = qaplan_dataset_materializers(spec.case_ids)
+    materializers = dataset_materializers(spec.case_ids)
     client = FakeKnowledgeBaseClient()
     materializers.update({
         'dataset.select_docs': lambda ctx, inputs: select_docs(ctx, inputs, kb_client=client),
-        'dataset.build_chunks': lambda ctx, inputs: build_chunks(ctx, inputs, kb_client=client),
+        # Candidate construction owns KB access; build_chunks only materializes a selected slot.
+        'dataset.build_chunk_candidates': lambda ctx, inputs: build_chunk_candidates(ctx, inputs, kb_client=client),
         'dataset.chunk_entities_extract': lambda ctx, inputs: {
             'chunk_entity': {
                 'available': inputs['chunk']['available'], 'chunk_id': inputs['chunk']['chunk_id'],
@@ -105,14 +107,14 @@ def test_qaplan_dataset_runtime_converts_three_chunks_into_two_cases(tmp_path):
             'case_enhance': {'key_points': [], 'forbidden_claims': []}
         },
     })
-    adapter = build_evo_artifact_adapter(store, qaplan_dataset_evo_ops(spec), materializers)
+    adapter = build_evo_artifact_adapter(store, dataset_evo_ops(spec), materializers)
     run_id = 'qaplan-runtime'
     _seed(adapter, run_id)
 
     for _ in range(30):
         tick = adapter.tick(run_id)
         assert tick.status == 'ok', tick.ops
-        if ArtifactKey.of(C.DATASET_GENERATE_MANIFEST) in adapter.effective_artifacts(run_id):
+        if ArtifactKey.of(C.DATASET_GENERATE_ENHANCE_MANIFEST) in adapter.effective_artifacts(run_id):
             break
     else:
         raise AssertionError('qaplan generation manifest was not materialized')
@@ -124,6 +126,8 @@ def test_qaplan_dataset_runtime_converts_three_chunks_into_two_cases(tmp_path):
     assert ArtifactKey(C.DATASET_CHUNK, 'chunk_0003') in effective
     assert ArtifactKey(C.DATASET_CASE, 'case_0002') in effective
     assert ArtifactKey(C.DATASET_CASE_ENHANCE, 'case_0002') in effective
+    assert ArtifactKey.of(C.DATASET_QAPLAN_MANIFEST) in effective
+    assert ArtifactKey.of(C.DATASET_GENERATE_ENHANCE_MANIFEST) in effective
 
 
 def _seed(adapter, run_id):

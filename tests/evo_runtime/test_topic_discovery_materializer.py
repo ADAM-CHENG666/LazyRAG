@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from evo.artifact_runtime.evo import catalog as C
 from evo.artifact_runtime.evo.adapter import build_evo_artifact_adapter
-from evo.artifact_runtime.evo.flow_ops import default_evo_ops
+from evo.artifact_runtime.evo.flow import DatasetFlowSpec
+from evo.artifact_runtime.evo.flow_ops import dataset_evo_ops
 from evo.artifact_runtime.kernel import ArtifactKey, SQLiteArtifactStore
 from evo.operations.dataset.topic_discovery import (
     topic_discovery_embedding_cluster,
@@ -155,7 +156,10 @@ def test_topic_discovery_manifest_merges_two_paths_without_points():
 def test_topic_discovery_fixed_ops_materialize_manifest(tmp_path):
     ops = {
         op.op_id: op
-        for op in default_evo_ops(('chunk_0001', 'chunk_0002', 'chunk_0003'))
+        for op in dataset_evo_ops(DatasetFlowSpec(
+            ('chunk_0001', 'chunk_0002', 'chunk_0003'),
+            ('case_0001', 'case_0002'),
+        ))
         if op.op_id.startswith('dataset.topic_discovery_')
     }
     store = SQLiteArtifactStore(tmp_path / 'store')
@@ -244,6 +248,7 @@ def test_topic_discovery_fixed_ops_materialize_manifest(tmp_path):
 
 def _seed_params(adapter, run_id):
     for key, value in (
+        (C.RUN_CONFIG, {'llm_config': {'evo_llm': {'model': 'test'}}}),
         (C.DATASET_TOPIC_DISCOVERY_ENTITY_BUILD_GRAPH_PARAMS, {}),
         (C.DATASET_TOPIC_DISCOVERY_ENTITY_CLUSTER_PARAMS, {}),
         (C.DATASET_TOPIC_DISCOVERY_EMBEDDING_CLUSTER_PARAMS, {

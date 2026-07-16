@@ -104,7 +104,7 @@ def _with_warnings(prep: dict[str, Any], snapshot: Mapping[str, Any], index: int
     return prep
 
 
-def dataset_materializers(case_ids, *, llm_complete=None, duplicate_questions=None) -> dict[str, Any]:
+def legacy_dataset_materializers(case_ids, *, llm_complete=None, duplicate_questions=None) -> dict[str, Any]:
     partitions = tuple(sorted(dict.fromkeys(case_ids)))
     if not partitions:
         raise ValueError('case_ids must not be empty')

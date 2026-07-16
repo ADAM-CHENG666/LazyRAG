@@ -48,7 +48,6 @@ class KnowledgeBaseClient:
             return
 
         document = self._get_document()
-        self._ensure_vector_store_connected(document)
         for doc_id in resolved_doc_ids:
             for group in groups:
                 offset = 0
@@ -70,7 +69,9 @@ class KnowledgeBaseClient:
                     batch = list(nodes or [])
                     if not batch:
                         break
-                    self._attach_stored_embeddings(document, batch, group=group)
+                    self._attach_stored_embeddings(
+                        document, batch, kb_id=kb_id, doc_id=doc_id, group=group,
+                    )
                     self._require_embeddings(batch, kb_id=kb_id, doc_id=doc_id, group=group)
                     yield batch
                     offset += len(batch)
@@ -88,26 +89,6 @@ class KnowledgeBaseClient:
         return self._document
 
     @staticmethod
-    def _ensure_vector_store_connected(document: Any) -> None:
-        '''Restore the Milvus client after a DocumentProcessor store has been unpickled.
-
-        The processor registers a serialized store with the remote service.  Its local
-        copy can retain the store's lazy-init marker while omitting MilvusStore's live
-        client pool; reconnect it before `get_nodes()` asks the hybrid store for vectors.
-        '''
-        impl = getattr(document, '_impl', None)
-        store = getattr(impl, 'store', None)
-        store_impl = getattr(store, '_impl', None)
-        vector_store = getattr(store_impl, 'vector_store', None)
-        if vector_store is None or hasattr(vector_store, '_client_pool'):
-            return
-        vector_store.connect(
-            embed_dims=getattr(store, '_embed_dims', None),
-            embed_datatypes=getattr(store, '_embed_datatypes', None),
-            global_metadata_desc=getattr(store, '_global_metadata_desc', None),
-        )
-
-    @staticmethod
     def _require_embeddings(nodes: list[Any], *, kb_id: str, doc_id: str, group: str) -> None:
         missing = [
             str(getattr(node, 'uid', '') or getattr(node, '_uid', '') or '')
@@ -121,7 +102,14 @@ class KnowledgeBaseClient:
             )
 
     @staticmethod
-    def _attach_stored_embeddings(document: Any, nodes: list[Any], *, group: str) -> None:
+    def _attach_stored_embeddings(
+        document: Any,
+        nodes: list[Any],
+        *,
+        kb_id: str,
+        doc_id: str,
+        group: str,
+    ) -> None:
         '''Read vectors explicitly because the LazyLLM UID lookup omits vector output fields.
 
         The installed LazyLLM version passes `output_fields=None` for UID lookups.
@@ -132,12 +120,7 @@ class KnowledgeBaseClient:
             return
 
         try:
-            impl = getattr(document, '_impl', None)
-            store = getattr(impl, 'store', None)
-            store_impl = getattr(store, '_impl', None)
-            vector_store = getattr(store_impl, 'vector_store', None)
-            if vector_store is None:
-                return
+            store, vector_store = _milvus_store(document)
             uids = [str(getattr(node, 'uid', '') or getattr(node, '_uid', '') or '') for node in missing]
             uids = [uid for uid in uids if uid]
             if not uids:
@@ -171,8 +154,10 @@ class KnowledgeBaseClient:
                 uid = str(getattr(node, 'uid', '') or getattr(node, '_uid', '') or '')
                 if embedding := embeddings.get(uid):
                     setattr(node, 'embedding', embedding)
-        except Exception:
-            return
+        except Exception as exc:
+            raise RuntimeError(
+                f'failed to read stored embeddings: kb_id={kb_id} doc_id={doc_id} group={group}'
+            ) from exc
 
     def _list_documents_from_doc_server(self, kb_id: str) -> list[dict[str, Any]]:
         docs: list[dict[str, Any]] = []
@@ -243,7 +228,6 @@ class KnowledgeBaseClient:
             return {}
 
         document = self._get_document()
-        self._ensure_vector_store_connected(document)
         counts: dict[str, dict[str, int]] = {}
         for doc_id in doc_ids:
             doc_counts: dict[str, int] = {}
@@ -290,3 +274,13 @@ def _int(value: Any) -> int:
 def _has_embedding(node: Any) -> bool:
     value = getattr(node, 'embedding', None)
     return isinstance(value, Mapping) and any(bool(vector) for vector in value.values())
+
+
+def _milvus_store(document: Any) -> tuple[Any, Any]:
+    impl = getattr(document, '_impl', None)
+    store = getattr(impl, 'store', None)
+    store_impl = getattr(store, 'vector_initialized_impl', None)
+    vector_store = getattr(store_impl, 'vector_store', None)
+    if store is None or vector_store is None:
+        raise RuntimeError('Milvus vector store is unavailable')
+    return store, vector_store

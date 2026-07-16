@@ -149,6 +149,22 @@ def qaplan_spec(ctx: Any, inputs: Mapping[str, object]) -> dict[str, object]:
     return {'qaplan_spec': preparation}
 
 
+def qaplan_manifest(ctx: Any, inputs: Mapping[str, object]) -> dict[str, object]:
+    plan = _mapping(inputs.get('qaplan_plan'), 'qaplan_plan')
+    stats = _mapping(plan.get('stats'), 'qaplan_plan.stats')
+    planned_case_count = _positive_int(stats.get('planned_case_count'), 'qaplan_plan.stats.planned_case_count')
+    specs = inputs.get('qaplan_specs')
+    if not isinstance(specs, tuple) or not specs:
+        raise ValueError('qaplan_specs must be a non-empty partitioned tuple')
+
+    spec_ids = [_text(_mapping(spec, 'qaplan_specs[]').get('id'), 'qaplan_specs[].id') for spec in specs]
+    if len(spec_ids) != planned_case_count:
+        raise ValueError('qaplan_specs count must match qaplan_plan.stats.planned_case_count')
+    if len(set(spec_ids)) != len(spec_ids):
+        raise ValueError('qaplan_specs ids must be unique')
+    return {'qaplan_manifest': {'case_count': len(spec_ids)}}
+
+
 def _case_ids(ctx: Any, operation: str) -> tuple[str, ...]:
     values = getattr(ctx, 'case_ids', ())
     if not isinstance(values, tuple) or not values:

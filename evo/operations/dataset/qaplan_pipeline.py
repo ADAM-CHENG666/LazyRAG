@@ -9,8 +9,8 @@ from evo.llm import LazyLLMClient
 from .chunks_build import build_chunk_candidates, build_chunks, build_chunks_manifest
 from .entities import chunk_entities_extract, chunk_entities_extract_manifest
 from .generate import generate, generate_manifest
-from .generate_enhance import generate_enhance
-from .qaplan import qaplan_plan, qaplan_spec
+from .generate_enhance import generate_enhance, generate_enhance_manifest
+from .qaplan import qaplan_manifest, qaplan_plan, qaplan_spec
 from .select_docs import select_docs
 from .topic_discovery import (
     topic_discovery_embedding_cluster,
@@ -21,8 +21,8 @@ from .topic_discovery import (
 )
 
 
-def qaplan_dataset_materializers(case_ids: tuple[str, ...]) -> dict[str, Any]:
-    """Materializers for the dataset-only qaplan graph.
+def dataset_materializers(case_ids: tuple[str, ...]) -> dict[str, Any]:
+    """Materializers for the dataset graph.
 
     LLM-backed operations read the same run_config artifact that the final
     generator uses, so live experiments do not depend on hidden process state.
@@ -67,10 +67,12 @@ def qaplan_dataset_materializers(case_ids: tuple[str, ...]) -> dict[str, Any]:
         'dataset.topic_discovery_manifest': topic_discovery_manifest,
         'dataset.qaplan_plan': lambda ctx, inputs: qaplan_plan(qaplan_context(ctx), inputs),
         'dataset.qaplan_spec': lambda ctx, inputs: qaplan_spec(qaplan_context(ctx), inputs),
+        'dataset.qaplan_manifest': qaplan_manifest,
         'dataset.generate': generate,
         'dataset.generate_enhance': generate_enhance,
         'dataset.generate_manifest': generate_manifest,
+        'dataset.generate_enhance_manifest': generate_enhance_manifest,
     }
 
 
-__all__ = ['qaplan_dataset_materializers']
+__all__ = ['dataset_materializers']

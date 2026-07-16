@@ -34,6 +34,64 @@ def node(uid):
     return SimpleNamespace(uid=uid, embedding={'default': [1.0]})
 
 
+def node_without_embedding(uid):
+    return SimpleNamespace(uid=uid, embedding={})
+
+
+class FakeMilvusClient:
+    def __init__(self, rows=None, exc=None):
+        self.rows = rows or []
+        self.exc = exc
+        self.calls = []
+
+    def has_collection(self, collection):
+        self.calls.append(('has_collection', collection))
+        return True
+
+    def load_collection(self, collection):
+        self.calls.append(('load_collection', collection))
+
+    def describe_collection(self, *, collection_name):
+        self.calls.append(('describe_collection', collection_name))
+        return {'fields': [{'name': 'uid'}, {'name': 'embedding_embed_main'}]}
+
+    def query(self, **kwargs):
+        self.calls.append(('query', kwargs))
+        if self.exc is not None:
+            raise self.exc
+        return self.rows
+
+
+class FakeVectorStore:
+    def __init__(self, client):
+        self.client = client
+
+    def _client_context(self):
+        class Context:
+            def __enter__(inner_self):
+                return self.client
+
+            def __exit__(inner_self, exc_type, exc, traceback):
+                return False
+
+        return Context()
+
+
+class FakeStore:
+    def __init__(self, vector_store):
+        self.vector_store = vector_store
+        self.vector_initialized = False
+
+    @property
+    def vector_initialized_impl(self):
+        self.vector_initialized = True
+        return SimpleNamespace(vector_store=self.vector_store)
+
+    @staticmethod
+    def _gen_collection_name(group):
+        return f'kb_{group}'
+
+
 class FakeDocServer:
     def __init__(self, pages):
         self.pages = pages
@@ -210,6 +268,39 @@ def test_iter_chunks_wraps_read_errors_with_context():
 
     with pytest.raises(RuntimeError, match='kb_id=kb doc_id=doc-1 group=block') as exc_info:
         list(client.iter_chunks('kb', doc_ids=['doc-1'], groups=['block'], page_size=1))
+
+    assert exc_info.value.__cause__ is original
+
+
+def test_iter_chunks_initializes_vector_store_and_attaches_stored_embeddings():
+    milvus = FakeMilvusClient(rows=[{'uid': 'n1', 'embedding_embed_main': [0.1, 0.2]}])
+    store = FakeStore(FakeVectorStore(milvus))
+    document = FakeDocument({('doc-1', 'block', 0): ([node_without_embedding('n1')], 1)})
+    document._impl = SimpleNamespace(store=store)
+
+    batches = list(KnowledgeBaseClient(document=document).iter_chunks(
+        'kb', doc_ids=['doc-1'], groups=['block'], page_size=1,
+    ))
+
+    assert store.vector_initialized is True
+    assert batches[0][0].embedding == {'embed_main': [0.1, 0.2]}
+    assert milvus.calls[-1] == ('query', {
+        'collection_name': 'kb_block',
+        'filter': "uid in ['n1']",
+        'output_fields': ['uid', 'embedding_embed_main'],
+    })
+
+
+def test_iter_chunks_raises_embedding_query_error_with_context():
+    original = ValueError('Milvus unavailable')
+    store = FakeStore(FakeVectorStore(FakeMilvusClient(exc=original)))
+    document = FakeDocument({('doc-1', 'block', 0): ([node_without_embedding('n1')], 1)})
+    document._impl = SimpleNamespace(store=store)
+
+    with pytest.raises(RuntimeError, match='failed to read stored embeddings: kb_id=kb doc_id=doc-1 group=block') as exc_info:
+        list(KnowledgeBaseClient(document=document).iter_chunks(
+            'kb', doc_ids=['doc-1'], groups=['block'], page_size=1,
+        ))
 
     assert exc_info.value.__cause__ is original
 

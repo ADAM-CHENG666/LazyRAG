@@ -1,0 +1,57 @@
+operation:
+  op_id: dataset.generate_enhance_manifest
+  flow: dataset
+  stage: generate_enhance
+  description: 汇总全部 case enhancement 分区，作为 dataset 最终完成凭证。
+
+fixed_op:
+  inputs:
+    case_enhances:
+      artifact_id: dataset.case_enhance
+      required: true
+      partition: partitioned
+      mapping: all_to_unpartitioned
+  outputs:
+    generate_enhance_manifest:
+      artifact_id: dataset.generate_enhance_manifest
+      partition: unpartitioned
+
+materializer:
+  function: generate_enhance_manifest
+  return_keys:
+    - generate_enhance_manifest
+
+input_payload:
+  case_enhances:
+    tuple: true
+    item:
+      fields:
+        key_points:
+          type: array
+          required: true
+        forbidden_claims:
+          type: list[string]
+          required: true
+
+output_payload:
+  generate_enhance_manifest:
+    json_compatible: true
+    fields:
+      case_count:
+        type: integer
+
+execution_flow:
+  - 等待 all_to_unpartitioned 的全部 dataset.case_enhance 分区完成。
+  - 校验每个 enhancement 保持 key_points 与 forbidden_claims 的基础契约。
+  - 仅输出 case_count，作为 dataset.generate_enhance 阶段和整个 dataset 流程的最小完成凭证。
+
+tests:
+  manifest_completion:
+    # manifest 不合并 base case 与 enhancement payload，只确认全部 enhancement 分区已形成有效结果。
+    cases:
+      # 合法 enhancement tuple 汇总为稳定 case_count。
+      - success
+      # tuple、key_points 或 forbidden_claims 契约错误时必须失败，不生成最终完成凭证。
+      - invalid_enhancement_error
+      # 返回结构固定为单一 generate_enhance_manifest output。
+      - return_keys_match_outputs

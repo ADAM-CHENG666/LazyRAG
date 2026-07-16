@@ -4,7 +4,8 @@ from types import SimpleNamespace
 
 from evo.artifact_runtime.evo import catalog as C
 from evo.artifact_runtime.evo.adapter import build_evo_artifact_adapter
-from evo.artifact_runtime.evo.flow_ops import default_evo_ops
+from evo.artifact_runtime.evo.flow import DatasetFlowSpec
+from evo.artifact_runtime.evo.flow_ops import dataset_evo_ops
 from evo.artifact_runtime.kernel import ArtifactKey, SQLiteArtifactStore
 from evo.operations.dataset.chunks_build import build_chunk_candidates, build_chunks, build_chunks_manifest
 
@@ -36,7 +37,10 @@ def node(uid, text, group='block'):
 def test_build_chunks_fixed_ops_materialize_partitioned_chunks_and_manifest(tmp_path):
     ops = {
         op.op_id: op
-        for op in default_evo_ops(('chunk_0001', 'chunk_0002', 'chunk_0003'))
+        for op in dataset_evo_ops(DatasetFlowSpec(
+            ('chunk_0001', 'chunk_0002', 'chunk_0003'),
+            ('case_0001', 'case_0002'),
+        ))
         if op.op_id in {'dataset.build_chunk_candidates', 'dataset.build_chunks', 'dataset.build_chunks_manifest'}
     }
     store = SQLiteArtifactStore(tmp_path / 'store')

@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from evo.operations.dataset.generate_enhance import generate_enhance
+from evo.operations.dataset.generate_enhance import generate_enhance, generate_enhance_manifest
 
 
 def _case(**overrides):
@@ -152,3 +152,30 @@ def test_generate_enhance_fails_without_partial_output_when_forbidden_claims_fai
 def test_generate_enhance_rejects_invalid_base_case(case):
     with pytest.raises(ValueError):
         _enhance(responses=(), case=case)
+
+
+def test_generate_enhance_manifest_is_the_minimal_final_dataset_marker():
+    # Partition identity lives in ArtifactKey; the final manifest only confirms
+    # that every case_enhance partition has produced a valid enhancement payload.
+    result = generate_enhance_manifest(None, {
+        'case_enhances': (
+            {'key_points': [], 'forbidden_claims': []},
+            {'key_points': [{'id': 'key_point_1'}], 'forbidden_claims': ['unsupported claim']},
+        ),
+    })
+
+    assert result == {'generate_enhance_manifest': {'case_count': 2}}
+
+
+@pytest.mark.parametrize(
+    ('enhancements', 'match'),
+    [
+        # The manifest must receive the all_to_unpartitioned runtime tuple.
+        ([{'key_points': [], 'forbidden_claims': []}], 'partitioned tuple'),
+        # A malformed enhancement must not be allowed to produce the final root.
+        (({'key_points': [], 'forbidden_claims': 'not-a-list'},), 'forbidden_claims'),
+    ],
+)
+def test_generate_enhance_manifest_rejects_invalid_enhancements(enhancements, match):
+    with pytest.raises(ValueError, match=match):
+        generate_enhance_manifest(None, {'case_enhances': enhancements})

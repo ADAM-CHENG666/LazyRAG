@@ -70,6 +70,19 @@ def generate_enhance(
     }}
 
 
+def generate_enhance_manifest(ctx: Any, inputs: Mapping[str, object]) -> dict[str, object]:
+    enhancements = inputs.get('case_enhances')
+    if not isinstance(enhancements, tuple) or not enhancements:
+        raise ValueError('case_enhances must be a non-empty partitioned tuple')
+    for enhancement in enhancements:
+        value = _mapping(enhancement, 'case_enhances[]')
+        if not isinstance(value.get('key_points'), list):
+            raise ValueError('case_enhances[].key_points must be a list')
+        if not isinstance(value.get('forbidden_claims'), list):
+            raise ValueError('case_enhances[].forbidden_claims must be a list')
+    return {'generate_enhance_manifest': {'case_count': len(enhancements)}}
+
+
 def _references(case: Mapping[str, object]) -> list[dict[str, str]]:
     context = _mapping(case.get('reference_context'), 'case.reference_context')
     chunk_ids = _string_list(case.get('reference_chunk_ids'), 'case.reference_chunk_ids')
