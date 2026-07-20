@@ -1,3 +1,5 @@
+from math import isfinite
+
 from .errors import DefinitionError
 
 
@@ -20,9 +22,17 @@ def _positive_int(value: object, name: str) -> None:
         raise DefinitionError(f'{name} must be >= 1')
 
 
-def _positive_number(value: float, name: str) -> None:
-    if value <= 0:
-        raise DefinitionError(f'{name} must be positive')
+def _positive_number(value: object, name: str) -> None:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise TypeError(f'{name} must be a number')
+    if not isfinite(value) or value <= 0:
+        raise DefinitionError(f'{name} must be finite and positive')
 
 
-__all__ = ['_positive_int', '_positive_number', '_string', '_text']
+def _as_exception(error: BaseException) -> Exception:
+    if isinstance(error, Exception):
+        return error
+    return RuntimeError(f'{type(error).__name__}: {error}')
+
+
+__all__ = ['_as_exception', '_positive_int', '_positive_number', '_string', '_text']

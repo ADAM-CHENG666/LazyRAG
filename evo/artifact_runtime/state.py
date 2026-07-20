@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Literal
 
-from .artifact import ArtifactKey, ArtifactRef, CollectionSnapshot
+from .artifact import ArtifactKey, ArtifactRef, PartitionSet
 from .errors import DefinitionError
 from .utils import _string, _text
 
@@ -21,17 +22,28 @@ RunStatus = Literal[
     'completed',
 ]
 
+AttemptStatus = Literal[
+    'scheduled',
+    'running',
+    'cancelling',
+    'cancelled',
+    'succeeded',
+    'failed',
+    'interrupted',
+    'discarded',
+]
+
 
 @dataclass(frozen=True)
 class InvocationSnapshot:
     invocation_id: str
     operation_id: str
-    item_key: str = ''
+    partition_key: str = ''
 
     def __post_init__(self) -> None:
         _text(self.invocation_id, 'invocation_id')
         _text(self.operation_id, 'operation_id')
-        _string(self.item_key, 'item_key')
+        _string(self.partition_key, 'partition_key')
 
 
 @dataclass(frozen=True)
@@ -45,14 +57,106 @@ class RuntimeErrorInfo:
 
 
 @dataclass(frozen=True)
+class ProgressUpdate:
+    phase: str
+    message: str = ''
+    current: int | None = None
+    total: int | None = None
+    detail: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _text(self.phase, 'progress phase')
+        _string(self.message, 'progress message')
+        if self.current is not None and (
+            not isinstance(self.current, int) or isinstance(self.current, bool) or self.current < 0
+        ):
+            raise DefinitionError('progress current must be a non-negative int or None')
+        if self.total is not None and (
+            not isinstance(self.total, int) or isinstance(self.total, bool) or self.total < 0
+        ):
+            raise DefinitionError('progress total must be a non-negative int or None')
+        if self.current is not None and self.total is not None and self.current > self.total:
+            raise DefinitionError('progress current cannot exceed total')
+        detail = dict(self.detail)
+        try:
+            json.dumps(detail, ensure_ascii=False, sort_keys=True)
+        except (TypeError, ValueError) as exc:
+            raise DefinitionError('progress detail must be JSON-serializable') from exc
+        object.__setattr__(self, 'detail', MappingProxyType(detail))
+
+
+@dataclass(frozen=True)
+class AttemptSnapshot:
+    attempt_id: str
+    invocation_id: str
+    operation_id: str
+    partition_key: str
+    status: AttemptStatus
+    created_at: float
+    started_at: float | None = None
+    finished_at: float | None = None
+    error: RuntimeErrorInfo | None = None
+    input_refs: tuple[ArtifactRef, ...] = ()
+    output_keys: tuple[ArtifactKey, ...] = ()
+
+    def __post_init__(self) -> None:
+        _text(self.attempt_id, 'attempt_id')
+        _text(self.invocation_id, 'invocation_id')
+        _text(self.operation_id, 'operation_id')
+        _string(self.partition_key, 'partition_key')
+        if self.status not in {
+            'scheduled', 'running', 'cancelling', 'cancelled', 'succeeded',
+            'failed', 'interrupted', 'discarded',
+        }:
+            raise DefinitionError(f'unknown attempt status: {self.status}')
+        for name, value in (
+            ('created_at', self.created_at),
+            ('started_at', self.started_at),
+            ('finished_at', self.finished_at),
+        ):
+            if value is not None and (not isinstance(value, (int, float)) or isinstance(value, bool)):
+                raise TypeError(f'{name} must be a number or None')
+        if self.status == 'failed' and self.error is None:
+            raise DefinitionError('failed attempt requires error details')
+        if self.status != 'failed' and self.error is not None:
+            raise DefinitionError('attempt error details are only valid for failed status')
+        input_refs = tuple(self.input_refs)
+        output_keys = tuple(self.output_keys)
+        if not all(isinstance(ref, ArtifactRef) for ref in input_refs):
+            raise TypeError('attempt input_refs must contain ArtifactRef values')
+        if not all(isinstance(key, ArtifactKey) for key in output_keys):
+            raise TypeError('attempt output_keys must contain ArtifactKey values')
+        object.__setattr__(self, 'input_refs', input_refs)
+        object.__setattr__(self, 'output_keys', output_keys)
+
+
+@dataclass(frozen=True)
+class ProgressEvent:
+    attempt_id: str
+    sequence: int
+    update: ProgressUpdate
+    created_at: float
+
+    def __post_init__(self) -> None:
+        _text(self.attempt_id, 'attempt_id')
+        if not isinstance(self.sequence, int) or isinstance(self.sequence, bool) or self.sequence <= 0:
+            raise DefinitionError('progress sequence must be a positive int')
+        if not isinstance(self.update, ProgressUpdate):
+            raise TypeError('update must be ProgressUpdate')
+        if not isinstance(self.created_at, (int, float)) or isinstance(self.created_at, bool):
+            raise TypeError('created_at must be a number')
+
+
+@dataclass(frozen=True)
 class RuntimeSnapshot:
     run_id: str
     status: RunStatus = 'created'
     running: tuple[InvocationSnapshot, ...] = ()
     ready_count: int = 0
     completed_artifacts: Mapping[ArtifactKey, ArtifactRef] = field(default_factory=dict)
-    collections: Mapping[ArtifactKey, CollectionSnapshot] = field(default_factory=dict)
+    partition_sets: Mapping[ArtifactKey, PartitionSet] = field(default_factory=dict)
     error: RuntimeErrorInfo | None = None
+    active_attempts: tuple[AttemptSnapshot, ...] = ()
 
     def __post_init__(self) -> None:
         _text(self.run_id, 'run_id')
@@ -80,12 +184,12 @@ class RuntimeSnapshot:
             if key != ref.key:
                 raise DefinitionError('completed artifact key must match its ref')
 
-        collections = dict(self.collections)
-        for key, collection in collections.items():
-            if not isinstance(key, ArtifactKey) or not isinstance(collection, CollectionSnapshot):
-                raise TypeError('collections must map ArtifactKey to CollectionSnapshot')
-            if key != collection.ref.key:
-                raise DefinitionError('collection key must match its ref')
+        partition_sets = dict(self.partition_sets)
+        for key, partitions in partition_sets.items():
+            if not isinstance(key, ArtifactKey) or key.partition_key:
+                raise TypeError('partition_sets keys must be scalar ArtifactKey values')
+            if not isinstance(partitions, PartitionSet):
+                raise TypeError('partition_sets values must be PartitionSet')
 
         if self.error is not None and not isinstance(self.error, RuntimeErrorInfo):
             raise TypeError('error must be RuntimeErrorInfo or None')
@@ -98,9 +202,19 @@ class RuntimeSnapshot:
         if self.status in {'cancelled', 'failed', 'completed'} and self.ready_count:
             raise DefinitionError(f'{self.status} runtime snapshot cannot contain ready invocations')
 
+        attempts = tuple(self.active_attempts)
+        if not all(isinstance(attempt, AttemptSnapshot) for attempt in attempts):
+            raise TypeError('attempts must contain AttemptSnapshot values')
+        if len({attempt.attempt_id for attempt in attempts}) != len(attempts):
+            raise DefinitionError('attempt ids must be unique')
+
         object.__setattr__(self, 'running', running)
         object.__setattr__(self, 'completed_artifacts', MappingProxyType(completed))
-        object.__setattr__(self, 'collections', MappingProxyType(collections))
+        object.__setattr__(self, 'partition_sets', MappingProxyType(partition_sets))
+        object.__setattr__(self, 'active_attempts', attempts)
 
 
-__all__ = ['InvocationSnapshot', 'RunStatus', 'RuntimeErrorInfo', 'RuntimeSnapshot']
+__all__ = [
+    'AttemptSnapshot', 'AttemptStatus', 'InvocationSnapshot', 'ProgressEvent', 'ProgressUpdate',
+    'RunStatus', 'RuntimeErrorInfo', 'RuntimeSnapshot',
+]

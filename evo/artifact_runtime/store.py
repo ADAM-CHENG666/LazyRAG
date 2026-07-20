@@ -1,177 +1,103 @@
+"""SQLite persistence and atomic commit boundary for artifact-runtime."""
+
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import json
 import pickle
-from collections.abc import AsyncIterator, Callable, Iterable, Mapping
+import time
+from collections.abc import AsyncIterator, Iterable, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast, get_args
 
 import aiosqlite
 
 from .artifact import (
+    ArtifactChangeSet,
+    ArtifactCommit,
     ArtifactKey,
-    ArtifactMutation,
     ArtifactRecord,
     ArtifactRef,
     ArtifactSnapshot,
-    CollectionItem,
-    CollectionMutation,
-    CollectionSnapshot,
-    OperationWriteSet,
-    merge_refs,
+    PartitionSet,
 )
 from .errors import DefinitionError
-from .planning import CollectionProjection
+from .state import (
+    AttemptSnapshot,
+    AttemptStatus,
+    ProgressEvent,
+    ProgressUpdate,
+    RunStatus,
+    RuntimeErrorInfo,
+)
 from .utils import _text
+
+
+_SCHEMA_VERSION = 1
+_RUN_STATUSES = frozenset(get_args(RunStatus))
+_PUBLIC_ATTEMPT_TRANSITIONS = {
+    'scheduled': frozenset({'running', 'cancelling', 'cancelled', 'interrupted'}),
+    'running': frozenset({
+        'cancelling', 'cancelled', 'failed', 'interrupted',
+    }),
+    'cancelling': frozenset({'cancelled', 'interrupted'}),
+    'cancelled': frozenset(),
+    'succeeded': frozenset(),
+    'failed': frozenset(),
+    'interrupted': frozenset(),
+    'discarded': frozenset(),
+}
 
 
 @dataclass(frozen=True)
 class StoredRunState:
-    status: str
-    error_kind: str = ''
-    error_message: str = ''
+    status: RunStatus
+    error: RuntimeErrorInfo | None = None
+
+    def __post_init__(self) -> None:
+        if self.status not in _RUN_STATUSES:
+            raise DefinitionError(f'unknown run status: {self.status}')
+        if self.error is not None and not isinstance(self.error, RuntimeErrorInfo):
+            raise TypeError('run error must be RuntimeErrorInfo or None')
+        if self.status == 'failed' and self.error is None:
+            raise DefinitionError('failed run requires error details')
+        if self.status != 'failed' and self.error is not None:
+            raise DefinitionError('run error is only valid for failed status')
 
 
 @dataclass(frozen=True)
 class CommitResult:
     status: Literal['ok', 'stale']
     refs: tuple[ArtifactRef, ...] = ()
+    changes: ArtifactChangeSet = field(default_factory=ArtifactChangeSet, compare=False)
+    replayed: bool = field(default=False, compare=False)
 
-    def to_json(self) -> str:
-        value = {'status': self.status, 'refs': [_ref_data(ref) for ref in self.refs]}
-        return json.dumps(value, separators=(',', ':'))
-
-    @classmethod
-    def from_json(cls, value: str) -> CommitResult:
-        data = json.loads(value)
-        refs = tuple(
-            ArtifactRef(ArtifactKey(str(item[0]), str(item[1])), int(item[2]))
-            for item in data['refs']
-        )
-        return cls(data['status'], refs)
+    def __post_init__(self) -> None:
+        if self.status not in {'ok', 'stale'}:
+            raise DefinitionError(f'unknown commit status: {self.status}')
+        refs = tuple(self.refs)
+        if not all(isinstance(ref, ArtifactRef) for ref in refs):
+            raise TypeError('commit result refs must contain ArtifactRef values')
+        object.__setattr__(self, 'refs', refs)
 
 
 @dataclass(frozen=True)
-class CommitIdentity:
+class _PreparedCommit:
     run_id: str
-    replay_key: str
+    command: ArtifactCommit
+    payloads: tuple[bytes, ...]
     request_hash: str
 
-
-@dataclass(frozen=True)
-class ExternalOrigin:
-    pass
-
-
-@dataclass(frozen=True)
-class OperationOrigin:
-    producer_operation: str
-
     def __post_init__(self) -> None:
-        _text(self.producer_operation, 'producer_operation')
-
-
-WriteOrigin = ExternalOrigin | OperationOrigin
-
-
-@dataclass(frozen=True)
-class ValueWrite:
-    key: ArtifactKey
-    payload: bytes
-    input_refs: tuple[ArtifactRef, ...] = ()
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.key, ArtifactKey):
-            raise TypeError('value write key must be ArtifactKey')
-        if not isinstance(self.payload, bytes):
-            raise TypeError('value write payload must be bytes')
-        object.__setattr__(self, 'input_refs', merge_refs(self.input_refs))
-
-
-@dataclass(frozen=True)
-class CollectionMemberWrite:
-    key: str
-    source: ArtifactRef | ArtifactKey
-
-    def __post_init__(self) -> None:
-        _text(self.key, 'collection member key')
-        source_key = self.source.key if isinstance(self.source, ArtifactRef) else self.source
-        if not isinstance(source_key, ArtifactKey):
-            raise TypeError('collection member source must be ArtifactRef or ArtifactKey')
-        if source_key.item_key != self.key:
-            raise DefinitionError('collection member source must match its item key')
-
-
-@dataclass(frozen=True)
-class CollectionManifestWrite:
-    key: ArtifactKey
-    item_artifact_id: str
-    members: tuple[CollectionMemberWrite, ...]
-    input_refs: tuple[ArtifactRef, ...] = ()
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.key, ArtifactKey) or self.key.item_key:
-            raise DefinitionError('collection manifest key must be a scalar ArtifactKey')
-        _text(self.item_artifact_id, 'collection manifest item_artifact_id')
-        members = tuple(self.members)
-        if len({member.key for member in members}) != len(members):
-            raise DefinitionError('collection manifest item keys must be unique')
-        for member in members:
-            source_key = member.source.key if isinstance(member.source, ArtifactRef) else member.source
-            if source_key.artifact_id != self.item_artifact_id:
-                raise DefinitionError('collection members do not match item_artifact_id')
-        object.__setattr__(self, 'members', members)
-        object.__setattr__(self, 'input_refs', merge_refs(self.input_refs))
-
-
-@dataclass(frozen=True)
-class ResolvedWriteSet:
-    origin: WriteOrigin
-    values: tuple[ValueWrite, ...]
-    collections: tuple[CollectionManifestWrite, ...]
-    result_keys: tuple[ArtifactKey, ...]
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.origin, (ExternalOrigin, OperationOrigin)):
-            raise TypeError('write origin must be ExternalOrigin or OperationOrigin')
-        values = tuple(self.values)
-        collections = tuple(self.collections)
-        written_keys = tuple(write.key for write in values) + tuple(
-            write.key for write in collections
-        )
-        if len(set(written_keys)) != len(written_keys):
-            raise DefinitionError('write set artifact keys must be unique')
-        value_keys = {write.key for write in values}
-        if any(
-            isinstance(member.source, ArtifactKey) and member.source not in value_keys
-            for collection in collections
-            for member in collection.members
-        ):
-            raise DefinitionError('collection member write must reference a value in the write set')
-        result_keys = tuple(self.result_keys)
-        if len(result_keys) != len(written_keys) or set(result_keys) != set(written_keys):
-            raise DefinitionError('write set result keys must contain every written artifact once')
-        object.__setattr__(self, 'values', values)
-        object.__setattr__(self, 'collections', collections)
-        object.__setattr__(self, 'result_keys', result_keys)
-
-    @property
-    def written_keys(self) -> tuple[ArtifactKey, ...]:
-        return tuple(write.key for write in self.values) + tuple(
-            write.key for write in self.collections
-        )
-
-
-CommitResolver = Callable[[ArtifactSnapshot], ResolvedWriteSet | None]
+        if len(self.payloads) != len(self.command.writes):
+            raise ValueError('prepared payload count must match commit writes')
 
 
 class ArtifactStore:
-    def __init__(self, root: Path, connection: aiosqlite.Connection) -> None:
-        self.root = root
+    def __init__(self, connection: aiosqlite.Connection) -> None:
         self._connection = connection
         self._lock = asyncio.Lock()
 
@@ -180,307 +106,54 @@ class ArtifactStore:
         path = Path(root)
         path.mkdir(parents=True, exist_ok=True)
         connection = await aiosqlite.connect(path / 'artifact-runtime.sqlite3')
-        connection.row_factory = aiosqlite.Row
-        await connection.execute('PRAGMA foreign_keys = ON')
-        await connection.execute('PRAGMA journal_mode = WAL')
-        await connection.execute('PRAGMA synchronous = FULL')
-        store = cls(path, connection)
-        await store._create_schema()
-        return store
+        try:
+            connection.row_factory = aiosqlite.Row
+            await connection.execute('PRAGMA foreign_keys = ON')
+            await connection.execute('PRAGMA journal_mode = WAL')
+            await connection.execute('PRAGMA synchronous = FULL')
+            store = cls(connection)
+            await store._create_schema()
+            return store
+        except BaseException:
+            await connection.close()
+            raise
 
     async def close(self) -> None:
         await self._connection.close()
 
     # Artifact commits
 
-    async def commit_external(
-        self, run_id: str, key: ArtifactKey, value: object, *,
-        idempotency_key: str, expected_ref: ArtifactRef | None = None,
-    ) -> CommitResult:
+    async def commit(self, run_id: str, commit: ArtifactCommit, *, attempt_id: str | None = None
+                     ) -> CommitResult:
         _text(run_id, 'run_id')
-        _text(idempotency_key, 'idempotency_key')
-        if not isinstance(key, ArtifactKey):
-            raise TypeError('key must be ArtifactKey')
-        if expected_ref is not None and expected_ref.key != key:
-            raise DefinitionError('expected_ref must identify the committed artifact key')
-
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
-        identity = CommitIdentity(
-            run_id,
-            f'external:{idempotency_key}',
-            _fingerprint(
-                'external', run_id, _key_data(key), _ref_data(expected_ref), _digest(payload)
-            ),
-        )
-        writes = ResolvedWriteSet(
-            ExternalOrigin(),
-            (ValueWrite(key, payload),),
-            (),
-            (key,),
-        )
-
-        def resolve(snapshot: ArtifactSnapshot) -> ResolvedWriteSet | None:
-            current = snapshot.records.get(key)
-            if expected_ref is not None and (
-                current is None or current.ref != expected_ref
-            ):
-                return None
-            return writes
-
-        return await self._commit(identity, resolve)
-
-    async def commit_operation(
-        self, run_id: str, operation: OperationWriteSet,
-    ) -> CommitResult:
-        _text(run_id, 'run_id')
-        if not isinstance(operation, OperationWriteSet):
-            raise TypeError('operation must be OperationWriteSet')
-
-        origin = OperationOrigin(operation.producer_operation)
-        values: list[ValueWrite] = []
-        collections: list[CollectionManifestWrite] = []
-        result_keys: list[ArtifactKey] = []
-        for key, value in operation.scalar_values.items():
-            values.append(ValueWrite(
-                key,
-                pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL),
-                operation.input_refs,
-            ))
-            result_keys.append(key)
-        for collection in operation.collection_writes:
-            members = []
-            for item_key, value in collection.items.items():
-                key = ArtifactKey.item(collection.item_artifact_id, item_key)
-                values.append(ValueWrite(
-                    key,
-                    pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL),
-                    operation.input_refs,
-                ))
-                members.append(CollectionMemberWrite(item_key, key))
-                result_keys.append(key)
-            collections.append(CollectionManifestWrite(
-                collection.key,
-                collection.item_artifact_id,
-                tuple(members),
-                operation.input_refs,
-            ))
-            result_keys.append(collection.key)
-        writes = ResolvedWriteSet(
-            origin,
-            tuple(values),
-            tuple(collections),
-            tuple(result_keys),
-        )
-        identity = CommitIdentity(
-            run_id,
-            f'operation:{operation.commit_id}',
-            _fingerprint(
-                'operation',
-                run_id,
-                operation.commit_id,
-                _origin_data(origin),
-                [_ref_data(ref) for ref in operation.input_refs],
-                [
-                    [*_key_data(guard.collection_key), guard.item.key, _ref_data(guard.item.ref)]
-                    for guard in operation.item_guards
-                ],
-                [
-                    [
-                        _ref_data(guard.ref),
-                        guard.item_artifact_id,
-                        [[item.key, _ref_data(item.ref)] for item in guard.items],
-                    ]
-                    for guard in operation.collection_guards
-                ],
-                _writes_data(writes),
-            ),
-        )
-
-        def resolve(snapshot: ArtifactSnapshot) -> ResolvedWriteSet | None:
-            effective = snapshot.effective_records()
-            if any(
-                effective.get(ref.key) is None or effective[ref.key].ref != ref
-                for ref in operation.input_refs
-            ):
-                return None
-            for guard in operation.item_guards:
-                current = snapshot.collections.get(guard.collection_key)
-                if (
-                    current is None
-                    or effective.get(current.ref.key) is None
-                    or effective.get(guard.item.ref.key) is None
-                    or effective[guard.item.ref.key].ref != guard.item.ref
-                    or not any(
-                        item.key == guard.item.key and item.ref == guard.item.ref
-                        for item in current.items
-                    )
-                ):
-                    return None
-            for guard in operation.collection_guards:
-                current = snapshot.collections.get(guard.ref.key)
-                if current != guard or effective.get(guard.ref.key) is None:
-                    return None
-            if any(key in effective for key in writes.written_keys):
-                return None
-            return writes
-
-        return await self._commit(identity, resolve)
-
-    async def commit_projection(
-        self, run_id: str, projection: CollectionProjection,
-    ) -> CommitResult:
-        _text(run_id, 'run_id')
-        if not isinstance(projection, CollectionProjection):
-            raise TypeError('projection must be CollectionProjection')
-
-        origin = OperationOrigin(projection.producer_operation)
-        manifest = CollectionManifestWrite(
-            projection.collection_key,
-            projection.item_artifact_id,
-            tuple(CollectionMemberWrite(item.key, item.ref) for item in projection.items),
-            projection.input_refs,
-        )
-        writes = ResolvedWriteSet(
-            origin,
-            (),
-            (manifest,),
-            (projection.collection_key,),
-        )
-        request_hash = _fingerprint(
-            'collection', run_id, _origin_data(origin), _writes_data(writes)
-        )
-        identity = CommitIdentity(
-            run_id,
-            f'collection:{request_hash}',
-            request_hash,
-        )
-
-        def resolve(snapshot: ArtifactSnapshot) -> ResolvedWriteSet | None:
-            effective = snapshot.effective_records()
-            inputs_are_current = all(
-                effective.get(ref.key) is not None and effective[ref.key].ref == ref
-                for ref in manifest.input_refs
-            )
-            members_are_current = all(
-                isinstance(member.source, ArtifactRef)
-                and effective.get(member.source.key) is not None
-                and effective[member.source.key].ref == member.source
-                for member in manifest.members
-            )
-            if not inputs_are_current or not members_are_current or manifest.key in effective:
-                return None
-            return writes
-
-        return await self._commit(identity, resolve)
-
-    async def mutate_collection(
-        self, run_id: str, mutation: CollectionMutation, *, idempotency_key: str,
-    ) -> CommitResult:
-        _text(run_id, 'run_id')
-        _text(idempotency_key, 'idempotency_key')
-        if not isinstance(mutation, CollectionMutation):
-            raise TypeError('mutation must be CollectionMutation')
-
-        item_writes = tuple(
-            ValueWrite(
-                ArtifactKey.item(mutation.item_artifact_id, key),
-                pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL),
-            )
-            for key, value in mutation.upserts.items()
-        )
-        identity = CommitIdentity(
-            run_id,
-            f'mutation:{idempotency_key}',
-            _fingerprint(
-                'mutation', run_id, mutation.collection_id, mutation.item_artifact_id,
-                _ref_data(mutation.expected_ref), list(mutation.deletes),
-                [[*_key_data(write.key), _digest(write.payload)] for write in item_writes],
-            ),
-        )
-
-        def resolve(snapshot: ArtifactSnapshot) -> ResolvedWriteSet | None:
-            collection_key = ArtifactKey.scalar(mutation.collection_id)
-            current = snapshot.collections.get(collection_key)
-            if mutation.expected_ref is not None and (
-                current is None or current.ref != mutation.expected_ref
-            ):
-                return None
-            if current is not None and collection_key not in snapshot.effective_records():
-                raise DefinitionError('current collection is not effective')
-            if current is not None and current.item_artifact_id != mutation.item_artifact_id:
-                raise DefinitionError('collection mutation item artifact type does not match')
-
-            current_items = () if current is None else current.items
-            current_by_key = {item.key: item for item in current_items}
-            missing = set(mutation.deletes) - set(current_by_key)
-            if missing:
-                raise DefinitionError(
-                    f'collection delete keys do not exist: {sorted(missing)}'
-                )
-
-            item_write_by_key = {write.key.item_key: write for write in item_writes}
-            members = [
-                CollectionMemberWrite(
-                    item.key,
-                    item_write_by_key[item.key].key
-                    if item.key in item_write_by_key
-                    else item.ref,
-                )
-                for item in current_items
-                if item.key not in mutation.deletes
-            ]
-            members.extend(
-                CollectionMemberWrite(key, item_write_by_key[key].key)
-                for key in mutation.upserts
-                if key not in current_by_key
-            )
-            return ResolvedWriteSet(
-                ExternalOrigin(),
-                item_writes,
-                (CollectionManifestWrite(
-                    collection_key,
-                    mutation.item_artifact_id,
-                    tuple(members),
-                ),),
-                (collection_key, *(write.key for write in item_writes)),
-            )
-
-        return await self._commit(identity, resolve)
-
-    async def commit_mutation(
-        self, run_id: str, mutation: ArtifactMutation | CollectionMutation, *,
-        idempotency_key: str,
-    ) -> CommitResult:
-        if isinstance(mutation, ArtifactMutation):
-            return await self.commit_external(
-                run_id,
-                mutation.key,
-                mutation.value,
-                idempotency_key=idempotency_key,
-                expected_ref=mutation.expected_ref,
-            )
-        if isinstance(mutation, CollectionMutation):
-            return await self.mutate_collection(
-                run_id,
-                mutation,
-                idempotency_key=idempotency_key,
-            )
-        raise TypeError('mutation must be ArtifactMutation or CollectionMutation')
+        if not isinstance(commit, ArtifactCommit):
+            raise TypeError('commit must be ArtifactCommit')
+        if attempt_id is None and commit.producer.startswith('operation:'):
+            raise DefinitionError('operation commit requires attempt_id')
+        if attempt_id is not None:
+            _text(attempt_id, 'attempt_id')
+        prepared = await asyncio.to_thread(_prepare_commit, run_id, commit)
+        return await self._commit(prepared, attempt_id=attempt_id)
 
     # Artifact reads
 
-    async def snapshot(self, run_id: str) -> ArtifactSnapshot:
+    async def snapshot(self, run_id: str, partition_set_ids: Iterable[str] = ()) -> ArtifactSnapshot:
         _text(run_id, 'run_id')
+        ids = frozenset(partition_set_ids)
+        for artifact_id in ids:
+            _text(artifact_id, 'partition set artifact_id')
         async with self._lock:
-            return await self._snapshot(run_id)
+            return await self._snapshot(run_id, ids)
 
-    async def read(self, run_id: str, ref: ArtifactRef) -> object | None:
+    async def read(self, run_id: str, ref: ArtifactRef) -> object:
         _text(run_id, 'run_id')
         if not isinstance(ref, ArtifactRef):
             raise TypeError('ref must be ArtifactRef')
         async with self._lock:
             found, value = await self._read(run_id, ref)
-        return value if found else None
+        if not found:
+            raise KeyError(ref)
+        return value
 
     async def record(self, run_id: str, ref: ArtifactRef) -> ArtifactRecord | None:
         _text(run_id, 'run_id')
@@ -489,41 +162,79 @@ class ArtifactStore:
         async with self._lock:
             return await self._record(run_id, ref)
 
-    async def read_many(
-        self, run_id: str, refs: Iterable[ArtifactRef],
-    ) -> Mapping[ArtifactRef, object]:
+    async def read_many(self, run_id: str, refs: Iterable[ArtifactRef]) -> Mapping[ArtifactRef, object]:
         _text(run_id, 'run_id')
         requested = tuple(refs)
         if not all(isinstance(ref, ArtifactRef) for ref in requested):
             raise TypeError('refs must contain ArtifactRef values')
-        values: dict[ArtifactRef, object] = {}
+        payloads: dict[ArtifactRef, bytes] = {}
         async with self._lock:
-            for ref in requested:
-                found, value = await self._read(run_id, ref)
-                if not found:
-                    raise DefinitionError(f'input artifact is missing: {ref}')
-                values[ref] = value
-        return values
+            for offset in range(0, len(requested), 250):
+                chunk = requested[offset:offset + 250]
+                placeholders = ','.join('(?, ?, ?)' for _ in chunk)
+                parameters: list[object] = [run_id]
+                for ref in chunk:
+                    parameters.extend((
+                        ref.key.artifact_id,
+                        ref.key.partition_key,
+                        ref.version,
+                    ))
+                cursor = await self._connection.execute(
+                    f"""
+                    SELECT artifact_id, partition_key, version, payload
+                    FROM artifact_payloads
+                    WHERE run_id = ?
+                      AND (artifact_id, partition_key, version) IN ({placeholders})
+                    """,
+                    parameters,
+                )
+                for row in await cursor.fetchall():
+                    ref = ArtifactRef(
+                        ArtifactKey(row['artifact_id'], row['partition_key']),
+                        row['version'],
+                    )
+                    payloads[ref] = row['payload']
+        missing = next((ref for ref in requested if ref not in payloads), None)
+        if missing is not None:
+            raise DefinitionError(f'input artifact is missing: {missing}')
+        return await asyncio.to_thread(_deserialize_many, requested, payloads)
 
     # Run state
 
-    async def set_run_state(
-        self, run_id: str, status: str, *, error_kind: str = '', error_message: str = '',
-    ) -> None:
+    async def create_run(self, run_id: str) -> StoredRunState:
         _text(run_id, 'run_id')
-        _text(status, 'status')
+        state = StoredRunState('created')
         async with self._transaction():
-            await self._connection.execute(
+            try:
+                await self._connection.execute(
+                    """
+                    INSERT INTO run_states(run_id, status, error_kind, error_message)
+                    VALUES (?, 'created', '', '')
+                    """,
+                    (run_id,),
+                )
+            except aiosqlite.IntegrityError as exc:
+                raise DefinitionError(f'run already exists: {run_id}') from exc
+        return state
+
+    async def set_run_state(self, run_id: str, status: RunStatus, *,
+                            error: RuntimeErrorInfo | None = None
+                            ) -> None:
+        _text(run_id, 'run_id')
+        state = StoredRunState(status, error)
+        error_kind = '' if state.error is None else state.error.kind
+        error_message = '' if state.error is None else state.error.message
+        async with self._transaction():
+            cursor = await self._connection.execute(
                 """
-                INSERT INTO run_states(run_id, status, error_kind, error_message)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(run_id) DO UPDATE SET
-                  status = excluded.status,
-                  error_kind = excluded.error_kind,
-                  error_message = excluded.error_message
+                UPDATE run_states
+                SET status = ?, error_kind = ?, error_message = ?
+                WHERE run_id = ?
                 """,
-                (run_id, status, error_kind, error_message),
+                (status, error_kind, error_message, run_id),
             )
+            if cursor.rowcount != 1:
+                raise DefinitionError(f'run not found: {run_id}')
 
     async def run_state(self, run_id: str) -> StoredRunState | None:
         _text(run_id, 'run_id')
@@ -535,7 +246,13 @@ class ArtifactStore:
             row = await cursor.fetchone()
         if row is None:
             return None
-        return StoredRunState(row['status'], row['error_kind'], row['error_message'])
+        status = cast(RunStatus, row['status'])
+        error = (
+            None
+            if status != 'failed'
+            else RuntimeErrorInfo(row['error_kind'], row['error_message'])
+        )
+        return StoredRunState(status, error)
 
     async def run_ids(self) -> tuple[str, ...]:
         async with self._lock:
@@ -544,169 +261,425 @@ class ArtifactStore:
             )
             return tuple(row['run_id'] for row in await cursor.fetchall())
 
-    async def delete_run(self, run_id: str) -> None:
-        _text(run_id, 'run_id')
-        statements = (
-            'DELETE FROM collection_items WHERE run_id = ?',
-            'DELETE FROM collection_manifests WHERE run_id = ?',
-            'DELETE FROM artifact_heads WHERE run_id = ?',
-            'DELETE FROM artifact_payloads WHERE run_id = ?',
-            'DELETE FROM artifact_records WHERE run_id = ?',
-            'DELETE FROM artifact_versions WHERE run_id = ?',
-            'DELETE FROM idempotency WHERE run_id = ?',
-            'DELETE FROM run_states WHERE run_id = ?',
+    # Physical execution attempts and progress
+
+    async def create_attempt(self, run_id: str, attempt_id: str, invocation_id: str, operation_id: str,
+                             partition_key: str, input_refs: Iterable[ArtifactRef] = (),
+                             output_keys: Iterable[ArtifactKey] = ()
+                             ) -> AttemptSnapshot:
+        for value, name in (
+            (run_id, 'run_id'),
+            (attempt_id, 'attempt_id'),
+            (invocation_id, 'invocation_id'),
+            (operation_id, 'operation_id'),
+        ):
+            _text(value, name)
+        created_at = time.time()
+        snapshot = AttemptSnapshot(
+            attempt_id,
+            invocation_id,
+            operation_id,
+            partition_key,
+            'scheduled',
+            created_at,
+            input_refs=tuple(input_refs),
+            output_keys=tuple(output_keys),
         )
         async with self._transaction():
-            for statement in statements:
-                await self._connection.execute(statement, (run_id,))
+            await self._require_run(run_id)
+            try:
+                await self._connection.execute(
+                    """
+                    INSERT INTO execution_attempts(
+                      run_id, attempt_id, invocation_id, operation_id, partition_key,
+                      status, created_at, started_at, finished_at, error_kind, error_message,
+                      input_refs_json, output_keys_json
+                    ) VALUES (?, ?, ?, ?, ?, 'scheduled', ?, NULL, NULL, '', '', ?, ?)
+                    """,
+                    (
+                        run_id,
+                        attempt_id,
+                        invocation_id,
+                        operation_id,
+                        partition_key,
+                        created_at,
+                        _refs_json(snapshot.input_refs),
+                        json.dumps(
+                            [_key_data(key) for key in snapshot.output_keys],
+                            separators=(',', ':'),
+                        ),
+                    ),
+                )
+            except aiosqlite.IntegrityError as exc:
+                raise DefinitionError(
+                    f'attempt conflicts with existing execution: {attempt_id}'
+                ) from exc
+        return snapshot
+
+    async def set_attempt_status(self, run_id: str, attempt_id: str, status: AttemptStatus, *,
+                                 error: RuntimeErrorInfo | None = None
+                                 ) -> AttemptSnapshot:
+        _text(run_id, 'run_id')
+        _text(attempt_id, 'attempt_id')
+        if status in {'succeeded', 'discarded'}:
+            raise DefinitionError(
+                f'{status} attempt status is owned by artifact commit'
+            )
+        async with self._transaction():
+            current = await self._attempt_row(run_id, attempt_id)
+            if current is None:
+                raise DefinitionError(f'attempt not found: {attempt_id}')
+            _validate_attempt_transition(current['status'], status)
+            if current['status'] == status:
+                snapshot = _attempt_snapshot(current)
+                if error is not None and error != snapshot.error:
+                    raise DefinitionError('attempt terminal state cannot change its error')
+                return snapshot
+            now = time.time()
+            started_at = current['started_at']
+            finished_at = current['finished_at']
+            if status == 'running' and started_at is None:
+                started_at = now
+            if status in {'cancelled', 'succeeded', 'failed', 'interrupted', 'discarded'}:
+                finished_at = now
+            error_kind = '' if error is None else error.kind
+            error_message = '' if error is None else error.message
+            if status == 'failed' and error is None:
+                raise DefinitionError('failed attempt requires error details')
+            if status != 'failed' and error is not None:
+                raise DefinitionError('attempt error is only valid for failed status')
+            await self._connection.execute(
+                """
+                UPDATE execution_attempts
+                SET status = ?, started_at = ?, finished_at = ?,
+                    error_kind = ?, error_message = ?
+                WHERE run_id = ? AND attempt_id = ?
+                """,
+                (
+                    status,
+                    started_at,
+                    finished_at,
+                    error_kind,
+                    error_message,
+                    run_id,
+                    attempt_id,
+                ),
+            )
+            row = dict(current)
+            row.update({
+                'status': status,
+                'started_at': started_at,
+                'finished_at': finished_at,
+                'error_kind': error_kind,
+                'error_message': error_message,
+            })
+        return _attempt_snapshot(row)
+
+    async def recover_attempts(self, run_id: str, status: Literal['cancelled', 'interrupted']
+                               ) -> tuple[AttemptSnapshot, ...]:
+        _text(run_id, 'run_id')
+        if status not in {'cancelled', 'interrupted'}:
+            raise DefinitionError('recovered attempt status must be cancelled or interrupted')
+        async with self._transaction():
+            cursor = await self._connection.execute(
+                """
+                SELECT * FROM execution_attempts
+                WHERE run_id = ? AND status IN ('scheduled', 'running', 'cancelling')
+                ORDER BY created_at, attempt_id
+                """,
+                (run_id,),
+            )
+            rows = [dict(row) for row in await cursor.fetchall()]
+            if rows:
+                finished_at = time.time()
+                await self._connection.execute(
+                    """
+                    UPDATE execution_attempts
+                    SET status = ?, finished_at = ?
+                    WHERE run_id = ? AND status IN ('scheduled', 'running', 'cancelling')
+                    """,
+                    (status, finished_at, run_id),
+                )
+                for row in rows:
+                    row['status'] = status
+                    row['finished_at'] = finished_at
+        return tuple(_attempt_snapshot(row) for row in rows)
+
+    async def attempts(self, run_id: str) -> tuple[AttemptSnapshot, ...]:
+        _text(run_id, 'run_id')
+        async with self._lock:
+            cursor = await self._connection.execute(
+                """
+                SELECT * FROM execution_attempts
+                WHERE run_id = ? ORDER BY created_at, attempt_id
+                """,
+                (run_id,),
+            )
+            rows = await cursor.fetchall()
+        return tuple(_attempt_snapshot(row) for row in rows)
+
+    async def append_progress(self, run_id: str, attempt_id: str, update: ProgressUpdate) -> ProgressEvent:
+        _text(run_id, 'run_id')
+        _text(attempt_id, 'attempt_id')
+        if not isinstance(update, ProgressUpdate):
+            raise TypeError('update must be ProgressUpdate')
+        detail_json = json.dumps(dict(update.detail), ensure_ascii=False, sort_keys=True)
+        created_at = time.time()
+        async with self._transaction():
+            current = await self._attempt_row(run_id, attempt_id)
+            if current is None:
+                raise DefinitionError(f'attempt not found: {attempt_id}')
+            if current['status'] != 'running':
+                raise DefinitionError('progress can only be appended to a running attempt')
+            cursor = await self._connection.execute(
+                """
+                SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence
+                FROM execution_events WHERE run_id = ? AND attempt_id = ?
+                """,
+                (run_id, attempt_id),
+            )
+            row = await cursor.fetchone()
+            sequence = int(row['sequence'])
+            await self._connection.execute(
+                """
+                INSERT INTO execution_events(
+                  run_id, attempt_id, sequence, phase, message,
+                  current_value, total_value, detail_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    attempt_id,
+                    sequence,
+                    update.phase,
+                    update.message,
+                    update.current,
+                    update.total,
+                    detail_json,
+                    created_at,
+                ),
+            )
+        return ProgressEvent(attempt_id, sequence, update, created_at)
+
+    async def progress_events(self, run_id: str, attempt_id: str | None = None
+                              ) -> tuple[ProgressEvent, ...]:
+        _text(run_id, 'run_id')
+        parameters: tuple[object, ...]
+        statement = 'SELECT * FROM execution_events WHERE run_id = ?'
+        parameters = (run_id,)
+        if attempt_id is not None:
+            _text(attempt_id, 'attempt_id')
+            statement += ' AND attempt_id = ?'
+            parameters = (run_id, attempt_id)
+        statement += ' ORDER BY created_at, attempt_id, sequence'
+        async with self._lock:
+            cursor = await self._connection.execute(statement, parameters)
+            rows = await cursor.fetchall()
+        return tuple(_progress_event(row) for row in rows)
+
+    async def _attempt_row(self, run_id: str, attempt_id: str) -> aiosqlite.Row | None:
+        cursor = await self._connection.execute(
+            'SELECT * FROM execution_attempts WHERE run_id = ? AND attempt_id = ?',
+            (run_id, attempt_id),
+        )
+        return await cursor.fetchone()
+
+    async def delete_run(self, run_id: str) -> None:
+        _text(run_id, 'run_id')
+        async with self._transaction():
+            await self._connection.execute(
+                'DELETE FROM run_states WHERE run_id = ?',
+                (run_id,),
+            )
 
     # Atomic commit protocol
 
-    async def _commit(
-        self, identity: CommitIdentity, resolve: CommitResolver,
-    ) -> CommitResult:
+    async def _commit(self, prepared: _PreparedCommit, *, attempt_id: str | None = None) -> CommitResult:
         async with self._transaction():
-            replay = await self._replay(identity)
+            await self._require_run(prepared.run_id)
+            attempt = None
+            if attempt_id is not None:
+                attempt = await self._attempt_row(prepared.run_id, attempt_id)
+                if attempt is None:
+                    raise DefinitionError(f'attempt not found: {attempt_id}')
+                _validate_attempt_commit(attempt, prepared.command)
+
+            replay = await self._replay(prepared)
             if replay is not None:
+                if attempt_id is not None and attempt is not None:
+                    await self._reconcile_replayed_attempt(
+                        prepared.run_id,
+                        attempt_id,
+                        attempt['status'],
+                    )
                 return replay
 
-            writes = resolve(await self._snapshot(identity.run_id))
+            if attempt is not None:
+                if attempt['status'] != 'running':
+                    return CommitResult('stale')
+
+            snapshot = await self._snapshot(prepared.run_id)
             result = (
                 CommitResult('stale')
-                if writes is None
-                else await self._apply_write_set(identity.run_id, writes)
+                if not await self._commit_is_current(
+                    prepared.run_id,
+                    prepared.command,
+                    snapshot,
+                )
+                else await self._apply_commit(prepared.run_id, prepared)
             )
-            await self._connection.execute(
-                'INSERT INTO idempotency(run_id, key, request_hash, result_json) '
-                'VALUES (?, ?, ?, ?)',
-                (
-                    identity.run_id,
-                    identity.replay_key,
-                    identity.request_hash,
-                    result.to_json(),
-                ),
-            )
+            if result.status == 'ok':
+                await self._connection.execute(
+                    """
+                    INSERT INTO commit_receipts(
+                      run_id, commit_id, request_hash, refs_json
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        prepared.run_id,
+                        prepared.command.commit_id,
+                        prepared.request_hash,
+                        _refs_json(result.refs),
+                    ),
+                )
+            if attempt_id is not None:
+                await self._finish_attempt_commit(
+                    prepared.run_id,
+                    attempt_id,
+                    result.status,
+                )
             return result
 
-    async def _replay(self, identity: CommitIdentity) -> CommitResult | None:
+    async def _require_run(self, run_id: str) -> None:
         cursor = await self._connection.execute(
-            'SELECT request_hash, result_json FROM idempotency '
-            'WHERE run_id = ? AND key = ?',
-            (identity.run_id, identity.replay_key),
+            'SELECT 1 FROM run_states WHERE run_id = ?',
+            (run_id,),
+        )
+        if await cursor.fetchone() is None:
+            raise DefinitionError(f'run not found: {run_id}')
+
+    async def _reconcile_replayed_attempt(self, run_id: str, attempt_id: str, attempt_status: str) -> None:
+        if attempt_status == 'succeeded':
+            return
+        if attempt_status == 'running':
+            await self._finish_attempt_commit(run_id, attempt_id, 'ok')
+            return
+        raise DefinitionError(
+            f'replayed commit conflicts with attempt state: '
+            f'{attempt_id} is {attempt_status}, expected succeeded'
+        )
+
+    async def _finish_attempt_commit(self, run_id: str, attempt_id: str,
+                                     commit_status: Literal['ok', 'stale']
+                                     ) -> None:
+        status = 'succeeded' if commit_status == 'ok' else 'discarded'
+        cursor = await self._connection.execute(
+            """
+            UPDATE execution_attempts
+            SET status = ?, finished_at = ?
+            WHERE run_id = ? AND attempt_id = ? AND status = 'running'
+            """,
+            (status, time.time(), run_id, attempt_id),
+        )
+        if cursor.rowcount != 1:
+            raise DefinitionError(f'attempt is no longer running: {attempt_id}')
+
+    async def _replay(self, prepared: _PreparedCommit) -> CommitResult | None:
+        cursor = await self._connection.execute(
+            """
+            SELECT request_hash, refs_json FROM commit_receipts
+            WHERE run_id = ? AND commit_id = ?
+            """,
+            (prepared.run_id, prepared.command.commit_id),
         )
         row = await cursor.fetchone()
         if row is None:
             return None
-        if row['request_hash'] != identity.request_hash:
+        if row['request_hash'] != prepared.request_hash:
             raise DefinitionError(
-                f'idempotency key reused with different request: {identity.replay_key}'
+                f'commit id reused with different request: {prepared.command.commit_id}'
             )
-        return CommitResult.from_json(row['result_json'])
+        return CommitResult(
+            'ok',
+            _refs_from_json(row['refs_json']),
+            replayed=True,
+        )
 
-    async def _apply_write_set(
-        self, run_id: str, writes: ResolvedWriteSet,
-    ) -> CommitResult:
-        refs_by_key: dict[ArtifactKey, ArtifactRef] = {}
-        for value in writes.values:
-            refs_by_key[value.key] = await self._write_value(run_id, writes.origin, value)
-        for collection in writes.collections:
-            items = tuple(
-                CollectionItem(
-                    member.key,
-                    member.source
-                    if isinstance(member.source, ArtifactRef)
-                    else refs_by_key[member.source],
-                )
-                for member in collection.members
-            )
-            refs_by_key[collection.key] = await self._write_collection(
-                run_id,
-                writes.origin,
-                collection,
-                items,
-            )
-        return CommitResult('ok', tuple(refs_by_key[key] for key in writes.result_keys))
+    async def _commit_is_current(self, run_id: str, commit: ArtifactCommit, snapshot: ArtifactSnapshot) -> bool:
+        for key, expected in commit.expected_heads.items():
+            current = snapshot.records.get(key)
+            if expected is None:
+                if current is not None:
+                    return False
+            elif current is None or current.ref != expected:
+                return False
 
-    async def _write_value(
-        self, run_id: str, origin: WriteOrigin, value: ValueWrite,
-    ) -> ArtifactRef:
-        ref = await self._next_ref(run_id, value.key)
-        record = (
-            ArtifactRecord(ref, 'external')
-            if isinstance(origin, ExternalOrigin)
-            else ArtifactRecord(
-                ref,
-                'operation',
-                origin.producer_operation,
-                value.input_refs,
-            )
-        )
-        await self._insert_record(run_id, record, value.payload)
-        await self._connection.execute(
-            """
-            INSERT INTO artifact_heads(run_id, artifact_id, item_key, version)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(run_id, artifact_id, item_key)
-            DO UPDATE SET version = excluded.version
-            """,
-            (run_id, ref.key.artifact_id, ref.key.item_key, ref.version),
-        )
-        return ref
+        effective = snapshot.effective_records()
+        if any(
+            effective.get(ref.key) is None or effective[ref.key].ref != ref
+            for write in commit.writes
+            for ref in write.input_refs
+        ):
+            return False
 
-    async def _write_collection(
-        self, run_id: str, origin: WriteOrigin, collection: CollectionManifestWrite,
-        items: tuple[CollectionItem, ...],
-    ) -> ArtifactRef:
-        payload = pickle.dumps(
-            {
-                'item_artifact_id': collection.item_artifact_id,
-                'items': tuple((item.key, item.ref.version) for item in items),
-            },
-            protocol=pickle.HIGHEST_PROTOCOL,
-        )
-        value = ValueWrite(
-            collection.key,
-            payload,
-            merge_refs(collection.input_refs, (item.ref for item in items)),
-        )
-        ref = await self._write_value(run_id, origin, value)
-        await self._connection.execute(
-            """
-            INSERT INTO collection_manifests(
-              run_id, artifact_id, item_key, version, item_artifact_id
-            ) VALUES (?, ?, ?, ?, ?)
-            """,
-            (run_id, ref.key.artifact_id, ref.key.item_key, ref.version, collection.item_artifact_id),
-        )
-        await self._connection.executemany(
-            """
-            INSERT INTO collection_items(
-              run_id, collection_artifact_id, collection_item_key,
-              collection_version, position, item_key, item_artifact_id, item_version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
+        for guard in commit.partition_guards:
+            record = effective.get(guard.partition_set_key)
+            if record is None:
+                return False
+            found, value = await self._read(run_id, record.ref)
+            if not found or not isinstance(value, PartitionSet):
+                return False
+            if guard.partition_key not in value:
+                return False
+        return True
+
+    async def _apply_commit(self, run_id: str, prepared: _PreparedCommit) -> CommitResult:
+        commit = prepared.command
+        records: list[ArtifactRecord] = []
+        partition_sets: dict[ArtifactKey, PartitionSet] = {}
+        for write, payload in zip(commit.writes, prepared.payloads, strict=True):
+            ref = await self._next_ref(run_id, write.key)
+            record = ArtifactRecord(ref, commit.producer, write.input_refs)
+            await self._insert_record(run_id, record, payload)
+            await self._connection.execute(
+                """
+                INSERT INTO artifact_heads(run_id, artifact_id, partition_key, version)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(run_id, artifact_id, partition_key)
+                DO UPDATE SET version = excluded.version
+                """,
                 (
-                    run_id, ref.key.artifact_id, ref.key.item_key, ref.version,
-                    position, item.key, item.ref.key.artifact_id, item.ref.version,
-                )
-                for position, item in enumerate(items)
+                    run_id,
+                    ref.key.artifact_id,
+                    ref.key.partition_key,
+                    ref.version,
+                ),
+            )
+            records.append(record)
+            if isinstance(write.value, PartitionSet):
+                partition_sets[write.key] = write.value
+        return CommitResult(
+            'ok',
+            tuple(record.ref for record in records),
+            ArtifactChangeSet(
+                tuple(records),
+                partition_sets,
             ),
         )
-        return ref
 
     # SQLite representation
 
-    async def _snapshot(self, run_id: str) -> ArtifactSnapshot:
+    async def _snapshot(self, run_id: str, partition_set_ids: frozenset[str] = frozenset()
+                        ) -> ArtifactSnapshot:
         cursor = await self._connection.execute(
             """
-            SELECT r.artifact_id, r.item_key, r.version, r.kind,
-                   r.producer_operation, r.input_refs_json
+            SELECT r.artifact_id, r.partition_key, r.version,
+                   r.producer, r.input_refs_json
             FROM artifact_heads h
             JOIN artifact_records r
               ON r.run_id = h.run_id
              AND r.artifact_id = h.artifact_id
-             AND r.item_key = h.item_key
+             AND r.partition_key = h.partition_key
              AND r.version = h.version
             WHERE h.run_id = ?
             """,
@@ -714,218 +687,232 @@ class ArtifactStore:
         )
         records = {}
         for row in await cursor.fetchall():
-            key = ArtifactKey(row['artifact_id'], row['item_key'])
+            key = ArtifactKey(row['artifact_id'], row['partition_key'])
             ref = ArtifactRef(key, row['version'])
             records[key] = ArtifactRecord(
                 ref,
-                row['kind'],
-                row['producer_operation'],
+                row['producer'],
                 _refs_from_json(row['input_refs_json']),
             )
-
-        cursor = await self._connection.execute(
-            """
-            SELECT m.artifact_id, m.version, m.item_artifact_id,
-                   i.position, i.item_key AS member_key,
-                   i.item_artifact_id AS member_artifact_id, i.item_version
-            FROM collection_manifests m
-            JOIN artifact_heads h
-              ON h.run_id = m.run_id
-             AND h.artifact_id = m.artifact_id
-             AND h.item_key = m.item_key
-             AND h.version = m.version
-            LEFT JOIN collection_items i
-              ON i.run_id = m.run_id
-             AND i.collection_artifact_id = m.artifact_id
-             AND i.collection_item_key = m.item_key
-             AND i.collection_version = m.version
-            WHERE m.run_id = ?
-            ORDER BY m.artifact_id, m.version, i.position
-            """,
-            (run_id,),
-        )
-        collection_rows: dict[ArtifactKey, list[aiosqlite.Row]] = {}
-        for row in await cursor.fetchall():
-            key = ArtifactKey.scalar(row['artifact_id'])
-            collection_rows.setdefault(key, []).append(row)
-
-        collections = {}
-        for key, rows in collection_rows.items():
-            first = rows[0]
-            ref = ArtifactRef(key, first['version'])
-            items = tuple(
-                CollectionItem(
-                    row['member_key'],
-                    ArtifactRef(
-                        ArtifactKey.item(row['member_artifact_id'], row['member_key']),
-                        row['item_version'],
-                    ),
+        partition_sets: dict[ArtifactKey, PartitionSet] = {}
+        for key, record in records.items():
+            if key.artifact_id not in partition_set_ids or key.partition_key:
+                continue
+            found, value = await self._read(run_id, record.ref)
+            if not found or not isinstance(value, PartitionSet):
+                raise DefinitionError(
+                    f'{key.artifact_id} must contain a PartitionSet value'
                 )
-                for row in rows
-                if row['position'] is not None
-            )
-            collections[key] = CollectionSnapshot(ref, first['item_artifact_id'], items)
-        return ArtifactSnapshot(records, collections)
+            partition_sets[key] = value
+        return ArtifactSnapshot(records, partition_sets)
 
     async def _read(self, run_id: str, ref: ArtifactRef) -> tuple[bool, object]:
         cursor = await self._connection.execute(
             """
             SELECT payload FROM artifact_payloads
-            WHERE run_id = ? AND artifact_id = ? AND item_key = ? AND version = ?
+            WHERE run_id = ? AND artifact_id = ? AND partition_key = ? AND version = ?
             """,
-            (run_id, ref.key.artifact_id, ref.key.item_key, ref.version),
+            (run_id, ref.key.artifact_id, ref.key.partition_key, ref.version),
         )
         row = await cursor.fetchone()
-        return (False, None) if row is None else (True, pickle.loads(row['payload']))
+        if row is None:
+            return False, None
+        return True, await asyncio.to_thread(pickle.loads, row['payload'])
 
     async def _record(self, run_id: str, ref: ArtifactRef) -> ArtifactRecord | None:
         cursor = await self._connection.execute(
             """
-            SELECT kind, producer_operation, input_refs_json
+            SELECT producer, input_refs_json
             FROM artifact_records
-            WHERE run_id = ? AND artifact_id = ? AND item_key = ? AND version = ?
+            WHERE run_id = ? AND artifact_id = ? AND partition_key = ? AND version = ?
             """,
-            (run_id, ref.key.artifact_id, ref.key.item_key, ref.version),
+            (run_id, ref.key.artifact_id, ref.key.partition_key, ref.version),
         )
         row = await cursor.fetchone()
         if row is None:
             return None
         return ArtifactRecord(
             ref,
-            row['kind'],
-            row['producer_operation'],
+            row['producer'],
             _refs_from_json(row['input_refs_json']),
         )
 
     async def _next_ref(self, run_id: str, key: ArtifactKey) -> ArtifactRef:
         cursor = await self._connection.execute(
             """
-            INSERT INTO artifact_versions(run_id, artifact_id, item_key, next_version)
-            VALUES (?, ?, ?, 2)
-            ON CONFLICT(run_id, artifact_id, item_key)
-            DO UPDATE SET next_version = next_version + 1
-            RETURNING next_version - 1 AS version
+            SELECT COALESCE(MAX(version), 0) + 1 AS version
+            FROM artifact_records
+            WHERE run_id = ? AND artifact_id = ? AND partition_key = ?
             """,
-            (run_id, key.artifact_id, key.item_key),
+            (run_id, key.artifact_id, key.partition_key),
         )
         row = await cursor.fetchone()
         return ArtifactRef(key, row['version'])
 
-    async def _insert_record(
-        self, run_id: str, record: ArtifactRecord, payload: bytes,
-    ) -> None:
+    async def _insert_record(self, run_id: str, record: ArtifactRecord, payload: bytes) -> None:
         ref = record.ref
         await self._connection.execute(
             """
             INSERT INTO artifact_records(
-              run_id, artifact_id, item_key, version, kind,
-              producer_operation, input_refs_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+              run_id, artifact_id, partition_key, version, producer, input_refs_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
-                run_id, ref.key.artifact_id, ref.key.item_key, ref.version,
-                record.kind, record.producer_operation, _refs_json(record.input_refs),
+                run_id, ref.key.artifact_id, ref.key.partition_key, ref.version,
+                record.producer,
+                _refs_json(record.input_refs),
             ),
         )
         await self._connection.execute(
             """
-            INSERT INTO artifact_payloads(run_id, artifact_id, item_key, version, payload)
+            INSERT INTO artifact_payloads(run_id, artifact_id, partition_key, version, payload)
             VALUES (?, ?, ?, ?, ?)
             """,
-            (run_id, ref.key.artifact_id, ref.key.item_key, ref.version, payload),
+            (run_id, ref.key.artifact_id, ref.key.partition_key, ref.version, payload),
         )
 
     async def _create_schema(self) -> None:
-        await self._connection.executescript(
+        cursor = await self._connection.execute('PRAGMA user_version')
+        row = await cursor.fetchone()
+        version = int(row[0])
+        if version == _SCHEMA_VERSION:
+            return
+        if version != 0:
+            raise DefinitionError(
+                f'unsupported artifact store schema version: {version}'
+            )
+
+        cursor = await self._connection.execute(
             """
-            CREATE TABLE IF NOT EXISTS artifact_versions(
-              run_id TEXT NOT NULL,
-              artifact_id TEXT NOT NULL,
-              item_key TEXT NOT NULL,
-              next_version INTEGER NOT NULL,
-              PRIMARY KEY(run_id, artifact_id, item_key)
-            );
-            CREATE TABLE IF NOT EXISTS artifact_records(
-              run_id TEXT NOT NULL,
-              artifact_id TEXT NOT NULL,
-              item_key TEXT NOT NULL,
-              version INTEGER NOT NULL,
-              kind TEXT NOT NULL CHECK(kind IN ('external', 'operation')),
-              producer_operation TEXT NOT NULL,
-              input_refs_json TEXT NOT NULL,
-              PRIMARY KEY(run_id, artifact_id, item_key, version)
-            );
-            CREATE TABLE IF NOT EXISTS artifact_payloads(
-              run_id TEXT NOT NULL,
-              artifact_id TEXT NOT NULL,
-              item_key TEXT NOT NULL,
-              version INTEGER NOT NULL,
-              payload BLOB NOT NULL,
-              PRIMARY KEY(run_id, artifact_id, item_key, version),
-              FOREIGN KEY(run_id, artifact_id, item_key, version)
-                REFERENCES artifact_records(run_id, artifact_id, item_key, version)
-                ON DELETE CASCADE
-            );
-            CREATE TABLE IF NOT EXISTS artifact_heads(
-              run_id TEXT NOT NULL,
-              artifact_id TEXT NOT NULL,
-              item_key TEXT NOT NULL,
-              version INTEGER NOT NULL,
-              PRIMARY KEY(run_id, artifact_id, item_key),
-              FOREIGN KEY(run_id, artifact_id, item_key, version)
-                REFERENCES artifact_records(run_id, artifact_id, item_key, version)
-            );
-            CREATE TABLE IF NOT EXISTS collection_manifests(
-              run_id TEXT NOT NULL,
-              artifact_id TEXT NOT NULL,
-              item_key TEXT NOT NULL CHECK(item_key = ''),
-              version INTEGER NOT NULL,
-              item_artifact_id TEXT NOT NULL,
-              PRIMARY KEY(run_id, artifact_id, item_key, version),
-              FOREIGN KEY(run_id, artifact_id, item_key, version)
-                REFERENCES artifact_records(run_id, artifact_id, item_key, version)
-                ON DELETE CASCADE
-            );
-            CREATE TABLE IF NOT EXISTS collection_items(
-              run_id TEXT NOT NULL,
-              collection_artifact_id TEXT NOT NULL,
-              collection_item_key TEXT NOT NULL CHECK(collection_item_key = ''),
-              collection_version INTEGER NOT NULL,
-              position INTEGER NOT NULL,
-              item_key TEXT NOT NULL,
-              item_artifact_id TEXT NOT NULL,
-              item_version INTEGER NOT NULL,
-              PRIMARY KEY(
-                run_id, collection_artifact_id, collection_item_key,
-                collection_version, position
-              ),
-              UNIQUE(
-                run_id, collection_artifact_id, collection_item_key,
-                collection_version, item_key
-              ),
-              FOREIGN KEY(
-                run_id, collection_artifact_id, collection_item_key, collection_version
-              ) REFERENCES collection_manifests(run_id, artifact_id, item_key, version)
-                ON DELETE CASCADE,
-              FOREIGN KEY(run_id, item_artifact_id, item_key, item_version)
-                REFERENCES artifact_records(run_id, artifact_id, item_key, version)
-            );
-            CREATE TABLE IF NOT EXISTS idempotency(
-              run_id TEXT NOT NULL,
-              key TEXT NOT NULL,
-              request_hash TEXT NOT NULL,
-              result_json TEXT NOT NULL,
-              PRIMARY KEY(run_id, key)
-            );
-            CREATE TABLE IF NOT EXISTS run_states(
-              run_id TEXT PRIMARY KEY,
-              status TEXT NOT NULL,
-              error_kind TEXT NOT NULL,
-              error_message TEXT NOT NULL
-            );
+            SELECT 1 FROM sqlite_master
+            WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+            LIMIT 1
             """
         )
-        await self._connection.commit()
+        if await cursor.fetchone() is not None:
+            raise DefinitionError(
+                'unversioned artifact store is not supported; delete and recreate it'
+            )
+
+        await self._connection.executescript(
+            f"""
+            BEGIN IMMEDIATE;
+            CREATE TABLE run_states(
+              run_id TEXT PRIMARY KEY,
+              status TEXT NOT NULL CHECK(status IN (
+                'created', 'running', 'pausing', 'paused',
+                'cancelling', 'cancelled', 'failed', 'completed'
+              )),
+              error_kind TEXT NOT NULL,
+              error_message TEXT NOT NULL,
+              CHECK(
+                (status = 'failed' AND trim(error_kind) != '' AND trim(error_message) != '')
+                OR (status != 'failed' AND error_kind = '' AND error_message = '')
+              )
+            );
+            CREATE TABLE artifact_records(
+              run_id TEXT NOT NULL,
+              artifact_id TEXT NOT NULL,
+              partition_key TEXT NOT NULL,
+              version INTEGER NOT NULL,
+              producer TEXT NOT NULL,
+              input_refs_json TEXT NOT NULL,
+              PRIMARY KEY(run_id, artifact_id, partition_key, version),
+              FOREIGN KEY(run_id) REFERENCES run_states(run_id) ON DELETE CASCADE,
+              CHECK(version > 0)
+            );
+            CREATE TABLE artifact_payloads(
+              run_id TEXT NOT NULL,
+              artifact_id TEXT NOT NULL,
+              partition_key TEXT NOT NULL,
+              version INTEGER NOT NULL,
+              payload BLOB NOT NULL,
+              PRIMARY KEY(run_id, artifact_id, partition_key, version),
+              FOREIGN KEY(run_id, artifact_id, partition_key, version)
+                REFERENCES artifact_records(run_id, artifact_id, partition_key, version)
+                ON DELETE CASCADE
+            );
+            CREATE TABLE artifact_heads(
+              run_id TEXT NOT NULL,
+              artifact_id TEXT NOT NULL,
+              partition_key TEXT NOT NULL,
+              version INTEGER NOT NULL,
+              PRIMARY KEY(run_id, artifact_id, partition_key),
+              FOREIGN KEY(run_id, artifact_id, partition_key, version)
+                REFERENCES artifact_records(run_id, artifact_id, partition_key, version)
+                ON DELETE CASCADE
+            );
+            CREATE TABLE commit_receipts(
+              run_id TEXT NOT NULL,
+              commit_id TEXT NOT NULL,
+              request_hash TEXT NOT NULL,
+              refs_json TEXT NOT NULL,
+              PRIMARY KEY(run_id, commit_id),
+              FOREIGN KEY(run_id) REFERENCES run_states(run_id) ON DELETE CASCADE
+            );
+            CREATE TABLE execution_attempts(
+              run_id TEXT NOT NULL,
+              attempt_id TEXT NOT NULL,
+              invocation_id TEXT NOT NULL,
+              operation_id TEXT NOT NULL,
+              partition_key TEXT NOT NULL,
+              status TEXT NOT NULL CHECK(status IN (
+                'scheduled', 'running', 'cancelling', 'cancelled',
+                'succeeded', 'failed', 'interrupted', 'discarded'
+              )),
+              created_at REAL NOT NULL,
+              started_at REAL,
+              finished_at REAL,
+              error_kind TEXT NOT NULL,
+              error_message TEXT NOT NULL,
+              input_refs_json TEXT NOT NULL,
+              output_keys_json TEXT NOT NULL,
+              PRIMARY KEY(run_id, attempt_id),
+              FOREIGN KEY(run_id) REFERENCES run_states(run_id) ON DELETE CASCADE,
+              CHECK(
+                (status = 'failed' AND trim(error_kind) != '' AND trim(error_message) != '')
+                OR (status != 'failed' AND error_kind = '' AND error_message = '')
+              ),
+              CHECK(
+                (status IN ('scheduled', 'running', 'cancelling') AND finished_at IS NULL)
+                OR (status IN (
+                  'cancelled', 'succeeded', 'failed', 'interrupted', 'discarded'
+                ) AND finished_at IS NOT NULL)
+              ),
+              CHECK(
+                status NOT IN ('running', 'succeeded', 'failed', 'discarded')
+                OR started_at IS NOT NULL
+              )
+            );
+            CREATE INDEX execution_attempts_by_run_status
+              ON execution_attempts(run_id, status, created_at);
+            CREATE UNIQUE INDEX active_attempt_by_invocation
+              ON execution_attempts(run_id, invocation_id)
+              WHERE status IN ('scheduled', 'running', 'cancelling');
+            CREATE TABLE execution_events(
+              run_id TEXT NOT NULL,
+              attempt_id TEXT NOT NULL,
+              sequence INTEGER NOT NULL,
+              phase TEXT NOT NULL,
+              message TEXT NOT NULL,
+              current_value INTEGER,
+              total_value INTEGER,
+              detail_json TEXT NOT NULL,
+              created_at REAL NOT NULL,
+              PRIMARY KEY(run_id, attempt_id, sequence),
+              FOREIGN KEY(run_id, attempt_id)
+                REFERENCES execution_attempts(run_id, attempt_id) ON DELETE CASCADE,
+              CHECK(sequence > 0),
+              CHECK(current_value IS NULL OR current_value >= 0),
+              CHECK(total_value IS NULL OR total_value >= 0),
+              CHECK(
+                current_value IS NULL OR total_value IS NULL OR current_value <= total_value
+              )
+            );
+            PRAGMA user_version = {_SCHEMA_VERSION};
+            COMMIT;
+            """
+        )
 
     @asynccontextmanager
     async def _transaction(self) -> AsyncIterator[None]:
@@ -945,65 +932,163 @@ class ArtifactStore:
                 raise
 
 
+def _validate_attempt_transition(current: str, target: AttemptStatus) -> None:
+    if current == target:
+        return
+    if target not in _PUBLIC_ATTEMPT_TRANSITIONS.get(current, frozenset()):
+        raise DefinitionError(f'cannot transition attempt from {current} to {target}')
+
+
+def _validate_attempt_commit(attempt: Mapping[str, object], commit: ArtifactCommit) -> None:
+    attempt_id = attempt['attempt_id']
+    if attempt['invocation_id'] != commit.commit_id:
+        raise DefinitionError(
+            f'attempt {attempt_id} does not belong to commit {commit.commit_id}'
+        )
+
+    expected_producer = f'operation:{attempt["operation_id"]}'
+    if commit.producer != expected_producer:
+        raise DefinitionError(
+            f'attempt {attempt_id} requires producer {expected_producer}'
+        )
+
+    input_refs = _refs_from_json(attempt['input_refs_json'])
+    if any(write.input_refs != input_refs for write in commit.writes):
+        raise DefinitionError(
+            f'attempt {attempt_id} input refs do not match commit lineage'
+        )
+
+    declared_outputs = {
+        ArtifactKey(item[0], item[1])
+        for item in json.loads(attempt['output_keys_json'])
+    }
+    if not declared_outputs.issubset(commit.output_keys):
+        raise DefinitionError(
+            f'attempt {attempt_id} declared outputs are missing from commit'
+        )
+
+    partition_key = attempt['partition_key']
+    if partition_key and not any(
+        guard.partition_key == partition_key
+        for guard in commit.partition_guards
+    ):
+        raise DefinitionError(
+            f'attempt {attempt_id} partition guard does not match commit'
+        )
+
+
+def _attempt_snapshot(row: Mapping[str, object]) -> AttemptSnapshot:
+    status = cast(AttemptStatus, row['status'])
+    error = None
+    if status == 'failed':
+        error = RuntimeErrorInfo(row['error_kind'], row['error_message'])
+    return AttemptSnapshot(
+        row['attempt_id'],
+        row['invocation_id'],
+        row['operation_id'],
+        row['partition_key'],
+        status,
+        row['created_at'],
+        row['started_at'],
+        row['finished_at'],
+        error,
+        _refs_from_json(row['input_refs_json']),
+        tuple(
+            ArtifactKey(item[0], item[1])
+            for item in json.loads(row['output_keys_json'])
+        ),
+    )
+
+
+def _progress_event(row: Mapping[str, object]) -> ProgressEvent:
+    update = ProgressUpdate(
+        row['phase'],
+        row['message'],
+        row['current_value'],
+        row['total_value'],
+        json.loads(row['detail_json']),
+    )
+    return ProgressEvent(
+        row['attempt_id'],
+        row['sequence'],
+        update,
+        row['created_at'],
+    )
+
+
 def _key_data(key: ArtifactKey) -> list[str]:
-    return [key.artifact_id, key.item_key]
+    return [key.artifact_id, key.partition_key]
 
 
 def _ref_data(ref: ArtifactRef | None) -> list[object] | None:
-    return None if ref is None else [ref.key.artifact_id, ref.key.item_key, ref.version]
-
-
-def _origin_data(origin: WriteOrigin) -> list[str]:
-    if isinstance(origin, ExternalOrigin):
-        return ['external']
-    return ['operation', origin.producer_operation]
-
-
-def _writes_data(writes: ResolvedWriteSet) -> list[object]:
-    return [
-        [
-            [*_key_data(write.key), _digest(write.payload), [_ref_data(ref) for ref in write.input_refs]]
-            for write in writes.values
-        ],
-        [
-            [
-                *_key_data(collection.key),
-                collection.item_artifact_id,
-                [
-                    [
-                        member.key,
-                        'ref' if isinstance(member.source, ArtifactRef) else 'write',
-                        _ref_data(member.source)
-                        if isinstance(member.source, ArtifactRef)
-                        else _key_data(member.source),
-                    ]
-                    for member in collection.members
-                ],
-                [_ref_data(ref) for ref in collection.input_refs],
-            ]
-            for collection in writes.collections
-        ],
-        [_key_data(key) for key in writes.result_keys],
+    return None if ref is None else [
+        ref.key.artifact_id,
+        ref.key.partition_key,
+        ref.version,
     ]
 
 
-def _digest(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
+def _prepare_commit(run_id: str, commit: ArtifactCommit) -> _PreparedCommit:
+    payloads = tuple(
+        pickle.dumps(write.value, protocol=pickle.HIGHEST_PROTOCOL)
+        for write in commit.writes
+    )
+    return _PreparedCommit(
+        run_id,
+        commit,
+        payloads,
+        _commit_fingerprint(run_id, commit, payloads),
+    )
 
 
-def _fingerprint(*values: object) -> str:
-    payload = json.dumps(values, sort_keys=True, separators=(',', ':')).encode()
-    return hashlib.sha256(payload).hexdigest()
+def _deserialize_many(refs: tuple[ArtifactRef, ...], payloads: Mapping[ArtifactRef, bytes]
+                      ) -> dict[ArtifactRef, object]:
+    return {ref: pickle.loads(payloads[ref]) for ref in refs}
+
+
+def _commit_fingerprint(run_id: str, commit: ArtifactCommit, payloads: tuple[bytes, ...]) -> str:
+    writes = [
+        [
+            *_key_data(write.key),
+            hashlib.sha256(payload).hexdigest(),
+            [_ref_data(ref) for ref in write.input_refs],
+        ]
+        for write, payload in zip(commit.writes, payloads, strict=True)
+    ]
+    expected = [
+        [
+            *_key_data(key),
+            _ref_data(ref),
+        ]
+        for key, ref in sorted(commit.expected_heads.items())
+    ]
+    guards = [
+        [*_key_data(guard.partition_set_key), guard.partition_key]
+        for guard in sorted(commit.partition_guards)
+    ]
+    encoded = json.dumps((
+        'commit',
+        run_id,
+        commit.commit_id,
+        commit.producer,
+        writes,
+        expected,
+        guards,
+    ), sort_keys=True, separators=(',', ':')).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _refs_json(refs: tuple[ArtifactRef, ...]) -> str:
-    values = [[ref.key.artifact_id, ref.key.item_key, ref.version] for ref in refs]
+    values = [
+        [ref.key.artifact_id, ref.key.partition_key, ref.version]
+        for ref in refs
+    ]
     return json.dumps(values, separators=(',', ':'))
 
 
 def _refs_from_json(value: str) -> tuple[ArtifactRef, ...]:
     return tuple(
-        ArtifactRef(ArtifactKey(str(item[0]), str(item[1])), int(item[2]))
+        ArtifactRef(ArtifactKey(item[0], item[1]), item[2])
         for item in json.loads(value)
     )
 

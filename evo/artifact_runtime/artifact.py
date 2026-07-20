@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Literal
 
 from .errors import DefinitionError
 from .utils import _positive_int, _string, _text
@@ -12,22 +11,23 @@ from .utils import _positive_int, _string, _text
 @dataclass(frozen=True, order=True)
 class ArtifactKey:
     artifact_id: str
-    item_key: str = ''
+    partition_key: str = ''
 
     def __post_init__(self) -> None:
         _text(self.artifact_id, 'artifact_id')
-        _string(self.item_key, 'item_key')
-        if self.item_key and not self.item_key.strip():
-            raise DefinitionError('item_key must be non-empty when set')
+        _string(self.partition_key, 'partition_key')
+
+        if self.partition_key and not self.partition_key.strip():
+            raise DefinitionError('partition_key must be non-empty when set')
 
     @classmethod
     def scalar(cls, artifact_id: str) -> ArtifactKey:
         return cls(artifact_id)
 
     @classmethod
-    def item(cls, artifact_id: str, item_key: str) -> ArtifactKey:
-        _text(item_key, 'item_key')
-        return cls(artifact_id, item_key)
+    def partition(cls, artifact_id: str, partition_key: str) -> ArtifactKey:
+        _text(partition_key, 'partition_key')
+        return cls(artifact_id, partition_key)
 
 
 @dataclass(frozen=True, order=True)
@@ -44,250 +44,139 @@ class ArtifactRef:
 @dataclass(frozen=True)
 class ArtifactRecord:
     ref: ArtifactRef
-    kind: Literal['external', 'operation']
-    producer_operation: str = ''
+    producer: str
     input_refs: tuple[ArtifactRef, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.ref, ArtifactRef):
             raise TypeError('ref must be ArtifactRef')
-        if self.kind not in {'external', 'operation'}:
-            raise DefinitionError(f'unknown artifact record kind: {self.kind}')
 
-        inputs = tuple(sorted(self.input_refs))
+        _text(self.producer, 'producer')
+        inputs = tuple(self.input_refs)
         if not all(isinstance(ref, ArtifactRef) for ref in inputs):
             raise TypeError('input_refs must contain ArtifactRef values')
+
+        inputs = tuple(sorted(inputs))
         if len({ref.key for ref in inputs}) != len(inputs):
             raise DefinitionError('input_refs must contain at most one ref per artifact key')
-        if self.kind == 'external':
-            if self.producer_operation or inputs:
-                raise DefinitionError('external artifact cannot declare producer or input refs')
-        else:
-            _text(self.producer_operation, 'producer_operation')
 
         object.__setattr__(self, 'input_refs', inputs)
 
 
 @dataclass(frozen=True)
-class CollectionItem:
-    key: str
-    ref: ArtifactRef
+class PartitionSet:
+    keys: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        _text(self.key, 'collection item key')
-        if not isinstance(self.ref, ArtifactRef):
-            raise TypeError('collection item ref must be ArtifactRef')
-        if self.ref.key.item_key != self.key:
-            raise DefinitionError('collection item key must match artifact ref item_key')
+        keys = tuple(self.keys)
+        for key in keys:
+            _text(key, 'partition key')
+
+        if len(set(keys)) != len(keys):
+            raise DefinitionError('partition keys must be unique')
+
+        object.__setattr__(self, 'keys', keys)
+
+    def __contains__(self, partition_key: object) -> bool:
+        return partition_key in self.keys
+
+
+@dataclass(frozen=True, order=True)
+class PartitionGuard:
+    partition_set_key: ArtifactKey
+    partition_key: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.partition_set_key, ArtifactKey):
+            raise TypeError('partition_set_key must be ArtifactKey')
+
+        if self.partition_set_key.partition_key:
+            raise DefinitionError('partition_set_key must identify a scalar artifact')
+        _text(self.partition_key, 'partition_key')
 
 
 @dataclass(frozen=True)
-class CollectionSnapshot:
-    ref: ArtifactRef
-    item_artifact_id: str
-    items: tuple[CollectionItem, ...] = ()
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.ref, ArtifactRef):
-            raise TypeError('collection ref must be ArtifactRef')
-        if self.ref.key.item_key:
-            raise DefinitionError('collection ref must be a scalar artifact ref')
-        _text(self.item_artifact_id, 'collection item_artifact_id')
-
-        items = tuple(self.items)
-        if not all(isinstance(item, CollectionItem) for item in items):
-            raise TypeError('collection items must be CollectionItem values')
-        if len({item.key for item in items}) != len(items):
-            raise DefinitionError('collection item keys must be unique')
-        if any(item.ref.key.artifact_id != self.item_artifact_id for item in items):
-            raise DefinitionError('collection items must share the declared item artifact id')
-
-        object.__setattr__(self, 'items', items)
-
-
-@dataclass(frozen=True)
-class CollectionResult:
-    items: Mapping[str, object] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        items = dict(self.items)
-        for key in items:
-            _text(key, 'collection result item key')
-        object.__setattr__(self, 'items', MappingProxyType(items))
-
-
-@dataclass(frozen=True)
-class CollectionItemGuard:
-    collection_key: ArtifactKey
-    item: CollectionItem
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.collection_key, ArtifactKey) or self.collection_key.item_key:
-            raise DefinitionError('collection guard key must be a scalar ArtifactKey')
-        if not isinstance(self.item, CollectionItem):
-            raise TypeError('collection guard item must be CollectionItem')
-
-
-@dataclass(frozen=True)
-class CollectionWrite:
-    key: ArtifactKey
-    item_artifact_id: str
-    items: Mapping[str, object] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.key, ArtifactKey) or self.key.item_key:
-            raise DefinitionError('collection write key must be a scalar ArtifactKey')
-        _text(self.item_artifact_id, 'collection write item_artifact_id')
-        items = dict(self.items)
-        for item_key in items:
-            _text(item_key, 'collection write item key')
-        object.__setattr__(self, 'items', MappingProxyType(items))
-
-
-@dataclass(frozen=True)
-class OperationWriteSet:
-    commit_id: str
-    producer_operation: str
-    input_refs: tuple[ArtifactRef, ...]
-    scalar_values: Mapping[ArtifactKey, object] = field(default_factory=dict)
-    collection_writes: tuple[CollectionWrite, ...] = ()
-    item_guards: tuple[CollectionItemGuard, ...] = ()
-    collection_guards: tuple[CollectionSnapshot, ...] = ()
-
-    def __post_init__(self) -> None:
-        _text(self.commit_id, 'artifact commit id')
-        _text(self.producer_operation, 'artifact commit producer_operation')
-
-        input_refs = tuple(sorted(self.input_refs))
-        if not all(isinstance(ref, ArtifactRef) for ref in input_refs):
-            raise TypeError('artifact commit input_refs must contain ArtifactRef values')
-        if len({ref.key for ref in input_refs}) != len(input_refs):
-            raise DefinitionError('artifact commit input_refs must contain one ref per key')
-        scalar_values = dict(self.scalar_values)
-        if not all(isinstance(key, ArtifactKey) for key in scalar_values):
-            raise TypeError('artifact commit scalar_values keys must be ArtifactKey values')
-
-        collection_writes = tuple(self.collection_writes)
-        item_guards = tuple(self.item_guards)
-        collection_guards = tuple(self.collection_guards)
-        if not all(isinstance(write, CollectionWrite) for write in collection_writes):
-            raise TypeError('artifact commit collection_writes must contain CollectionWrite values')
-        if not all(isinstance(guard, CollectionItemGuard) for guard in item_guards):
-            raise TypeError('artifact commit item_guards must contain CollectionItemGuard values')
-        if not all(isinstance(guard, CollectionSnapshot) for guard in collection_guards):
-            raise TypeError('artifact commit collection_guards must contain CollectionSnapshot values')
-
-        input_by_key = {ref.key: ref for ref in input_refs}
-        guarded_refs = [guard.item.ref for guard in item_guards]
-        guarded_refs.extend(
-            ref
-            for guard in collection_guards
-            for ref in (guard.ref, *(item.ref for item in guard.items))
-        )
-        if any(input_by_key.get(ref.key) != ref for ref in guarded_refs):
-            raise DefinitionError('artifact commit guards must reference exact input refs')
-
-        output_keys = self.output_keys()
-        if len(set(output_keys)) != len(output_keys):
-            raise DefinitionError('artifact commit output keys must be unique')
-        if not output_keys:
-            raise DefinitionError('artifact commit must contain at least one output')
-
-        object.__setattr__(self, 'input_refs', input_refs)
-        object.__setattr__(self, 'scalar_values', MappingProxyType(scalar_values))
-        object.__setattr__(self, 'collection_writes', collection_writes)
-        object.__setattr__(self, 'item_guards', item_guards)
-        object.__setattr__(self, 'collection_guards', collection_guards)
-
-    def output_keys(self) -> tuple[ArtifactKey, ...]:
-        keys = [*self.scalar_values]
-        keys.extend(write.key for write in self.collection_writes)
-        keys.extend(
-            ArtifactKey.item(write.item_artifact_id, item_key)
-            for write in self.collection_writes
-            for item_key in write.items
-        )
-        return tuple(keys)
-
-
-@dataclass(frozen=True)
-class ArtifactMutation:
+class ArtifactDraft:
     key: ArtifactKey
     value: object
-    expected_ref: ArtifactRef | None = None
+    input_refs: tuple[ArtifactRef, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.key, ArtifactKey):
-            raise TypeError('artifact mutation key must be ArtifactKey')
-        if self.key.item_key:
-            raise DefinitionError('item artifacts must be edited through CollectionMutation')
-        if self.expected_ref is not None:
-            if not isinstance(self.expected_ref, ArtifactRef):
-                raise TypeError('expected_ref must be ArtifactRef or None')
-            if self.expected_ref.key != self.key:
-                raise DefinitionError('expected_ref must identify the mutated artifact')
+            raise TypeError('artifact write key must be ArtifactKey')
+
+        if isinstance(self.value, PartitionSet) and self.key.partition_key:
+            raise DefinitionError('PartitionSet must be written as a scalar artifact')
+
+        object.__setattr__(self, 'input_refs', merge_refs(self.input_refs))
 
 
 @dataclass(frozen=True)
-class CollectionMutation:
-    collection_id: str
-    item_artifact_id: str
-    upserts: Mapping[str, object] = field(default_factory=dict)
-    deletes: tuple[str, ...] = ()
-    expected_ref: ArtifactRef | None = None
+class ArtifactCommit:
+    commit_id: str
+    producer: str
+    writes: tuple[ArtifactDraft, ...]
+    expected_heads: Mapping[ArtifactKey, ArtifactRef | None] = field(default_factory=dict)
+    partition_guards: tuple[PartitionGuard, ...] = ()
 
     def __post_init__(self) -> None:
-        _text(self.collection_id, 'collection_id')
-        _text(self.item_artifact_id, 'item_artifact_id')
-        upserts = dict(self.upserts)
-        deletes = tuple(self.deletes)
+        _text(self.commit_id, 'artifact commit id')
+        _text(self.producer, 'artifact commit producer')
+        writes = tuple(self.writes)
+        if not writes:
+            raise DefinitionError('artifact commit must contain at least one write')
+        if not all(isinstance(write, ArtifactDraft) for write in writes):
+            raise TypeError('artifact commit writes must contain ArtifactDraft values')
+        if len({write.key for write in writes}) != len(writes):
+            raise DefinitionError('artifact commit write keys must be unique')
 
-        for key in upserts:
-            _text(key, 'collection upsert key')
-        for key in deletes:
-            _text(key, 'collection delete key')
-        if len(set(deletes)) != len(deletes):
-            raise DefinitionError('collection delete keys must be unique')
-        if set(upserts) & set(deletes):
-            raise DefinitionError('collection mutation cannot upsert and delete the same key')
-        if not upserts and not deletes:
-            raise DefinitionError('collection mutation must change at least one item')
+        expected_heads = dict(self.expected_heads)
+        for key, ref in expected_heads.items():
+            if not isinstance(key, ArtifactKey):
+                raise TypeError('expected_heads keys must be ArtifactKey values')
+            if ref is not None and not isinstance(ref, ArtifactRef):
+                raise TypeError('expected_heads values must be ArtifactRef or None')
+            if ref is not None and ref.key != key:
+                raise DefinitionError('expected head must identify its artifact key')
 
-        if self.expected_ref is not None:
-            if not isinstance(self.expected_ref, ArtifactRef):
-                raise TypeError('expected_ref must be ArtifactRef or None')
-            if self.expected_ref.key != ArtifactKey.scalar(self.collection_id):
-                raise DefinitionError('expected_ref must identify the mutated collection')
+        guards = tuple(self.partition_guards)
+        if not all(isinstance(guard, PartitionGuard) for guard in guards):
+            raise TypeError('partition_guards must contain PartitionGuard values')
+        if len(set(guards)) != len(guards):
+            raise DefinitionError('partition guards must be unique')
 
-        object.__setattr__(self, 'upserts', MappingProxyType(upserts))
-        object.__setattr__(self, 'deletes', tuple(sorted(deletes)))
+        object.__setattr__(self, 'writes', writes)
+        object.__setattr__(self, 'expected_heads', MappingProxyType(expected_heads))
+        object.__setattr__(self, 'partition_guards', guards)
+
+    @property
+    def output_keys(self) -> tuple[ArtifactKey, ...]:
+        return tuple(write.key for write in self.writes)
 
 
 @dataclass(frozen=True)
 class ArtifactSnapshot:
     records: Mapping[ArtifactKey, ArtifactRecord] = field(default_factory=dict)
-    collections: Mapping[ArtifactKey, CollectionSnapshot] = field(default_factory=dict)
+    partition_sets: Mapping[ArtifactKey, PartitionSet] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         records = dict(self.records)
-        collections = dict(self.collections)
-
+        partition_sets = dict(self.partition_sets)
         for key, record in records.items():
             if not isinstance(key, ArtifactKey) or not isinstance(record, ArtifactRecord):
                 raise TypeError('records must map ArtifactKey to ArtifactRecord')
             if record.ref.key != key:
                 raise DefinitionError('artifact record key must match its ref')
-        for key, collection in collections.items():
-            if not isinstance(key, ArtifactKey) or not isinstance(collection, CollectionSnapshot):
-                raise TypeError('collections must map ArtifactKey to CollectionSnapshot')
-            if collection.ref.key != key:
-                raise DefinitionError('collection key must match its ref')
-            record = records.get(key)
-            if record is None or record.ref != collection.ref:
-                raise DefinitionError('collection ref must be the current artifact record')
+        for key, partitions in partition_sets.items():
+            if not isinstance(key, ArtifactKey) or key.partition_key:
+                raise TypeError('partition_sets keys must be scalar ArtifactKey values')
+            if not isinstance(partitions, PartitionSet):
+                raise TypeError('partition_sets values must be PartitionSet')
+            if key not in records:
+                raise DefinitionError('partition set must reference a visible artifact record')
 
         object.__setattr__(self, 'records', MappingProxyType(records))
-        object.__setattr__(self, 'collections', MappingProxyType(collections))
+        object.__setattr__(self, 'partition_sets', MappingProxyType(partition_sets))
 
     def effective_records(self) -> Mapping[ArtifactKey, ArtifactRecord]:
         effective = dict(self.records)
@@ -295,55 +184,70 @@ class ArtifactSnapshot:
         while changed:
             changed = False
             for key, record in tuple(effective.items()):
-                if record.kind != 'operation':
-                    continue
-                if any(effective.get(ref.key, None) is None or effective[ref.key].ref != ref
-                       for ref in record.input_refs):
-                    del effective[key]
-                    changed = True
-            for key, collection in self.collections.items():
-                if key not in effective:
-                    continue
                 if any(
-                    effective.get(item.ref.key) is None
-                    or effective[item.ref.key].ref != item.ref
-                    for item in collection.items
+                    effective.get(ref.key) is None or effective[ref.key].ref != ref
+                    for ref in record.input_refs
                 ):
                     del effective[key]
                     changed = True
         return MappingProxyType(effective)
 
-    def effective_collections(self) -> Mapping[ArtifactKey, CollectionSnapshot]:
-        effective = self.effective_records()
-        return MappingProxyType({
-            key: collection
-            for key, collection in self.collections.items()
-            if effective.get(key) is not None and effective[key].ref == collection.ref
-        })
+
+@dataclass(frozen=True)
+class ArtifactChangeSet:
+    records: tuple[ArtifactRecord, ...] = ()
+    partition_sets: Mapping[ArtifactKey, PartitionSet] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        records = tuple(self.records)
+        partition_sets = dict(self.partition_sets)
+
+        if not all(isinstance(record, ArtifactRecord) for record in records):
+            raise TypeError('change records must contain ArtifactRecord values')
+        if len({record.ref.key for record in records}) != len(records):
+            raise DefinitionError('change records must have unique artifact keys')
+
+        record_keys = {record.ref.key for record in records}
+        for key, partitions in partition_sets.items():
+            if key not in record_keys:
+                raise DefinitionError('partition set change must have a matching record')
+            if not isinstance(partitions, PartitionSet):
+                raise TypeError('partition set changes must contain PartitionSet values')
+
+        object.__setattr__(self, 'records', records)
+        object.__setattr__(self, 'partition_sets', MappingProxyType(partition_sets))
+
+    def apply(self, snapshot: ArtifactSnapshot) -> ArtifactSnapshot:
+        records = dict(snapshot.records)
+        partition_sets = dict(snapshot.partition_sets)
+
+        for record in self.records:
+            key = record.ref.key
+            records[key] = record
+
+            if key in self.partition_sets:
+                partition_sets[key] = self.partition_sets[key]
+            else:
+                partition_sets.pop(key, None)
+        return ArtifactSnapshot(records, partition_sets)
 
 
 def merge_refs(*groups: Iterable[ArtifactRef]) -> tuple[ArtifactRef, ...]:
     refs: dict[ArtifactKey, ArtifactRef] = {}
+
     for group in groups:
         for ref in group:
+            if not isinstance(ref, ArtifactRef):
+                raise TypeError('artifact refs must contain ArtifactRef values')
             previous = refs.get(ref.key)
             if previous is not None and previous != ref:
                 raise DefinitionError(f'conflicting refs for artifact key {ref.key}')
             refs[ref.key] = ref
+
     return tuple(sorted(refs.values()))
 
 
 __all__ = [
-    'OperationWriteSet',
-    'ArtifactKey',
-    'ArtifactMutation',
-    'ArtifactRecord',
-    'ArtifactRef',
-    'ArtifactSnapshot',
-    'CollectionItem',
-    'CollectionItemGuard',
-    'CollectionMutation',
-    'CollectionResult',
-    'CollectionSnapshot',
-    'CollectionWrite',
+    'ArtifactChangeSet', 'ArtifactCommit', 'ArtifactKey', 'ArtifactRecord', 'ArtifactRef',
+    'ArtifactSnapshot', 'ArtifactDraft', 'PartitionGuard', 'PartitionSet', 'merge_refs',
 ]
