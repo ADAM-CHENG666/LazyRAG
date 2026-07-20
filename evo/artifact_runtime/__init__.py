@@ -1,5 +1,4 @@
 from .artifact import (
-    ArtifactChangeSet,
     ArtifactCommit,
     ArtifactKey,
     ArtifactRecord,
@@ -29,11 +28,13 @@ from .operation import (
 )
 from .runtime import ArtifactRuntime
 from .state import (
+    ArtifactRetryRequest,
     AttemptSnapshot,
     AttemptStatus,
     InvocationSnapshot,
     ProgressEvent,
     ProgressUpdate,
+    RetryStatus,
     RunStatus,
     RuntimeErrorInfo,
     RuntimeSnapshot,
@@ -41,11 +42,11 @@ from .state import (
 
 
 __all__ = [
-    'ArtifactChangeSet', 'ArtifactCommit', 'ArtifactKey', 'ArtifactRecord', 'ArtifactRef',
-    'ArtifactRuntime', 'ArtifactRuntimeError', 'ArtifactSnapshot', 'ArtifactDraft', 'AttemptSnapshot',
+    'ArtifactCommit', 'ArtifactDraft', 'ArtifactKey', 'ArtifactRecord', 'ArtifactRef',
+    'ArtifactRetryRequest', 'ArtifactRuntime', 'ArtifactRuntimeError', 'ArtifactSnapshot', 'AttemptSnapshot',
     'AttemptStatus', 'BoundAggregate', 'DefinitionError', 'InputSpec', 'InvocationSnapshot', 'Operation',
     'OperationContext', 'OperationExecutionError', 'OperationInvocation', 'OperationResult', 'OperationSpec',
     'OutputSpec', 'PartitionGuard', 'PartitionSet', 'PlanningError', 'ProgressEvent', 'ProgressUpdate',
-    'RunStatus', 'RuntimeErrorInfo', 'RuntimeSnapshot', 'all_items', 'each', 'keyed', 'one', 'operation',
-    'partitioned', 'scalar',
+    'RetryStatus', 'RunStatus', 'RuntimeErrorInfo', 'RuntimeSnapshot', 'all_items', 'each', 'keyed',
+    'one', 'operation', 'partitioned', 'scalar',
 ]

@@ -1,17 +1,27 @@
 from __future__ import annotations
 
 import asyncio
-from collections import Counter, deque
+import itertools
+import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Literal, get_args
-from uuid import uuid4
+from typing import Literal
 
-from .artifact import ArtifactCommit, ArtifactSnapshot
-from .errors import DefinitionError, OperationExecutionError, PlanningError
+from .artifact import ArtifactCommit, ArtifactKey, ArtifactSnapshot
+from .errors import DefinitionError, OperationExecutionError
 from .execution import ExecutionHandle, start_execution
 from .operation import OperationContext, OperationInvocation, OperationResult
-from .planning import PlanningDecision, RuntimeDefinition, plan_next
+from .planning import (
+    PlanAwaiting,
+    PlanComplete,
+    PlanReady,
+    PlanningResult,
+    RuntimeDefinition,
+    obsolete_retries,
+    plan_next,
+)
 from .state import (
+    ArtifactRetryRequest,
     AttemptSnapshot,
     InvocationSnapshot,
     ProgressUpdate,
@@ -19,19 +29,18 @@ from .state import (
     RuntimeErrorInfo,
     RuntimeSnapshot,
 )
-from .store import ArtifactStore, CommitResult
+from .store import ArtifactStore
 from .utils import _as_exception, _positive_int, _positive_number, _text
 
 
-_RUN_STATUSES = frozenset(get_args(RunStatus))
-
-
-class _SessionFailure(ExceptionGroup):
-    """An internal run failure that must enter the actor cleanup path."""
+_CONTROL_PRIORITY = 0
+_COMPLETION_PRIORITY = 2
+_PROGRESS_PRIORITY = 2
+_PROGRESS_CAPACITY = 256
 
 
 class _TerminationFailure(ExceptionGroup):
-    """A retryable failure to terminate one or more physical executions."""
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +56,13 @@ class _CommitCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class _RetryArtifactCommand:
+    artifact_key: ArtifactKey
+    request_id: str
+    reply: asyncio.Future[RuntimeSnapshot]
+
+
+@dataclass(frozen=True, slots=True)
 class _ExecutionProgress:
     attempt_id: str
     update: ProgressUpdate
@@ -55,7 +71,8 @@ class _ExecutionProgress:
 @dataclass(frozen=True, slots=True)
 class _ExecutionDone:
     attempt_id: str
-    outcome: OperationResult | Exception
+    result: OperationResult | None
+    error: BaseException | None
 
 
 @dataclass(slots=True)
@@ -63,12 +80,15 @@ class _ActiveExecution:
     invocation: OperationInvocation
     attempt: AttemptSnapshot
     handle: ExecutionHandle
-    task: asyncio.Task[None]
+    waiter: asyncio.Task[None]
+
+
+_Event = _Command | _CommitCommand | _RetryArtifactCommand | _ExecutionProgress | _ExecutionDone
 
 
 class RunSession:
     def __init__(self, run_id: str, definition: RuntimeDefinition, store: ArtifactStore, *,
-                 max_concurrency: int = 4, terminate_timeout: float = 1.0
+                 max_concurrency: int, terminate_timeout: float
                  ) -> None:
         _text(run_id, 'run_id')
         if not isinstance(definition, RuntimeDefinition):
@@ -83,81 +103,65 @@ class RunSession:
         self._store = store
         self._max_concurrency = max_concurrency
         self._terminate_timeout = terminate_timeout
-
-        self._events: asyncio.Queue[
-            _Command | _CommitCommand | _ExecutionProgress | _ExecutionDone
-        ] = asyncio.Queue()
-        self._condition = asyncio.Condition()
-        self._request_lock = asyncio.Lock()
+        self._events: asyncio.PriorityQueue[tuple[int, int, _Event]] = asyncio.PriorityQueue()
+        self._event_sequence = itertools.count()
+        self._progress_slots = asyncio.Semaphore(_PROGRESS_CAPACITY)
         self._ready = asyncio.Event()
-        self._stopped = asyncio.Event()
-        self._startup_error: BaseException | None = None
-        self._task_group: asyncio.TaskGroup | None = None
-
-        self._pending_invocations: dict[str, deque[OperationInvocation]] = {}
-        self._active_attempts: dict[str, _ActiveExecution] = {}
-        self._remaining_planned: dict[str, int] = {}
+        self._condition = asyncio.Condition()
+        self._serve_task: asyncio.Task[None] | None = None
+        self._initialization_error: BaseException | None = None
+        self._stopping = False
+        self._closed = False
 
         self._status: RunStatus = 'created'
         self._error: RuntimeErrorInfo | None = None
-        self._pending_failure: RuntimeErrorInfo | None = None
-        self._accept_commands = True
-        self._closing = False
         self._artifacts = ArtifactSnapshot()
-        self._view = ArtifactSnapshot()
+        self._retries: tuple[ArtifactRetryRequest, ...] = ()
+        self._decision: PlanningResult | None = None
+        self._active: dict[str, _ActiveExecution] = {}
         self._snapshot = RuntimeSnapshot(run_id)
 
-    # Actor lifecycle and public commands
-
     async def serve(self) -> None:
+        if self._serve_task is not None:
+            raise RuntimeError('run session is already serving')
+        self._serve_task = asyncio.current_task()
         try:
-            async with asyncio.TaskGroup() as group:
-                self._task_group = group
-                await self._initialize()
-                self._ready.set()
-                while not self._closing:
-                    event = await self._events.get()
-                    try:
-                        match event:
-                            case _Command():
-                                await self._command(event)
-                            case _CommitCommand():
-                                await self._commit_command(event)
-                            case _ExecutionProgress():
-                                await self._execution_progress(event)
-                            case _ExecutionDone():
-                                await self._execution_done(event)
-                    except Exception as exc:
-                        failure = await self._handle_session_failure(exc)
-                        if (
-                            isinstance(event, (_Command, _CommitCommand))
-                            and not event.reply.done()
-                        ):
-                            event.reply.set_exception(
-                                exc if failure is None else failure
-                            )
-                        if failure is not None:
-                            raise failure
-        except BaseException as exc:
-            if not self._ready.is_set():
-                self._startup_error = exc
+            await self._initialize()
+        except Exception as exc:
+            self._initialization_error = exc
             self._ready.set()
-            failure = await self._handle_session_failure(exc)
-            if failure is None:
-                return
-            if failure is exc:
-                raise
-            raise failure
+            self._closed = True
+            await self._notify()
+            raise
+        self._ready.set()
+
+        try:
+            while not self._stopping:
+                _, _, event = await self._events.get()
+                try:
+                    try:
+                        await self._handle_event(event)
+                    except Exception as exc:
+                        await self._handle_internal_error(exc)
+                finally:
+                    if isinstance(event, _ExecutionProgress):
+                        self._progress_slots.release()
+                    self._events.task_done()
+        except BaseException:
+            await asyncio.gather(
+                *(execution.handle.terminate() for execution in self._active.values()),
+                return_exceptions=True,
+            )
+            raise
         finally:
-            await self._finish_pending_commands()
-            self._stopped.set()
-            async with self._condition:
-                self._condition.notify_all()
+            self._closed = True
+            await self._finish_pending_events()
+            await self._notify()
 
     async def wait_ready(self) -> None:
         await self._ready.wait()
-        if self._startup_error is not None:
-            raise RuntimeError('run session failed to start') from self._startup_error
+        if self._initialization_error is not None:
+            raise self._initialization_error
 
     async def start(self) -> RuntimeSnapshot:
         return await self._request('start')
@@ -172,142 +176,159 @@ class RunSession:
         return await self._request('retry')
 
     async def cancel(self) -> RuntimeSnapshot:
-        if self._snapshot.status == 'cancelled' or (
-            self._snapshot.status == 'failed'
-            and not self._snapshot.active_attempts
-        ):
-            return self._snapshot
         return await self._request('cancel')
-
-    async def close(self) -> RuntimeSnapshot:
-        if self._stopped.is_set():
-            return self._snapshot
-        return await self._request('close')
 
     async def release(self) -> RuntimeSnapshot:
         return await self._request('release')
 
+    async def close(self) -> RuntimeSnapshot:
+        if self._closed:
+            return self._snapshot
+        return await self._request('close')
+
     async def commit(self, commit: ArtifactCommit) -> RuntimeSnapshot:
         if not isinstance(commit, ArtifactCommit):
             raise TypeError('commit must be ArtifactCommit')
-        await self.wait_ready()
-        async with self._request_lock:
-            if not self._accept_commands or self._stopped.is_set():
-                raise RuntimeError('run session is closed')
-            reply = asyncio.get_running_loop().create_future()
-            self._events.put_nowait(_CommitCommand(commit, reply))
+        reply = self._reply()
+        await self._enqueue(_CommitCommand(commit, reply), _CONTROL_PRIORITY)
+        return await reply
+
+    async def retry_artifact(self, artifact_key: ArtifactKey, request_id: str
+                             ) -> RuntimeSnapshot:
+        if not isinstance(artifact_key, ArtifactKey):
+            raise TypeError('artifact_key must be ArtifactKey')
+        _text(request_id, 'retry request_id')
+        reply = self._reply()
+        await self._enqueue(
+            _RetryArtifactCommand(artifact_key, request_id, reply),
+            _CONTROL_PRIORITY,
+        )
         return await reply
 
     def snapshot(self) -> RuntimeSnapshot:
+        if not self._ready.is_set():
+            raise RuntimeError('run session is not ready')
+        if self._initialization_error is not None:
+            raise self._initialization_error
         return self._snapshot
 
-    async def wait_for_status(self, statuses: str | tuple[str, ...], *, timeout: float = 10.0
+    async def wait_for_status(self, statuses: str | tuple[str, ...], *,
+                              timeout: float = 10.0
                               ) -> RuntimeSnapshot:
-        _positive_number(timeout, 'timeout')
-        requested = (statuses,) if isinstance(statuses, str) else tuple(statuses)
-        if not requested or any(status not in _RUN_STATUSES for status in requested):
-            raise DefinitionError('statuses must contain valid run status values')
-        expected = frozenset(requested)
+        expected = (statuses,) if isinstance(statuses, str) else tuple(statuses)
+        if not expected:
+            raise DefinitionError('statuses must not be empty')
         async with asyncio.timeout(timeout):
             async with self._condition:
                 await self._condition.wait_for(
-                    lambda: self._snapshot.status in expected or self._stopped.is_set()
+                    lambda: self._snapshot.status in expected or self._closed
                 )
-                if self._snapshot.status not in expected:
-                    raise RuntimeError('run session stopped before reaching requested status')
-                return self._snapshot
+        if self._snapshot.status not in expected:
+            raise RuntimeError('run session closed before reaching requested status')
+        return self._snapshot
 
-    async def _request(self, kind: Literal['start', 'pause', 'resume', 'retry', 'cancel', 'release', 'close']
-                       ) -> RuntimeSnapshot:
-        await self.wait_ready()
-        async with self._request_lock:
-            if not self._accept_commands or self._stopped.is_set():
-                if kind == 'cancel' and self._snapshot.status == 'cancelled':
-                    return self._snapshot
-                if kind in {'release', 'close'}:
-                    return self._snapshot
-                raise RuntimeError('run session is closed')
-            reply = asyncio.get_running_loop().create_future()
-            self._events.put_nowait(_Command(kind, reply))
-        return await reply
-
-    # Recovery and serialized command handling
+    async def wait_until_settled(self, *, timeout: float = 10.0) -> RuntimeSnapshot:
+        async with asyncio.timeout(timeout):
+            async with self._condition:
+                await self._condition.wait_for(
+                    lambda: self._settled() or self._closed
+                )
+        if not self._settled():
+            raise RuntimeError('run session closed before becoming settled')
+        return self._snapshot
 
     async def _initialize(self) -> None:
-        stored = await self._store.run_state(self.run_id)
-        if stored is None:
-            stored = await self._store.create_run(self.run_id)
-
-        recovery = 'cancelled' if stored.status in {'cancelling', 'cancelled'} else 'interrupted'
-        await self._store.recover_attempts(self.run_id, recovery)
-
-        status = stored.status
-        error = stored.error
-        if status == 'cancelling':
-            await self._store.set_run_state(self.run_id, 'cancelled')
-            status = 'cancelled'
-            error = None
-        elif status in {'running', 'pausing'}:
-            await self._store.set_run_state(self.run_id, 'paused')
-            status = 'paused'
-            error = None
-
-        self._status = status
-        self._error = error
-        self._artifacts = await self._store.snapshot(
+        state, artifacts, attempts, retries = await self._store.inspect(
             self.run_id,
             self._definition.partition_set_ids,
         )
-        decision = self._decide_current_state()
-        if status == 'completed' and not decision.complete:
-            await self._store.set_run_state(self.run_id, 'paused')
-            self._status = 'paused'
-        await self._publish(decision.view)
-        if self._status == 'cancelled':
-            self._closing = True
+        active_attempts = tuple(
+            attempt
+            for attempt in attempts
+            if attempt.status in {'scheduled', 'running', 'cancelling'}
+        )
+        if active_attempts:
+            raise RuntimeError('artifact store contains unrecovered execution attempts')
+        self._status = state.status
+        self._error = state.error
+        self._artifacts = artifacts
+        self._retries = retries
+        self._decision = plan_next(self._definition, self._artifacts, self._retries)
 
-    async def _command(self, command: _Command) -> None:
+        if self._status == 'completed' and not isinstance(self._decision, PlanComplete):
+            await self._persist_status('paused')
+        if self._status == 'running':
+            await self._schedule()
+        else:
+            await self._publish()
+
+    async def _request(self, kind: Literal[
+        'start', 'pause', 'resume', 'retry', 'cancel', 'release', 'close'
+    ]) -> RuntimeSnapshot:
+        reply = self._reply()
+        await self._enqueue(_Command(kind, reply), _CONTROL_PRIORITY)
+        return await reply
+
+    def _reply(self) -> asyncio.Future[RuntimeSnapshot]:
+        if self._closed or self._stopping:
+            raise RuntimeError('run session is closed')
+        return asyncio.get_running_loop().create_future()
+
+    async def _enqueue(self, event: _Event, priority: int) -> None:
+        if self._closed or self._stopping:
+            raise RuntimeError('run session is closed')
+        await self._events.put((priority, next(self._event_sequence), event))
+
+    async def _handle_event(self, event: _Event) -> None:
+        if isinstance(event, _Command):
+            await self._handle_command(event)
+        elif isinstance(event, _CommitCommand):
+            await self._handle_commit(event)
+        elif isinstance(event, _RetryArtifactCommand):
+            await self._handle_retry_artifact(event)
+        elif isinstance(event, _ExecutionProgress):
+            await self._handle_progress(event)
+        else:
+            await self._handle_done(event)
+
+    async def _handle_command(self, command: _Command) -> None:
+        actions: dict[str, Callable[[], Awaitable[None]]] = {
+            'start': self._start,
+            'pause': self._pause,
+            'resume': self._resume,
+            'retry': self._retry,
+            'cancel': self._cancel,
+            'release': self._release,
+            'close': self._close,
+        }
         try:
-            if (
-                self._pending_failure is not None
-                and command.kind not in {'cancel', 'close'}
-            ):
-                raise RuntimeError('run session is settling a failure')
-            match command.kind:
-                case 'start':
-                    await self._start()
-                case 'pause':
-                    await self._pause()
-                case 'resume':
-                    await self._resume()
-                case 'retry':
-                    await self._retry()
-                case 'cancel':
-                    await self._cancel()
-                case 'release':
-                    await self._release()
-                case 'close':
-                    await self._close()
-            if not command.reply.done():
-                command.reply.set_result(self._snapshot)
-        except _SessionFailure:
-            raise
+            await actions[command.kind]()
         except Exception as exc:
             if not command.reply.done():
                 command.reply.set_exception(exc)
+        else:
+            if not command.reply.done():
+                command.reply.set_result(self._snapshot)
 
-    async def _commit_command(self, command: _CommitCommand) -> None:
+    async def _handle_commit(self, command: _CommitCommand) -> None:
         try:
             await self._commit_artifacts(command.commit)
-            if not command.reply.done():
-                command.reply.set_result(self._snapshot)
-        except _SessionFailure:
-            raise
         except Exception as exc:
             if not command.reply.done():
                 command.reply.set_exception(exc)
+        else:
+            if not command.reply.done():
+                command.reply.set_result(self._snapshot)
 
-    # Run state machine
+    async def _handle_retry_artifact(self, command: _RetryArtifactCommand) -> None:
+        try:
+            await self._request_artifact_retry(command.artifact_key, command.request_id)
+        except Exception as exc:
+            if not command.reply.done():
+                command.reply.set_exception(exc)
+        else:
+            if not command.reply.done():
+                command.reply.set_result(self._snapshot)
 
     async def _start(self) -> None:
         if self._status != 'created':
@@ -315,12 +336,15 @@ class RunSession:
         await self._enter_running()
 
     async def _pause(self) -> None:
+        if self._status == 'paused':
+            return
         if self._status == 'running':
-            await self._transition('pausing')
+            await self._persist_status('pausing')
         elif self._status != 'pausing':
             raise DefinitionError(f'cannot pause run from {self._status}')
-        await self._cancel_invocations()
-        await self._transition('paused')
+        await self._terminate(tuple(self._active.values()), final='paused')
+        self._status = 'paused'
+        await self._publish()
 
     async def _resume(self) -> None:
         if self._status != 'paused':
@@ -330,607 +354,469 @@ class RunSession:
     async def _retry(self) -> None:
         if self._status != 'failed':
             raise DefinitionError(f'cannot retry run from {self._status}')
-        if self._pending_failure is not None or self._active_attempts:
-            raise RuntimeError('cannot retry run while failure cleanup is incomplete')
+        if self._active:
+            await self._terminate(tuple(self._active.values()))
+        self._error = None
         await self._enter_running()
 
-    async def _enter_running(self, decision: PlanningDecision | None = None) -> None:
-        if decision is None:
-            self._artifacts = await self._store.snapshot(
-                self.run_id,
-                self._definition.partition_set_ids,
-            )
-            decision = self._decide_current_state()
-        await self._persist_status('running')
-        await self._schedule(decision)
-
     async def _cancel(self) -> None:
-        if self._pending_failure is not None:
-            await self._finish_pending_failure()
-            return
         if self._status == 'cancelled':
             return
-        if self._status == 'failed':
-            await self._cancel_invocations()
-            self._closing = not self._active_attempts
-            await self._publish()
-            return
         if self._status == 'completed':
-            raise DefinitionError(f'cannot cancel run from {self._status}')
+            raise DefinitionError('cannot cancel run from completed')
         if self._status != 'cancelling':
-            await self._transition('cancelling')
-        await self._cancel_invocations()
-        await self._transition('cancelled')
-
-    async def _close(self) -> None:
-        if self._pending_failure is not None:
-            await self._finish_pending_failure()
-            return
-        if self._status in {'running', 'pausing'}:
-            if self._status == 'running':
-                await self._transition('pausing')
-            await self._cancel_invocations()
-            await self._transition('paused')
-        elif self._status == 'cancelling':
-            await self._cancel_invocations()
-            await self._transition('cancelled')
-        else:
-            await self._cancel_invocations()
-        self._closing = True
+            await self._persist_status('cancelling')
+        await self._terminate(tuple(self._active.values()), final='cancelled')
+        self._status = 'cancelled'
+        self._retries = ()
+        await self._publish()
 
     async def _release(self) -> None:
-        if self._status in {'running', 'pausing', 'cancelling'} or self._active_attempts:
+        if self._status in {'pausing', 'cancelling'} or self._active or not self._settled():
             raise RuntimeError('cannot release a run while it is executing')
-        self._closing = True
+        self._stopping = True
+
+    async def _close(self) -> None:
+        if self._status in {'running', 'pausing'}:
+            if self._status == 'running':
+                await self._persist_status('pausing')
+            await self._terminate(tuple(self._active.values()), final='paused')
+            self._status = 'paused'
+        elif self._status == 'cancelling':
+            await self._terminate(tuple(self._active.values()), final='cancelled')
+            self._status = 'cancelled'
+            self._retries = ()
+        elif self._active:
+            await self._terminate(tuple(self._active.values()))
+        await self._publish()
+        self._stopping = True
+
+    async def _enter_running(self) -> None:
+        await self._refresh_plan()
+        await self._persist_status('running')
+        await self._schedule()
 
     async def _commit_artifacts(self, commit: ArtifactCommit) -> None:
-        if self._pending_failure is not None:
-            raise RuntimeError('run session is settling a failure')
+        if self._status not in {'created', 'paused', 'completed', 'running'}:
+            raise DefinitionError(f'cannot commit artifact from {self._status}')
         self._definition.validate_commit(commit)
         previous_status = self._status
-        if previous_status not in {'created', 'paused', 'completed', 'running'}:
-            raise DefinitionError(f'cannot commit artifact from {previous_status}')
-
-        committed = await self._store.commit(self.run_id, commit)
-        if committed.status == 'stale':
+        result = await self._store.commit(self.run_id, commit)
+        if result.status == 'stale':
             raise DefinitionError('artifact commit precondition is stale')
-        await self._apply_commit(committed)
 
-        decision = self._decide_current_state()
+        await self._refresh_plan()
         try:
-            await self._cancel_invalidated_invocations(decision.view)
+            await self._cancel_invalidated()
         except _TerminationFailure:
-            await self._publish(decision.view)
+            await self._publish()
             return
-        if previous_status == 'completed':
-            if decision.complete:
-                await self._publish(decision.view)
-            else:
-                await self._enter_running(decision)
+        if previous_status == 'completed' and not isinstance(self._decision, PlanComplete):
+            await self._persist_status('running')
+            await self._schedule()
         elif previous_status == 'running':
-            await self._schedule(decision)
+            await self._schedule()
         else:
-            await self._publish(decision.view)
+            await self._publish()
 
-    # Planning and bounded scheduling
+    async def _request_artifact_retry(self, key: ArtifactKey, request_id: str) -> None:
+        if self._status not in {'created', 'paused', 'completed', 'running'}:
+            raise DefinitionError(f'cannot retry artifact from {self._status}')
+        operation = self._definition.producer_by_artifact.get(key.artifact_id)
+        if operation is None:
+            raise DefinitionError(f'artifact has no producer operation: {key}')
+        current = self._decision.view.records.get(key) if self._decision is not None else None
+        if current is None:
+            raise DefinitionError(f'artifact is not currently effective: {key}')
 
-    def _decide_current_state(self) -> PlanningDecision:
-        decision = plan_next(self._definition, self._artifacts)
-        self._view = decision.view
-        return decision
+        pending = await self._store.retry_requests(self.run_id, pending_only=True)
+        logical_key = (operation.spec.op_id, key.partition_key if operation.spec.driver_input else '')
+        for request in pending:
+            producer = self._definition.producer_by_artifact[request.artifact_key.artifact_id]
+            other_key = (
+                producer.spec.op_id,
+                request.artifact_key.partition_key if producer.spec.driver_input else '',
+            )
+            if request.request_id != request_id and other_key == logical_key:
+                raise DefinitionError('one invocation already has a pending artifact retry')
 
-    async def _refresh_decision(self) -> PlanningDecision:
+        request = await self._store.request_retry(
+            self.run_id,
+            request_id,
+            key,
+            current.ref,
+        )
+        await self._refresh_plan()
+        if request.status != 'pending':
+            await self._publish()
+        elif self._status == 'completed':
+            await self._persist_status('running')
+            await self._schedule()
+        elif self._status == 'running':
+            await self._schedule()
+        else:
+            await self._publish()
+
+    async def _refresh_plan(self) -> None:
         self._artifacts = await self._store.snapshot(
             self.run_id,
             self._definition.partition_set_ids,
         )
-        return self._decide_current_state()
+        self._retries = await self._store.retry_requests(self.run_id, pending_only=True)
+        if self._retries:
+            obsolete = obsolete_retries(self._definition, self._artifacts, self._retries)
+            for request in obsolete:
+                await self._store.cancel_retry(self.run_id, request.request_id)
+            if obsolete:
+                obsolete_ids = {request.request_id for request in obsolete}
+                self._retries = tuple(
+                    request
+                    for request in self._retries
+                    if request.request_id not in obsolete_ids
+                )
+        self._decision = plan_next(self._definition, self._artifacts, self._retries)
 
-    async def _apply_commit(self, result: CommitResult) -> None:
-        if result.status != 'ok':
+    async def _schedule(self) -> None:
+        if self._status != 'running':
+            await self._publish()
             return
-        if result.replayed:
-            self._artifacts = await self._store.snapshot(
-                self.run_id,
-                self._definition.partition_set_ids,
-            )
-        else:
-            self._artifacts = result.changes.apply(self._artifacts)
+        if self._decision is None:
+            await self._refresh_plan()
 
-    async def _schedule(self, decision: PlanningDecision | None = None) -> None:
+        if isinstance(self._decision, PlanComplete):
+            if not self._active:
+                await self._persist_status('completed')
+            await self._publish()
+            return
+        if isinstance(self._decision, PlanAwaiting):
+            await self._publish()
+            return
+
+        active_invocations = {
+            execution.invocation.invocation_id
+            for execution in self._active.values()
+        }
+        per_operation: dict[str, int] = {}
+        for execution in self._active.values():
+            operation_id = execution.invocation.operation.spec.op_id
+            per_operation[operation_id] = per_operation.get(operation_id, 0) + 1
+
+        for invocation in self._decision.invocations:
+            if len(self._active) >= self._max_concurrency:
+                break
+            if invocation.invocation_id in active_invocations:
+                continue
+            operation_id = invocation.operation.spec.op_id
+            if per_operation.get(operation_id, 0) >= invocation.operation.spec.max_concurrency:
+                continue
+            await self._launch(invocation)
+            active_invocations.add(invocation.invocation_id)
+            per_operation[operation_id] = per_operation.get(operation_id, 0) + 1
+            if self._status == 'failed':
+                break
+        await self._publish()
+
+    async def _launch(self, invocation: OperationInvocation) -> None:
         try:
-            await self._plan_execution(
-                self._decide_current_state() if decision is None else decision
+            values = await self._store.read_many(self.run_id, invocation.value_refs())
+        except Exception as exc:
+            await self._fail_run(exc)
+            await self._terminate_failed_siblings()
+            return
+
+        attempt_id = uuid.uuid4().hex
+        try:
+            attempt = await self._store.create_attempt(
+                self.run_id,
+                attempt_id,
+                invocation.invocation_id,
+                invocation.operation.spec.op_id,
+                invocation.partition_key,
+                invocation.lineage_refs(),
+                tuple(key for key in invocation.output_keys.values() if key is not None),
+                retry_request_id=invocation.retry_request_id,
             )
         except Exception as exc:
-            await self._fail(exc)
-
-    async def _plan_execution(self, decision: PlanningDecision) -> None:
-        known = {
-            execution.invocation.invocation_id
-            for execution in self._active_attempts.values()
-        }
-        known.update(
-            invocation.invocation_id
-            for queue in self._pending_invocations.values()
-            for invocation in queue
-        )
-        active_by_operation = Counter(
-            execution.invocation.operation.spec.op_id
-            for execution in self._active_attempts.values()
-        )
-        pending_by_operation = {
-            op_id: len(queue)
-            for op_id, queue in self._pending_invocations.items()
-        }
-
-        self._remaining_planned.clear()
-        for invocation in decision.invocations:
-            if invocation.invocation_id in known:
-                continue
-            op_id = invocation.operation.spec.op_id
-            window = invocation.operation.spec.max_concurrency + 1
-            if active_by_operation[op_id] + pending_by_operation.get(op_id, 0) >= window:
-                self._remaining_planned[op_id] = self._remaining_planned.get(op_id, 0) + 1
-                continue
-            self._pending_invocations.setdefault(op_id, deque()).append(invocation)
-            pending_by_operation[op_id] = pending_by_operation.get(op_id, 0) + 1
-            known.add(invocation.invocation_id)
-
-        await self._start_ready_invocations()
-        if self._active_attempts or self._pending_invocations:
-            await self._publish(decision.view)
-        elif decision.complete:
-            await self._transition('completed', decision.view)
-        elif decision.blocked_reason:
-            await self._publish(decision.view)
-            raise PlanningError(decision.blocked_reason)
-        else:
-            await self._publish(decision.view)
-
-    async def _start_ready_invocations(self) -> None:
-        active_by_operation = Counter(
-            execution.invocation.operation.spec.op_id
-            for execution in self._active_attempts.values()
-        )
-        for op_id in tuple(self._pending_invocations):
-            queue = self._pending_invocations.pop(op_id)
-            while queue and len(self._active_attempts) < self._max_concurrency:
-                invocation = queue[0]
-                if active_by_operation[op_id] >= invocation.operation.spec.max_concurrency:
-                    break
-                queue.popleft()
-                await self._launch_invocation(invocation)
-                active_by_operation[op_id] += 1
-
-            if queue:
-                self._pending_invocations[op_id] = queue
-            if len(self._active_attempts) >= self._max_concurrency:
-                break
-
-    async def _launch_invocation(self, invocation: OperationInvocation) -> None:
-        if self._task_group is None:
-            raise RuntimeError('run session task group is not active')
-
-        values = await self._store.read_many(self.run_id, invocation.value_refs())
-        inputs = invocation.bind_values(values)
-        attempt_id = uuid4().hex
-
-        async def report(update: ProgressUpdate) -> None:
-            await self._events.put(_ExecutionProgress(attempt_id, update))
-
-        context = OperationContext(
-            self.run_id,
-            invocation.invocation_id,
-            invocation.partition_key,
-            report,
-        )
-        attempt = await self._store.create_attempt(
-            self.run_id,
-            attempt_id,
-            invocation.invocation_id,
-            invocation.operation.spec.op_id,
-            invocation.partition_key,
-            invocation.lineage_refs(),
-            (key for key in invocation.output_keys.values() if key is not None),
-        )
+            await self._fail_run(exc)
+            await self._terminate_failed_siblings()
+            return
         try:
             attempt = await self._store.set_attempt_status(
                 self.run_id,
                 attempt_id,
                 'running',
             )
-        except BaseException as exc:
-            try:
-                await self._store.set_attempt_status(
-                    self.run_id,
-                    attempt_id,
-                    'interrupted',
-                )
-            except Exception as cleanup_error:
-                raise BaseExceptionGroup(
-                    'attempt failed to enter running state',
-                    (exc, cleanup_error),
-                ) from exc
-            raise
-        try:
+            context = OperationContext(
+                self.run_id,
+                invocation.invocation_id,
+                invocation.partition_key,
+                self._reporter(attempt_id),
+            )
             handle = await start_execution(
                 invocation,
                 context,
-                inputs,
+                invocation.bind_values(values),
                 terminate_timeout=self._terminate_timeout,
             )
-        except BaseException as exc:
-            try:
-                if isinstance(exc, Exception):
-                    await self._store.set_attempt_status(
-                        self.run_id,
-                        attempt_id,
-                        'failed',
-                        error=_error_info(exc),
-                    )
-                else:
-                    await self._store.set_attempt_status(
-                        self.run_id,
-                        attempt_id,
-                        'interrupted',
-                    )
-            except Exception as persistence_error:
-                failures: list[BaseException] = [exc, persistence_error]
-                try:
-                    await self._store.set_attempt_status(
-                        self.run_id,
-                        attempt_id,
-                        'interrupted',
-                    )
-                except Exception as cleanup_error:
-                    failures.append(cleanup_error)
-                raise BaseExceptionGroup(
-                    'execution failed to start and its attempt could not be finalized',
-                    failures,
-                ) from exc
-            raise
-
-        task = self._task_group.create_task(
-            self._wait_execution(attempt_id, invocation.operation.spec.op_id, handle),
-            name=attempt_id,
-        )
-        self._active_attempts[attempt_id] = _ActiveExecution(
-            invocation,
-            attempt,
-            handle,
-            task,
-        )
-
-    # Attempt completion, progress and cancellation
-
-    async def _wait_execution(self, attempt_id: str, operation_id: str, handle: ExecutionHandle) -> None:
-        try:
-            outcome: OperationResult | Exception = await handle.wait()
-        except asyncio.CancelledError:
-            outcome = OperationExecutionError(f'{operation_id} execution was cancelled')
         except Exception as exc:
-            outcome = exc
-        await self._events.put(_ExecutionDone(attempt_id, outcome))
+            await self._fail_attempt(attempt, exc)
+            await self._terminate_failed_siblings()
+            return
 
-    async def _execution_progress(self, event: _ExecutionProgress) -> None:
-        execution = self._active_attempts.get(event.attempt_id)
-        if execution is not None and execution.attempt.status == 'running':
+        waiter = asyncio.create_task(
+            self._wait_execution(attempt_id, handle),
+            name=f'artifact-attempt:{attempt_id}',
+        )
+        self._active[attempt_id] = _ActiveExecution(invocation, attempt, handle, waiter)
+
+    def _reporter(self, attempt_id: str) -> Callable[[ProgressUpdate], Awaitable[None]]:
+        async def report(update: ProgressUpdate) -> None:
+            await self._progress_slots.acquire()
+            try:
+                await self._enqueue(
+                    _ExecutionProgress(attempt_id, update),
+                    _PROGRESS_PRIORITY,
+                )
+            except BaseException:
+                self._progress_slots.release()
+                raise
+        return report
+
+    async def _wait_execution(self, attempt_id: str, handle: ExecutionHandle) -> None:
+        result = None
+        error = None
+        try:
+            result = await handle.wait()
+        except asyncio.CancelledError as exc:
+            error = exc
+        except Exception as exc:
+            error = exc
+        try:
+            await self._enqueue(
+                _ExecutionDone(attempt_id, result, error),
+                _COMPLETION_PRIORITY,
+            )
+        except RuntimeError:
+            return
+
+    async def _handle_progress(self, event: _ExecutionProgress) -> None:
+        execution = self._active.get(event.attempt_id)
+        if execution is None or execution.attempt.status != 'running':
+            return
+        try:
             await self._store.append_progress(self.run_id, event.attempt_id, event.update)
+        except Exception as exc:
+            await self._fail_running(exc)
 
-    async def _execution_done(self, event: _ExecutionDone) -> None:
-        execution = self._active_attempts.get(event.attempt_id)
+    async def _handle_done(self, event: _ExecutionDone) -> None:
+        execution = self._active.get(event.attempt_id)
         if execution is None:
             return
-        if (
-            self._pending_failure is not None
-            or execution.attempt.status == 'cancelling'
-            or self._status != 'running'
-        ):
-            await self._settle_cancelled_execution(execution)
-            await self._continue_after_cancellation()
+        if execution.attempt.status == 'cancelling':
+            return
+        if event.error is not None:
+            if isinstance(event.error, asyncio.CancelledError):
+                error = OperationExecutionError('operation ended without a cancellation request')
+            else:
+                error = _as_exception(event.error)
+            execution.attempt = await self._fail_attempt(execution.attempt, error)
+            self._active.pop(event.attempt_id, None)
+            await self._terminate_failed_siblings()
+            await self._publish()
             return
 
-        if isinstance(event.outcome, Exception):
-            try:
-                await self._store.set_attempt_status(
-                    self.run_id,
-                    event.attempt_id,
-                    'failed',
-                    error=_error_info(event.outcome),
-                )
-            except Exception as persistence_error:
-                raise ExceptionGroup(
-                    'operation failed and its attempt could not be finalized',
-                    (event.outcome, persistence_error),
-                ) from event.outcome
-            self._remove_active(execution)
-            await self._fail(event.outcome)
-            return
-
-        invocation = execution.invocation
         try:
-            commit = invocation.artifact_commit(event.outcome)
+            if event.result is None:
+                raise OperationExecutionError('operation returned no result')
+            commit = execution.invocation.artifact_commit(event.result)
             self._definition.validate_commit(commit)
-            committed = await self._store.commit(
+            await self._store.commit(
                 self.run_id,
                 commit,
                 attempt_id=event.attempt_id,
             )
         except Exception as exc:
-            try:
-                await self._store.set_attempt_status(
-                    self.run_id,
-                    event.attempt_id,
-                    'failed',
-                    error=_error_info(exc),
-                )
-            except Exception as persistence_error:
-                raise ExceptionGroup(
-                    'operation result failed and its attempt could not be finalized',
-                    (exc, persistence_error),
-                ) from exc
-            self._remove_active(execution)
-            await self._fail(exc)
+            execution.attempt = await self._fail_attempt(execution.attempt, exc)
+            self._active.pop(event.attempt_id, None)
+            await self._terminate_failed_siblings()
+            await self._publish()
             return
 
-        self._remove_active(execution)
-        if committed.status == 'stale':
-            decision = await self._refresh_decision()
-            if any(
-                item.invocation_id == invocation.invocation_id
-                for item in decision.invocations
-            ):
-                await self._fail(PlanningError(
-                    f'{invocation.invocation_id} produced no committable artifact'
-                ))
-                return
-        else:
-            await self._apply_commit(committed)
-            decision = None
-        await self._schedule(decision)
+        self._active.pop(event.attempt_id, None)
+        await self._refresh_plan()
+        await self._schedule()
 
-    async def _cancel_invalidated_invocations(self, view: ArtifactSnapshot) -> None:
-        for op_id, queue in tuple(self._pending_invocations.items()):
-            current = deque(
-                invocation
-                for invocation in queue
-                if invocation.is_current(
-                    self._artifacts.records,
-                    view.records,
-                    view.partition_sets,
-                )
-            )
-            if current:
-                self._pending_invocations[op_id] = current
-            else:
-                self._pending_invocations.pop(op_id, None)
+    async def _fail_attempt(self, attempt: AttemptSnapshot,
+                            error: Exception
+                            ) -> AttemptSnapshot:
+        info = RuntimeErrorInfo(type(error).__name__, str(error) or type(error).__name__)
+        failed = await self._store.fail_attempt_and_run(self.run_id, attempt.attempt_id, info)
+        self._status = 'failed'
+        self._error = info
+        return failed
 
-        invalid = tuple(
-            execution
-            for execution in self._active_attempts.values()
-            if not execution.invocation.is_current(
-                self._artifacts.records,
-                view.records,
-                view.partition_sets,
-            )
-        )
-        if invalid:
-            await self._cancel_executions(invalid)
+    async def _fail_run(self, error: Exception) -> None:
+        info = RuntimeErrorInfo(type(error).__name__, str(error) or type(error).__name__)
+        await self._store.set_run_state(self.run_id, 'failed', error=info)
+        self._status = 'failed'
+        self._error = info
 
-    async def _cancel_invocations(self) -> None:
-        self._pending_invocations.clear()
-        self._remaining_planned.clear()
-        if self._active_attempts:
-            await self._cancel_executions(tuple(self._active_attempts.values()))
+    async def _fail_running(self, error: Exception) -> None:
+        await self._fail_run(error)
+        try:
+            await self._terminate(tuple(self._active.values()))
+        except _TerminationFailure:
+            pass
+        await self._publish()
 
-    async def _cancel_executions(self, executions: tuple[_ActiveExecution, ...]) -> None:
+    async def _handle_internal_error(self, error: Exception) -> None:
+        if self._status == 'failed':
+            try:
+                await self._terminate(tuple(self._active.values()))
+            except _TerminationFailure:
+                pass
+            await self._publish()
+            return
+        await self._fail_running(error)
+
+    async def _terminate_failed_siblings(self) -> None:
+        siblings = tuple(self._active.values())
+        if not siblings:
+            return
+        try:
+            await self._terminate(siblings)
+        except _TerminationFailure:
+            return
+
+    async def _cancel_invalidated(self) -> None:
+        if self._decision is None:
+            return
         targets = tuple(
             execution
-            for execution in executions
-            if self._active_attempts.get(execution.attempt.attempt_id) is execution
+            for execution in self._active.values()
+            if not execution.invocation.is_current(
+                self._artifacts.records,
+                self._decision.view.records,
+                self._decision.view.partition_sets,
+            )
         )
-        if not targets:
-            return
+        if targets:
+            await self._terminate(targets)
 
-        marking_errors: dict[str, Exception] = {}
-        for execution in targets:
-            if execution.attempt.status == 'cancelling':
-                continue
-            try:
-                execution.attempt = await self._store.set_attempt_status(
-                    self.run_id,
-                    execution.attempt.attempt_id,
-                    'cancelling',
-                )
-            except Exception as exc:
-                marking_errors[execution.attempt.attempt_id] = exc
-        await self._publish()
+    async def _terminate(self, executions: tuple[_ActiveExecution, ...], *,
+                         final: Literal['paused', 'cancelled'] | None = None
+                         ) -> None:
+        failures: list[Exception] = []
+        for execution in executions:
+            if execution.attempt.status in {'scheduled', 'running'}:
+                try:
+                    execution.attempt = await self._store.set_attempt_status(
+                        self.run_id,
+                        execution.attempt.attempt_id,
+                        'cancelling',
+                    )
+                except Exception:
+                    pass
 
-        termination_results = await asyncio.gather(
-            *(execution.handle.terminate() for execution in targets),
+        results = await asyncio.gather(
+            *(execution.handle.terminate() for execution in executions),
             return_exceptions=True,
         )
-        failures: list[Exception] = []
-        for execution, result in zip(targets, termination_results, strict=True):
-            attempt_id = execution.attempt.attempt_id
+        for execution, result in zip(executions, results, strict=True):
             if isinstance(result, BaseException):
-                marking_error = marking_errors.get(attempt_id)
-                if marking_error is not None:
-                    failures.append(marking_error)
                 failures.append(_as_exception(result))
                 continue
-
-            await asyncio.gather(execution.task, return_exceptions=True)
+            await asyncio.gather(execution.waiter, return_exceptions=True)
             try:
-                await self._settle_cancelled_execution(execution)
+                if execution.attempt.status != 'failed':
+                    execution.attempt = await self._store.set_attempt_status(
+                        self.run_id,
+                        execution.attempt.attempt_id,
+                        'cancelled',
+                    )
             except Exception as exc:
-                marking_error = marking_errors.get(attempt_id)
-                if marking_error is not None:
-                    failures.append(marking_error)
                 failures.append(exc)
+                continue
+            self._active.pop(execution.attempt.attempt_id, None)
 
-        await self._publish()
+        if not failures and final == 'paused':
+            await self._store.finish_pause(self.run_id)
+        elif not failures and final == 'cancelled':
+            await self._store.finish_cancel(self.run_id)
         if failures:
-            raise _TerminationFailure(
-                'failed to terminate active executions',
-                failures,
+            await self._publish()
+            raise _TerminationFailure('operation process trees failed to terminate', failures)
+
+    async def _persist_status(self, status: RunStatus) -> None:
+        await self._store.set_run_state(self.run_id, status, error=self._error if status == 'failed' else None)
+        self._status = status
+
+    async def _publish(self) -> None:
+        view = self._artifacts if self._decision is None else self._decision.view
+        running = ()
+        if self._status not in {'cancelled', 'failed', 'completed'}:
+            running = tuple(
+                InvocationSnapshot(
+                    execution.invocation.invocation_id,
+                    execution.invocation.operation.spec.op_id,
+                    execution.invocation.partition_key,
+                )
+                for execution in self._active.values()
+                if execution.attempt.status in {'scheduled', 'running'}
             )
-
-    async def _settle_cancelled_execution(self, execution: _ActiveExecution) -> None:
-        attempt_id = execution.attempt.attempt_id
-        execution.attempt = await self._store.set_attempt_status(
-            self.run_id,
-            attempt_id,
-            'cancelled',
-        )
-        self._remove_active(execution)
-
-    def _remove_active(self, execution: _ActiveExecution) -> None:
-        attempt_id = execution.attempt.attempt_id
-        if self._active_attempts.get(attempt_id) is execution:
-            del self._active_attempts[attempt_id]
-
-    async def _continue_after_cancellation(self) -> None:
-        if self._pending_failure is not None:
-            await self._finish_pending_failure()
-        elif self._status == 'running':
-            await self._schedule()
-        elif self._active_attempts:
-            await self._publish()
-        elif self._status == 'pausing':
-            await self._transition('paused')
-        elif self._status == 'cancelling':
-            await self._transition('cancelled')
-        elif self._status == 'failed':
-            await self._publish()
-        else:
-            await self._publish()
-
-    # Failure, shutdown and observable state
-
-    async def _fail(self, error: Exception) -> None:
-        try:
-            await self._cancel_invocations()
-            await self._transition('failed', error=_error_info(error))
-        except Exception as cleanup_error:
-            raise _SessionFailure(
-                'run failed while its state and executions were being settled',
-                (error, cleanup_error),
-            ) from error
-
-    async def _handle_session_failure(self, cause: BaseException) -> BaseException | None:
-        failures: list[BaseException] = [cause]
+        ready_count = 0
+        awaiting: tuple[ArtifactKey, ...] = ()
         if (
-            self._pending_failure is None
+            isinstance(self._decision, PlanReady)
             and self._status not in {'cancelled', 'failed', 'completed'}
         ):
-            self._pending_failure = _error_info(cause)
-        try:
-            await self._cancel_invocations()
-        except Exception as cleanup_error:
-            failures.append(cleanup_error)
+            active_ids = {execution.invocation.invocation_id for execution in self._active.values()}
+            ready_count = sum(
+                invocation.invocation_id not in active_ids
+                for invocation in self._decision.invocations
+            )
+        elif isinstance(self._decision, PlanAwaiting):
+            awaiting = self._decision.artifact_keys
 
-        if self._pending_failure is not None:
-            try:
-                await self._persist_status('failed', error=self._pending_failure)
-                self._pending_failure = None
-            except Exception as persistence_error:
-                failures.append(persistence_error)
-
-        self._closing = not self._active_attempts and self._pending_failure is None
-        await self._publish()
-        if self._active_attempts:
-            return None
-        if self._pending_failure is not None:
-            return BaseExceptionGroup('run session failed during cleanup', failures)
-        if len(failures) == 1:
-            return None
-        return BaseExceptionGroup('run session failed during cleanup', failures)
-
-    async def _finish_pending_failure(self) -> None:
-        await self._cancel_invocations()
-        error = self._pending_failure
-        if error is None:
-            return
-        await self._persist_status('failed', error=error)
-        self._pending_failure = None
-        self._closing = True
-        await self._publish()
-
-    async def _transition(self, status: RunStatus, view: ArtifactSnapshot | None = None, *,
-                          error: RuntimeErrorInfo | None = None
-                          ) -> None:
-        await self._persist_status(status, error=error)
-        await self._publish(view)
-        if status == 'cancelled':
-            self._closing = True
-
-    async def _persist_status(self, status: RunStatus, *, error: RuntimeErrorInfo | None = None) -> None:
-        await self._store.set_run_state(self.run_id, status, error=error)
-        self._status = status
-        self._error = error
-
-    async def _publish(self, view: ArtifactSnapshot | None = None) -> None:
-        if view is not None:
-            self._view = view
-        running = ()
-        if self._status in {'running', 'pausing', 'cancelling'}:
-            running = tuple(sorted(
-                (
-                    InvocationSnapshot(
-                        execution.invocation.invocation_id,
-                        execution.invocation.operation.spec.op_id,
-                        execution.invocation.partition_key,
-                    )
-                    for execution in self._active_attempts.values()
-                ),
-                key=lambda item: item.invocation_id,
-            ))
-        attempts = tuple(sorted(
-            (execution.attempt for execution in self._active_attempts.values()),
-            key=lambda attempt: attempt.attempt_id,
-        ))
-        snapshot = RuntimeSnapshot(
+        self._snapshot = RuntimeSnapshot(
             self.run_id,
             self._status,
             running,
-            sum(len(queue) for queue in self._pending_invocations.values())
-            + sum(self._remaining_planned.values()),
-            {key: record.ref for key, record in self._view.records.items()},
-            self._view.partition_sets,
+            ready_count,
+            {key: record.ref for key, record in view.records.items()},
+            view.partition_sets,
             self._error,
-            attempts,
+            tuple(execution.attempt for execution in self._active.values()),
+            awaiting,
         )
+        await self._notify()
+
+    def _settled(self) -> bool:
+        if self._snapshot.status in {'created', 'paused', 'cancelled', 'failed', 'completed'}:
+            if self._snapshot.active_attempts:
+                return False
+            return True
+        return (
+            self._snapshot.status == 'running'
+            and not self._snapshot.running
+            and self._snapshot.ready_count == 0
+            and not self._snapshot.active_attempts
+        )
+
+    async def _notify(self) -> None:
         async with self._condition:
-            self._snapshot = snapshot
             self._condition.notify_all()
 
-    async def _finish_pending_commands(self) -> None:
-        async with self._request_lock:
-            self._accept_commands = False
-            while True:
-                try:
-                    event = self._events.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-                match event:
-                    case _Command() if not event.reply.done():
-                        if event.kind == 'cancel' and self._status == 'cancelled':
-                            event.reply.set_result(self._snapshot)
-                        elif event.kind in {'release', 'close'}:
-                            event.reply.set_result(self._snapshot)
-                        else:
-                            event.reply.set_exception(RuntimeError('run session is closed'))
-                    case _CommitCommand() if not event.reply.done():
-                        event.reply.set_exception(RuntimeError('run session is closed'))
-
-
-def _error_info(error: BaseException) -> RuntimeErrorInfo:
-    primary = error
-    while isinstance(primary, BaseExceptionGroup):
-        primary = primary.exceptions[0]
-    return RuntimeErrorInfo(type(primary).__name__, str(primary) or repr(primary))
+    async def _finish_pending_events(self) -> None:
+        error = RuntimeError('run session is closed')
+        while not self._events.empty():
+            _, _, event = self._events.get_nowait()
+            if isinstance(event, (_Command, _CommitCommand, _RetryArtifactCommand)):
+                if not event.reply.done():
+                    event.reply.set_exception(error)
+            if isinstance(event, _ExecutionProgress):
+                self._progress_slots.release()
+            self._events.task_done()
 
 
 __all__ = ['RunSession']

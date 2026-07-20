@@ -33,6 +33,8 @@ AttemptStatus = Literal[
     'discarded',
 ]
 
+RetryStatus = Literal['pending', 'fulfilled', 'cancelled']
+
 
 @dataclass(frozen=True)
 class InvocationSnapshot:
@@ -98,6 +100,7 @@ class AttemptSnapshot:
     error: RuntimeErrorInfo | None = None
     input_refs: tuple[ArtifactRef, ...] = ()
     output_keys: tuple[ArtifactKey, ...] = ()
+    retry_request_id: str = ''
 
     def __post_init__(self) -> None:
         _text(self.attempt_id, 'attempt_id')
@@ -126,8 +129,41 @@ class AttemptSnapshot:
             raise TypeError('attempt input_refs must contain ArtifactRef values')
         if not all(isinstance(key, ArtifactKey) for key in output_keys):
             raise TypeError('attempt output_keys must contain ArtifactKey values')
+        _string(self.retry_request_id, 'retry_request_id')
         object.__setattr__(self, 'input_refs', input_refs)
         object.__setattr__(self, 'output_keys', output_keys)
+
+
+@dataclass(frozen=True)
+class ArtifactRetryRequest:
+    request_id: str
+    artifact_key: ArtifactKey
+    base_ref: ArtifactRef
+    status: RetryStatus
+    created_at: float
+    result_ref: ArtifactRef | None = None
+
+    def __post_init__(self) -> None:
+        _text(self.request_id, 'retry request_id')
+        if not isinstance(self.artifact_key, ArtifactKey):
+            raise TypeError('retry artifact_key must be ArtifactKey')
+        if not isinstance(self.base_ref, ArtifactRef):
+            raise TypeError('retry base_ref must be ArtifactRef')
+        if self.base_ref.key != self.artifact_key:
+            raise DefinitionError('retry base_ref must identify artifact_key')
+        if self.status not in {'pending', 'fulfilled', 'cancelled'}:
+            raise DefinitionError(f'unknown retry status: {self.status}')
+        if not isinstance(self.created_at, (int, float)) or isinstance(self.created_at, bool):
+            raise TypeError('retry created_at must be a number')
+        if self.status == 'fulfilled':
+            if not isinstance(self.result_ref, ArtifactRef):
+                raise DefinitionError('fulfilled retry requires result_ref')
+            if self.result_ref.key != self.artifact_key:
+                raise DefinitionError('retry result_ref must identify artifact_key')
+            if self.result_ref.version <= self.base_ref.version:
+                raise DefinitionError('retry result_ref must be newer than base_ref')
+        elif self.result_ref is not None:
+            raise DefinitionError('only fulfilled retry can contain result_ref')
 
 
 @dataclass(frozen=True)
@@ -157,6 +193,7 @@ class RuntimeSnapshot:
     partition_sets: Mapping[ArtifactKey, PartitionSet] = field(default_factory=dict)
     error: RuntimeErrorInfo | None = None
     active_attempts: tuple[AttemptSnapshot, ...] = ()
+    awaiting_artifacts: tuple[ArtifactKey, ...] = ()
 
     def __post_init__(self) -> None:
         _text(self.run_id, 'run_id')
@@ -208,13 +245,21 @@ class RuntimeSnapshot:
         if len({attempt.attempt_id for attempt in attempts}) != len(attempts):
             raise DefinitionError('attempt ids must be unique')
 
+        awaiting = tuple(self.awaiting_artifacts)
+        if not all(isinstance(key, ArtifactKey) for key in awaiting):
+            raise TypeError('awaiting_artifacts must contain ArtifactKey values')
+        if len(set(awaiting)) != len(awaiting):
+            raise DefinitionError('awaiting artifact keys must be unique')
+
         object.__setattr__(self, 'running', running)
         object.__setattr__(self, 'completed_artifacts', MappingProxyType(completed))
         object.__setattr__(self, 'partition_sets', MappingProxyType(partition_sets))
         object.__setattr__(self, 'active_attempts', attempts)
+        object.__setattr__(self, 'awaiting_artifacts', awaiting)
 
 
 __all__ = [
-    'AttemptSnapshot', 'AttemptStatus', 'InvocationSnapshot', 'ProgressEvent', 'ProgressUpdate',
-    'RunStatus', 'RuntimeErrorInfo', 'RuntimeSnapshot',
+    'ArtifactRetryRequest', 'AttemptSnapshot', 'AttemptStatus', 'InvocationSnapshot',
+    'ProgressEvent', 'ProgressUpdate', 'RetryStatus', 'RunStatus', 'RuntimeErrorInfo',
+    'RuntimeSnapshot',
 ]

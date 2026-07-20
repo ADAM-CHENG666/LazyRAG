@@ -333,6 +333,7 @@ class OperationInvocation:
     inputs: Mapping[str, BoundInput]
     expected_heads: Mapping[ArtifactKey, ArtifactRef | None] = field(default_factory=dict)
     partition_key: str = ''
+    retry_request_id: str = ''
     invocation_id: str = field(init=False)
     output_keys: Mapping[str, ArtifactKey | None] = field(init=False)
     partition_set_key: ArtifactKey | None = field(init=False)
@@ -348,6 +349,7 @@ class OperationInvocation:
             raise DefinitionError('invocation inputs must match operation inputs')
 
         _string(self.partition_key, 'partition_key')
+        _string(self.retry_request_id, 'retry_request_id')
         has_driver = self.operation.spec.driver_input is not None
         if has_driver != bool(self.partition_key):
             raise DefinitionError('partition_key must be set exactly for partitioned invocation')
@@ -376,7 +378,12 @@ class OperationInvocation:
             if has_driver
             else None
         )
-        invocation_id = _invocation_id(self.operation.spec.op_id, inputs, output_keys)
+        invocation_id = _invocation_id(
+            self.operation.spec.op_id,
+            inputs,
+            output_keys,
+            self.retry_request_id,
+        )
 
         object.__setattr__(self, 'inputs', MappingProxyType(inputs))
         object.__setattr__(self, 'expected_heads', MappingProxyType(expected_heads))
@@ -551,7 +558,9 @@ class OperationInvocation:
         )
 
 
-def _invocation_id(op_id: str, inputs: Mapping[str, BoundInput], outputs: Mapping[str, ArtifactKey | None]) -> str:
+def _invocation_id(op_id: str, inputs: Mapping[str, BoundInput],
+                   outputs: Mapping[str, ArtifactKey | None], retry_request_id: str
+                   ) -> str:
     payload = {
         'operation': op_id,
         'inputs': [
@@ -566,6 +575,7 @@ def _invocation_id(op_id: str, inputs: Mapping[str, BoundInput], outputs: Mappin
             ]
             for name, key in sorted(outputs.items())
         ],
+        'retry_request_id': retry_request_id,
     }
     digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()

@@ -57,6 +57,10 @@ class ExecutionHandle(Protocol):
         ...
 
 
+class _TerminationError(OperationExecutionError):
+    pass
+
+
 class _CooperativeHandle:
     def __init__(self, task: asyncio.Task[OperationResult]) -> None:
         self._task = task
@@ -93,43 +97,84 @@ class _IsolatedHandle:
         self._terminate_timeout = terminate_timeout
         self._terminate_requested = False
         self._terminate_lock = asyncio.Lock()
+        self._terminated = asyncio.Event()
+        self._cleaned = False
+        self._termination_failure: asyncio.Future[OperationExecutionError] = (
+            asyncio.get_running_loop().create_future()
+        )
         self._completion = asyncio.create_task(
             self._complete(),
             name=f'isolated:{operation.spec.op_id}:{process.pid}',
         )
 
     async def wait(self) -> OperationResult:
-        result = await asyncio.shield(self._completion)
+        done, _ = await asyncio.wait(
+            (self._completion, self._termination_failure),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if self._termination_failure in done:
+            raise self._termination_failure.result()
+        try:
+            result = await asyncio.shield(self._completion)
+        except _TerminationError:
+            if self._terminated.is_set():
+                raise asyncio.CancelledError
+            raise
         if result is None:
             raise asyncio.CancelledError
         return result
 
     async def terminate(self) -> None:
         async with self._terminate_lock:
-            if not self._completion.done():
-                self._terminate_requested = True
-                with suppress(ProcessLookupError):
-                    os.killpg(self._process.pid, signal.SIGTERM)
-
-        try:
-            await asyncio.shield(self._completion)
-        except asyncio.CancelledError:
-            if not self._completion.cancelled():
-                raise
-        except OperationExecutionError:
-            pass
+            if self._completion.done():
+                error = None if self._completion.cancelled() else self._completion.exception()
+                if not isinstance(error, _TerminationError):
+                    await _consume_completion(self._completion)
+                    return
+            if self._termination_failure.done():
+                self._termination_failure = asyncio.get_running_loop().create_future()
+            self._terminate_requested = True
+            try:
+                await _terminate_process_group(
+                    self._process.pid,
+                    self._terminate_timeout,
+                )
+                self._terminated.set()
+                await asyncio.shield(self._process.wait())
+            except Exception as exc:
+                error = (
+                    exc
+                    if isinstance(exc, OperationExecutionError)
+                    else _TerminationError(str(exc) or type(exc).__name__)
+                )
+                if not self._termination_failure.done():
+                    self._termination_failure.set_result(error)
+                raise error
+            self._progress_task.cancel()
+            if self._completion.done():
+                self._cleanup()
+            else:
+                await _consume_completion(self._completion)
 
     async def _complete(self) -> OperationResult | None:
+        process_group_finished = False
         try:
-            await _wait_process_exit(self._process)
-            await _finish_process_group(
-                self._process.pid,
-                self._terminate_timeout,
-            )
+            await self._process.wait()
+            if self._terminate_requested:
+                await self._terminated.wait()
+            else:
+                await _finish_process_group(
+                    self._process.pid,
+                    self._terminate_timeout,
+                )
+            process_group_finished = True
             await self._process.wait()
             stdout, stderr = await self._output()
             try:
                 await self._progress_task
+            except asyncio.CancelledError:
+                if not self._terminate_requested:
+                    raise
             except Exception as exc:
                 raise OperationExecutionError(
                     f'{self._operation.spec.op_id} worker emitted invalid progress'
@@ -157,7 +202,8 @@ class _IsolatedHandle:
                 f'{self._operation.spec.op_id} worker produced no result'
             )
         finally:
-            self._cleanup()
+            if process_group_finished:
+                self._cleanup()
 
     async def _output(self) -> tuple[bytes, bytes]:
         stdout, stderr = await asyncio.gather(
@@ -167,6 +213,9 @@ class _IsolatedHandle:
         return stdout, stderr
 
     def _cleanup(self) -> None:
+        if self._cleaned:
+            return
+        self._cleaned = True
         try:
             os.close(self._parent_watch)
         finally:
@@ -326,14 +375,40 @@ async def _finish_process_group(process_group: int, timeout: float) -> None:
         async with asyncio.timeout(timeout):
             await _wait_process_group(process_group)
     except TimeoutError as exc:
-        raise OperationExecutionError(
+        raise _TerminationError(
             f'isolated process group {process_group} survived SIGKILL'
         ) from exc
 
 
-async def _wait_process_exit(process: asyncio.subprocess.Process) -> None:
-    while process.returncode is None:
-        await asyncio.sleep(0.01)
+async def _terminate_process_group(process_group: int, timeout: float) -> None:
+    if not _process_group_exists(process_group):
+        return
+    with suppress(ProcessLookupError):
+        os.killpg(process_group, signal.SIGTERM)
+    try:
+        async with asyncio.timeout(timeout):
+            await _wait_process_group(process_group)
+        return
+    except TimeoutError:
+        with suppress(ProcessLookupError):
+            os.killpg(process_group, signal.SIGKILL)
+    try:
+        async with asyncio.timeout(timeout):
+            await _wait_process_group(process_group)
+    except TimeoutError as exc:
+        raise _TerminationError(
+            f'isolated process group {process_group} survived SIGKILL'
+        ) from exc
+
+
+async def _consume_completion(completion: asyncio.Task[OperationResult | None]) -> None:
+    try:
+        await asyncio.shield(completion)
+    except asyncio.CancelledError:
+        if not completion.cancelled():
+            raise
+    except OperationExecutionError:
+        return
 
 
 async def _wait_process_group(process_group: int) -> None:

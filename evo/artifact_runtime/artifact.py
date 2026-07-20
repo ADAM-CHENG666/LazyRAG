@@ -193,45 +193,6 @@ class ArtifactSnapshot:
         return MappingProxyType(effective)
 
 
-@dataclass(frozen=True)
-class ArtifactChangeSet:
-    records: tuple[ArtifactRecord, ...] = ()
-    partition_sets: Mapping[ArtifactKey, PartitionSet] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        records = tuple(self.records)
-        partition_sets = dict(self.partition_sets)
-
-        if not all(isinstance(record, ArtifactRecord) for record in records):
-            raise TypeError('change records must contain ArtifactRecord values')
-        if len({record.ref.key for record in records}) != len(records):
-            raise DefinitionError('change records must have unique artifact keys')
-
-        record_keys = {record.ref.key for record in records}
-        for key, partitions in partition_sets.items():
-            if key not in record_keys:
-                raise DefinitionError('partition set change must have a matching record')
-            if not isinstance(partitions, PartitionSet):
-                raise TypeError('partition set changes must contain PartitionSet values')
-
-        object.__setattr__(self, 'records', records)
-        object.__setattr__(self, 'partition_sets', MappingProxyType(partition_sets))
-
-    def apply(self, snapshot: ArtifactSnapshot) -> ArtifactSnapshot:
-        records = dict(snapshot.records)
-        partition_sets = dict(snapshot.partition_sets)
-
-        for record in self.records:
-            key = record.ref.key
-            records[key] = record
-
-            if key in self.partition_sets:
-                partition_sets[key] = self.partition_sets[key]
-            else:
-                partition_sets.pop(key, None)
-        return ArtifactSnapshot(records, partition_sets)
-
-
 def merge_refs(*groups: Iterable[ArtifactRef]) -> tuple[ArtifactRef, ...]:
     refs: dict[ArtifactKey, ArtifactRef] = {}
 
@@ -248,6 +209,6 @@ def merge_refs(*groups: Iterable[ArtifactRef]) -> tuple[ArtifactRef, ...]:
 
 
 __all__ = [
-    'ArtifactChangeSet', 'ArtifactCommit', 'ArtifactKey', 'ArtifactRecord', 'ArtifactRef',
-    'ArtifactSnapshot', 'ArtifactDraft', 'PartitionGuard', 'PartitionSet', 'merge_refs',
+    'ArtifactCommit', 'ArtifactDraft', 'ArtifactKey', 'ArtifactRecord', 'ArtifactRef',
+    'ArtifactSnapshot', 'PartitionGuard', 'PartitionSet', 'merge_refs',
 ]
