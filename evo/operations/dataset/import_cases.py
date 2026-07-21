@@ -26,7 +26,7 @@ def import_cases(ctx: Any, inputs: Mapping[str, object], kb_client: KnowledgeBas
     file_path = Path(path)
     try:
         raw = file_path.read_bytes()
-        reader = csv.DictReader(raw.decode('utf-8-sig').splitlines())
+        reader = csv.DictReader(raw.decode('utf-8-sig').splitlines(), strict=True)
         headers = set(reader.fieldnames or ())
         rows = list(reader)
     except Exception as exc:

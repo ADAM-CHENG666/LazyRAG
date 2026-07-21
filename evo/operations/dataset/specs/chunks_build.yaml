@@ -26,9 +26,6 @@ input_payload:
       chunks:
         type: array
         required: true
-      target_chunk_count:
-        type: integer
-        required: true
       params:
         type: object
         required: true
@@ -65,7 +62,7 @@ execution_flow:
   - 读取 build_chunk_candidates，并按 runtime output partition 的稳定 index 选择当前 slot。
   - index 小于候选数量时，输出 available=true 的真实 chunk，原样保留 kb_id、chunk_id、doc_id 和正文。
   - index 超过候选数量时，输出 available=false 的空占位 chunk；静态 partition 数量不因 CSV 导入而变化。
-  - 当 target_chunk_count=0 时，全部静态 slots 都必须输出 available=false，占位不会触发后续 LLM 调用。
+  - 当没有自动生成侧候选（例如全部 case 均已导入）时，全部静态 slots 都必须输出 available=false，占位不会触发后续 LLM 调用。
   - 返回仅包含当前 partition slot 的 {"chunk": payload}。
 
 tests:
@@ -76,7 +73,7 @@ tests:
       - maps_candidates_with_source_provenance
       # 候选不足时继续使用现有 available=false 占位，而不是删减 runtime partitions。
       - insufficient_chunks_placeholder
-      # import_case_count=target_case_count 导致 target_chunk_count=0 时，所有 slots 均为占位。
+      # import_case_count=target_case_count 时没有自动生成候选，所有 slots 均为占位。
       - all_imported_cases_produce_only_placeholders
       # materializer 只返回当前 partition 的 chunk output。
       - return_keys_match_outputs

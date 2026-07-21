@@ -76,9 +76,6 @@ output_payload:
               type: string
       selection_stats:
         type: object
-      target_chunk_count:
-        # 来自导入 manifest 的冻结目标，不由静态分区数重新计算。
-        type: integer
       fallback_used:
         type: boolean
       params:
@@ -86,8 +83,9 @@ output_payload:
 
 execution_flow:
   - 读取 selected_docs、import_cases_manifest 与 build_chunks_params。
-  - 将 target_chunk_count 固定计算为 ceil(3 * import_cases_manifest.stats.case_allocation.auto_case_count / 2)，不得由静态 case partition 数量推导。
-  - 当 auto_case_count=0 时，不扫描知识库，返回 chunks=[]、target_chunk_count=0 与零值筛选统计。
+  - 候选扫描预算只服务仍需自动生成的 case；它不是独立的全局 chunk 总数，也不输出为 artifact 字段。
+  - 全局静态 chunk slot 总数固定由 target_case_count 的 1.5 倍（向上取整）决定，定义在 flow；CSV 导入不会改变该数量。
+  - 当 auto_case_count=0 时，不扫描知识库，返回 chunks=[] 与零值筛选统计。
   - 否则按 selected_docs 的 kb_id/doc_id 来源读取、归一化 type，并沿用既有 groups、allowed_types、候选容量和 fallback 筛选算法。
   - 每个候选保留原始 kb_id、chunk_id、doc_id 与完整 text；不改写任何数据库 ID，也不在此处重新分配导入 case。
   - 被过滤节点不消耗配额；返回完整候选列表和 selection_stats，供所有静态 chunk partition 复用。
@@ -96,8 +94,8 @@ tests:
   auto_generation_capacity:
     # 候选目标只服务 generated assignments，导入 case 不消耗自动生成侧的 chunk 配额。
     cases:
-      # target_chunk_count 只由 manifest 中冻结的 auto_case_count 换算，不受静态分区数影响。
-      - derives_target_chunk_count_from_auto_case_count
+      # 候选扫描只服务自动生成侧；静态 chunk slot 总数仍由 flow 中的 target_case_count 决定。
+      - imported_cases_do_not_change_static_chunk_slot_count
       # auto_case_count=0 时不读取任何知识库 chunk，输出空候选和零统计。
       - imported_only_skips_kb_scan
   candidate_selection:

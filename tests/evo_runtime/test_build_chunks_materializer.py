@@ -62,17 +62,23 @@ def test_build_chunks_fixed_ops_materialize_partitioned_chunks_and_manifest(tmp_
         run_id,
         ArtifactKey.of(C.DATASET_SELECTED_DOCS),
         {
-            'kb_id': 'kb-1',
+            'kb_ids': ['kb-1'],
             'docs': [
-                {'doc_id': 'doc-1', 'filename': 'a.pdf', 'file_type': 'pdf', 'status': 'success',
+                {'kb_id': 'kb-1', 'doc_id': 'doc-1', 'filename': 'a.pdf', 'file_type': 'pdf', 'status': 'success',
                  'group_counts': {'block': 2}},
-                {'doc_id': 'doc-2', 'filename': 'b.pdf', 'file_type': 'pdf', 'status': 'success',
+                {'kb_id': 'kb-1', 'doc_id': 'doc-2', 'filename': 'b.pdf', 'file_type': 'pdf', 'status': 'success',
                  'group_counts': {'block': 1}},
             ],
-            'stats': {'matched': 2, 'selected': 2},
-            'params': {'kb_id': 'kb-1', 'max_docs': 2, 'target_case_count': 2},
+            'stats': {'matched_by_kb': {'kb-1': 2}, 'selected_by_kb': {'kb-1': 2}, 'matched': 2, 'selected': 2},
+            'params': {'kb_ids': ['kb-1'], 'max_docs': 2, 'auto_case_count': 2},
         },
         idempotency_key='seed:selected_docs',
+    )
+    adapter.commit_external(
+        run_id,
+        ArtifactKey.of(C.DATASET_IMPORT_CASES_MANIFEST),
+        {'stats': {'case_allocation': {'auto_case_count': 2}}},
+        idempotency_key='seed:import_cases_manifest',
     )
     adapter.commit_external(
         run_id,
@@ -94,11 +100,11 @@ def test_build_chunks_fixed_ops_materialize_partitioned_chunks_and_manifest(tmp_
     built_record = adapter.get(run_id, built_ref)
     assert built_record is not None
     assert built_record.value['chunks'] == [
-        {'available': True, 'chunk_id': 'chunk-1', 'doc_id': 'doc-1', 'filename': 'a.pdf',
+        {'available': True, 'kb_id': 'kb-1', 'chunk_id': 'chunk-1', 'doc_id': 'doc-1', 'filename': 'a.pdf',
          'group': 'block', 'type': 'text', 'partition': 'chunk_0001'},
-        {'available': True, 'chunk_id': 'chunk-2', 'doc_id': 'doc-1', 'filename': 'a.pdf',
+        {'available': True, 'kb_id': 'kb-1', 'chunk_id': 'chunk-2', 'doc_id': 'doc-1', 'filename': 'a.pdf',
          'group': 'block', 'type': 'text', 'partition': 'chunk_0002'},
-        {'available': True, 'chunk_id': 'chunk-3', 'doc_id': 'doc-2', 'filename': 'b.pdf',
+        {'available': True, 'kb_id': 'kb-1', 'chunk_id': 'chunk-3', 'doc_id': 'doc-2', 'filename': 'b.pdf',
          'group': 'block', 'type': 'text', 'partition': 'chunk_0003'},
     ]
     assert client.calls == [('doc-1', 'block'), ('doc-2', 'block')]

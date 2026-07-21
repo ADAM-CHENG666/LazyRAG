@@ -13,7 +13,6 @@ from .kb_client import KnowledgeBaseClient
 from .models import chunk_from_docnode
 
 CHUNK_PAGE_SIZE = 200
-DEFAULT_TARGET_CASE_COUNT = 100
 DEFAULT_ALLOWED_TYPES = ('text', 'paragraph', 'table', 'formula', 'equation', 'unknown')
 CHUNK_PARTITION_PATTERN = re.compile(r'^chunk_\d{4,}$')
 
@@ -53,14 +52,14 @@ def build_chunk_candidates(
     allocation = _mapping(_mapping(inputs.get('import_cases_manifest'), 'import_cases_manifest').get('stats'), 'import_cases_manifest.stats')
     case_allocation = _mapping(allocation.get('case_allocation'), 'import_cases_manifest.stats.case_allocation')
     auto_case_count = _non_negative_int(case_allocation.get('auto_case_count'), 'auto_case_count')
-    target = (auto_case_count * 3 + 1) // 2
-    if target == 0:
+    candidate_limit = (auto_case_count * 3 + 1) // 2
+    if candidate_limit == 0:
         return {'build_chunk_candidates': {
             'chunks': [], 'selection_stats': {'scanned_count': 0, 'accepted_count': 0, 'filtered_count_by_type': {}},
-            'target_chunk_count': 0, 'fallback_used': False, 'params': params.to_dict(),
+            'fallback_used': False, 'params': params.to_dict(),
         }}
     docs = _docs(selected)
-    plan = sampling_plan(docs, params.groups, target)
+    plan = sampling_plan(docs, params.groups, candidate_limit)
     if not plan:
         raise ValueError('dataset.build_chunk_candidates sampling plan is empty')
 
@@ -70,7 +69,6 @@ def build_chunk_candidates(
     return {'build_chunk_candidates': {
         'chunks': chunks,
         'selection_stats': selection_stats,
-        'target_chunk_count': target,
         'fallback_used': fallback_used_by_plan(plan, params.groups),
         'params': params.to_dict(),
     }}
@@ -98,30 +96,19 @@ def build_chunks_manifest(ctx: Any, inputs: Mapping[str, object]) -> Mapping[str
     allocation = _case_allocation(inputs.get('import_cases_manifest'))
     candidates = _mapping(inputs.get('build_chunk_candidates'), 'build_chunk_candidates')
     params = BuildChunksParams.from_dict(_mapping(candidates.get('params'), 'build_chunk_candidates.params'))
-    target = _non_negative_int(candidates.get('target_chunk_count'), 'build_chunk_candidates.target_chunk_count')
-
     chunks = _chunk_tuple(inputs.get('chunk'))
     partitions = _runtime_partitions(ctx)
     if len(partitions) != len(chunks):
         raise ValueError('dataset.build_chunks_manifest runtime partitions do not match chunk tuple')
 
     fallback_used = bool(candidates.get('fallback_used'))
-    warnings = build_warnings(sum(1 for chunk in chunks if chunk.get('available')), target, fallback_used)
+    warnings = build_warnings(sum(1 for chunk in chunks if chunk.get('available')), len(partitions), fallback_used)
     return {
         'build_chunks_manifest': built_chunks_payload(
-            ctx, selected, chunks, partitions, target, allocation['auto_case_count'], fallback_used, warnings, params,
+            ctx, selected, chunks, partitions, allocation['auto_case_count'], fallback_used, warnings, params,
             normalize_selection_stats(_mapping(candidates.get('selection_stats'), 'build_chunk_candidates.selection_stats')),
         )
     }
-
-
-def target_chunk_count(selected: Mapping[str, Any]) -> int:
-    selected_params = selected.get('params') if isinstance(selected.get('params'), Mapping) else {}
-    try:
-        target_case_count = int(selected_params.get('target_case_count', DEFAULT_TARGET_CASE_COUNT))
-    except (TypeError, ValueError):
-        target_case_count = DEFAULT_TARGET_CASE_COUNT
-    return (max(target_case_count, 1) * 3 + 1) // 2
 
 
 def sampling_plan(docs: list[Mapping[str, Any]], groups: list[str], target: int) -> list[DocGroupQuota]:
@@ -180,7 +167,6 @@ def built_chunks_payload(
     selected: Mapping[str, Any],
     chunks: tuple[Mapping[str, Any], ...],
     partitions: tuple[str, ...],
-    target: int,
     auto_case_count: int,
     fallback_used: bool,
     warnings: list[str],
@@ -203,7 +189,6 @@ def built_chunks_payload(
     stats = chunk_stats(manifest_chunks)
     stats.update(selection_stats)
     stats.update({
-        'target_chunk_count': target,
         'auto_case_count': auto_case_count,
         'fallback_used': fallback_used,
         'warnings': list(warnings),

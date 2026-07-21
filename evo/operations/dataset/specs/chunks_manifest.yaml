@@ -89,9 +89,6 @@ input_payload:
           filtered_count_by_type:
             type: object
             value_type: integer
-      target_chunk_count:
-        type: integer
-        required: true
       fallback_used:
         type: boolean
         required: true
@@ -232,22 +229,20 @@ output_payload:
             type: list[string]
           allowed_types:
             type: list[string]
-          target_chunk_count:
-            type: integer
           auto_case_count:
             type: integer
 
 execution_flow:
   - 读取并校验 selected_docs input payload。
-  - 读取 import_cases_manifest.stats.case_allocation.auto_case_count，以及 build_chunk_candidates 的 target、筛选统计和参数。
+  - 读取 import_cases_manifest.stats.case_allocation.auto_case_count，以及 build_chunk_candidates 的筛选统计和参数。
   - 读取 all_to_unpartitioned 汇总后的 chunk tuple。
-  - 要求 chunk tuple 的数量等于 target_chunk_count。
+  - 要求 chunk tuple 的数量等于 flow 声明的静态 runtime chunk slot 数。
   - 按 runtime partition 顺序将 chunk slots 归一化为 build_chunks_manifest.chunks 项。
   - 每个 manifest 项保留 available、kb_id、chunk_id、doc_id、filename、group、type 和 partition；不拼接或改写数据库 ID。
   - 统计 available=true 的真实 chunk 数量为 chunk_count。
   - 统计 available=false 的占位 slot 数量为 empty_count。
   - 直接使用候选构建阶段提供的 scanned_count、accepted_count 和 filtered_count_by_type。
-  - 汇总 slot_count、target_chunk_count、auto_case_count、doc_count、group_counts、doc_group_stats、fallback_used 和 warnings。
+  - 汇总 slot_count、auto_case_count、doc_count、group_counts、doc_group_stats、fallback_used 和 warnings。
   - 返回 {"build_chunks_manifest": payload}。
 
 tests:
@@ -256,7 +251,7 @@ tests:
     cases:
       # 每个真实项保留 kb_id、doc_id、chunk_id 原值，且按 runtime partition 顺序汇总。
       - preserves_provenance_and_partition_order
-      # target_chunk_count=0 时允许全部 unavailable slot，形成可供主题链路消费的合法 manifest。
+      # 全部 case 均导入时允许全部 unavailable slot，形成可供主题链路消费的合法 manifest。
       - all_placeholder_manifest_for_imported_only_run
       # tuple 数量仍必须等于静态 runtime slot 数；不可因候选不足而缺少 partition 输出。
       - static_tuple_count_mismatch_error

@@ -210,17 +210,36 @@ def test_select_docs_skips_knowledge_base_reads_when_every_case_is_imported():
         'import_cases_manifest': import_manifest(target=2, imported=2),
     }, NoReadClient())
 
-    assert output['selected_docs']['docs'] == []
-    assert output['selected_docs']['params']['auto_case_count'] == 0
+    assert output == {'selected_docs': {
+        'kb_ids': ['kb-a', 'kb-b'],
+        'docs': [],
+        'stats': {'matched_by_kb': {}, 'selected_by_kb': {}, 'matched': 0, 'selected': 0},
+        'params': {'kb_ids': ['kb-a', 'kb-b'], 'max_docs': 100, 'auto_case_count': 0},
+    }}
 
 
-@pytest.mark.parametrize('params, match', [
-    ({'kb_ids': []}, 'kb_ids'),
-    ({'kb_ids': ['kb-1'], 'max_docs': 0}, 'max_docs must be a positive integer'),
+@pytest.mark.parametrize('inputs, match', [
+    ({'source_config': None, 'import_cases_manifest': import_manifest()}, 'source_config must be a mapping'),
+    ({'source_config': {'kb_ids': []}, 'import_cases_manifest': import_manifest()}, 'kb_ids'),
+    ({'source_config': {'kb_ids': ['kb-1', 'kb-1']}, 'import_cases_manifest': import_manifest()}, 'kb_ids must be unique'),
+    ({'source_config': {'kb_ids': ['kb-1'], 'max_docs': 0}, 'import_cases_manifest': import_manifest()},
+     'max_docs must be a positive integer'),
+    ({'source_config': {'kb_ids': ['kb-1'], 'max_docs': True}, 'import_cases_manifest': import_manifest()},
+     'max_docs must be a positive integer'),
+    ({'source_config': {'kb_ids': ['kb-1'], 'max_docs': 100001}, 'import_cases_manifest': import_manifest()},
+     'max_docs must be <= 100000'),
+    ({'source_config': {'kb_ids': ['kb-1']}, 'import_cases_manifest': None}, 'import_cases_manifest must be a mapping'),
+    ({'source_config': {'kb_ids': ['kb-1']}, 'import_cases_manifest': {}}, 'import_cases_manifest.stats must be a mapping'),
+    ({'source_config': {'kb_ids': ['kb-1']}, 'import_cases_manifest': {'stats': {}}},
+     'import_cases_manifest.stats.case_allocation must be a mapping'),
+    ({'source_config': {'kb_ids': ['kb-1']}, 'import_cases_manifest': {'stats': {'case_allocation': {'auto_case_count': -1}}}},
+     'auto_case_count must be non-negative'),
+    ({'source_config': {'kb_ids': ['kb-1']}, 'import_cases_manifest': {'stats': {'case_allocation': {'auto_case_count': True}}}},
+     'auto_case_count must be non-negative'),
 ])
-def test_select_docs_materializer_rejects_invalid_params(params, match):
+def test_select_docs_materializer_rejects_invalid_contract(inputs, match):
     with pytest.raises(ValueError, match=match):
-        select_docs(None, {'source_config': params, 'import_cases_manifest': import_manifest()}, FakeKnowledgeBaseClient([{'doc_id': 'doc-1'}]))
+        select_docs(None, inputs, FakeKnowledgeBaseClient([{'doc_id': 'doc-1'}]))
 
 
 def test_select_docs_materializer_normalizes_optional_doc_fields():
@@ -300,7 +319,6 @@ def test_build_chunks_manifest_materializer_outputs_built_chunks():
     candidates = {
         'chunks': [],
         'selection_stats': {'scanned_count': 3, 'accepted_count': 3, 'filtered_count_by_type': {}},
-        'target_chunk_count': 3,
         'fallback_used': False,
         'params': {'groups': ['block', 'line']},
     }
@@ -338,7 +356,6 @@ def test_build_chunks_manifest_materializer_outputs_built_chunks():
             'scanned_count': 3,
             'accepted_count': 3,
             'filtered_count_by_type': {},
-                'target_chunk_count': 3,
                 'auto_case_count': 3,
             'doc_count': 2,
             'group_counts': {'block': 3},
@@ -425,7 +442,7 @@ def test_build_chunks_manifest_exposes_type_and_selection_stats():
     built = build_chunks_manifest(
         manifest_ctx(('chunk_0001', 'chunk_0002', 'chunk_0003')),
             {'selected_docs': selected, 'import_cases_manifest': import_manifest(target=3), 'chunk': chunks, 'build_chunk_candidates': {
-            'chunks': list(chunks), 'selection_stats': stats, 'target_chunk_count': 3,
+            'chunks': list(chunks), 'selection_stats': stats,
             'fallback_used': False, 'params': {'groups': ['block']},
         }},
     )['build_chunks_manifest']
@@ -469,7 +486,7 @@ def test_build_chunks_manifest_materializer_samples_group_first_and_falls_back()
             ),
             'build_chunk_candidates': {
                 'chunks': [], 'selection_stats': {'scanned_count': 5, 'accepted_count': 5, 'filtered_count_by_type': {}},
-                'target_chunk_count': 5, 'fallback_used': True, 'params': {'groups': ['block', 'line']},
+                'fallback_used': True, 'params': {'groups': ['block', 'line']},
             },
         },
     )
@@ -479,12 +496,12 @@ def test_build_chunks_manifest_materializer_samples_group_first_and_falls_back()
         'doc-1-block-1', 'doc-1-block-2', 'doc-2-block-1', 'doc-1-line-1', 'doc-2-line-1',
     ]
     assert built['stats']['group_counts'] == {'block': 3, 'line': 2}
-    assert built['stats']['target_chunk_count'] == 5
+    assert built['stats']['slot_count'] == 5
     assert built['stats']['fallback_used'] is True
     assert built['stats']['warnings'] == ['fallback group sampling was used']
 
 
-def test_build_chunks_materializer_outputs_placeholder_when_actual_chunks_below_target():
+def test_build_chunks_materializer_outputs_placeholder_when_candidates_do_not_fill_static_slots():
     selected = {
         'kb_id': 'kb-1',
         'docs': [
@@ -514,6 +531,30 @@ def test_build_chunks_materializer_outputs_placeholder_when_actual_chunks_below_
     }}
 
 
+def test_all_imported_cases_skip_candidate_scan_and_leave_static_slots_as_placeholders():
+    class NoReadClient:
+        def iter_chunks(self, kb_id, doc_ids, groups, page_size):
+            raise AssertionError('all-imported runs must not scan knowledge-base chunks')
+
+    selected = {
+        'kb_ids': ['kb-1'],
+        'docs': [{'kb_id': 'kb-1', 'doc_id': 'doc-1', 'group_counts': {'block': 3}}],
+    }
+    candidates = build_chunk_candidates(None, {
+        'selected_docs': selected,
+        'build_chunks_params': {'groups': ['block']},
+        'import_cases_manifest': import_manifest(target=2, imported=2),
+    }, NoReadClient())['build_chunk_candidates']
+
+    assert candidates == {
+        'chunks': [],
+        'selection_stats': {'scanned_count': 0, 'accepted_count': 0, 'filtered_count_by_type': {}},
+        'fallback_used': False,
+        'params': {'groups': ['block'], 'allowed_types': DEFAULT_ALLOWED_TYPES},
+    }
+    assert build_chunks(chunk_ctx('chunk_0003'), {'build_chunk_candidates': candidates})['chunk']['available'] is False
+
+
 def test_build_chunks_manifest_materializer_warns_when_actual_chunks_below_target():
     selected = {
         'kb_id': 'kb-1',
@@ -541,7 +582,7 @@ def test_build_chunks_manifest_materializer_warns_when_actual_chunks_below_targe
         manifest_ctx(partitions),
         {'selected_docs': selected, 'import_cases_manifest': import_manifest(target=8), 'chunk': chunks, 'build_chunk_candidates': {
             'chunks': [], 'selection_stats': {'scanned_count': 2, 'accepted_count': 2, 'filtered_count_by_type': {}},
-            'target_chunk_count': 8, 'fallback_used': False, 'params': {'groups': ['block']},
+            'fallback_used': False, 'params': {'groups': ['block']},
         }},
     )
 
@@ -549,7 +590,7 @@ def test_build_chunks_manifest_materializer_warns_when_actual_chunks_below_targe
     assert stats['chunk_count'] == 2
     assert stats['slot_count'] == 8
     assert stats['empty_count'] == 6
-    assert stats['target_chunk_count'] == 8
+    assert stats['slot_count'] == 8
     assert stats['fallback_used'] is False
     assert stats['warnings'] == ['chunk build produced 2 chunks, below target 8; continuing']
 
@@ -567,7 +608,7 @@ def test_build_chunks_materializer_rejects_empty_sampling_plan():
         candidate_payload(selected, {'groups': ['block']}, FakeKnowledgeBaseClient())
 
 
-def test_build_chunks_manifest_keeps_static_slots_when_auto_chunk_target_is_smaller_or_larger():
+def test_build_chunks_manifest_keeps_static_slots_when_imported_cases_reduce_candidates():
     selected = {
         'kb_id': 'kb-1',
         'docs': [
@@ -590,10 +631,10 @@ def test_build_chunks_manifest_keeps_static_slots_when_auto_chunk_target_is_smal
                 ),
                 'build_chunk_candidates': {
                     'chunks': [], 'selection_stats': {'scanned_count': 0, 'accepted_count': 0, 'filtered_count_by_type': {}},
-                    'target_chunk_count': 3, 'fallback_used': False, 'params': {'groups': ['block']},
+                    'fallback_used': False, 'params': {'groups': ['block']},
                 },
             },
     )['build_chunks_manifest']
 
     assert output['stats']['slot_count'] == 2
-    assert output['stats']['target_chunk_count'] == 3
+    assert output['stats']['auto_case_count'] == 5
