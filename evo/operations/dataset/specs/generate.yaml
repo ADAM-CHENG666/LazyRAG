@@ -2,7 +2,7 @@ operation:
   op_id: dataset.generate
   flow: dataset
   stage: generate
-  description: 基于单个 qaplan spec 的指令和参考资料，生成 QA 原型 case。
+  description: 对导入基础 case 直接透传，或基于单个 qaplan spec 生成 QA 原型 case。
 
 fixed_op:
   inputs:
@@ -34,39 +34,48 @@ input_payload:
         required: true
         validation:
           - non_empty_after_strip
-      question_type:
+      mode:
+        # 控制本分区直接返回导入 case，还是调用 LLM 生成。
         type: string
         required: true
+        enum:
+          - imported
+          - generated
+      imported_case:
+        type: object
+        required: false
+      question_type:
+        type: string
+        required: false
         enum:
           - precision
           - reasoning
       difficulty:
         type: string
-        required: true
+        required: false
         enum:
           - easy
           - medium
           - hard
       source:
         type: object
-        required: true
+        required: false
         fields:
-          kb_id:
-            type: string
-            required: true
+          kb_ids:
+            type: list[string]
       instruction:
         type: string
-        required: true
+        required: false
         validation:
           - non_empty_after_strip
       topic:
         type: string
-        required: true
+        required: false
         validation:
           - non_empty_after_strip
       qaplan:
         type: object
-        required: true
+        required: false
         fields:
           plan_item_id:
             type: string
@@ -88,7 +97,7 @@ input_payload:
             required: true
       references:
         type: array
-        required: true
+        required: false
         item:
           type: object
           fields:
@@ -135,31 +144,40 @@ output_payload:
       # 简约说明本题的考察或设计逻辑，供后续判罚辅助使用。
       grading_guidance:
         type: string
-      # 真实知识库 chunk_id 到完整参考正文的映射，供 groundedness 判分。
+      # 按参考资料原始顺序保存的 [{chunk_id, text}]，供 groundedness 判分和人工审阅。
       reference_context:
-        type: object
-        value_type: string
+        # 供评测和人工审阅使用，保持与 CSV 的 {chunk_id,text} 结构一致。
+        type: array
+        item:
+          type: object
+          fields:
+            chunk_id:
+              type: string
+            text:
+              type: string
       # 从知识库 DocNode 原样保留的 chunk_id，供召回率和精确率计算。
       reference_chunk_ids:
         type: list[string]
       # 从知识库文档原样保留的 doc_id，供召回率和精确率计算。
       reference_doc_ids:
         type: list[string]
-      # 最终 case 仅保留路由到原始知识库所需的 kb_id。
+      # 最终 case 仅保留其引用实际来自的知识库列表。
       source_preparation:
+        # 仅记录此 case 实际使用的 KB，支持单 case 跨多个 KB。
         type: object
         fields:
-          kb_id:
-            type: string
+          kb_ids:
+            type: list[string]
 
 execution_flow:
-  - 读取当前 case 输出分区，要求它与同分区 qaplan_spec.id 一致。
-  - 校验 qaplan_spec 的 question_type、difficulty、instruction、topic、source 和 references；references 必须非空，且每项的 chunk_id、doc_id、text 均为真实知识库标识或正文。
+  - 读取当前 case 输出分区，要求它与同分区 qaplan_spec.id 一致，并按 qaplan_spec.mode 选择唯一分支。
+  - mode=imported 时，校验 imported_case 是完整基础 case，且 imported_case.id 等于当前分区；不调用 LLM，原样返回 {"case": imported_case}。
+  - mode=generated 时，校验 qaplan_spec 的 question_type、difficulty、instruction、topic、source 和 references；references 必须非空，且每项的 chunk_id、doc_id、text 均为真实知识库标识或正文。
   - 按 references 原始顺序为每份资料添加稳定短别名，例如 <reference id="ref_1">、<reference id="ref_2">，并保留完整正文。
   - 先写入通用 QA 约束与三字段输出契约，再追加 qaplan_spec.instruction、topic 和带短别名参考资料；要求模型只使用给定资料，question 与 answer 均实质使用全部 references，不补充外部事实。
   - 调用 run_config.llm_config 指定的生成模型，并要求返回 JSON object：question、answer、grading_guidance。
   - 使用 dataset.llm_json 基础设施解析与修复 JSON；校验 question、answer、grading_guidance 均为非空字符串。JSON 无法解析、字段缺失或类型错误时，按基础设施规则携带校验错误重试一次，仍失败则直接报错。
-  - 构造 case：复制 id、question_type、difficulty；将真实 references 转换为 reference_context、reference_chunk_ids 与 reference_doc_ids；仅写入 source_preparation={kb_id}。
+  - 构造 generated case：复制 id、question_type、difficulty；将真实 references 转换为按顺序的 reference_context=[{chunk_id,text}]、reference_chunk_ids 与 reference_doc_ids；仅写入实际引用来源的 source_preparation={kb_ids}。
   - 返回 {"case": payload}。key_points 与 forbidden_claims 不属于本 operation，由后续 enhancement 流程负责。
 
 tests:
@@ -180,13 +198,15 @@ tests:
     cases:
       # 合法模型 JSON 能生成仅含 question、answer、grading_guidance 与确定性元数据的 case。
       - success
+      # imported case 经过完整校验后直接成为基础 case，不调用生成模型，也不补齐缺失字段。
+      - imported_case_direct_return_without_llm
       # precision 与 reasoning 均沿用 qaplan_spec 的问题类型；generate 不重新解释或改写其类型。
       - preserves_question_type
       # easy、medium、hard 均沿用 qaplan_spec 的难度；generate 不根据答案长度或 guidance 内容重新分类。
       - preserves_difficulty
       # case 保留真实知识库 references，转换为 reference_context、reference_chunk_ids 与 reference_doc_ids。
       - preserves_kb_reference_ids_and_context
-      # source_preparation 只保留上游提供的 kb_id，保证 case 能追溯到原始知识库。
+      # source_preparation 保留实际引用来源 kb_ids，保证跨知识库 case 能追溯到原始知识库。
       - preserves_source_preparation
       # materializer 返回结构固定为 {"case": payload}，不混入额外 output key。
       - return_keys_match_outputs
@@ -208,6 +228,8 @@ tests:
       - same_partition_case_id_error
       # question_type、difficulty、instruction、topic、source、qaplan 均为必填且必须合法。
       - qaplan_spec_contract_error
+      # imported / generated 之外的 mode，或与分支不匹配的字段组合，必须在调用模型前失败。
+      - mode_branch_contract_error
       # references 不能为空，且每份资料必须具备非空 chunk_id、doc_id、text。
       - reference_contract_error
       # run_config.llm_config 缺失或不是 object 时直接失败。

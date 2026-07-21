@@ -169,11 +169,12 @@ def test_topic_discovery_entity_cluster_merges_only_edge_derived_clusters_and_ke
 
 
 def test_topic_discovery_entity_cluster_rejects_invalid_contract_and_params():
-    with pytest.raises(ValueError, match='entity_graph.nodes must be a non-empty list'):
-        topic_discovery_entity_cluster(
-            None,
-            {'entity_graph': {'nodes': [], 'edges': []}, 'topic_discovery_entity_cluster_params': {}},
-        )
+    empty = topic_discovery_entity_cluster(
+        None,
+        {'entity_graph': {'nodes': [], 'edges': []}, 'topic_discovery_entity_cluster_params': {}},
+    )['entity_clusters']
+    assert empty['clusters'] == []
+    assert empty['stats']['cluster_count'] == 0
 
     with pytest.raises(ValueError, match='duplicate node chunk_id: chunk-1'):
         topic_discovery_entity_cluster(

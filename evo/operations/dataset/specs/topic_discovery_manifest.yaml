@@ -162,6 +162,7 @@ execution_flow:
   - 读取并校验 entity_clusters 与 embedding_clusters。
   - 校验两路所有 clusters 的 topics 均为非空 list[string]。
   - 按 entity first、embedding second 合并 clusters。
+  - 当两路 clusters 均为空时，返回 clusters=[] 与零值统计的合法空 manifest，供 auto_case_count=0 的 qaplan 旁路使用。
   - 生成稳定最终 cluster_id，例如 entity_000001、embedding_000001。
   - 保留 cluster_type、topics、chunk_ids、chunk_count、scores 和 metadata。
   - 汇总 entity_cluster_count、embedding_cluster_count、total_cluster_count 和 unique_chunk_count。
@@ -198,6 +199,8 @@ tests:
       # 任一路 cluster 的 topics 为空、含空字符串或不是 list[string] 时直接失败。
       # 例子：topics=[]、topics=['']、topics='Tesla' 都应直接失败。
       - empty_topics_error
+      # 两路空 cluster 能形成稳定空 manifest；仅非空 cluster 需要 topics 非空。
+      - imported_only_empty_manifest_bypass
   runtime_wiring:
     # fixed op 接线：看两路 unpartitioned clusters 在 runtime 中是否能汇总为最终 manifest。
     cases:

@@ -176,6 +176,7 @@ output_payload:
 execution_flow:
   - 解析并校验 topic_discovery_embedding_label_params。
   - 读取并校验 embedding_cluster_candidates。
+  - 当 embedding_cluster_candidates.clusters=[] 时，返回 clusters=[] 的合法空结果，不建立 chunk 索引也不调用 LLM。
   - 读取 chunk tuple 并建立 chunk_id 到 chunk payload 的索引。
   - 按 candidates.clusters 稳定顺序逐个处理 cluster。
   - 对每个 cluster 按 chunk_ids 原顺序选择前 max_label_source_chunks 个 chunk。
@@ -208,6 +209,8 @@ tests:
       # 输出 cluster 必须保留 candidate 的 chunk_ids 原顺序，不因标注过程重排。
       # 例子：candidate.chunk_ids=['chunk-2', 'chunk-1'] 时，输出 cluster 也必须保持这个顺序。
       - preserves_chunk_ids
+      # 空 candidate 列表直接形成空 embedding clusters，不调用 LLM，供 imported-only run 继续收口。
+      - imported_only_empty_label_bypass
       # candidate_count、cluster_count、labeled_cluster_count 与最终输出一致。
       - stats
       # materializer 返回结构固定为 {"embedding_clusters": payload}，不混入额外字段。

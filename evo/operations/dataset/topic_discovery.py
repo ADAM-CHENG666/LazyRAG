@@ -148,6 +148,8 @@ def topic_discovery_entity_build_graph(ctx: Any, inputs: Mapping[str, object]) -
     source_chunks = _chunk_entity_tuple(inputs.get('chunk_entity'))
     nodes, skipped = _entity_nodes(source_chunks)
     if not nodes:
+        if source_chunks and all(chunk.get('available') is False for chunk in source_chunks):
+            return {'entity_graph': _empty_entity_graph(source_chunks, skipped, params)}
         raise ValueError('topic_discovery_entity_build_graph requires at least one valid node')
 
     noisy_entities = _noisy_entities(nodes, params)
@@ -173,6 +175,13 @@ def topic_discovery_entity_cluster(ctx: Any, inputs: Mapping[str, object]) -> Ma
         'topic_discovery_entity_cluster_params',
     ))
     graph = _mapping(inputs.get('entity_graph'), 'entity_graph')
+    if graph.get('nodes') == [] and graph.get('edges') == []:
+        return {'entity_clusters': {
+            'clusters': [],
+            'stats': {'source_node_count': 0, 'source_edge_count': 0, 'edge_cluster_count': 0,
+                      'singleton_cluster_count': 0, 'cluster_count': 0, 'topic_merge_count': 0},
+            'params': params.to_dict(),
+        }}
     nodes = _graph_nodes(graph.get('nodes'))
     edges = _graph_edges(graph.get('edges'), {node['chunk_id'] for node in nodes})
 
@@ -210,6 +219,13 @@ def topic_discovery_embedding_cluster(
     ))
     chunks = _chunk_tuple(inputs.get('chunk'))
     embedding_chunks, skipped = _embedding_chunks(chunks)
+    if not embedding_chunks and chunks and all(chunk.get('available') is False for chunk in chunks):
+        return {'embedding_cluster_candidates': {
+            'clusters': [], 'skipped_chunks': skipped,
+            'stats': {'source_chunk_count': len(chunks), 'embedding_chunk_count': 0,
+                      'skipped_chunk_count': len(skipped), 'candidate_count': 0, 'noise_candidate_count': 0},
+            'params': params.to_dict(),
+        }}
     if len(embedding_chunks) <= max(params.umap_n_neighbors, params.umap_n_components, params.min_cluster_size,
                                     params.min_samples):
         raise ValueError('not enough embedding chunks for topic_discovery_embedding_cluster')
@@ -246,6 +262,12 @@ def topic_discovery_embedding_label(
     ))
     candidates = _mapping(inputs.get('embedding_cluster_candidates'), 'embedding_cluster_candidates')
     clusters = _candidate_clusters(candidates.get('clusters'))
+    if not clusters:
+        return {'embedding_clusters': {
+            'clusters': [], 'skipped_chunks': list(candidates.get('skipped_chunks') or []),
+            'stats': {'candidate_count': 0, 'cluster_count': 0, 'labeled_cluster_count': 0},
+            'params': params.to_dict(),
+        }}
     chunks_by_id = {chunk['chunk_id']: chunk for chunk in _chunk_tuple(inputs.get('chunk'))}
     complete = llm_complete or _default_llm_complete()
 
@@ -310,6 +332,19 @@ def topic_discovery_manifest(ctx: Any, inputs: Mapping[str, object]) -> Mapping[
         },
         'params': {},
     }}
+
+
+def _empty_entity_graph(
+    source_chunks: tuple[Mapping[str, Any], ...],
+    skipped: list[dict[str, Any]],
+    params: EntityBuildGraphParams,
+) -> dict[str, Any]:
+    return {
+        'nodes': [], 'edges': [], 'skipped_chunks': skipped,
+        'stats': {'source_chunk_count': len(source_chunks), 'node_count': 0, 'edge_count': 0,
+                  'skipped_chunk_count': len(skipped), 'noisy_entity_count': 0},
+        'params': params.to_dict(),
+    }
 
 
 def _chunk_entity_tuple(value: object) -> tuple[Mapping[str, Any], ...]:

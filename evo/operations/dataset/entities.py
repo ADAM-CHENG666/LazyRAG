@@ -65,13 +65,16 @@ def chunk_entities_extract(
     entities = [] if not available else _extract_entities(
         str(chunk.get('text') or ''), params, _llm_complete(llm_complete)
     )
-    return {'chunk_entity': {
+    payload = {
         'available': available,
         'chunk_id': _required_str(chunk, 'chunk_id'),
         'doc_id': _required_str(chunk, 'doc_id'),
         'group': _required_str(chunk, 'group'),
         'entities': entities,
-    }}
+    }
+    if kb_id := str(chunk.get('kb_id') or ''):
+        payload['kb_id'] = kb_id
+    return {'chunk_entity': payload}
 
 
 def chunk_entities_extract_manifest(ctx: Any, inputs: Mapping[str, object]) -> Mapping[str, object]:
@@ -86,8 +89,9 @@ def chunk_entities_extract_manifest(ctx: Any, inputs: Mapping[str, object]) -> M
     if missing:
         raise ValueError(f'missing ChunkEntity for chunk ids: {missing}')
 
-    output_chunks = [
-        {
+    output_chunks = []
+    for chunk in chunks:
+        value = {
             'available': chunk['available'],
             'chunk_id': chunk['chunk_id'],
             'doc_id': chunk['doc_id'],
@@ -95,8 +99,9 @@ def chunk_entities_extract_manifest(ctx: Any, inputs: Mapping[str, object]) -> M
             'partition': chunk['partition'],
             'entities': list(by_chunk_id[chunk['chunk_id']]['entities']),
         }
-        for chunk in chunks
-    ]
+        if chunk['kb_id']:
+            value['kb_id'] = chunk['kb_id']
+        output_chunks.append(value)
     return {'chunk_entities_extract_manifest': {
         'chunks': output_chunks,
         'stats': _chunk_entities_stats(output_chunks),
@@ -129,6 +134,7 @@ def _chunks(built: Mapping[str, Any]) -> list[dict[str, Any]]:
         seen.add(chunk_id)
         chunks.append({
             'available': chunk.get('available') is not False,
+            'kb_id': str(chunk.get('kb_id') or ''),
             'chunk_id': chunk_id,
             'doc_id': _required_str(chunk, 'doc_id'),
             'group': _required_str(chunk, 'group'),

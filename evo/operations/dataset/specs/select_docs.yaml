@@ -2,7 +2,7 @@ operation:
   op_id: dataset.select_docs
   flow: dataset
   stage: select_docs
-  description: 从指定知识库中选择本次 dataset 构建要使用的文档集合。
+  description: 按知识库文档规模分配全局文档配额，仅为尚需自动生成的 case 选择文档。
 
 fixed_op:
   inputs:
@@ -11,6 +11,10 @@ fixed_op:
       required: true
       partition: unpartitioned
       mapping: same_partition
+    import_cases_manifest:
+      artifact_id: dataset.import_cases_manifest
+      required: true
+      partition: unpartitioned
   outputs:
     selected_docs:
       artifact_id: dataset.selected_docs
@@ -24,37 +28,51 @@ materializer:
 input_payload:
   source_config:
     fields:
-      kb_id:
-        type: string
+      kb_ids:
+        # 用户配置的全部候选知识库，不是单个手工输入的 kb_id。
+        type: list[string]
         required: true
         validation:
-          - non_empty_after_strip
+          - non_empty
+          - non_empty_after_strip_items
+          - unique_items
       max_docs:
+        # 跨知识库共享的文档总上限，按各库文档规模分配。
         type: integer
         required: false
         default: 100
         validation:
           - positive_integer
           - max_value: 100000
-      target_case_count:
-        type: integer
-        required: false
-        default: 100
-        validation:
-          - positive_integer
-          - max_value: 100000
+  import_cases_manifest:
+    fields:
+      stats:
+        type: object
+        required: true
+        fields:
+          case_allocation:
+            type: object
+            required: true
+            fields:
+              auto_case_count:
+                # CSV 导入后仍需 qaplan/LLM 自动生成的 case 数。
+                type: integer
+                required: true
 
 output_payload:
   selected_docs:
     json_compatible: true
     fields:
-      kb_id:
-        type: string
+      kb_ids:
+        type: list[string]
       docs:
+        # 后续 chunk 扫描的扁平文档列表；每项保留其来源 kb_id。
         type: array
         item:
           type: object
           fields:
+            kb_id:
+              type: string
             doc_id:
               type: string
             filename:
@@ -69,6 +87,12 @@ output_payload:
       stats:
         type: object
         fields:
+          matched_by_kb:
+            type: object
+            value_type: integer
+          selected_by_kb:
+            type: object
+            value_type: integer
           matched:
             type: integer
           selected:
@@ -76,38 +100,39 @@ output_payload:
       params:
         type: object
         fields:
-          kb_id:
-            type: string
+          kb_ids:
+            type: list[string]
           max_docs:
             type: integer
-          target_case_count:
+          auto_case_count:
             type: integer
 
-behavior:
-  responsibility:
-    - 从 source_config 中读取 kb_id、max_docs 和 target_case_count。
-    - 校验 kb_id 是非空 id。
-    - 将 max_docs 和 target_case_count 归一化为正整数；默认值为 100，最大值为 100000。
-    - 调用 KnowledgeBaseClient.list_documents(kb_id) 获取知识库文档列表。
-    - 保持 KnowledgeBaseClient 返回的文档顺序，不主动排序。
-    - 选择前 max_docs 个文档。
-    - 如果没有选中任何文档，则 operation 失败。
-    - 将每个选中文档归一化为 doc_id、filename、file_type、status 和 group_counts。
-    - 构造包含 kb_id、docs、stats 和 params 的 selected_docs payload。
-    - 只返回 {"selected_docs": payload}。
-  not_responsibility:
-    - 不读取 chunks 或 DocNode 内容。
-    - 不生成 dataset cases。
-    - 不决定问题类型分布。
-    - 不直接写 artifact store。
-    - 不返回旧版 ArtifactDraft 或 OperationOutput。
-    - 不调用 ctx.report_progress，因为当前 materializer context 没有 progress hook。
+execution_flow:
+  - 读取 source_config.kb_ids、max_docs 与 import_cases_manifest.stats.case_allocation.auto_case_count。
+  - 当 auto_case_count=0 时，不访问知识库，返回 docs=[] 与零值统计；静态下游 chunk partitions 仍由其自身占位逻辑处理。
+  - 否则，对每个 kb_id 调用 KnowledgeBaseClient.list_documents，保留各知识库原始文档顺序并统计文档规模。
+  - 使用既有“按规模分配”容量算法，把全局 max_docs 按各知识库文档规模分配为整数配额；不采用平均分配或新的分配算法。
+  - 在每个知识库内选择配额内的前序文档，并在每项中保留原始 kb_id、doc_id、filename、file_type、status 和 group_counts。
+  - 自动生成仍需要 case 时，如全局没有选中任何文档则保持现有空选中失败语义。
+  - 返回 {"selected_docs": payload}。
 
 tests:
-  - contract
-  - success
-  - default_params
-  - validation_error
-  - empty_selection_error
-  - normalize_optional_doc_fields
-  - return_keys_match_outputs
+  multi_kb_selection:
+    # 多知识库仅扩展文档来源；所有 ID 保持数据库原值，不构造 kb/doc/chunk 拼接的全局 ID。
+    cases:
+      # 按每个知识库的文档规模，用既有容量算法分配全局 max_docs 配额并保留各库内原始顺序。
+      - proportional_doc_quota_and_stable_per_kb_order
+      # 每个输出文档携带其原始 kb_id，供后续读取 chunk 与 case 溯源。
+      - preserves_kb_provenance_without_rewriting_ids
+  imported_only_bypass:
+    # 导入已覆盖全部目标时，自动链路不再访问知识库，但静态图仍能继续产出合法占位。
+    cases:
+      # auto_case_count=0 时返回空 docs 和零统计，不触发空选择错误。
+      - no_kb_access_when_all_cases_imported
+  validation:
+    # 自动生成仍有需求时，沿用原有输入与空选中失败语义。
+    cases:
+      # kb_ids、max_docs、manifest 统计非法时直接失败。
+      - contract_error
+      # auto_case_count 大于零且没有任何可选文档时直接失败。
+      - empty_selection_error

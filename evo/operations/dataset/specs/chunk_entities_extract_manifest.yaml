@@ -47,6 +47,9 @@ input_payload:
               type: boolean
               required: false
               default: true
+            kb_id:
+              type: string
+              required: false
             doc_id:
               type: string
               required: true
@@ -76,6 +79,9 @@ input_payload:
           type: boolean
           required: false
           default: true
+        kb_id:
+          type: string
+          required: false
         chunk_id:
           type: string
           required: true
@@ -117,6 +123,8 @@ output_payload:
           fields:
             available:
               type: boolean
+            kb_id:
+              type: string
             chunk_id:
               type: string
             doc_id:

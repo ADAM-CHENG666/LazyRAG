@@ -20,6 +20,7 @@ CHUNK_PARTITION_PATTERN = re.compile(r'^chunk_\d{4,}$')
 
 @dataclass(frozen=True)
 class DocGroupQuota:
+    kb_id: str
     doc_id: str
     group: str
     quota: int
@@ -49,8 +50,16 @@ def build_chunk_candidates(
 ) -> Mapping[str, object]:
     selected = _mapping(inputs.get('selected_docs'), 'selected_docs')
     params = BuildChunksParams.from_dict(_mapping(inputs.get('build_chunks_params'), 'build_chunks_params'))
+    allocation = _mapping(_mapping(inputs.get('import_cases_manifest'), 'import_cases_manifest').get('stats'), 'import_cases_manifest.stats')
+    case_allocation = _mapping(allocation.get('case_allocation'), 'import_cases_manifest.stats.case_allocation')
+    auto_case_count = _non_negative_int(case_allocation.get('auto_case_count'), 'auto_case_count')
+    target = (auto_case_count * 3 + 1) // 2
+    if target == 0:
+        return {'build_chunk_candidates': {
+            'chunks': [], 'selection_stats': {'scanned_count': 0, 'accepted_count': 0, 'filtered_count_by_type': {}},
+            'target_chunk_count': 0, 'fallback_used': False, 'params': params.to_dict(),
+        }}
     docs = _docs(selected)
-    target = target_chunk_count(selected)
     plan = sampling_plan(docs, params.groups, target)
     if not plan:
         raise ValueError('dataset.build_chunk_candidates sampling plan is empty')
@@ -86,14 +95,13 @@ def build_chunks(
 
 def build_chunks_manifest(ctx: Any, inputs: Mapping[str, object]) -> Mapping[str, object]:
     selected = _mapping(inputs.get('selected_docs'), 'selected_docs')
+    allocation = _case_allocation(inputs.get('import_cases_manifest'))
     candidates = _mapping(inputs.get('build_chunk_candidates'), 'build_chunk_candidates')
     params = BuildChunksParams.from_dict(_mapping(candidates.get('params'), 'build_chunk_candidates.params'))
-    target = _positive_int(candidates.get('target_chunk_count'), 'build_chunk_candidates.target_chunk_count')
+    target = _non_negative_int(candidates.get('target_chunk_count'), 'build_chunk_candidates.target_chunk_count')
 
     chunks = _chunk_tuple(inputs.get('chunk'))
     partitions = _runtime_partitions(ctx)
-    if len(chunks) != target:
-        raise ValueError(f'dataset.build_chunks_manifest requires {target} chunk slots, got {len(chunks)}')
     if len(partitions) != len(chunks):
         raise ValueError('dataset.build_chunks_manifest runtime partitions do not match chunk tuple')
 
@@ -101,7 +109,7 @@ def build_chunks_manifest(ctx: Any, inputs: Mapping[str, object]) -> Mapping[str
     warnings = build_warnings(sum(1 for chunk in chunks if chunk.get('available')), target, fallback_used)
     return {
         'build_chunks_manifest': built_chunks_payload(
-            ctx, selected, chunks, partitions, target, fallback_used, warnings, params,
+            ctx, selected, chunks, partitions, target, allocation['auto_case_count'], fallback_used, warnings, params,
             normalize_selection_stats(_mapping(candidates.get('selection_stats'), 'build_chunk_candidates.selection_stats')),
         )
     }
@@ -127,7 +135,9 @@ def sampling_plan(docs: list[Mapping[str, Any]], groups: list[str], target: int)
         if not capacities:
             continue
         quotas = allocate_doc_quotas(remaining, capacities, doc_order)
-        plan.extend(DocGroupQuota(doc_id, group, quota) for doc_id, quota in quotas.items() if quota > 0)
+        plan.extend(DocGroupQuota(str(doc.get('kb_id') or ''), doc_id, group, quota)
+                    for doc in docs for doc_id, quota in quotas.items()
+                    if doc_id == str(doc.get('doc_id') or '') and quota > 0)
         remaining -= sum(quotas.values())
     return plan
 
@@ -138,22 +148,21 @@ def read_planned_chunks(
     plan: list[DocGroupQuota],
     allowed_types: list[str],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    kb_id = str(selected.get('kb_id') or '')
     docs = _docs(selected)
-    by_id = {str(doc.get('doc_id') or ''): dict(doc) for doc in docs}
+    by_id = {(str(doc.get('kb_id') or ''), str(doc.get('doc_id') or '')): dict(doc) for doc in docs}
     chunks: list[dict[str, Any]] = []
     scanned_count = 0
     filtered_count_by_type: Counter[str] = Counter()
     for item in plan:
         accepted_count = 0
-        for batch in client.iter_chunks(kb_id, [item.doc_id], [item.group], CHUNK_PAGE_SIZE):
+        for batch in client.iter_chunks(item.kb_id, [item.doc_id], [item.group], CHUNK_PAGE_SIZE):
             for node in batch:
                 scanned_count += 1
                 node_type = normalized_node_type(node)
                 if node_type not in allowed_types:
                     filtered_count_by_type[node_type] += 1
                     continue
-                chunks.append(chunk_payload(node, kb_id, item.doc_id, item.group, by_id.get(item.doc_id, {})))
+                chunks.append(chunk_payload(node, item.kb_id, item.doc_id, item.group, by_id.get((item.kb_id, item.doc_id), {})))
                 accepted_count += 1
                 if accepted_count >= item.quota:
                     break
@@ -172,6 +181,7 @@ def built_chunks_payload(
     chunks: tuple[Mapping[str, Any], ...],
     partitions: tuple[str, ...],
     target: int,
+    auto_case_count: int,
     fallback_used: bool,
     warnings: list[str],
     params: BuildChunksParams,
@@ -180,6 +190,7 @@ def built_chunks_payload(
     manifest_chunks = [
         {
             'available': bool(chunk.get('available')),
+            'kb_id': str(chunk.get('kb_id') or ''),
             'chunk_id': str(chunk.get('chunk_id') or ''),
             'doc_id': str(chunk.get('doc_id') or ''),
             'filename': str(chunk.get('filename') or ''),
@@ -193,10 +204,11 @@ def built_chunks_payload(
     stats.update(selection_stats)
     stats.update({
         'target_chunk_count': target,
+        'auto_case_count': auto_case_count,
         'fallback_used': fallback_used,
         'warnings': list(warnings),
     })
-    source = {'kb_id': str(selected.get('kb_id') or '')}
+    source = {'kb_ids': list(selected.get('kb_ids') or [])}
     selected_ref = selected_docs_ref(ctx)
     if selected_ref:
         source['selected_docs_ref'] = selected_ref
@@ -219,6 +231,7 @@ def chunk_payload(node: Any, kb_id: str, doc_id: str, group: str, doc: dict[str,
     chunk = chunk_from_docnode(node, kb_id=kb_id, doc_id=doc_id, group=group, doc=doc)
     return {
         'available': True,
+        'kb_id': kb_id,
         'chunk_id': chunk.chunk_id,
         'doc_id': chunk.source.doc_id,
         'filename': chunk.source.filename,
@@ -441,6 +454,20 @@ def _positive_int(value: Any, name: str) -> int:
     if parsed < 1:
         raise ValueError(f'{name} must be a positive integer')
     return parsed
+
+
+def _non_negative_int(value: Any, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f'{name} must be a non-negative integer')
+    return value
+
+
+def _case_allocation(value: object) -> Mapping[str, Any]:
+    manifest = _mapping(value, 'import_cases_manifest')
+    stats = _mapping(manifest.get('stats'), 'import_cases_manifest.stats')
+    allocation = _mapping(stats.get('case_allocation'), 'import_cases_manifest.stats.case_allocation')
+    _non_negative_int(allocation.get('auto_case_count'), 'auto_case_count')
+    return allocation
 
 
 def _runtime_partitions(ctx: Any) -> tuple[str, ...]:

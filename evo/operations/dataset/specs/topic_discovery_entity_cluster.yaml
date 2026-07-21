@@ -139,6 +139,7 @@ output_payload:
 execution_flow:
   - 解析并校验 topic_discovery_entity_cluster_params。
   - 校验 entity_graph.nodes 和 edges。
+  - 当 nodes=[] 且 edges=[] 时，返回 clusters=[] 的合法空结果；不得要求节点非空。
   - 建立 chunk_id 到 node order 的索引。
   - 遍历 edges.overlapped_items，构建 topic -> edges 倒排索引。
   - 对每个 topic 的 edges 构建子图并求 connected components。
@@ -187,9 +188,9 @@ tests:
   input_validation:
     # 输入契约与失败路径：看 entity_graph 的 nodes / edges 结构是否合法，坏输入是否立即失败。
     cases:
-      # entity_graph.nodes 必须是非空 list，chunk_id 不可重复，entities 必须是非空 list[string]。
-      # 例子：nodes 为空、chunk_id 重复、entities 不是 list[string]、或 entities 里出现空字符串，都应直接失败。
-      - contract
+      # nodes=[] 且 edges=[] 是 imported-only run 的合法空图；非空 nodes 的 chunk_id 与 entities 契约仍严格校验。
+      # 例子：chunk_id 重复、entities 非法，或空 nodes 搭配非空 edges 时都应直接失败。
+      - contract_with_imported_only_empty_bypass
       # edge endpoint 必须属于 entity_graph.nodes；非法 graph 或非法参数应立即抛错。
       # 例子：edge 引用了 nodes 中不存在的 chunk_id，或者 topic_merge_similarity_threshold 超出 [0, 1]，都应立即失败。
       - validation_error

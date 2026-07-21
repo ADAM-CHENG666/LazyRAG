@@ -20,6 +20,7 @@ ABTEST_CANDIDATE_CONFIG = 'abtest.candidate_config'
 
 CORPUS_REPORT = 'corpus.report'
 CORPUS_SNAPSHOT = 'corpus.snapshot'
+DATASET_IMPORT_CASES_MANIFEST = 'dataset.import_cases_manifest'
 DATASET_SELECTED_DOCS = 'dataset.selected_docs'
 DATASET_BUILD_CHUNKS_PARAMS = 'dataset.build_chunks_params'
 DATASET_BUILD_CHUNK_CANDIDATES = 'dataset.build_chunk_candidates'
@@ -101,6 +102,7 @@ ROOTS = MappingProxyType({
 
 OUTPUTS = MappingProxyType({
     'dataset.build_chunks': (
+        OutputSpec(DATASET_IMPORT_CASES_MANIFEST),
         OutputSpec(DATASET_SELECTED_DOCS),
         OutputSpec(DATASET_BUILD_CHUNK_CANDIDATES),
         OutputSpec(DATASET_BUILD_CHUNKS_MANIFEST),

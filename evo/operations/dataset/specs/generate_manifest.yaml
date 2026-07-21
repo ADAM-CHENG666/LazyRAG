@@ -11,6 +11,11 @@ fixed_op:
       required: true
       partition: partitioned
       mapping: all_to_unpartitioned
+    import_cases_manifest:
+      # 用其冻结统计汇总 imported/generated 数量，不从 case 内容猜测来源。
+      artifact_id: dataset.import_cases_manifest
+      required: true
+      partition: unpartitioned
   outputs:
     generate_manifest:
       artifact_id: dataset.generate_manifest
@@ -38,6 +43,22 @@ input_payload:
         reference_chunk_ids:
           type: list[string]
           required: true
+  import_cases_manifest:
+    fields:
+      stats:
+        type: object
+        required: true
+        fields:
+          case_allocation:
+            type: object
+            required: true
+            fields:
+              import_case_count:
+                type: integer
+                required: true
+              auto_case_count:
+                type: integer
+                required: true
 
 output_payload:
   generate_manifest:
@@ -54,17 +75,21 @@ output_payload:
             type: object
           difficulty_counts:
             type: object
+          import_case_count:
+            type: integer
+          generated_case_count:
+            type: integer
 
 execution_flow:
   - 汇总 all_to_unpartitioned 的 case tuple。
   - 校验每个 case 的稳定 id、问题类型、难度和 reference_chunk_ids，并拒绝重复 id。
-  - 输出基础 case 的轻量审计索引与分布统计；不改写 case 内容，不依赖任何 enhancement 字段，也不承担 assemble 职责。
+  - 使用 import_cases_manifest 的冻结统计输出基础 case 的轻量审计索引、问题/难度分布与 imported/generated 数量；不改写 case 内容，不依赖任何 enhancement 字段，也不承担 assemble 职责。
 
 tests:
   manifest_summary:
     # 汇总主逻辑：验证所有基础 case 聚合为轻量完成标记，且不读取或输出 enhancement 字段。
     cases:
-      # 合法分区 case 能汇总出 cases 审计索引与按问题类型、难度统计的分布。
+      # 合法分区 case 能汇总出 cases 审计索引、按问题类型/难度统计的分布，以及 imported/generated 数量。
       - success
       # 同一轮生成中 case.id 必须唯一，避免不同分区的结果在 manifest 中发生歧义。
       - duplicate_id_error

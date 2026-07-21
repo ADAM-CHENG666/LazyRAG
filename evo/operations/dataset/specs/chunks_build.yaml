@@ -2,7 +2,7 @@ operation:
   op_id: dataset.build_chunks
   flow: dataset
   stage: build_chunks
-  description: 基于 selected_docs 为指定数量的 runtime partitions 构建 dataset 候选 chunk slots。
+  description: 将自动生成侧的候选 chunk 映射到既有静态 runtime chunk partitions，不足部分输出占位。
 
 fixed_op:
   inputs:
@@ -38,7 +38,12 @@ output_payload:
     json_compatible: true
     fields:
       available:
-        type: boolean # 当输出 chunk 不足时，也需要使用无效 chunk 做占位，以满足当前静态声明设计
+        # false 表示静态 slot 的占位，不应触发实体、聚类或 LLM 工作。
+        type: boolean
+      kb_id:
+        # 真实 chunk 所属知识库；不参与 ID 拼接。
+        type: string
+        required: false
       chunk_id:
         type: string
       doc_id:
@@ -53,25 +58,25 @@ output_payload:
         type: string
       embedding:
         type: object
-        fields:
-          model:
-            type: string
-          vector:
-            type: list[number]
       metadata:
         type: object
 
 execution_flow:
-  - 读取 build_chunk_candidates。
-  - 按 runtime output partition 的 index 从候选列表选择一个 chunk。
-  - 按 runtime output chunk partition 选择当前 slot 对应的 chunk，真实 chunk 输出 available=true。
-  - 当当前 slot 超过实际 chunk 数量时，输出 available=false 的空占位 chunk payload。
+  - 读取 build_chunk_candidates，并按 runtime output partition 的稳定 index 选择当前 slot。
+  - index 小于候选数量时，输出 available=true 的真实 chunk，原样保留 kb_id、chunk_id、doc_id 和正文。
+  - index 超过候选数量时，输出 available=false 的空占位 chunk；静态 partition 数量不因 CSV 导入而变化。
+  - 当 target_chunk_count=0 时，全部静态 slots 都必须输出 available=false，占位不会触发后续 LLM 调用。
   - 返回仅包含当前 partition slot 的 {"chunk": payload}。
 
 tests:
-  - contract
-  - success
-  - insufficient_chunks_placeholder
-  - partitioned_chunk_output
-  - return_keys_match_outputs
-  - partition
+  static_partition_mapping:
+    # CSV 只缩减真实自动生成材料，不改变 DAG 静态声明的 chunk slot 数量。
+    cases:
+      # 真实候选按稳定 partition index 映射，并保留 kb_id/doc_id/chunk_id 原值。
+      - maps_candidates_with_source_provenance
+      # 候选不足时继续使用现有 available=false 占位，而不是删减 runtime partitions。
+      - insufficient_chunks_placeholder
+      # import_case_count=target_case_count 导致 target_chunk_count=0 时，所有 slots 均为占位。
+      - all_imported_cases_produce_only_placeholders
+      # materializer 只返回当前 partition 的 chunk output。
+      - return_keys_match_outputs

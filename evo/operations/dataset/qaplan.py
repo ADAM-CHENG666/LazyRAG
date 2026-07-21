@@ -28,13 +28,26 @@ REASONING_INSTRUCTION = '''- 围绕给定 topic 选择问题；topic 是选题�
 def qaplan_plan(ctx: Any, inputs: Mapping[str, object]) -> dict[str, object]:
     case_ids = _case_ids(ctx, 'qaplan_plan')
     source_config = _mapping(inputs.get('source_config'), 'source_config')
-    kb_id = _text(source_config.get('kb_id'), 'kb_id')
-    target_case_count = _positive_int(source_config.get('target_case_count'), 'target_case_count')
-    if target_case_count != len(case_ids):
-        raise ValueError('target_case_count must match runtime case partition count')
+    kb_ids = _string_list(source_config.get('kb_ids'), 'kb_ids')
+    imported = _mapping(inputs.get('import_cases_manifest'), 'import_cases_manifest')
+    allocation = _mapping(_mapping(imported.get('stats'), 'import_cases_manifest.stats').get('case_allocation'), 'case_allocation')
+    target_case_count = _positive_int(allocation.get('target_case_count'), 'target_case_count')
+    auto_case_count = _non_negative_int(allocation.get('auto_case_count'), 'auto_case_count')
+    import_case_count = _non_negative_int(allocation.get('import_case_count'), 'import_case_count')
+    assignments = _mapping(allocation.get('assignments'), 'assignments')
+    if target_case_count != len(case_ids) or set(assignments) != set(case_ids):
+        raise ValueError('case assignments must match runtime case partitions')
+    generated_ids = [case_id for case_id in case_ids if _mapping(assignments[case_id], 'assignment').get('mode') == 'generated']
+    if len(generated_ids) != auto_case_count:
+        raise ValueError('auto_case_count must match generated assignments')
+    if auto_case_count == 0:
+        return {'qaplan_plan': {'source': {'kb_ids': kb_ids}, 'items': [], 'stats': {
+            'target_case_count': target_case_count, 'import_case_count': import_case_count,
+            'auto_case_count': 0, 'planned_case_count': 0, 'lane_summaries': []},
+            'params': {'lane_ratios': {}, 'resolved_lane_quotas': {}, 'lane_order': list(LANE_NAMES)}}}
 
     ratios = _lane_ratios(inputs.get('qaplan_plan_params'))
-    quotas = _allocate_quotas(target_case_count, ratios)
+    quotas = _allocate_quotas(auto_case_count, ratios)
     chunks = _chunk_map(inputs.get('chunk'))
     clusters = _clusters(inputs.get('topic_discovery_manifest'), chunks)
 
@@ -75,6 +88,7 @@ def qaplan_plan(ctx: Any, inputs: Mapping[str, object]) -> dict[str, object]:
         for cluster, topic, selection_round in selected:
             references = _references(cluster, reference_count, chunks)
             items.append({
+                'case_id': generated_ids[len(items)],
                 'plan_item_id': f'qaplan_item_{len(items) + 1:06d}',
                 'lane': lane,
                 'question_type': question_type,
@@ -87,10 +101,12 @@ def qaplan_plan(ctx: Any, inputs: Mapping[str, object]) -> dict[str, object]:
             })
 
     payload = {
-        'source': {'kb_id': kb_id},
+        'source': {'kb_ids': kb_ids},
         'items': items,
         'stats': {
             'target_case_count': target_case_count,
+            'import_case_count': import_case_count,
+            'auto_case_count': auto_case_count,
             'planned_case_count': len(items),
             'lane_summaries': lane_summaries,
         },
@@ -110,20 +126,28 @@ def qaplan_spec(ctx: Any, inputs: Mapping[str, object]) -> dict[str, object]:
     if case_id not in case_ids:
         raise ValueError('preparation output partition must belong to runtime case partitions')
 
+    imported = _mapping(inputs.get('import_cases_manifest'), 'import_cases_manifest')
+    allocation = _mapping(_mapping(imported.get('stats'), 'import_cases_manifest.stats').get('case_allocation'), 'case_allocation')
+    assignment = _mapping(_mapping(allocation.get('assignments'), 'assignments').get(case_id), 'assignment')
+    mode = _choice(assignment.get('mode'), ('imported', 'generated'), 'assignment.mode')
+    if mode == 'imported':
+        row = _positive_int(assignment.get('source_row_number'), 'assignment.source_row_number')
+        details = imported.get('details')
+        if not isinstance(details, list): raise ValueError('import_cases_manifest.details must be a list')
+        detail = next((item for item in details if isinstance(item, Mapping) and item.get('source_row_number') == row), None)
+        case = _mapping(_mapping(detail, 'loaded detail').get('case'), 'loaded detail.case')
+        if _text(case.get('id'), 'loaded detail.case.id') != case_id: raise ValueError('loaded detail case id mismatch')
+        return {'qaplan_spec': {'id': case_id, 'mode': 'imported', 'imported_case': dict(case)}}
+
     qaplan = _mapping(inputs.get('qaplan_plan'), 'qaplan_plan')
     items = qaplan.get('items')
     if not isinstance(items, list):
         raise ValueError('qaplan.items must be a list')
     stats = _mapping(qaplan.get('stats'), 'qaplan.stats')
-    target_case_count = _positive_int(stats.get('target_case_count'), 'qaplan.stats.target_case_count')
-    planned_case_count = _positive_int(stats.get('planned_case_count'), 'qaplan.stats.planned_case_count')
-    if target_case_count != planned_case_count or planned_case_count != len(items):
-        raise ValueError('target_case_count, planned_case_count, and qaplan.items must match')
-    if len(items) != len(case_ids):
-        raise ValueError('qaplan.items count must match runtime case partition count')
-    source = _mapping(qaplan.get('source'), 'qaplan_plan.source')
-
-    item = _mapping(items[case_ids.index(case_id)], 'qaplan.items[]')
+    planned_case_count = _non_negative_int(stats.get('planned_case_count'), 'qaplan.stats.planned_case_count')
+    if planned_case_count != len(items): raise ValueError('planned_case_count must match qaplan.items')
+    item = next((item for item in items if isinstance(item, Mapping) and item.get('case_id') == case_id), None)
+    item = _mapping(item, 'qaplan item for case')
     question_type = _choice(item.get('question_type'), ('precision', 'reasoning'), 'question_type')
     difficulty = _choice(item.get('difficulty'), ('easy', 'medium', 'hard'), 'difficulty')
     topic = _text(item.get('topic'), 'topic')
@@ -131,12 +155,12 @@ def qaplan_spec(ctx: Any, inputs: Mapping[str, object]) -> dict[str, object]:
     instruction = _instruction(question_type, topic, len(references))
 
     preparation = {
-        'id': case_id,
+        'id': case_id, 'mode': 'generated',
         'question_type': question_type,
         'difficulty': difficulty,
         'instruction': instruction,
         'topic': topic,
-        'source': {'kb_id': _text(source.get('kb_id'), 'qaplan_plan.source.kb_id')},
+        'source': {'kb_ids': list(dict.fromkeys(reference.get('kb_id', '') for reference in references if reference.get('kb_id')))},
         'qaplan': {
             'plan_item_id': _text(item.get('plan_item_id'), 'plan_item_id'),
             'lane': _text(item.get('lane'), 'lane'),
@@ -152,16 +176,32 @@ def qaplan_spec(ctx: Any, inputs: Mapping[str, object]) -> dict[str, object]:
 def qaplan_manifest(ctx: Any, inputs: Mapping[str, object]) -> dict[str, object]:
     plan = _mapping(inputs.get('qaplan_plan'), 'qaplan_plan')
     stats = _mapping(plan.get('stats'), 'qaplan_plan.stats')
-    planned_case_count = _positive_int(stats.get('planned_case_count'), 'qaplan_plan.stats.planned_case_count')
+    planned_case_count = _non_negative_int(stats.get('planned_case_count'), 'qaplan_plan.stats.planned_case_count')
+    imported = _mapping(inputs.get('import_cases_manifest'), 'import_cases_manifest')
+    allocation = _mapping(_mapping(imported.get('stats'), 'import_cases_manifest.stats').get('case_allocation'), 'case_allocation')
+    target_count = _positive_int(allocation.get('target_case_count'), 'target_case_count')
+    assignments = _mapping(allocation.get('assignments'), 'assignments')
     specs = inputs.get('qaplan_specs')
-    if not isinstance(specs, tuple) or not specs:
-        raise ValueError('qaplan_specs must be a non-empty partitioned tuple')
+    if not isinstance(specs, tuple) or len(specs) != target_count:
+        raise ValueError('qaplan_specs count must match target case partition count')
 
     spec_ids = [_text(_mapping(spec, 'qaplan_specs[]').get('id'), 'qaplan_specs[].id') for spec in specs]
-    if len(spec_ids) != planned_case_count:
-        raise ValueError('qaplan_specs count must match qaplan_plan.stats.planned_case_count')
     if len(set(spec_ids)) != len(spec_ids):
         raise ValueError('qaplan_specs ids must be unique')
+    if set(spec_ids) != set(assignments):
+        raise ValueError('qaplan_specs ids must match assignments')
+    generated_ids = set()
+    for spec in specs:
+        value = _mapping(spec, 'qaplan_specs[]')
+        case_id = _text(value.get('id'), 'qaplan_specs[].id')
+        mode = _choice(value.get('mode'), ('imported', 'generated'), 'qaplan_specs[].mode')
+        expected = _choice(_mapping(assignments[case_id], 'assignment').get('mode'), ('imported', 'generated'), 'assignment.mode')
+        if mode != expected:
+            raise ValueError('qaplan spec mode must match assignment')
+        if mode == 'generated':
+            generated_ids.add(case_id)
+    if len(generated_ids) != planned_case_count:
+        raise ValueError('generated qaplan spec count must match planned_case_count')
     return {'qaplan_manifest': {'case_count': len(spec_ids)}}
 
 
@@ -174,6 +214,18 @@ def _case_ids(ctx: Any, operation: str) -> tuple[str, ...]:
     if len(set(values)) != len(values):
         raise ValueError('runtime case_ids must be unique')
     return values
+
+
+def _string_list(value: object, name: str) -> list[str]:
+    if not isinstance(value, list) or not value:
+        raise ValueError(f'{name} must be a non-empty list')
+    return [_text(item, name) for item in value]
+
+
+def _non_negative_int(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f'{name} must be a non-negative integer')
+    return value
 
 
 def _lane_ratios(value: object) -> dict[str, object]:
@@ -225,6 +277,7 @@ def _chunk_map(value: object) -> dict[str, dict[str, str]]:
             raise ValueError('available chunk_id values must be unique')
         chunks[chunk_id] = {
             'chunk_id': chunk_id,
+            'kb_id': _text(item.get('kb_id'), 'chunk.kb_id') if item.get('kb_id') else '',
             'doc_id': _text(item.get('doc_id'), 'doc_id'),
             'text': item.get('text') if isinstance(item.get('text'), str) else '',
         }
@@ -296,6 +349,7 @@ def _build_references(value: object, difficulty: str) -> list[dict[str, str]]:
     for index, raw in enumerate(value):
         item = _mapping(raw, f'references[{index}]')
         output.append({
+            'kb_id': _text(item.get('kb_id'), 'reference kb_id') if item.get('kb_id') else '',
             'chunk_id': _text(item.get('chunk_id'), 'reference chunk_id'),
             'doc_id': _text(item.get('doc_id'), 'reference doc_id'),
             'text': _text(item.get('text'), 'reference text'),

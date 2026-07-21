@@ -18,6 +18,7 @@ LANES = (
 def _chunk(chunk_id, doc_id=None, *, text=None, available=True):
     return {
         'available': available,
+        'kb_id': 'kb-1',
         'chunk_id': chunk_id,
         'doc_id': doc_id or f'doc-{chunk_id}',
         'text': text or f'text for {chunk_id}',
@@ -59,7 +60,14 @@ def _inputs(*, target_case_count=6, clusters=None, chunks=None, lane_ratios=None
     entity_chunks = ['entity-1', 'entity-2', 'entity-3']
     embedding_chunks = ['embedding-1', 'embedding-2', 'embedding-3']
     return {
-        'source_config': {'kb_id': 'kb-1', 'target_case_count': target_case_count},
+        'source_config': {'kb_ids': ['kb-1']},
+        'import_cases_manifest': {'stats': {'case_allocation': {
+            'target_case_count': target_case_count,
+            'import_case_count': 0,
+            'auto_case_count': target_case_count,
+            'assignments': {f'case_{index:04d}': {'mode': 'generated'}
+                            for index in range(1, target_case_count + 1)},
+        }}, 'details': []},
         'topic_discovery_manifest': {
             'clusters': clusters if clusters is not None else [
                 _cluster('entity_000001', 'entity', ['entity topic 1', 'entity topic 2', 'entity topic 3'], entity_chunks),
@@ -89,7 +97,7 @@ def test_qaplan_plan_uses_default_equal_lane_ratios_and_returns_source_and_six_o
     payload = _plan()
 
     assert list(payload) == ['source', 'items', 'stats', 'params']
-    assert payload['source'] == {'kb_id': 'kb-1'}
+    assert payload['source'] == {'kb_ids': ['kb-1']}
     assert [item['lane'] for item in payload['items']] == list(LANES)
     assert [item['question_type'] for item in payload['items']] == [
         'precision', 'precision', 'precision', 'reasoning', 'reasoning', 'reasoning',
@@ -98,6 +106,25 @@ def test_qaplan_plan_uses_default_equal_lane_ratios_and_returns_source_and_six_o
     assert payload['stats']['target_case_count'] == 6
     assert payload['stats']['planned_case_count'] == 6
     assert payload['params']['resolved_lane_quotas'] == dict.fromkeys(LANES, 1)
+
+
+def test_qaplan_plan_bypasses_topic_planning_when_every_case_is_imported():
+    inputs = _inputs(target_case_count=2, clusters=[])
+    inputs['import_cases_manifest']['stats']['case_allocation'] = {
+        'target_case_count': 2,
+        'import_case_count': 2,
+        'auto_case_count': 0,
+        'assignments': {
+            'case_0001': {'mode': 'imported', 'source_row_number': 2},
+            'case_0002': {'mode': 'imported', 'source_row_number': 3},
+        },
+    }
+
+    payload = qaplan_plan(_context(2), inputs)['qaplan_plan']
+
+    assert payload['items'] == []
+    assert payload['stats']['planned_case_count'] == 0
+    assert payload['stats']['import_case_count'] == 2
 
 
 def test_qaplan_plan_normalizes_ratios_and_uses_largest_remainder_with_lane_order_tie_break():
@@ -153,9 +180,9 @@ def test_qaplan_plan_preserves_real_kb_reference_ids_order_and_full_chunk_materi
     hard_item = payload['items'][2]
 
     assert hard_item['references'] == [
-        {'chunk_id': 'entity-1', 'doc_id': 'doc-entity-1', 'text': 'text for entity-1'},
-        {'chunk_id': 'entity-2', 'doc_id': 'doc-entity-2', 'text': 'text for entity-2'},
-        {'chunk_id': 'entity-3', 'doc_id': 'doc-entity-3', 'text': 'text for entity-3'},
+        {'chunk_id': 'entity-1', 'kb_id': 'kb-1', 'doc_id': 'doc-entity-1', 'text': 'text for entity-1'},
+        {'chunk_id': 'entity-2', 'kb_id': 'kb-1', 'doc_id': 'doc-entity-2', 'text': 'text for entity-2'},
+        {'chunk_id': 'entity-3', 'kb_id': 'kb-1', 'doc_id': 'doc-entity-3', 'text': 'text for entity-3'},
     ]
 
 
@@ -175,7 +202,7 @@ def test_qaplan_plan_reports_lane_summary_for_user_visible_distribution():
 
 
 def test_qaplan_plan_rejects_target_case_count_that_does_not_match_runtime_partitions():
-    with pytest.raises(ValueError, match='target_case_count.*runtime.*partition'):
+    with pytest.raises(ValueError, match='case assignments must match runtime case partitions'):
         _plan(target_case_count=6, runtime_case_count=5)
 
 

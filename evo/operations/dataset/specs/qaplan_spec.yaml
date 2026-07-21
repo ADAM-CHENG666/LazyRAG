@@ -2,12 +2,17 @@ operation:
   op_id: dataset.qaplan_spec
   flow: dataset
   stage: qaplan_spec
-  description: 将全局 QA plan 按 runtime case 分区顺序拆分为单个 QA 生成规格。
+  description: 按稳定 case 分区分发导入旁路或自动生成所需的 QA 规格。
 
 fixed_op:
   inputs:
     qaplan_plan:
       artifact_id: dataset.qaplan_plan
+      required: true
+      partition: unpartitioned
+      mapping: unpartitioned_to_all
+    import_cases_manifest:
+      artifact_id: dataset.import_cases_manifest
       required: true
       partition: unpartitioned
       mapping: unpartitioned_to_all
@@ -24,88 +29,54 @@ materializer:
 input_payload:
   qaplan_plan:
     fields:
-      source:
-        type: object
-        required: true
-        fields:
-          kb_id:
-            type: string
-            required: true
       items:
         type: array
         required: true
         item:
           type: object
           fields:
-            plan_item_id:
+            case_id:
               type: string
               required: true
-            lane:
-              type: string
-              required: true
-              enum:
-                - entity_precision_easy
-                - entity_precision_medium
-                - entity_precision_hard
-                - embedding_reasoning_easy
-                - embedding_reasoning_medium
-                - embedding_reasoning_hard
             question_type:
               type: string
               required: true
-              enum:
-                - precision
-                - reasoning
             difficulty:
               type: string
               required: true
-              enum:
-                - easy
-                - medium
-                - hard
-            cluster_id:
-              type: string
-              required: true
-            cluster_type:
-              type: string
-              required: true
-              enum:
-                - entity
-                - embedding
             topic:
               type: string
               required: true
             references:
               type: array
               required: true
-              item:
-                type: object
-                fields:
-                  chunk_id:
-                    type: string
-                    required: true
-                  doc_id:
-                    type: string
-                    required: true
-                  text:
-                    type: string
-                    required: true
-            selection_round:
-              type: integer
-              required: true
       stats:
         type: object
         required: true
         fields:
-          target_case_count:
+          auto_case_count:
             type: integer
             required: true
           planned_case_count:
             type: integer
             required: true
-      params:
+  import_cases_manifest:
+    fields:
+      stats:
         type: object
-        required: false
+        required: true
+        fields:
+          case_allocation:
+            type: object
+            required: true
+            fields:
+              assignments:
+                type: object
+                required: true
+      details:
+        # imported case 由其 loaded detail 提供，不在 manifest 中维护第二份索引。
+        type: array
+        required: true
 
 output_payload:
   qaplan_spec:
@@ -113,114 +84,76 @@ output_payload:
     fields:
       id:
         type: string
+      mode:
+        # imported 直接透传 base case；generated 读取唯一 qaplan item。
+        type: string
+        enum:
+          - imported
+          - generated
+      imported_case:
+        # 已完成 CSV 校验、可直接作为 dataset.case 的基础 case。
+        type: object
+        required: false
+        description: mode=imported 时的已规范化基础 case；generate 直接返回它。
       question_type:
         type: string
+        required: false
         enum:
           - precision
           - reasoning
       difficulty:
         type: string
+        required: false
         enum:
           - easy
           - medium
           - hard
       source:
+        # generated case 实际引用到的 KB，而非整个运行配置的 KB 集合。
         type: object
+        required: false
         fields:
-          kb_id:
-            type: string
-      # 按 question_type 生成的行为约束；instruction 自身不包含 QA 类型名称、topic 值或 references 数量。
+          kb_ids:
+            type: list[string]
       instruction:
         type: string
+        required: false
       topic:
         type: string
+        required: false
       qaplan:
         type: object
-        fields:
-          plan_item_id:
-            type: string
-          lane:
-            type: string
-          cluster_id:
-            type: string
-          cluster_type:
-            type: string
-          selection_round:
-            type: integer
+        required: false
       references:
         type: array
-        item:
-          type: object
-          fields:
-            chunk_id:
-              type: string
-            doc_id:
-              type: string
-            text:
-              type: string
+        required: false
 
 execution_flow:
-  - 读取当前 qaplan_spec 输出分区对应的 runtime case id，以及 flow 中全部 case 分区的稳定顺序。
-  - 校验 qaplan_plan.stats.target_case_count、qaplan_plan.stats.planned_case_count 和 qaplan_plan.items 长度三者相等，且均等于 runtime case 分区总数；不一致时直接失败。
-  - 使用当前 case id 在 runtime case 分区顺序中的零基索引，取得 qaplan_plan.items[index]；不通过 plan_item_id 或其他字段重新排序。
-  - 校验每个 item 的 references 非空，且数量与 difficulty 一致：easy=1、medium=2、hard=3；每份 reference 的 chunk_id、doc_id、text 均不能为空。
-  - 根据 question_type 生成 qaplan_spec.instruction；instruction 只放置类型行为约束，不显式说明 QA 类型名称，也不插入 topic 值或 references 数量；topic 和 references 在后续生成 prompt 中作为独立上下文提供。
-  - precision instruction：要求问题显式围绕 topic 名称，且答案只抽取、并列、去重或格式化整合 references 中可直接找到的事实；不要求计算、比较、资格判断、时间先后判断、因果推断或新关系建立。
-  - reasoning instruction：要求最终结论不能是任一 reference 的直接复述，必须由资料中明确的事实、条件或关系归纳或推导得出；不得依赖外部常识、主观判断、开放式总结或资料未建立的关系。
-  - 将当前 case id 写入 qaplan_spec.id；复制计划项的 question_type、difficulty、topic、instruction、references 与 qaplan_plan.source.kb_id。
-  - 将 plan_item_id、lane、cluster_id、cluster_type 和 selection_round 写入 qaplan_spec.qaplan，保留完整 references 的真实 chunk_id、doc_id 和 text。
+  - 读取当前 qaplan_spec 输出分区的稳定 case id，并从 import_cases_manifest.stats.case_allocation.assignments 查找唯一 assignment；缺失、未知 mode 或 assignment 与 runtime 分区不一致时直接失败。
+  - mode=imported 时，要求 details 中存在 source_row_number 匹配 assignment、load_status=loaded 且 case.id 相同的完整规范化基础 case；输出 {id, mode=imported, imported_case}，不读取 qaplan_plan.items，不构造 instruction。
+  - mode=generated 时，要求 qaplan_plan.items 中恰有一个 case_id 等于当前 id 的计划项；不得按 items 索引猜测分配，也不得使用导入 case 占位索引。
+  - 对 generated item 校验 references 非空且数量符合 easy=1、medium=2、hard=3；每项 chunk_id、doc_id、text 均不能为空。
+  - 根据 question_type 构造现有 precision 或 reasoning instruction，并复制计划项的 type、difficulty、topic、references 与 qaplan 追踪字段；source.kb_ids 由 references 中去重后的实际 kb_id 按首次出现顺序构造。
   - 返回 {"qaplan_spec": payload}。
 
 tests:
-  plan_distribution:
-    # 分区构建主逻辑：验证 qaplan_plan 产出的无分区计划如何被复制给每个 case operation，再按稳定分区索引构建不同 qaplan_spec。
+  imported_bypass:
+    # 导入分区的分配已经在 import_cases_manifest 冻结；qaplan spec 只传递已验证的 case。
     cases:
-      # qaplan_plan 作为 unpartitioned 输入通过 unpartitioned_to_all 分发给所有 case 分区。
-      - unpartitioned_qaplan_to_all_case_partitions
-      # 当前 case 使用其零基分区索引对应的 qaplan_plan item，不按 plan_item_id、topic 或任何字段重新排序。
-      # 例子：case_0001 取 items[0]，case_0002 取 items[1]。
-      - current_case_uses_same_index_plan_item
-      # 分区派发严格保留 qaplan_plan.items 原有顺序，确保 lane block 顺序在 qaplan_spec 中不被破坏。
-      - preserves_qaplan_item_order
-      # 第一个与最后一个 runtime case 分区均能正确取得边界计划项。
-      # 例子：N=3 时 case_0001 取 items[0]，case_0003 取 items[2]。
-      - first_and_last_case_partition
-  qaplan_spec_payload:
-    # 输出结构：验证 qaplan_spec 只复制已装配的计划材料，并根据 QA 类型生成行为约束；不重新读取 chunk、不重新选 topic，也不截断正文。
+      # imported assignment 只产生带原分区 id 的 imported_case，不访问或消费 qaplan item。
+      - imported_case_bypasses_plan_lookup
+      # assignment 或 imported_case 缺失、id 不一致或基础 case 契约非法时直接失败。
+      - imported_case_assignment_contract_error
+  generated_spec:
+    # 自动分区必须按显式 case_id 找到计划项，保证 CSV 导入位于任意静态分区时仍不发生错位。
     cases:
-      # question_type、difficulty、topic 与原计划项保持一致。
-      - copies_question_type_difficulty_and_topic
-      # precision case 使用直接事实整合的行为约束；instruction 不包含 QA 类型名称、topic 值或实际参考资料数量。
-      - renders_precision_instruction
-      # reasoning case 使用闭合推导的行为约束；instruction 不包含 QA 类型名称、topic 值或实际参考资料数量。
-      - renders_reasoning_instruction
-      # 难度本身不改变 instruction 的问题类型语义；它只通过 references 数量影响构建材料规模，不被渲染进 instruction。
-      - difficulty_only_changes_reference_count_in_instruction
-      # qaplan_spec.qaplan 下保留 plan_item_id、lane、cluster_id、cluster_type、selection_round，便于后续溯源与展示。
-      - copies_qaplan_trace_metadata
-      # references 中完整保留每份 chunk 的 chunk_id、doc_id 和 text，不做截断或改写。
-      - preserves_full_reference_text
-      # 输出 id 必须等于当前 qaplan_spec 输出分区，而非由 plan_item_id 或输入内容推导。
-      - id_is_current_output_partition
-      # materializer 返回结构固定为 {"qaplan_spec": payload}，不混入额外 output key。
-      - return_keys_match_outputs
-  validation:
-    # 输入一致性：验证 qaplan_plan 的展示统计、计划项数与 runtime case 分区数必须完全对应，避免错位派发。
-    cases:
-      # qaplan_plan 必须包含合法 source、items、stats 和每项完整 references；缺字段或类型错误时直接失败。
-      - qaplan_plan_contract
-      # target_case_count、planned_case_count 与 items 数量任一不一致时直接失败。
-      # 例子：target_case_count=6、planned_case_count=5、items 长度=5 时不能继续。
-      - qaplan_stats_item_count_mismatch_error
-      # qaplan.items 数量必须等于 flow 的 runtime case 分区数。
-      # 例子：qaplan 有 6 项而 flow 只创建 5 个 case 分区时，不能静默丢弃或复用计划项。
-      - qaplan_item_count_runtime_partition_count_mismatch_error
-      # reference 的 chunk_id、doc_id、text 为空或 references 数量不符合 difficulty 时直接失败。
-      - invalid_reference_error
-      # question_type 不属于 precision/reasoning，或 topic 为空导致无法安全渲染 instruction 时直接失败。
-      - invalid_instruction_source_error
+      # generated assignment 通过 plan item.case_id 唯一匹配，而非按全局 case 分区索引匹配。
+      - generated_case_uses_explicit_plan_case_id
+      # 生成路径保留现有 instruction、references、类型、难度与计划追踪元数据。
+      - preserves_generated_qaplan_contract
+      # 缺失、重复或错误绑定的 plan item 必须失败。
+      - generated_plan_binding_error
   runtime_wiring:
-    # fixed op 接线：验证单个全局 qaplan_plan 会生成每个 case 各自独立的 partitioned qaplan_spec operation。
+    # 两个全局 manifest 均广播到每个静态 case 分区，输出仍是一分区一 qaplan_spec。
     cases:
-      # runtime 为每个 case 分区创建一个 dataset.qaplan_spec[case_xxxx] 实例，并写入对应的 dataset.qaplan_spec 分区。
       - partition

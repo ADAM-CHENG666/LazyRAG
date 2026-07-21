@@ -40,9 +40,18 @@ input_payload:
         validation:
           - non_empty_after_strip
       reference_context:
-        type: object
+        # 基础 case 冻结的证据列表；enhance 不重新查询知识库。
+        type: array
         required: true
-        value_type: string
+        item:
+          type: object
+          fields:
+            chunk_id:
+              type: string
+              required: true
+            text:
+              type: string
+              required: true
       reference_chunk_ids:
         type: list[string]
         required: true
@@ -86,7 +95,7 @@ output_payload:
 
 execution_flow:
   - 读取同分区的基础 case；只使用 question、answer、reference_context 和 reference_chunk_ids，不读取 qaplan_spec 或 grading_guidance。
-  - 按 reference_chunk_ids 原始顺序为完整 reference_context 添加稳定短别名，供两个 LLM 调用引用；短别名只在 operation 内部使用，最终输出映射回真实 chunk_id。
+  - 校验 reference_context 是按 reference_chunk_ids 相同顺序排列的 [{chunk_id, text}]，每个 chunk_id 唯一且文本完整；再为其添加稳定短别名，供两个 LLM 调用引用。
   - 第一次调用 LLM：基于 question、answer 和 references，提取 1–5 条 answer 已包含的原子 key points；每条必须由一个或多个 references 支持，不能引入 answer 未出现的新事实。
   - 校验 key points 的结构、证据短别名和 statement；将证据映射为真实 evidence_chunk_ids，并按输出顺序赋予 key_point_1、key_point_2 等 case 内稳定 id。不要求 key points 覆盖全部 references。
   - 第二次独立调用 LLM：基于同一份 question、answer 和 references，提取 0–3 条与本题相关、被 references 明确否定且易误答的 forbidden claims；允许返回空列表。
@@ -101,7 +110,7 @@ tests:
       - base_case_contract_error
       # grading_guidance 与 qaplan_spec 即使存在也不进入任一增强 prompt，避免以设计意图扩写事实。
       - ignores_guidance_and_qaplan_spec
-      # reference_context 中必须包含 reference_chunk_ids 对应的完整文本，且原始 chunk 顺序稳定用于短别名映射。
+      # reference_context 必须是与 reference_chunk_ids 一致的 [{chunk_id,text}] 列表，且原始顺序稳定用于短别名映射。
       - reference_context_contract_and_stable_aliases
   key_points_generation:
     # 第一次 LLM 调用：验证它只将冻结 answer 拆解为可追溯的原子事实。

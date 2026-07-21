@@ -17,11 +17,12 @@ def _reference(index):
 def _qaplan_spec(**overrides):
     value = {
         'id': 'case_0001',
+        'mode': 'generated',
         'question_type': 'precision',
         'difficulty': 'medium',
         'instruction': 'Generate one grounded QA from the given materials.',
         'topic': 'service level',
-        'source': {'kb_id': 'kb-1'},
+        'source': {'kb_ids': ['kb-1']},
         'qaplan': {
             'plan_item_id': 'qaplan_item_000001',
             'lane': 'entity_precision_medium',
@@ -43,6 +44,17 @@ def _inputs(qaplan_spec=None, run_config=None):
     return {
         'qaplan_spec': qaplan_spec if qaplan_spec is not None else _qaplan_spec(),
         'run_config': run_config if run_config is not None else {'llm_config': {'evo_llm': {'model': 'generate-test'}}},
+    }
+
+
+def _import_manifest(imported=0, generated=2):
+    return {
+        'stats': {
+            'case_allocation': {
+                'import_case_count': imported,
+                'auto_case_count': generated,
+            },
+        },
     }
 
 
@@ -101,14 +113,28 @@ def test_generate_returns_base_case_with_real_kb_references():
         'question': 'What is the target?',
         'answer': 'The target is defined in the references.',
         'grading_guidance': 'Assess whether the answer identifies the reference-grounded target definition.',
-        'reference_context': {
-            'chunk-1': 'full reference text 1',
-            'chunk-2': 'full reference text 2',
-        },
+        'reference_context': [
+            {'chunk_id': 'chunk-1', 'text': 'full reference text 1'},
+            {'chunk_id': 'chunk-2', 'text': 'full reference text 2'},
+        ],
         'reference_chunk_ids': ['chunk-1', 'chunk-2'],
         'reference_doc_ids': ['doc-1', 'doc-2'],
-        'source_preparation': {'kb_id': 'kb-1'},
+        'source_preparation': {'kb_ids': ['kb-1']},
     }
+
+
+def test_generate_directly_returns_a_complete_imported_case_without_calling_llm():
+    imported = {
+        'id': 'case_0001', 'question_type': 'precision', 'difficulty': 'easy',
+        'question': 'What is covered?', 'answer': 'Battery defects.', 'grading_guidance': 'Match the scope.',
+        'reference_context': [{'chunk_id': 'chunk-1', 'text': 'Battery defects are covered.'}],
+        'reference_chunk_ids': ['chunk-1'], 'reference_doc_ids': ['doc-1'],
+        'source_preparation': {'kb_ids': ['kb-1']},
+    }
+
+    case = _generate(qaplan_spec={'id': 'case_0001', 'mode': 'imported', 'imported_case': imported}, response=AssertionError('LLM must not run'))
+
+    assert case == imported
 
 
 def test_generate_retries_once_for_invalid_three_field_output():
@@ -167,7 +193,7 @@ def test_generate_manifest_summarizes_base_cases_without_enhancement_fields():
             'difficulty': 'medium',
             'reference_chunk_ids': ['chunk-2', 'chunk-3'],
         },
-    )})
+    ), 'import_cases_manifest': _import_manifest()})
 
     assert result == {
         'generate_manifest': {
@@ -179,6 +205,8 @@ def test_generate_manifest_summarizes_base_cases_without_enhancement_fields():
                 'case_count': 2,
                 'question_type_counts': {'precision': 1, 'reasoning': 1},
                 'difficulty_counts': {'easy': 1, 'medium': 1, 'hard': 0},
+                'import_case_count': 0,
+                'generated_case_count': 2,
             },
         },
     }
@@ -193,4 +221,4 @@ def test_generate_manifest_rejects_duplicate_case_ids():
     }
 
     with pytest.raises(ValueError, match='id values must be unique'):
-        generate_manifest(None, {'cases': (case, case)})
+        generate_manifest(None, {'cases': (case, case), 'import_cases_manifest': _import_manifest()})

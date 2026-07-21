@@ -7,6 +7,7 @@ from evo.operations.dataset.qaplan import qaplan_manifest, qaplan_spec
 
 def _reference(index):
     return {
+        'kb_id': 'kb-1',
         'chunk_id': f'chunk-{index}',
         'doc_id': f'doc-{index}',
         'text': f'full text {index}',
@@ -17,6 +18,7 @@ def _item(index, *, question_type='precision', difficulty='easy', topic='service
     reference_count = {'easy': 1, 'medium': 2, 'hard': 3}[difficulty]
     prefix = 'entity' if question_type == 'precision' else 'embedding'
     return {
+        'case_id': f'case_{index:04d}',
         'plan_item_id': f'qaplan_item_{index:06d}',
         'lane': f'{prefix}_{question_type}_{difficulty}',
         'question_type': question_type,
@@ -31,10 +33,12 @@ def _item(index, *, question_type='precision', difficulty='easy', topic='service
 
 def _qaplan(items):
     return {
-        'source': {'kb_id': 'kb-1'},
+        'source': {'kb_ids': ['kb-1']},
         'items': items,
         'stats': {
             'target_case_count': len(items),
+            'import_case_count': 0,
+            'auto_case_count': len(items),
             'planned_case_count': len(items),
         },
         'params': {},
@@ -48,8 +52,18 @@ def _context(case_id, case_count):
     )
 
 
-def _spec(case_id, items):
-    return qaplan_spec(_context(case_id, len(items)), {'qaplan_plan': _qaplan(items)})['qaplan_spec']
+def _import_manifest(assignments, details=()):
+    return {'stats': {'case_allocation': {
+        'target_case_count': len(assignments), 'import_case_count': 0,
+        'auto_case_count': len(assignments), 'assignments': assignments,
+    }}, 'details': list(details)}
+
+
+def _spec(case_id, items, assignments=None, details=()):
+    assignments = assignments or {item['case_id']: {'mode': 'generated'} for item in items}
+    return qaplan_spec(_context(case_id, len(assignments)), {
+        'qaplan_plan': _qaplan(items), 'import_cases_manifest': _import_manifest(assignments, details),
+    })['qaplan_spec']
 
 
 def test_qaplan_spec_uses_current_case_partition_index_without_reordering_items():
@@ -61,10 +75,22 @@ def test_qaplan_spec_uses_current_case_partition_index_without_reordering_items(
     preparation = _spec('case_0002', items)
 
     assert preparation['id'] == 'case_0002'
-    assert preparation['source'] == {'kb_id': 'kb-1'}
+    assert preparation['source'] == {'kb_ids': ['kb-1']}
     assert preparation['topic'] == 'second topic'
     assert preparation['qaplan']['plan_item_id'] == 'qaplan_item_000002'
     assert preparation['qaplan']['lane'] == 'embedding_reasoning_medium'
+
+
+def test_qaplan_spec_reads_imported_case_from_loaded_detail_without_consuming_a_plan_item():
+    imported = {'id': 'case_0001', 'question': 'Q', 'answer': 'A', 'question_type': 'precision',
+                'difficulty': 'easy', 'grading_guidance': 'G', 'reference_context': [],
+                'reference_chunk_ids': ['chunk-1'], 'reference_doc_ids': ['doc-1'],
+                'source_preparation': {'kb_ids': ['kb-1']}}
+
+    spec = _spec('case_0001', [], {'case_0001': {'mode': 'imported', 'source_row_number': 2}},
+                 ({'source_row_number': 2, 'load_status': 'loaded', 'case_id': 'case_0001', 'case': imported},))
+
+    assert spec == {'id': 'case_0001', 'mode': 'imported', 'imported_case': imported}
 
 
 def test_qaplan_spec_renders_precision_behavior_without_disclosing_qa_type_or_context_values():
@@ -122,19 +148,25 @@ def test_qaplan_spec_preserves_full_references_and_trace_metadata():
         (
             {
                 'items': [_item(1)],
-                'stats': {'target_case_count': 2, 'planned_case_count': 1},
+                'stats': {'target_case_count': 2, 'planned_case_count': 2},
                 'params': {},
             },
             'case_0001',
             1,
-            'target_case_count.*planned_case_count.*items',
+            'planned_case_count.*qaplan.items',
         ),
-        (_qaplan([_item(1)]), 'case_0001', 2, 'items.*runtime.*partition'),
+        (_qaplan([_item(1)]), 'case_0002', 2, 'qaplan item for case'),
     ],
 )
 def test_qaplan_spec_rejects_plan_and_runtime_count_mismatches(qaplan, case_id, case_count, match):
     with pytest.raises(ValueError, match=match):
-        qaplan_spec(_context(case_id, case_count), {'qaplan_plan': qaplan})
+        qaplan_spec(_context(case_id, case_count), {
+            'qaplan_plan': qaplan,
+            'import_cases_manifest': _import_manifest({
+                f'case_{index:04d}': {'mode': 'generated'}
+                for index in range(1, case_count + 1)
+            }),
+        })
 
 
 @pytest.mark.parametrize(
@@ -148,7 +180,10 @@ def test_qaplan_spec_rejects_plan_and_runtime_count_mismatches(qaplan, case_id, 
 )
 def test_qaplan_spec_rejects_invalid_instruction_or_reference_inputs(item, match):
     with pytest.raises(ValueError, match=match):
-        qaplan_spec(_context('case_0001', 1), {'qaplan_plan': _qaplan([item])})
+        qaplan_spec(_context('case_0001', 1), {
+            'qaplan_plan': _qaplan([item]),
+            'import_cases_manifest': _import_manifest({'case_0001': {'mode': 'generated'}}),
+        })
 
 
 def test_qaplan_manifest_is_the_minimal_completion_marker_for_all_specs():
@@ -156,7 +191,31 @@ def test_qaplan_manifest_is_the_minimal_completion_marker_for_all_specs():
     # the partitioned specs remain the authoritative planning artifacts.
     result = qaplan_manifest(None, {
         'qaplan_plan': _qaplan([_item(1), _item(2)]),
-        'qaplan_specs': ({'id': 'case_0001'}, {'id': 'case_0002'}),
+        'import_cases_manifest': _import_manifest({
+            'case_0001': {'mode': 'generated'}, 'case_0002': {'mode': 'generated'},
+        }),
+        'qaplan_specs': ({'id': 'case_0001', 'mode': 'generated'}, {'id': 'case_0002', 'mode': 'generated'}),
+    })
+
+    assert result == {'qaplan_manifest': {'case_count': 2}}
+
+
+def test_qaplan_manifest_accepts_a_fully_imported_dataset_without_plan_items():
+    assignments = {
+        'case_0001': {'mode': 'imported', 'source_row_number': 2},
+        'case_0002': {'mode': 'imported', 'source_row_number': 3},
+    }
+    plan = _qaplan([])
+    plan['stats']['target_case_count'] = 2
+    plan['stats']['import_case_count'] = 2
+
+    result = qaplan_manifest(None, {
+        'qaplan_plan': plan,
+        'import_cases_manifest': _import_manifest(assignments),
+        'qaplan_specs': (
+            {'id': 'case_0001', 'mode': 'imported'},
+            {'id': 'case_0002', 'mode': 'imported'},
+        ),
     })
 
     assert result == {'qaplan_manifest': {'case_count': 2}}
@@ -166,13 +225,19 @@ def test_qaplan_manifest_is_the_minimal_completion_marker_for_all_specs():
     ('plan', 'specs', 'match'),
     [
         # A plan cannot declare completion before every planned case has a spec.
-        (_qaplan([_item(1), _item(2)]), ({'id': 'case_0001'},), 'planned_case_count'),
+        (_qaplan([_item(1), _item(2)]), ({'id': 'case_0001'},), 'target case partition count'),
         # Duplicate spec ids would make the all-partitions completion marker ambiguous.
         (_qaplan([_item(1), _item(2)]), ({'id': 'case_0001'}, {'id': 'case_0001'}), 'unique'),
         # The operation requires the runtime all_to_unpartitioned tuple, not an arbitrary list.
-        (_qaplan([_item(1)]), [{'id': 'case_0001'}], 'partitioned tuple'),
+        (_qaplan([_item(1)]), [{'id': 'case_0001'}], 'target case partition count'),
     ],
 )
 def test_qaplan_manifest_rejects_incomplete_or_invalid_specs(plan, specs, match):
     with pytest.raises(ValueError, match=match):
-        qaplan_manifest(None, {'qaplan_plan': plan, 'qaplan_specs': specs})
+        qaplan_manifest(None, {
+            'qaplan_plan': plan,
+            'import_cases_manifest': _import_manifest({
+                f'case_{index:04d}': {'mode': 'generated'} for index in range(1, len(plan['items']) + 1)
+            }),
+            'qaplan_specs': specs,
+        })

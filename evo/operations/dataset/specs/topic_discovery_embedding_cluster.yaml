@@ -164,7 +164,8 @@ execution_flow:
   - 读取 chunk tuple 并保持 runtime partition 稳定顺序。
   - 跳过 available=false 的 chunk。
   - 消费 build_chunks 已规范化的 embedding.model 与 embedding.vector；只校验向量非空、正范数与维度一致。
-  - 如果有效 embedding chunk 数不足以执行该路径的降维或聚类，则 operation 失败，输出数据异常由后续流程判罚。
+  - 当全部 chunk 都是 available=false 时，返回 clusters=[]、完整 skipped_chunks 与零值统计的合法空结果，不执行降维或聚类。
+  - 存在 available=true 的 chunk 但有效 embedding chunk 数不足以执行该路径的降维或聚类时，仍按现有语义失败。
   - 使用 UMAP 将 embedding 降到 umap_n_components 维；缺少 UMAP 依赖时失败。
   - 使用 HDBSCAN 聚类；缺少 HDBSCAN 依赖时失败。
   - 按 HDBSCAN label 构建 clusters；label=-1 每个 chunk 单独生成 singleton candidate。
@@ -179,9 +180,9 @@ tests:
       - success
       # 空参数输入时使用默认 umap / hdbscan 参数，并将默认值回写到 params。
       - default_params
-      # 有效 embedding chunk 数不足以执行当前参数下的降维或聚类时，直接抛错而不是产出空 candidates。
+      # 全部 chunk unavailable 时返回合法空 candidates；存在可用 chunk 但有效 embedding 数不足时直接抛错。
       # 例子：只有 2 个有效 embedding chunk，但 umap_n_neighbors=3 或 min_cluster_size=3 时，不足以执行当前路径，应直接失败。
-      - insufficient_embedding_count_error
+      - imported_only_empty_candidates_bypass
       # embedding 缺少 model/vector、向量为空或 norm 为 0 的 chunk 会被跳过，并写入 skipped_chunks。
       - invalid_embedding_skipped
       # embedding 维度与首个有效向量不一致的 chunk 会被跳过，并给出 dimension_mismatch 原因。

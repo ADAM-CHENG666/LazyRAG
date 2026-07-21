@@ -158,7 +158,8 @@ execution_flow:
   - 读取 all_to_unpartitioned 汇总后的 chunk_entity tuple。
   - 按 chunk_entity.available 判断是否为有效 chunk。
   - 遍历 chunk_entity tuple，构建有效 nodes 和 skipped_chunks。
-  - 如果没有有效 node，则 operation 失败。
+  - 如果全部 chunk_entity 都是 available=false，则返回 nodes=[]、edges=[] 与完整 skipped_chunks 的合法空图；导入已覆盖全部 case 不属于数据异常。
+  - 如果存在 available=true 的 chunk 但没有有效 node，则 operation 失败。
   - 基于有效 nodes 统计 noisy entities。
   - 遍历 node pairs，过滤 noisy entities 后计算 overlapped_items 和 score。
   - 对满足 edge_score_threshold 的 pair 生成 edge。
@@ -197,10 +198,10 @@ tests:
       # chunk_entity 必须是 partitioned tuple，tuple 内每项必须是 mapping，且包含合法 chunk_id/doc_id/group/entities。
       # 例子：chunk_entity 传 list、tuple 内某一项不是 mapping、entities 不是 list[string]、或 entities 内含空字符串，都应直接失败。
       - contract
-      # 参数必须是 0 到 1 之间的数字；当没有任何有效 node 时直接抛错，不生成空 graph。
+      # 参数必须是 0 到 1 之间的数字；仅当存在可用 chunk 仍没有有效 node 时直接抛错。
       # 例子：entity_similarity_threshold / edge_score_threshold / noisy_entity_top_percent 任一越界都应失败；
-      # 全部 chunk 都是 unavailable 或 empty_entities 时，也应失败。
-      - validation_error
+      # 全部 chunk 都 unavailable 时形成空 graph；可用 chunk 全部 empty_entities 时仍失败。
+      - imported_only_empty_graph_bypass
   runtime_wiring:
     # fixed op 接线：看 all_to_unpartitioned 输入聚合后，运行时能否把 entity_graph 继续交给下游 entity_cluster。
     cases:

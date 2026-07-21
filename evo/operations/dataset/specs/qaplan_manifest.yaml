@@ -10,6 +10,10 @@ fixed_op:
       artifact_id: dataset.qaplan_plan
       required: true
       partition: unpartitioned
+    import_cases_manifest:
+      artifact_id: dataset.import_cases_manifest
+      required: true
+      partition: unpartitioned
     qaplan_specs:
       artifact_id: dataset.qaplan_spec
       required: true
@@ -38,6 +42,25 @@ input_payload:
           planned_case_count:
             type: integer
             required: true
+          auto_case_count:
+            type: integer
+            required: true
+  import_cases_manifest:
+    fields:
+      stats:
+        type: object
+        required: true
+        fields:
+          case_allocation:
+            type: object
+            required: true
+            fields:
+              target_case_count:
+                type: integer
+                required: true
+              assignments:
+                type: object
+                required: true
   qaplan_specs:
     tuple: true
     item:
@@ -47,6 +70,12 @@ input_payload:
           required: true
           validation:
             - non_empty_after_strip
+        mode:
+          type: string
+          required: true
+          enum:
+            - imported
+            - generated
 
 output_payload:
   qaplan_manifest:
@@ -57,7 +86,8 @@ output_payload:
 
 execution_flow:
   - 等待 all_to_unpartitioned 的全部 qaplan_spec 分区完成。
-  - 校验 qaplan_plan 的计划数量与 qaplan_spec 数量一致，拒绝重复或空的 spec id。
+  - 校验 qaplan_plan 的 planned_case_count 等于 auto_case_count 与 items 数量，且 qaplan_specs 数量等于 import_cases_manifest.stats.case_allocation.target_case_count；拒绝重复或空的 spec id。
+  - 校验每个 imported assignment 对应 imported qaplan_spec，每个 generated assignment 对应 generated qaplan_spec。
   - 仅输出 case_count，作为 dataset.qaplan 阶段的最小完成凭证。
 
 tests:
@@ -66,7 +96,7 @@ tests:
     cases:
       # 全部 spec 到齐且 id 唯一时，输出稳定的 case_count。
       - success
-      # plan 数量、spec 数量或 spec id 不合法时必须失败，避免提前声明阶段完成。
+      # 自动计划数、全部静态 spec 数、assignment mode 或 spec id 不合法时必须失败，避免提前声明阶段完成。
       - incomplete_or_invalid_specs_error
       # 返回结构固定为单一 qaplan_manifest output。
       - return_keys_match_outputs

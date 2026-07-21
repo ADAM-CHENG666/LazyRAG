@@ -204,9 +204,14 @@ def dataset_evo_ops(spec: DatasetFlowSpec) -> tuple[type[FixedOp], ...]:
     chunks = StaticPartitions(spec.chunk_ids)
     cases = StaticPartitions(spec.case_ids)
 
+    class ImportCases(FixedOp):
+        op_id = 'dataset.import_cases'
+        inputs = {'source_config': ArtifactInput(C.CORPUS_SOURCE_CONFIG)}
+        outputs = {'import_cases_manifest': ArtifactOutput(C.DATASET_IMPORT_CASES_MANIFEST)}
+
     class SelectDocs(FixedOp):
         op_id = 'dataset.select_docs'
-        inputs = {'source_config': ArtifactInput(C.CORPUS_SOURCE_CONFIG)}
+        inputs = {'source_config': ArtifactInput(C.CORPUS_SOURCE_CONFIG), 'import_cases_manifest': ArtifactInput(C.DATASET_IMPORT_CASES_MANIFEST)}
         outputs = {'selected_docs': ArtifactOutput(C.DATASET_SELECTED_DOCS)}
 
     class BuildChunks(FixedOp):
@@ -218,7 +223,7 @@ def dataset_evo_ops(spec: DatasetFlowSpec) -> tuple[type[FixedOp], ...]:
 
     class BuildChunkCandidates(FixedOp):
         op_id = 'dataset.build_chunk_candidates'
-        inputs = {'selected_docs': ArtifactInput(C.DATASET_SELECTED_DOCS),
+        inputs = {'selected_docs': ArtifactInput(C.DATASET_SELECTED_DOCS), 'import_cases_manifest': ArtifactInput(C.DATASET_IMPORT_CASES_MANIFEST),
                   'build_chunks_params': ArtifactInput(C.DATASET_BUILD_CHUNKS_PARAMS)}
         outputs = {'build_chunk_candidates': ArtifactOutput(C.DATASET_BUILD_CHUNK_CANDIDATES)}
 
@@ -226,6 +231,7 @@ def dataset_evo_ops(spec: DatasetFlowSpec) -> tuple[type[FixedOp], ...]:
         op_id = 'dataset.build_chunks_manifest'
         inputs = {
             'selected_docs': ArtifactInput(C.DATASET_SELECTED_DOCS),
+            'import_cases_manifest': ArtifactInput(C.DATASET_IMPORT_CASES_MANIFEST),
             'build_chunk_candidates': ArtifactInput(C.DATASET_BUILD_CHUNK_CANDIDATES),
             'chunk': ArtifactInput(C.DATASET_CHUNK, partition_spec=chunks, partition_mapping=all_to_unpartitioned()),
         }
@@ -298,6 +304,7 @@ def dataset_evo_ops(spec: DatasetFlowSpec) -> tuple[type[FixedOp], ...]:
         op_id = 'dataset.qaplan_plan'
         inputs = {
             'source_config': ArtifactInput(C.CORPUS_SOURCE_CONFIG),
+            'import_cases_manifest': ArtifactInput(C.DATASET_IMPORT_CASES_MANIFEST),
             'topic_discovery_manifest': ArtifactInput(C.DATASET_TOPIC_DISCOVERY_MANIFEST),
             'chunk': ArtifactInput(C.DATASET_CHUNK, partition_spec=chunks, partition_mapping=all_to_unpartitioned()),
             'qaplan_plan_params': ArtifactInput(C.DATASET_QAPLAN_PLAN_PARAMS),
@@ -306,13 +313,14 @@ def dataset_evo_ops(spec: DatasetFlowSpec) -> tuple[type[FixedOp], ...]:
 
     class QaplanSpec(FixedOp):
         op_id = 'dataset.qaplan_spec'
-        inputs = {'qaplan_plan': ArtifactInput(C.DATASET_QAPLAN_PLAN, partition_mapping=unpartitioned_to_all())}
+        inputs = {'qaplan_plan': ArtifactInput(C.DATASET_QAPLAN_PLAN, partition_mapping=unpartitioned_to_all()), 'import_cases_manifest': ArtifactInput(C.DATASET_IMPORT_CASES_MANIFEST, partition_mapping=unpartitioned_to_all())}
         outputs = {'qaplan_spec': ArtifactOutput(C.DATASET_QAPLAN_SPEC, cases)}
 
     class QaplanManifest(FixedOp):
         op_id = 'dataset.qaplan_manifest'
         inputs = {
             'qaplan_plan': ArtifactInput(C.DATASET_QAPLAN_PLAN),
+            'import_cases_manifest': ArtifactInput(C.DATASET_IMPORT_CASES_MANIFEST),
             'qaplan_specs': ArtifactInput(
                 C.DATASET_QAPLAN_SPEC,
                 partition_spec=cases,
@@ -339,7 +347,7 @@ def dataset_evo_ops(spec: DatasetFlowSpec) -> tuple[type[FixedOp], ...]:
 
     class GenerateManifest(FixedOp):
         op_id = 'dataset.generate_manifest'
-        inputs = {'cases': ArtifactInput(C.DATASET_CASE, partition_spec=cases, partition_mapping=all_to_unpartitioned())}
+        inputs = {'cases': ArtifactInput(C.DATASET_CASE, partition_spec=cases, partition_mapping=all_to_unpartitioned()), 'import_cases_manifest': ArtifactInput(C.DATASET_IMPORT_CASES_MANIFEST)}
         outputs = {'generate_manifest': ArtifactOutput(C.DATASET_GENERATE_MANIFEST)}
 
     class GenerateEnhanceManifest(FixedOp):
@@ -354,7 +362,7 @@ def dataset_evo_ops(spec: DatasetFlowSpec) -> tuple[type[FixedOp], ...]:
         outputs = {'generate_enhance_manifest': ArtifactOutput(C.DATASET_GENERATE_ENHANCE_MANIFEST)}
 
     return (
-        SelectDocs, BuildChunkCandidates, BuildChunks, BuildChunksManifest, ChunkEntitiesExtract, ChunkEntitiesManifest,
+        ImportCases, SelectDocs, BuildChunkCandidates, BuildChunks, BuildChunksManifest, ChunkEntitiesExtract, ChunkEntitiesManifest,
         EntityGraph, EntityClusters, EmbeddingCandidates, EmbeddingClusters, TopicManifest,
         QaplanPlan, QaplanSpec, QaplanManifest, Generate, GenerateEnhance, GenerateManifest, GenerateEnhanceManifest,
     )

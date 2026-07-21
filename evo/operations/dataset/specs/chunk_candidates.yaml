@@ -2,12 +2,16 @@ operation:
   op_id: dataset.build_chunk_candidates
   flow: dataset
   stage: build_chunk_candidates
-  description: 一次读取知识库并按内容类型筛选，生成供所有 chunk partition 复用的候选列表。
+  description: 一次扫描已选文档中的 chunk，为尚需自动生成的 case 构建候选列表。
 
 fixed_op:
   inputs:
     selected_docs:
       artifact_id: dataset.selected_docs
+      required: true
+      partition: unpartitioned
+    import_cases_manifest:
+      artifact_id: dataset.import_cases_manifest
       required: true
       partition: unpartitioned
     build_chunks_params:
@@ -24,15 +28,56 @@ materializer:
   return_keys:
     - build_chunk_candidates
 
+input_payload:
+  selected_docs:
+    fields:
+      docs:
+        type: array
+        required: true
+  import_cases_manifest:
+    fields:
+      stats:
+        type: object
+        required: true
+        fields:
+          case_allocation:
+            type: object
+            required: true
+            fields:
+              auto_case_count:
+                type: integer
+                required: true
+  build_chunks_params:
+    fields:
+      groups:
+        type: list[string]
+        required: false
+      allowed_types:
+        type: list[string]
+        required: false
+
 output_payload:
   build_chunk_candidates:
     json_compatible: true
     fields:
       chunks:
+        # 只包含真实候选；静态 slot 的占位由 build_chunks 生成。
         type: array
+        item:
+          type: object
+          fields:
+            kb_id:
+              type: string
+            chunk_id:
+              type: string
+            doc_id:
+              type: string
+            text:
+              type: string
       selection_stats:
         type: object
       target_chunk_count:
+        # 来自导入 manifest 的冻结目标，不由静态分区数重新计算。
         type: integer
       fallback_used:
         type: boolean
@@ -40,13 +85,25 @@ output_payload:
         type: object
 
 execution_flow:
-  - 一次读取 selected_docs 和 build_chunks_params。
-  - 一次扫描知识库、归一化 type，并按 allowed_types 筛选。
-  - 被过滤节点不消耗配额；读取到合格配额或 doc/group 耗尽。
-  - 返回完整候选列表及 selection_stats，供后续所有 partition 复用。
+  - 读取 selected_docs、import_cases_manifest 与 build_chunks_params。
+  - 将 target_chunk_count 固定计算为 ceil(3 * import_cases_manifest.stats.case_allocation.auto_case_count / 2)，不得由静态 case partition 数量推导。
+  - 当 auto_case_count=0 时，不扫描知识库，返回 chunks=[]、target_chunk_count=0 与零值筛选统计。
+  - 否则按 selected_docs 的 kb_id/doc_id 来源读取、归一化 type，并沿用既有 groups、allowed_types、候选容量和 fallback 筛选算法。
+  - 每个候选保留原始 kb_id、chunk_id、doc_id 与完整 text；不改写任何数据库 ID，也不在此处重新分配导入 case。
+  - 被过滤节点不消耗配额；返回完整候选列表和 selection_stats，供所有静态 chunk partition 复用。
 
 tests:
-  - scans_kb_once
-  - allowed_type_filtering
-  - filtered_nodes_do_not_consume_quota
-  - selection_stats
+  auto_generation_capacity:
+    # 候选目标只服务 generated assignments，导入 case 不消耗自动生成侧的 chunk 配额。
+    cases:
+      # target_chunk_count 只由 manifest 中冻结的 auto_case_count 换算，不受静态分区数影响。
+      - derives_target_chunk_count_from_auto_case_count
+      # auto_case_count=0 时不读取任何知识库 chunk，输出空候选和零统计。
+      - imported_only_skips_kb_scan
+  candidate_selection:
+    # 非零自动生成路径保持当前的筛选与容量策略，不引入新的多知识库分配算法。
+    cases:
+      # 多知识库候选沿 selected_docs 顺序扫描，并保留每个 chunk 的 kb_id 溯源。
+      - preserves_selected_doc_order_and_kb_provenance
+      # allowed_types 过滤项不消耗配额，既有 fallback 与 selection_stats 语义保持不变。
+      - existing_filter_and_fallback_behavior

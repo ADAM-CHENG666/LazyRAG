@@ -35,6 +35,18 @@ def generate(
     preparation = _mapping(inputs.get('qaplan_spec'), 'qaplan_spec')
     if _text(preparation.get('id'), 'qaplan_spec.id') != case_id:
         raise ValueError('qaplan_spec.id must match case output partition')
+    mode = _choice(preparation.get('mode'), ('imported', 'generated'), 'qaplan_spec.mode')
+    if mode == 'imported':
+        case = _mapping(preparation.get('imported_case'), 'qaplan_spec.imported_case')
+        if _text(case.get('id'), 'imported_case.id') != case_id:
+            raise ValueError('imported_case.id must match case output partition')
+        _choice(case.get('question_type'), ('precision', 'reasoning'), 'imported_case.question_type')
+        _choice(case.get('difficulty'), ('easy', 'medium', 'hard'), 'imported_case.difficulty')
+        _text(case.get('question'), 'imported_case.question')
+        _text(case.get('answer'), 'imported_case.answer')
+        _text(case.get('grading_guidance'), 'imported_case.grading_guidance')
+        _string_list(case.get('reference_chunk_ids'), 'imported_case.reference_chunk_ids')
+        return {'case': dict(case)}
 
     question_type = _choice(preparation.get('question_type'), ('precision', 'reasoning'), 'question_type')
     difficulty = _choice(preparation.get('difficulty'), ('easy', 'medium', 'hard'), 'difficulty')
@@ -61,10 +73,10 @@ def generate(
         'question': generated['question'],
         'answer': generated['answer'],
         'grading_guidance': generated['grading_guidance'],
-        'reference_context': {item['chunk_id']: item['text'] for item in references},
+        'reference_context': [{'chunk_id': item['chunk_id'], 'text': item['text']} for item in references],
         'reference_chunk_ids': [item['chunk_id'] for item in references],
         'reference_doc_ids': list(dict.fromkeys(item['doc_id'] for item in references)),
-        'source_preparation': {'kb_id': _text(source.get('kb_id'), 'qaplan_spec.source.kb_id')},
+        'source_preparation': {'kb_ids': _string_list(source.get('kb_ids'), 'qaplan_spec.source.kb_ids')},
     }}
 
 
@@ -85,6 +97,13 @@ def generate_manifest(ctx: Any, inputs: Mapping[str, object]) -> dict[str, objec
         })
     if len({item['id'] for item in cases}) != len(cases):
         raise ValueError('id values must be unique')
+    imported = _mapping(inputs.get('import_cases_manifest'), 'import_cases_manifest')
+    import_stats = _mapping(imported.get('stats'), 'import_cases_manifest.stats')
+    allocation = _mapping(import_stats.get('case_allocation'), 'import_cases_manifest.stats.case_allocation')
+    import_count = _non_negative_int(allocation.get('import_case_count'), 'import_case_count')
+    auto_count = _non_negative_int(allocation.get('auto_case_count'), 'auto_case_count')
+    if import_count + auto_count != len(cases):
+        raise ValueError('import and auto case counts must match generated cases')
 
     return {'generate_manifest': {
         'cases': cases,
@@ -98,6 +117,8 @@ def generate_manifest(ctx: Any, inputs: Mapping[str, object]) -> dict[str, objec
                 name: sum(1 for item in cases if item['difficulty'] == name)
                 for name in ('easy', 'medium', 'hard')
             },
+            'import_case_count': import_count,
+            'generated_case_count': auto_count,
         },
     }}
 
@@ -167,3 +188,9 @@ def _choice(value: object, choices: tuple[str, ...], name: str) -> str:
     if item not in choices:
         raise ValueError(f'{name} is invalid')
     return item
+
+
+def _non_negative_int(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f'{name} must be a non-negative integer')
+    return value

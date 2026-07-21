@@ -10,6 +10,10 @@ fixed_op:
       artifact_id: corpus.source_config
       required: true
       partition: unpartitioned
+    import_cases_manifest:
+      artifact_id: dataset.import_cases_manifest
+      required: true
+      partition: unpartitioned
     topic_discovery_manifest:
       artifact_id: dataset.topic_discovery_manifest
       required: true
@@ -36,17 +40,34 @@ materializer:
 input_payload:
   source_config:
     fields:
-      kb_id:
-        type: string
+      kb_ids:
+        type: list[string]
         required: true
         validation:
-          - non_empty_after_strip
-      target_case_count:
-        type: integer
+          - non_empty
+          - non_empty_after_strip_items
+  import_cases_manifest:
+    fields:
+      stats:
+        type: object
         required: true
-        validation:
-          - positive_integer
-          - max_value: 100000
+        fields:
+          case_allocation:
+            type: object
+            required: true
+            fields:
+              target_case_count:
+                type: integer
+                required: true
+              import_case_count:
+                type: integer
+                required: true
+              auto_case_count:
+                type: integer
+                required: true
+              assignments:
+                type: object
+                required: true
   topic_discovery_manifest:
     fields:
       clusters:
@@ -96,6 +117,9 @@ input_payload:
         available:
           type: boolean
           required: true
+        kb_id:
+          type: string
+          required: false
         chunk_id:
           type: string
           required: true
@@ -184,15 +208,19 @@ output_payload:
     json_compatible: true
     fields:
       source:
+        # 本次运行配置的 KB 范围；单个 case 的实际来源由 references 决定。
         type: object
         fields:
-          kb_id:
-            type: string
+          kb_ids:
+            type: list[string]
       items:
         type: array
         item:
           type: object
           fields:
+            case_id:
+              # 该 plan item 唯一服务的 generated case 分区。
+              type: string
             plan_item_id:
               type: string
             lane:
@@ -225,10 +253,13 @@ output_payload:
             topic:
               type: string
             references:
+              # 生成所需的完整证据；每项保留跨 KB 溯源信息。
               type: array
               item:
                 type: object
                 fields:
+                  kb_id:
+                    type: string
                   chunk_id:
                     type: string
                   doc_id:
@@ -243,7 +274,15 @@ output_payload:
           # source_config 中指定的本次 dataset case 总数。
           target_case_count:
             type: integer
-          # 实际生成的计划项数量；成功时必须等于 target_case_count。
+          # CSV 成功导入并固定跳过 qaplan 的 case 数量。
+          import_case_count:
+            # 已导入、无需 qaplan 或生成模型处理的 case 数量。
+            type: integer
+          # 需要 qaplan 与 LLM 自动生成的剩余 case 数量。
+          auto_case_count:
+            # 参与 lane 配额和容量检查的剩余 case 数量。
+            type: integer
+          # 实际生成的计划项数量；成功时必须等于 auto_case_count。
           planned_case_count:
             type: integer
           # 六路计划的展示摘要，顺序固定为 lane_order。
@@ -283,13 +322,15 @@ output_payload:
             type: list[string]
 
 execution_flow:
-  - 读取 source_config.target_case_count；要求其等于 flow 的 runtime case 分区总数。
+  - 读取 import_cases_manifest，校验 stats.case_allocation.target_case_count 等于 flow 的 runtime case 分区总数，且 assignments 覆盖每个稳定 case id 一次。
+  - 仅将 mode=generated 的 stable case id 作为 qaplan 目标；其数量必须等于 auto_case_count，并保留 runtime case 分区顺序。
+  - 当 auto_case_count=0 时，返回 items=[]、所有 lane 配额为 0 的合法空计划；不得读取 cluster 或触发容量不足错误。
   - 读取并归一化 qaplan_plan_params.lane_ratios；默认六路均为 1，所有 ratio 必须非负且总和大于 0。
-  - 按固定 lane 顺序使用最大余数法，将 target_case_count 换算为六路整数配额；先分配各路向下取整值，再按小数余数从大到小补齐，余数相同时按固定 lane 顺序补齐。
-  - 汇总可用 chunk 并校验 manifest；通过 chunk_id 原样补齐选中引用的 doc_id 与完整 text，不分析或转换正文。
+  - 按固定 lane 顺序使用最大余数法，将 auto_case_count 换算为六路整数配额；先分配各路向下取整值，再按小数余数从大到小补齐，余数相同时按固定 lane 顺序补齐。
+  - 汇总可用 chunk 并校验 manifest；通过 chunk_id 原样补齐选中引用的 kb_id、doc_id 与完整 text，不分析或转换正文。
   - 逐 lane 按来源类型和累积难度筛选 cluster，校验 topic_capacity 不小于该 lane 整数配额；按 manifest 原始 cluster 顺序和 topic 轮次选取 cluster-topic。
-  - 每个计划项按难度引用 cluster.chunk_ids 原始顺序前 1、2 或 3 个 chunk，按 lane 块顺序生成稳定 plan_item_id。
-  - 生成 source、items、简明 stats、lane_ratios、resolved_lane_quotas 和 lane_order；返回 {"qaplan_plan": payload}。
+  - 每个计划项按难度引用 cluster.chunk_ids 原始顺序前 1、2 或 3 个 chunk，按 lane 块顺序生成稳定 plan_item_id，并依次绑定一个 generated assignment 的 case_id。
+  - 生成 source.kb_ids、items、含 target/imported/auto/planned 数量的 stats、lane_ratios、resolved_lane_quotas 和 lane_order；返回 {"qaplan_plan": payload}。
 
 tests:
   plan_construction:
@@ -298,6 +339,8 @@ tests:
       # 空参数时六路均使用默认 ratio=1，并按 target_case_count 平均分配整数 case 数。
       # 例子：target_case_count=6 时，六路各获得 1 个 case。
       - default_equal_lane_ratios
+      # 比例只应用于自动生成的剩余 case；导入 case 不参与配额，也不按其类型或难度补偿。
+      - lane_ratios_apply_only_to_generated_cases
       # lane_ratios 表示相对权重，不要求和为 1 或 100；相同比例缩放必须得到相同整数配额。
       # 例子：1:1:1:1:1:1 与 10:10:10:10:10:10 在 target_case_count=60 时均分配为每路 10 个。
       - ratio_normalization
@@ -325,12 +368,16 @@ tests:
       # plan_item_id 按最终全局 items 顺序稳定编号，且不依赖 runtime case id。
       # 例子：第一个和第二个 item 固定为 qaplan_item_000001、qaplan_item_000002。
       - stable_plan_item_ids
+      # 每个计划项绑定一个且仅一个 generated runtime case id；导入分区不出现在 items 中。
+      - assigns_plan_items_only_to_generated_case_ids
   quota_and_capacity:
     # 比例、难度和容量：验证总数来源、六路独立校验，以及三档难度的累积 chunk 门槛。
     cases:
       # source_config.target_case_count 是唯一的总 case 数来源，并且必须等于 runtime flow 预创建的 case 分区总数。
       # 例子：source_config.target_case_count=6 而 runtime 只有 5 个 case 分区时，应直接失败。
       - target_case_count_source_and_runtime_partition_match
+      # auto_case_count=0 时空 topic manifest 合法；非零时仍保留现有容量不足失败语义。
+      - imported_only_empty_plan_bypass
       # ratio 为 0 的 lane 获得 0 个 case，不参与候选容量校验。
       # 例子：embedding_reasoning_hard=0 且没有 embedding hard cluster 时，其他 lane 仍可成功。
       - zero_ratio_lane_skipped
@@ -356,8 +403,8 @@ tests:
       # references 保持 cluster.chunk_ids 的原始顺序，不随 chunk tuple 顺序或 doc_id 排序而变化。
       # 例子：cluster.chunk_ids=[c2,c1] 时，easy item 引用 c2，medium item 引用 [c2,c1]。
       - references_keep_cluster_chunk_id_order
-      # 每份 reference 原样携带 chunk_id、doc_id 和完整 text；正文不截断、不重写、不做 LLM 分析。
-      - references_include_chunk_id_doc_id_and_full_text
+      # 每份 reference 原样携带 kb_id、chunk_id、doc_id 和完整 text；正文不截断、不重写、不做 LLM 分析。
+      - references_include_kb_id_chunk_id_doc_id_and_full_text
       # manifest 引用不存在的 chunk、available=false 的 chunk 或 text 为空的 chunk 时直接失败，避免下游生成无依据 case。
       - unavailable_or_missing_referenced_chunk_error
   stats_and_contract:

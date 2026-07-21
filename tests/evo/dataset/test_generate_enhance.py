@@ -11,10 +11,10 @@ def _case(**overrides):
         'question': 'What does the warranty cover?',
         'answer': 'The warranty covers battery defects under stated conditions.',
         'grading_guidance': 'Assess the coverage conclusion and its conditions.',
-        'reference_context': {
-            'chunk-1': 'The warranty covers battery defects.',
-            'chunk-2': 'Coverage applies under stated conditions.',
-        },
+        'reference_context': [
+            {'chunk_id': 'chunk-1', 'text': 'The warranty covers battery defects.'},
+            {'chunk_id': 'chunk-2', 'text': 'Coverage applies under stated conditions.'},
+        ],
         'reference_chunk_ids': ['chunk-1', 'chunk-2'],
     }
     value.update(overrides)
@@ -145,7 +145,7 @@ def test_generate_enhance_fails_without_partial_output_when_forbidden_claims_fai
     'case',
     [
         _case(question=''),
-        _case(reference_context={}),
+        _case(reference_context=[]),
         _case(reference_chunk_ids=['chunk-3']),
     ],
 )

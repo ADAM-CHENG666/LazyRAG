@@ -91,9 +91,24 @@ def chunk_ctx(partition):
 
 
 def candidate_payload(selected, params, client):
+    fallback_kb_id = selected.get('kb_id', '')
+    selected = {
+        **selected,
+        'kb_ids': selected.get('kb_ids', [fallback_kb_id]),
+        'docs': [{**doc, 'kb_id': doc.get('kb_id', fallback_kb_id)} for doc in selected.get('docs', [])],
+    }
+    target_case_count = selected.get('params', {}).get('target_case_count', 100)
     return build_chunk_candidates(
         None,
-        {'selected_docs': selected, 'build_chunks_params': params},
+        {
+            'selected_docs': selected,
+            'build_chunks_params': params,
+            'import_cases_manifest': {'stats': {'case_allocation': {
+                'target_case_count': target_case_count,
+                'import_case_count': 0,
+                'auto_case_count': target_case_count,
+                'assignments': {},
+            }}}},
         client,
     )['build_chunk_candidates']
 
@@ -110,6 +125,15 @@ def manifest_ctx(partitions):
 DEFAULT_ALLOWED_TYPES = ['text', 'paragraph', 'table', 'formula', 'equation', 'unknown']
 
 
+def import_manifest(*, target=2, imported=0):
+    return {'stats': {'case_allocation': {
+        'target_case_count': target,
+        'import_case_count': imported,
+        'auto_case_count': target - imported,
+        'assignments': {},
+    }}}
+
+
 def test_select_docs_materializer_outputs_selected_docs():
     client = FakeKnowledgeBaseClient([
         {'doc_id': 'doc-1', 'filename': 'a.pdf', 'file_type': 'pdf', 'upload_status': 'success',
@@ -119,25 +143,26 @@ def test_select_docs_materializer_outputs_selected_docs():
         {'doc_id': 'doc-3', 'filename': 'c.txt', 'file_type': 'txt', 'upload_status': 'pending'},
     ])
 
-    output = select_docs(None, {'source_config': {'kb_id': 'kb-1', 'max_docs': 2, 'target_case_count': 37}}, client)
+    output = select_docs(None, {'source_config': {'kb_ids': ['kb-1'], 'max_docs': 2},
+                                'import_cases_manifest': import_manifest(target=37)}, client)
 
     assert output == {'selected_docs': {
-        'kb_id': 'kb-1',
+        'kb_ids': ['kb-1'],
         'docs': [
-            {'doc_id': 'doc-1', 'filename': 'a.pdf', 'file_type': 'pdf', 'status': 'success',
+            {'kb_id': 'kb-1', 'doc_id': 'doc-1', 'filename': 'a.pdf', 'file_type': 'pdf', 'status': 'success',
              'group_counts': {'block': 8, 'line': 2}},
-            {'doc_id': 'doc-2', 'filename': 'b.docx', 'file_type': 'docx', 'status': 'success',
+            {'kb_id': 'kb-1', 'doc_id': 'doc-2', 'filename': 'b.docx', 'file_type': 'docx', 'status': 'success',
              'group_counts': {'block': 0, 'line': 0}},
         ],
-        'stats': {'matched': 3, 'selected': 2},
-        'params': {'kb_id': 'kb-1', 'max_docs': 2, 'target_case_count': 37},
+        'stats': {'matched_by_kb': {'kb-1': 3}, 'selected_by_kb': {'kb-1': 2}, 'matched': 3, 'selected': 2},
+        'params': {'kb_ids': ['kb-1'], 'max_docs': 2, 'auto_case_count': 37},
     }}
     assert client.list_calls == ['kb-1']
 
 
 def test_select_docs_materializer_rejects_empty_selection():
     with pytest.raises(ValueError, match='selected no documents'):
-        select_docs(None, {'source_config': {'kb_id': 'kb-1'}}, FakeKnowledgeBaseClient([]))
+        select_docs(None, {'source_config': {'kb_ids': ['kb-1']}, 'import_cases_manifest': import_manifest()}, FakeKnowledgeBaseClient([]))
 
 
 def test_select_docs_materializer_defaults_target_case_count():
@@ -146,19 +171,56 @@ def test_select_docs_materializer_defaults_target_case_count():
          'group_counts': {'block': 8}},
     ])
 
-    output = select_docs(None, {'source_config': {'kb_id': 'kb-1'}}, client)
+    output = select_docs(None, {'source_config': {'kb_ids': ['kb-1']}, 'import_cases_manifest': import_manifest()}, client)
 
-    assert output['selected_docs']['params'] == {'kb_id': 'kb-1', 'max_docs': 100, 'target_case_count': 100}
+    assert output['selected_docs']['params'] == {'kb_ids': ['kb-1'], 'max_docs': 100, 'auto_case_count': 2}
+
+
+def test_select_docs_allocates_a_shared_limit_proportionally_across_knowledge_bases():
+    class MultiKbClient:
+        def __init__(self):
+            self.list_calls = []
+            self.docs = {
+                'kb-a': [{'doc_id': 'a-1'}],
+                'kb-b': [{'doc_id': 'b-1'}, {'doc_id': 'b-2'}, {'doc_id': 'b-3'}],
+            }
+
+        def list_documents(self, kb_id):
+            self.list_calls.append(kb_id)
+            return self.docs[kb_id]
+
+    client = MultiKbClient()
+    output = select_docs(None, {
+        'source_config': {'kb_ids': ['kb-a', 'kb-b'], 'max_docs': 3},
+        'import_cases_manifest': import_manifest(target=3),
+    }, client)['selected_docs']
+
+    assert [item['doc_id'] for item in output['docs']] == ['a-1', 'b-1', 'b-2']
+    assert output['stats']['selected_by_kb'] == {'kb-a': 1, 'kb-b': 2}
+    assert client.list_calls == ['kb-a', 'kb-b']
+
+
+def test_select_docs_skips_knowledge_base_reads_when_every_case_is_imported():
+    class NoReadClient:
+        def list_documents(self, kb_id):
+            raise AssertionError('all-imported runs must not read knowledge-base documents')
+
+    output = select_docs(None, {
+        'source_config': {'kb_ids': ['kb-a', 'kb-b']},
+        'import_cases_manifest': import_manifest(target=2, imported=2),
+    }, NoReadClient())
+
+    assert output['selected_docs']['docs'] == []
+    assert output['selected_docs']['params']['auto_case_count'] == 0
 
 
 @pytest.mark.parametrize('params, match', [
-    ({'kb_id': ''}, 'kb_id'),
-    ({'kb_id': 'kb-1', 'max_docs': 0}, 'max_docs must be a positive integer'),
-    ({'kb_id': 'kb-1', 'target_case_count': 'bad'}, 'target_case_count must be a positive integer'),
+    ({'kb_ids': []}, 'kb_ids'),
+    ({'kb_ids': ['kb-1'], 'max_docs': 0}, 'max_docs must be a positive integer'),
 ])
 def test_select_docs_materializer_rejects_invalid_params(params, match):
     with pytest.raises(ValueError, match=match):
-        select_docs(None, {'source_config': params}, FakeKnowledgeBaseClient([{'doc_id': 'doc-1'}]))
+        select_docs(None, {'source_config': params, 'import_cases_manifest': import_manifest()}, FakeKnowledgeBaseClient([{'doc_id': 'doc-1'}]))
 
 
 def test_select_docs_materializer_normalizes_optional_doc_fields():
@@ -168,12 +230,13 @@ def test_select_docs_materializer_normalizes_optional_doc_fields():
         {'doc_id': 'doc-2', 'group_counts': 'not-a-map'},
     ])
 
-    output = select_docs(None, {'source_config': {'kb_id': 'kb-1', 'max_docs': 2}}, client)
+    output = select_docs(None, {'source_config': {'kb_ids': ['kb-1'], 'max_docs': 2},
+                                'import_cases_manifest': import_manifest()}, client)
 
     assert output['selected_docs']['docs'] == [
-        {'doc_id': 'doc-1', 'filename': 'fallback-name.pdf', 'file_type': '', 'status': 'ready',
+        {'kb_id': 'kb-1', 'doc_id': 'doc-1', 'filename': 'fallback-name.pdf', 'file_type': '', 'status': 'ready',
          'group_counts': {'block': 4, 'line': 0, 'bad': 0, 'negative': 0}},
-        {'doc_id': 'doc-2', 'filename': 'doc-2', 'file_type': '', 'status': '', 'group_counts': {}},
+        {'kb_id': 'kb-1', 'doc_id': 'doc-2', 'filename': 'doc-2', 'file_type': '', 'status': '', 'group_counts': {}},
     ]
 
 
@@ -201,6 +264,7 @@ def test_build_chunks_materializer_outputs_partitioned_chunk(monkeypatch):
 
     assert output == {'chunk': {
         'available': True,
+        'kb_id': 'kb-1',
         'chunk_id': 'chunk-2',
         'doc_id': 'doc-1',
         'filename': 'a.pdf',
@@ -209,7 +273,7 @@ def test_build_chunks_materializer_outputs_partitioned_chunk(monkeypatch):
         'text': 'two',
         'embedding': {'model': 'default', 'vector': [0.4472135954999579, 0.8944271909999159]},
             'metadata': {
-                'doc': {'doc_id': 'doc-1', 'filename': 'a.pdf', 'file_type': 'pdf',
+                'doc': {'kb_id': 'kb-1', 'doc_id': 'doc-1', 'filename': 'a.pdf', 'file_type': 'pdf',
                         'status': 'success', 'group_counts': {'block': 2}},
                 'node_metadata': {'type': 'text', 'page': 1},
                 'node_global_metadata': {'filename': 'fallback.pdf'},
@@ -244,6 +308,7 @@ def test_build_chunks_manifest_materializer_outputs_built_chunks():
         manifest_ctx(('chunk_0001', 'chunk_0002', 'chunk_0003')),
         {
             'selected_docs': selected,
+            'import_cases_manifest': import_manifest(target=3),
             'chunk': (
                 {'available': True, 'chunk_id': 'chunk-1', 'doc_id': 'doc-1', 'filename': 'a.pdf',
                  'group': 'block', 'type': 'text', 'text': 'one', 'embedding': {}, 'metadata': {}},
@@ -257,13 +322,13 @@ def test_build_chunks_manifest_materializer_outputs_built_chunks():
     )
 
     assert output == {'build_chunks_manifest': {
-        'source': {'kb_id': 'kb-1', 'selected_docs_ref': 'dataset.selected_docs@v1'},
+            'source': {'kb_ids': [], 'selected_docs_ref': 'dataset.selected_docs@v1'},
         'chunks': [
-            {'available': True, 'chunk_id': 'chunk-1', 'doc_id': 'doc-1', 'filename': 'a.pdf',
+                {'available': True, 'kb_id': '', 'chunk_id': 'chunk-1', 'doc_id': 'doc-1', 'filename': 'a.pdf',
              'group': 'block', 'type': 'text', 'partition': 'chunk_0001'},
-            {'available': True, 'chunk_id': 'chunk-2', 'doc_id': 'doc-1', 'filename': 'a.pdf',
+                {'available': True, 'kb_id': '', 'chunk_id': 'chunk-2', 'doc_id': 'doc-1', 'filename': 'a.pdf',
              'group': 'block', 'type': 'text', 'partition': 'chunk_0002'},
-            {'available': True, 'chunk_id': 'chunk-3', 'doc_id': 'doc-2', 'filename': 'b.pdf',
+                {'available': True, 'kb_id': '', 'chunk_id': 'chunk-3', 'doc_id': 'doc-2', 'filename': 'b.pdf',
              'group': 'block', 'type': 'text', 'partition': 'chunk_0003'},
         ],
         'stats': {
@@ -273,7 +338,8 @@ def test_build_chunks_manifest_materializer_outputs_built_chunks():
             'scanned_count': 3,
             'accepted_count': 3,
             'filtered_count_by_type': {},
-            'target_chunk_count': 3,
+                'target_chunk_count': 3,
+                'auto_case_count': 3,
             'doc_count': 2,
             'group_counts': {'block': 3},
             'doc_group_stats': [
@@ -358,7 +424,7 @@ def test_build_chunks_manifest_exposes_type_and_selection_stats():
 
     built = build_chunks_manifest(
         manifest_ctx(('chunk_0001', 'chunk_0002', 'chunk_0003')),
-        {'selected_docs': selected, 'chunk': chunks, 'build_chunk_candidates': {
+            {'selected_docs': selected, 'import_cases_manifest': import_manifest(target=3), 'chunk': chunks, 'build_chunk_candidates': {
             'chunks': list(chunks), 'selection_stats': stats, 'target_chunk_count': 3,
             'fallback_used': False, 'params': {'groups': ['block']},
         }},
@@ -388,6 +454,7 @@ def test_build_chunks_manifest_materializer_samples_group_first_and_falls_back()
         manifest_ctx(('chunk_0001', 'chunk_0002', 'chunk_0003', 'chunk_0004', 'chunk_0005')),
         {
             'selected_docs': selected,
+            'import_cases_manifest': import_manifest(target=5),
             'chunk': (
                 {'available': True, 'chunk_id': 'doc-1-block-1', 'doc_id': 'doc-1', 'filename': 'a.pdf',
                  'group': 'block', 'type': 'text', 'text': '1', 'embedding': {}, 'metadata': {}},
@@ -472,7 +539,7 @@ def test_build_chunks_manifest_materializer_warns_when_actual_chunks_below_targe
 
     output = build_chunks_manifest(
         manifest_ctx(partitions),
-        {'selected_docs': selected, 'chunk': chunks, 'build_chunk_candidates': {
+        {'selected_docs': selected, 'import_cases_manifest': import_manifest(target=8), 'chunk': chunks, 'build_chunk_candidates': {
             'chunks': [], 'selection_stats': {'scanned_count': 2, 'accepted_count': 2, 'filtered_count_by_type': {}},
             'target_chunk_count': 8, 'fallback_used': False, 'params': {'groups': ['block']},
         }},
@@ -500,7 +567,7 @@ def test_build_chunks_materializer_rejects_empty_sampling_plan():
         candidate_payload(selected, {'groups': ['block']}, FakeKnowledgeBaseClient())
 
 
-def test_build_chunks_manifest_materializer_rejects_chunk_tuple_count_mismatch():
+def test_build_chunks_manifest_keeps_static_slots_when_auto_chunk_target_is_smaller_or_larger():
     selected = {
         'kb_id': 'kb-1',
         'docs': [
@@ -510,11 +577,11 @@ def test_build_chunks_manifest_materializer_rejects_chunk_tuple_count_mismatch()
         'params': {'target_case_count': 2},
     }
 
-    with pytest.raises(ValueError, match='requires 3 chunk slots, got 2'):
-        build_chunks_manifest(
+    output = build_chunks_manifest(
             manifest_ctx(('chunk_0001', 'chunk_0002')),
             {
                 'selected_docs': selected,
+                'import_cases_manifest': import_manifest(target=5),
                 'chunk': (
                     {'available': True, 'chunk_id': 'chunk-1', 'doc_id': 'doc-1', 'filename': 'a.pdf',
                      'group': 'block', 'type': 'text', 'text': '1', 'embedding': {}, 'metadata': {}},
@@ -526,4 +593,7 @@ def test_build_chunks_manifest_materializer_rejects_chunk_tuple_count_mismatch()
                     'target_chunk_count': 3, 'fallback_used': False, 'params': {'groups': ['block']},
                 },
             },
-        )
+    )['build_chunks_manifest']
+
+    assert output['stats']['slot_count'] == 2
+    assert output['stats']['target_chunk_count'] == 3

@@ -33,6 +33,9 @@ input_payload:
         type: boolean
         required: false
         default: true
+      kb_id:
+        type: string
+        required: false
       chunk_id:
         type: string
         required: true
@@ -85,6 +88,8 @@ output_payload:
     fields:
       available:
         type: boolean
+      kb_id:
+        type: string
       chunk_id:
         type: string
       doc_id:
@@ -104,7 +109,7 @@ execution_flow:
   - 解析 LLM 返回 JSON，并校验 entities 字段。
   - 如果解析或校验失败，则带上错误反馈重试一次。
   - 重试后仍失败时抛出 validation error。
-  - 返回仅包含 available、chunk_id、doc_id、group 和 entities 的 {"chunk_entity": payload}。
+  - 返回仅包含 available、kb_id、chunk_id、doc_id、group 和 entities 的 {"chunk_entity": payload}。
 
 tests:
   single_chunk_logic:
