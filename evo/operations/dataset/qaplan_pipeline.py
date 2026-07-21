@@ -9,6 +9,7 @@ from evo.llm import LazyLLMClient
 from .chunks_build import build_chunk_candidates, build_chunks, build_chunks_manifest
 from .entities import chunk_entities_extract, chunk_entities_extract_manifest
 from .generate import generate, generate_manifest
+from .import_cases import import_cases
 from .generate_enhance import generate_enhance, generate_enhance_manifest
 from .qaplan import qaplan_manifest, qaplan_plan, qaplan_spec
 from .select_docs import select_docs
@@ -50,6 +51,7 @@ def dataset_materializers(case_ids: tuple[str, ...]) -> dict[str, Any]:
         )
 
     return {
+        'dataset.import_cases': import_cases,
         'dataset.select_docs': select_docs,
         'dataset.build_chunk_candidates': build_chunk_candidates,
         'dataset.build_chunks': build_chunks,

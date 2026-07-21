@@ -1,13 +1,15 @@
 import json
 import os
+import hashlib
+from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
 from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 _DOCUMENTS: dict[tuple[str, ...], Any] = {}
-GROUP_COUNT_GROUPS = ('block', 'line')
 DOCS_PAGE_SIZE = 100
+CHUNK_PAGE_SIZE = 200
 
 
 class KnowledgeBaseClient:
@@ -27,9 +29,76 @@ class KnowledgeBaseClient:
         self._document_factory = document_factory
 
     def list_documents(self, kb_id: str) -> list[dict[str, Any]]:
-        docs = self._list_documents_from_doc_server(kb_id)
-        group_counts = self._group_counts_by_doc(kb_id, [doc['doc_id'] for doc in docs])
-        return [{**doc, 'group_counts': group_counts.get(doc['doc_id'], {})} for doc in docs]
+        return self._list_documents_from_doc_server(kb_id)
+
+    def count_valid_chunks(
+        self,
+        kb_id: str,
+        doc_ids: list[str],
+        groups: list[str],
+        allowed_types: list[str],
+        max_scan_chunks: int,
+    ) -> dict[str, Any]:
+        capacities = {group: {doc_id: 0 for doc_id in doc_ids} for group in groups}
+        filtered: Counter[str] = Counter()
+        invalid: Counter[str] = Counter()
+        scanned = 0
+
+        for doc_id, group, batch in self._iter_raw_chunks(kb_id, doc_ids, groups):
+            scanned += len(batch)
+            if scanned > max_scan_chunks:
+                raise ValueError(f'max_scan_chunks exceeded: {scanned} > {max_scan_chunks}')
+            embedding_candidates = []
+            for node in batch:
+                reason = _content_ineligible_reason(node, allowed_types)
+                if reason.startswith('filtered_type:'):
+                    filtered[reason.partition(':')[2]] += 1
+                elif reason:
+                    invalid[reason] += 1
+                else:
+                    embedding_candidates.append(node)
+            self._try_attach_stored_embeddings(
+                self._get_document(), embedding_candidates, kb_id, doc_id, group,
+            )
+            for node in embedding_candidates:
+                reason = _embedding_ineligible_reason(node)
+                if reason:
+                    invalid[reason] += 1
+                else:
+                    capacities[group][doc_id] += 1
+
+        effective = sum(sum(items.values()) for items in capacities.values())
+        return {
+            'scanned_count': scanned,
+            'effective_count': effective,
+            'capacities': capacities,
+            'filtered_count_by_type': dict(filtered),
+            'invalid_count_by_reason': dict(invalid),
+        }
+
+    def fetch_valid_chunks(
+        self,
+        kb_id: str,
+        doc_id: str,
+        group: str,
+        allowed_types: list[str],
+        limit: int,
+        *,
+        order_by: str,
+    ) -> list[Any]:
+        if order_by != 'stable_chunk_id_hash':
+            raise ValueError('order_by must be stable_chunk_id_hash')
+        if limit <= 0:
+            return []
+
+        nodes = []
+        document = self._get_document()
+        for _, _, batch in self._iter_raw_chunks(kb_id, [doc_id], [group]):
+            candidates = [node for node in batch if not _content_ineligible_reason(node, allowed_types)]
+            self._try_attach_stored_embeddings(document, candidates, kb_id, doc_id, group)
+            nodes.extend(node for node in candidates if not _embedding_ineligible_reason(node))
+        nodes.sort(key=lambda node: hashlib.sha256(_node_uid(node).encode()).hexdigest())
+        return nodes[:limit]
 
     def iter_chunks(
         self,
@@ -74,6 +143,39 @@ class KnowledgeBaseClient:
                     )
                     self._require_embeddings(batch, kb_id=kb_id, doc_id=doc_id, group=group)
                     yield batch
+                    offset += len(batch)
+                    if offset >= int(total or offset):
+                        break
+
+    def _iter_raw_chunks(
+        self,
+        kb_id: str,
+        doc_ids: list[str],
+        groups: list[str],
+    ) -> Iterator[tuple[str, str, list[Any]]]:
+        document = self._get_document()
+        for doc_id in doc_ids:
+            for group in groups:
+                offset = 0
+                while True:
+                    try:
+                        nodes, total = document.get_nodes(
+                            doc_ids=[doc_id],
+                            group=group,
+                            kb_id=kb_id,
+                            limit=CHUNK_PAGE_SIZE,
+                            offset=offset,
+                            return_total=True,
+                            sort_by_number=True,
+                        )
+                    except Exception as exc:
+                        raise RuntimeError(
+                            f'failed to read chunks: kb_id={kb_id} doc_id={doc_id} group={group}'
+                        ) from exc
+                    batch = list(nodes or [])
+                    if not batch:
+                        break
+                    yield doc_id, group, batch
                     offset += len(batch)
                     if offset >= int(total or offset):
                         break
@@ -159,6 +261,20 @@ class KnowledgeBaseClient:
                 f'failed to read stored embeddings: kb_id={kb_id} doc_id={doc_id} group={group}'
             ) from exc
 
+    @classmethod
+    def _try_attach_stored_embeddings(
+        cls,
+        document: Any,
+        nodes: list[Any],
+        kb_id: str,
+        doc_id: str,
+        group: str,
+    ) -> None:
+        try:
+            cls._attach_stored_embeddings(document, nodes, kb_id=kb_id, doc_id=doc_id, group=group)
+        except RuntimeError:
+            return
+
     def _list_documents_from_doc_server(self, kb_id: str) -> list[dict[str, Any]]:
         docs: list[dict[str, Any]] = []
         page = 1
@@ -219,38 +335,6 @@ class KnowledgeBaseClient:
             'row': {'doc': dict(doc), 'relation': dict(relation), 'snapshot': dict(snapshot)},
         }
 
-    def _group_counts_by_doc(
-        self,
-        kb_id: str,
-        doc_ids: list[str],
-    ) -> dict[str, dict[str, int]]:
-        if not doc_ids:
-            return {}
-
-        document = self._get_document()
-        counts: dict[str, dict[str, int]] = {}
-        for doc_id in doc_ids:
-            doc_counts: dict[str, int] = {}
-            for group in GROUP_COUNT_GROUPS:
-                try:
-                    _, total = document.get_nodes(
-                        doc_ids=[doc_id],
-                        group=group,
-                        kb_id=kb_id,
-                        limit=1,
-                        offset=0,
-                        return_total=True,
-                        sort_by_number=True,
-                    )
-                except Exception as exc:
-                    raise RuntimeError(
-                        f'failed to count chunks: kb_id={kb_id} doc_id={doc_id} group={group}'
-                    ) from exc
-                doc_counts[group] = max(_int(total), 0)
-            counts[doc_id] = doc_counts
-        return counts
-
-
 def _build_document() -> Any:
     from lazymind.config import config
     from lazymind.parsing.service.build_document import build_document
@@ -274,6 +358,31 @@ def _int(value: Any) -> int:
 def _has_embedding(node: Any) -> bool:
     value = getattr(node, 'embedding', None)
     return isinstance(value, Mapping) and any(bool(vector) for vector in value.values())
+
+
+def _node_uid(node: Any) -> str:
+    return str(getattr(node, 'uid', '') or getattr(node, '_uid', '') or '')
+
+
+def _content_ineligible_reason(node: Any, allowed_types: list[str]) -> str:
+    metadata = getattr(node, 'metadata', {}) or {}
+    node_type = str(metadata.get('type') or metadata.get('node_type') or 'unknown').strip().lower()
+    if node_type not in allowed_types:
+        return f'filtered_type:{node_type}'
+    if not str(getattr(node, 'text', '') or '').strip():
+        return 'empty_text'
+    return ''
+
+
+def _embedding_ineligible_reason(node: Any) -> str:
+    if not _has_embedding(node):
+        return 'missing_embedding'
+    try:
+        from .models import normalize_embedding
+        normalize_embedding(getattr(node, 'embedding', None))
+    except ValueError:
+        return 'invalid_embedding'
+    return ''
 
 
 def _milvus_store(document: Any) -> tuple[Any, Any]:

@@ -84,7 +84,16 @@ def generate_enhance_manifest(ctx: Any, inputs: Mapping[str, object]) -> dict[st
 
 
 def _references(case: Mapping[str, object]) -> list[dict[str, str]]:
-    context = _mapping(case.get('reference_context'), 'case.reference_context')
+    raw_context = case.get('reference_context')
+    if not isinstance(raw_context, list):
+        raise ValueError('case.reference_context must be a list')
+    context: dict[str, str] = {}
+    for index, raw in enumerate(raw_context):
+        item = _mapping(raw, f'case.reference_context[{index}]')
+        chunk_id = _text(item.get('chunk_id'), f'case.reference_context[{index}].chunk_id')
+        if chunk_id in context:
+            raise ValueError('case.reference_context chunk ids must be unique')
+        context[chunk_id] = _text(item.get('text'), f'case.reference_context[{index}].text')
     chunk_ids = _string_list(case.get('reference_chunk_ids'), 'case.reference_chunk_ids')
     if len(set(chunk_ids)) != len(chunk_ids):
         raise ValueError('case.reference_chunk_ids must be unique')
