@@ -1,3 +1,4 @@
+import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -30,8 +31,14 @@ class FakeKnowledgeBaseClient(KnowledgeBaseClient):
         return self.documents
 
 
-def node(uid):
-    return SimpleNamespace(uid=uid, embedding={'default': [1.0]})
+def node(uid, *, text='chunk text', chunk_type='text', embedding=None, number=1):
+    return SimpleNamespace(
+        uid=uid,
+        text=text,
+        metadata={'type': chunk_type},
+        embedding={'default': [1.0]} if embedding is None else embedding,
+        number=number,
+    )
 
 
 def node_without_embedding(uid):
@@ -133,7 +140,6 @@ def test_list_documents_uses_doc_server_and_normalizes_rows_without_real_db():
         'path': '/docs/file.pdf',
         'upload_status': 'success',
         'status': 'SUCCESS',
-        'group_counts': {'block': 0, 'line': 0},
         'row': {
             'doc': {
                 'doc_id': 'doc-1',
@@ -151,7 +157,7 @@ def test_list_documents_uses_doc_server_and_normalizes_rows_without_real_db():
     ]
 
 
-def test_list_documents_counts_block_and_line_groups_from_document():
+def test_list_documents_does_not_precount_groups_per_document():
     http = FakeDocServer({
         1: {
             'items': [
@@ -165,34 +171,68 @@ def test_list_documents_counts_block_and_line_groups_from_document():
             'page_size': 100,
         },
     })
-    document = FakeDocument({
-        ('doc-1', 'block', 0): ([], 8),
-        ('doc-1', 'line', 0): ([], 2),
-        ('doc-2', 'block', 0): ([], 5),
-        ('doc-2', 'line', 0): ([], 0),
-    })
+    document = FakeDocument()
     client = KnowledgeBaseClient(base_url='http://doc-server:8000', http_get_json=http, document=document)
 
     assert client.list_documents('kb-1') == [
         {'doc_id': 'doc-1', 'filename': 'a.pdf', 'file_type': 'pdf', 'path': '', 'upload_status': 'success',
-         'status': '', 'group_counts': {'block': 8, 'line': 2},
+         'status': '',
          'row': {'doc': {'doc_id': 'doc-1', 'filename': 'a.pdf', 'file_type': 'pdf', 'upload_status': 'success'},
                  'relation': {}, 'snapshot': {}}},
         {'doc_id': 'doc-2', 'filename': 'b.pdf', 'file_type': 'pdf', 'path': '', 'upload_status': 'success',
-         'status': '', 'group_counts': {'block': 5, 'line': 0},
+         'status': '',
          'row': {'doc': {'doc_id': 'doc-2', 'filename': 'b.pdf', 'file_type': 'pdf', 'upload_status': 'success'},
                  'relation': {}, 'snapshot': {}}},
     ]
-    assert document.calls == [
-        {'doc_ids': ['doc-1'], 'group': 'block', 'kb_id': 'kb-1', 'limit': 1, 'offset': 0,
-         'return_total': True, 'sort_by_number': True},
-        {'doc_ids': ['doc-1'], 'group': 'line', 'kb_id': 'kb-1', 'limit': 1, 'offset': 0,
-         'return_total': True, 'sort_by_number': True},
-        {'doc_ids': ['doc-2'], 'group': 'block', 'kb_id': 'kb-1', 'limit': 1, 'offset': 0,
-         'return_total': True, 'sort_by_number': True},
-        {'doc_ids': ['doc-2'], 'group': 'line', 'kb_id': 'kb-1', 'limit': 1, 'offset': 0,
-         'return_total': True, 'sort_by_number': True},
-    ]
+    assert document.calls == []
+
+
+def test_count_valid_chunks_returns_group_doc_capacity_and_aggregate_filter_stats():
+    document = FakeDocument({
+        ('doc-1', 'block', 0): ([
+            node('valid-1'),
+            node('filtered-1', chunk_type='heading'),
+            node('empty-1', text='   '),
+            node('missing-vector-1', embedding={}),
+        ], 4),
+    })
+    client = KnowledgeBaseClient(document=document)
+
+    result = client.count_valid_chunks(
+        'kb-1', ['doc-1'], ['block'], ['text', 'paragraph'], max_scan_chunks=10,
+    )
+
+    assert result == {
+        'scanned_count': 4,
+        'effective_count': 1,
+        'capacities': {'block': {'doc-1': 1}},
+        'filtered_count_by_type': {'heading': 1},
+        'invalid_count_by_reason': {'empty_text': 1, 'missing_embedding': 1},
+    }
+
+
+def test_count_valid_chunks_rejects_scan_limit_without_returning_partial_capacity():
+    document = FakeDocument({
+        ('doc-1', 'block', 0): ([node('one'), node('two')], 2),
+    })
+
+    with pytest.raises(ValueError, match='max_scan_chunks'):
+        KnowledgeBaseClient(document=document).count_valid_chunks(
+            'kb-1', ['doc-1'], ['block'], ['text'], max_scan_chunks=1,
+        )
+
+
+def test_fetch_valid_chunks_selects_by_stable_chunk_id_hash_and_hydrates_only_selected_payloads():
+    values = [node(f'chunk-{index}', number=index) for index in range(1, 8)]
+    document = FakeDocument({('doc-1', 'block', 0): (values, len(values))})
+    client = KnowledgeBaseClient(document=document)
+
+    selected = client.fetch_valid_chunks(
+        'kb-1', 'doc-1', 'block', ['text'], 3, order_by='stable_chunk_id_hash',
+    )
+    expected = sorted(values, key=lambda item: hashlib.sha256(item.uid.encode()).hexdigest())[:3]
+
+    assert [item.uid for item in selected] == [item.uid for item in expected]
 
 
 def test_iter_chunks_empty_doc_ids_yields_nothing_and_does_not_read_document():

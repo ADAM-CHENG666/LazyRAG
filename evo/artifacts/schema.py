@@ -6,8 +6,7 @@ import math
 from numbers import Real
 from typing import Any
 
-from .. import validate_case_id
-from .models import ArtifactRef
+from .. import validate_case_id, validate_id
 
 
 @dataclass(frozen=True)
@@ -42,10 +41,17 @@ def _artifact_ref_errors(payload: dict[str, Any], key: str) -> list[str]:
     value = payload.get(key)
     if not isinstance(value, str): return [f'{key} must be str']
     try:
-        ArtifactRef.parse(value)
+        _parse_artifact_ref(value)
     except (TypeError, ValueError):
         return [f'{key} must be artifact ref']
     return []
+
+
+def _parse_artifact_ref(value: str) -> None:
+    artifact_id, raw_version = value.rsplit('@v', 1)
+    validate_id(artifact_id, 'artifact_id')
+    if int(raw_version) < 1:
+        raise ValueError('artifact version must be positive')
 
 
 def _judge_result_errors(payload: dict[str, Any]) -> list[str]:
@@ -73,24 +79,19 @@ def _dataset_case_errors(payload: dict[str, Any]) -> list[str]:
 
 def _selected_docs_errors(payload: dict[str, Any]) -> list[str]:
     errors = []
-    allowed_top_level = {'kb_id', 'docs', 'stats', 'params'}
+    allowed_top_level = {'kb_ids', 'docs', 'stats', 'params'}
     for key in sorted(set(payload) - allowed_top_level):
         errors.append(f'unsupported top-level field: {key}')
-    allowed_doc_fields = {'doc_id', 'filename', 'file_type', 'status', 'group_counts'}
+    allowed_doc_fields = {'kb_id', 'doc_id', 'filename', 'file_type', 'status'}
     for doc in payload.get('docs') or []:
         if not isinstance(doc, dict):
             errors.append('docs must contain only objects')
             continue
         for key in sorted(set(doc) - allowed_doc_fields):
             errors.append(f'unsupported doc field: {key}')
-        for key in ('doc_id', 'filename', 'file_type', 'status'):
+        for key in ('kb_id', 'doc_id', 'filename', 'file_type', 'status'):
             if key not in doc or not isinstance(doc.get(key), str):
                 errors.append(f'doc.{key} must be str')
-        if not isinstance(doc.get('group_counts'), dict):
-            errors.append('doc.group_counts must be dict')
-        for group, count in (doc.get('group_counts') or {}).items():
-            if not isinstance(group, str) or isinstance(count, bool) or not isinstance(count, int):
-                errors.append('doc.group_counts must map str to int')
     return errors
 
 
@@ -124,7 +125,7 @@ def _built_chunks_errors(payload: dict[str, Any]) -> list[str]:
             errors.append('chunk_refs must contain artifact refs')
             continue
         try:
-            ArtifactRef.parse(ref)
+            _parse_artifact_ref(ref)
         except (TypeError, ValueError):
             errors.append('chunk_refs must contain artifact refs')
     return errors
@@ -150,7 +151,7 @@ def _chunk_entities_errors(payload: dict[str, Any]) -> list[str]:
             errors.append('chunk_entity_refs must contain artifact refs')
             continue
         try:
-            ArtifactRef.parse(ref)
+            _parse_artifact_ref(ref)
         except (TypeError, ValueError):
             errors.append('chunk_entity_refs must contain artifact refs')
     return errors
@@ -169,7 +170,7 @@ def _entity_relation_graph_errors(payload: dict[str, Any]) -> list[str]:
             errors.append('chunk_refs must contain artifact refs')
             continue
         try:
-            ArtifactRef.parse(ref)
+            _parse_artifact_ref(ref)
         except (TypeError, ValueError):
             errors.append('chunk_refs must contain artifact refs')
     for key in ('edges', 'skipped_chunks'):
@@ -192,7 +193,7 @@ def _topic_cluster_errors(payload: dict[str, Any]) -> list[str]:
             errors.append('chunk_refs must contain artifact refs')
             continue
         try:
-            ArtifactRef.parse(ref)
+            _parse_artifact_ref(ref)
         except (TypeError, ValueError):
             errors.append('chunk_refs must contain artifact refs')
     return errors
@@ -205,7 +206,7 @@ def _embedding_topic_clusters_errors(payload: dict[str, Any]) -> list[str]:
             errors.append('cluster_refs must contain artifact refs')
             continue
         try:
-            ArtifactRef.parse(ref)
+            _parse_artifact_ref(ref)
         except (TypeError, ValueError):
             errors.append('cluster_refs must contain artifact refs')
     if not isinstance(payload.get('skipped_chunks'), list):
@@ -226,7 +227,7 @@ def _entity_topic_clusters_errors(payload: dict[str, Any]) -> list[str]:
             errors.append('cluster_refs must contain artifact refs')
             continue
         try:
-            ArtifactRef.parse(ref)
+            _parse_artifact_ref(ref)
         except (TypeError, ValueError):
             errors.append('cluster_refs must contain artifact refs')
     topics = payload.get('topics')
@@ -382,8 +383,8 @@ SCHEMAS: dict[str, ArtifactSchema] = {
                                            nonempty=('snapshot_id', 'source_units'),
                                            types={'snapshot_id': str, 'source_units': list}),
     'SelectedDocs': ArtifactSchema(
-        required=('kb_id', 'docs', 'stats', 'params'), nonempty=('kb_id', 'docs'),
-        types={'kb_id': str, 'docs': list, 'stats': dict, 'params': dict},
+        required=('kb_ids', 'docs', 'stats', 'params'), nonempty=('kb_ids', 'docs'),
+        types={'kb_ids': list, 'docs': list, 'stats': dict, 'params': dict},
         validate=_selected_docs_errors,
     ),
     'DatasetChunk': ArtifactSchema(

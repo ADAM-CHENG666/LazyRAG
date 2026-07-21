@@ -61,18 +61,6 @@ input_payload:
             status:
               type: string
               required: false
-            group_counts:
-              type: object
-              required: false
-              value_type: integer
-      params:
-        type: object
-        required: false
-        fields:
-          target_case_count:
-            type: integer
-            required: false
-            default: 100
   build_chunk_candidates:
     fields:
       chunks:
@@ -82,16 +70,15 @@ input_payload:
         type: object
         required: true
         fields:
-          scanned_count:
-            type: integer
-          accepted_count:
-            type: integer
-          filtered_count_by_type:
+          target:
             type: object
-            value_type: integer
-      fallback_used:
-        type: boolean
-        required: true
+          scan:
+            type: object
+          eligibility:
+            type: object
+          allocation:
+            # 包含 fallback_used 与 group -> KB -> doc 三级配额审计。
+            type: object
       params:
         type: object
         required: true
@@ -186,40 +173,53 @@ output_payload:
       stats:
         type: object
         fields:
-          chunk_count:
+          auto_case_count:
             type: integer
-          slot_count:
-            type: integer
-          empty_count:
-            type: integer
-          scanned_count:
-            type: integer
-          accepted_count:
-            type: integer
-          filtered_count_by_type:
+          slots:
+            # 静态 runtime slot 的总体使用情况。
             type: object
-            value_type: integer
-          doc_count:
-            type: integer
-          group_counts:
+            fields:
+              total_count:
+                type: integer
+              available_count:
+                type: integer
+              placeholder_count:
+                type: integer
+          candidate_selection:
+            # 原样承接 build_chunk_candidates.selection_stats 的四块审计结构。
             type: object
-            value_type: integer
-          doc_group_stats:
-            type: array
-            item:
-              type: object
-              fields:
-                doc_id:
-                  type: string
-                filename:
-                  type: string
-                total:
-                  type: integer
-                groups:
+            fields:
+              target:
+                type: object
+              scan:
+                type: object
+              eligibility:
+                type: object
+              allocation:
+                type: object
+          source_coverage:
+            # 最终 available chunk 覆盖的 doc/group 情况。
+            type: object
+            fields:
+              doc_count:
+                type: integer
+              group_counts:
+                type: object
+                value_type: integer
+              documents:
+                type: array
+                item:
                   type: object
-                  value_type: integer
-          fallback_used:
-            type: boolean
+                  fields:
+                    doc_id:
+                      type: string
+                    filename:
+                      type: string
+                    total_count:
+                      type: integer
+                    group_counts:
+                      type: object
+                      value_type: integer
           warnings:
             type: list[string]
       params:
@@ -229,7 +229,9 @@ output_payload:
             type: list[string]
           allowed_types:
             type: list[string]
-          auto_case_count:
+          max_scan_docs_per_kb:
+            type: integer
+          max_scan_chunks:
             type: integer
 
 execution_flow:
@@ -239,10 +241,10 @@ execution_flow:
   - 要求 chunk tuple 的数量等于 flow 声明的静态 runtime chunk slot 数。
   - 按 runtime partition 顺序将 chunk slots 归一化为 build_chunks_manifest.chunks 项。
   - 每个 manifest 项保留 available、kb_id、chunk_id、doc_id、filename、group、type 和 partition；不拼接或改写数据库 ID。
-  - 统计 available=true 的真实 chunk 数量为 chunk_count。
-  - 统计 available=false 的占位 slot 数量为 empty_count。
-  - 直接使用候选构建阶段提供的 scanned_count、accepted_count 和 filtered_count_by_type。
-  - 汇总 slot_count、auto_case_count、doc_count、group_counts、doc_group_stats、fallback_used 和 warnings。
+  - 在 stats.slots 中汇总 total_count、available_count 和 placeholder_count。
+  - 将候选阶段的 target、scan、eligibility、allocation 四块审计原样写入 stats.candidate_selection。
+  - 在 stats.source_coverage 中汇总最终 available chunk 的 doc_count、group_counts 与逐文档覆盖情况。
+  - 汇总 auto_case_count 与 warnings。
   - 返回 {"build_chunks_manifest": payload}。
 
 tests:
@@ -256,9 +258,13 @@ tests:
       # tuple 数量仍必须等于静态 runtime slot 数；不可因候选不足而缺少 partition 输出。
       - static_tuple_count_mismatch_error
   audit_stats:
-    # 统计同时说明真实自动生成材料和静态占位，方便定位导入对自动链路的影响。
+    # stats 固定分为 slots、candidate_selection、source_coverage，并单独记录 auto_case_count/warnings。
     cases:
-      # chunk_count、empty_count、auto_case_count、筛选统计和候选 target 能相互复核。
-      - records_import_aware_selection_stats
+      # slots、auto_case_count 与 candidate_selection 中的目标/选择/短缺统计能相互复核。
+      - records_import_aware_hierarchical_selection_stats
+      # candidate_selection 原样保留 target、scan、eligibility、allocation 四块，避免扁平字段漂移。
+      - preserves_structured_candidate_selection_audit
+      # source_coverage 仅描述最终 available chunk 的文档与 group 覆盖，不混入扫描容量统计。
+      - separates_final_source_coverage_from_candidate_capacity
       # 返回结构固定为单一 build_chunks_manifest output。
       - return_keys_match_outputs

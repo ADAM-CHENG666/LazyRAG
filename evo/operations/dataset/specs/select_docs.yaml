@@ -2,7 +2,7 @@ operation:
   op_id: dataset.select_docs
   flow: dataset
   stage: select_docs
-  description: 按知识库文档规模分配全局文档配额，仅为尚需自动生成的 case 选择文档。
+  description: 枚举尚需自动生成 case 的所有知识库文档，作为后续有效 chunk 扫描的可审计来源。
 
 fixed_op:
   inputs:
@@ -36,14 +36,6 @@ input_payload:
           - non_empty
           - non_empty_after_strip_items
           - unique_items
-      max_docs:
-        # 跨知识库共享的文档总上限，按各库文档规模分配。
-        type: integer
-        required: false
-        default: 100
-        validation:
-          - positive_integer
-          - max_value: 100000
   import_cases_manifest:
     fields:
       stats:
@@ -81,58 +73,48 @@ output_payload:
               type: string
             status:
               type: string
-            group_counts:
-              type: object
-              value_type: integer
       stats:
         type: object
         fields:
-          matched_by_kb:
+          discovered_by_kb:
+            # 每个 KB 实际枚举出的文档数；不再存在按比例截断的 selected 配额。
             type: object
             value_type: integer
-          selected_by_kb:
-            type: object
-            value_type: integer
-          matched:
-            type: integer
-          selected:
+          discovered:
             type: integer
       params:
         type: object
         fields:
           kb_ids:
             type: list[string]
-          max_docs:
-            type: integer
           auto_case_count:
             type: integer
 
 execution_flow:
-  - 读取 source_config.kb_ids、max_docs 与 import_cases_manifest.stats.case_allocation.auto_case_count。
+  - 读取 source_config.kb_ids 与 import_cases_manifest.stats.case_allocation.auto_case_count。
   - 当 auto_case_count=0 时，不访问知识库，返回 docs=[] 与零值统计；静态下游 chunk partitions 仍由其自身占位逻辑处理。
-  - 否则，对每个 kb_id 调用 KnowledgeBaseClient.list_documents，保留各知识库原始文档顺序并统计文档规模。
-  - 使用既有“按规模分配”容量算法，把全局 max_docs 按各知识库文档规模分配为整数配额；不采用平均分配或新的分配算法。
-  - 在每个知识库内选择配额内的前序文档，并在每项中保留原始 kb_id、doc_id、filename、file_type、status 和 group_counts。
-  - 自动生成仍需要 case 时，如全局没有选中任何文档则保持现有空选中失败语义。
+  - 否则，对每个 kb_id 调用 KnowledgeBaseClient.list_documents，保留所有文档及各 KB 的原始返回顺序。
+  - 每项保留原始 kb_id、doc_id、filename、file_type 与 status；此阶段不读取 group_counts，也不按文档数抽样。
+  - 自动生成仍需要 case 时，如全局没有发现任何文档则直接失败。
   - 返回 {"selected_docs": payload}。
 
 tests:
-  multi_kb_selection:
-    # 多知识库仅扩展文档来源；所有 ID 保持数据库原值，不构造 kb/doc/chunk 拼接的全局 ID。
+  document_discovery:
+    # selected_docs 只固定扫描来源；候选比例完全由后续有效 chunk 容量决定。
     cases:
-      # 按每个知识库的文档规模，用既有容量算法分配全局 max_docs 配额并保留各库内原始顺序。
-      - proportional_doc_quota_and_stable_per_kb_order
-      # 每个输出文档携带其原始 kb_id，供后续读取 chunk 与 case 溯源。
-      - preserves_kb_provenance_without_rewriting_ids
+      # 不截断任一 KB 的文档；按 kb_ids 顺序和各 KB 内原始顺序输出全部文档。
+      - enumerates_all_docs_in_stable_kb_and_document_order
+      # 每个输出文档携带其原始 kb_id/doc_id，不构造或改写数据库 ID。
+      - preserves_source_provenance_without_rewriting_ids
   imported_only_bypass:
     # 导入已覆盖全部目标时，自动链路不再访问知识库，但静态图仍能继续产出合法占位。
     cases:
       # auto_case_count=0 时返回空 docs 和零统计，不触发空选择错误。
       - no_kb_access_when_all_cases_imported
   validation:
-    # 自动生成仍有需求时，沿用原有输入与空选中失败语义。
+    # 自动生成仍有需求时，KB 输入与发现结果必须合法。
     cases:
-      # kb_ids、max_docs、manifest 统计非法时直接失败。
+      # kb_ids 或 manifest 统计非法时直接失败；max_docs 不再是支持的参数。
       - contract_error
-      # auto_case_count 大于零且没有任何可选文档时直接失败。
-      - empty_selection_error
+      # auto_case_count 大于零且没有发现任何文档时直接失败。
+      - empty_discovery_error

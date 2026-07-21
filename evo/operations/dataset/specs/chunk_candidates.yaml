@@ -2,7 +2,7 @@ operation:
   op_id: dataset.build_chunk_candidates
   flow: dataset
   stage: build_chunk_candidates
-  description: 一次扫描已选文档中的 chunk，为尚需自动生成的 case 构建候选列表。
+  description: 完整统计已发现文档的有效 chunk 容量，并按全局 group 优先级及 KB/doc 容量比例构建候选列表。
 
 fixed_op:
   inputs:
@@ -50,11 +50,26 @@ input_payload:
   build_chunks_params:
     fields:
       groups:
+        # 全局优先级顺序：仅当前 group 的有效容量不足时，才使用后续 group。
         type: list[string]
         required: false
       allowed_types:
         type: list[string]
         required: false
+      max_scan_docs_per_kb:
+        # 超大 KB 的硬保护；达到上限必须失败，绝不静默截断或改变采样比例。
+        type: integer
+        required: false
+        default: 10000
+        validation:
+          - positive_integer
+      max_scan_chunks:
+        # 本次运行的全局原始 chunk 统计硬保护；包含被过滤或非法的节点。
+        type: integer
+        required: false
+        default: 100000
+        validation:
+          - positive_integer
 
 output_payload:
   build_chunk_candidates:
@@ -66,29 +81,129 @@ output_payload:
         item:
           type: object
           fields:
+            available:
+              # 候选列表只包含真实 chunk，因此固定为 true；build_chunks 可直接映射为 partition 输出。
+              type: boolean
             kb_id:
               type: string
             chunk_id:
               type: string
             doc_id:
               type: string
+            filename:
+              type: string
+            group:
+              type: string
+            type:
+              type: string
             text:
               type: string
+            embedding:
+              type: object
+            metadata:
+              type: object
       selection_stats:
         type: object
-      fallback_used:
-        type: boolean
+        # 按目标、扫描、有效性、分配四块组织；不保存非法 chunk ID 或正文。
+        fields:
+          target:
+            type: object
+            fields:
+              candidate_limit:
+                type: integer
+              selected_count:
+                type: integer
+              shortfall_count:
+                type: integer
+          scan:
+            type: object
+            fields:
+              doc_count:
+                type: integer
+              chunk_count:
+                type: integer
+          eligibility:
+            type: object
+            fields:
+              effective_count:
+                type: integer
+              filtered_count_by_type:
+                type: object
+                value_type: integer
+              invalid_count_by_reason:
+                # 正文为空、embedding 缺失或 embedding 非法等不能成为候选的原因计数。
+                type: object
+                value_type: integer
+          allocation:
+            type: object
+            fields:
+              fallback_used:
+                type: boolean
+              groups:
+                # 按配置顺序列出 group -> KB -> doc 的容量、配额与实际选择量。
+                type: array
+                item:
+                  type: object
+                  fields:
+                    group:
+                      type: string
+                    effective_count:
+                      type: integer
+                    quota:
+                      type: integer
+                    selected_count:
+                      type: integer
+                    knowledge_bases:
+                      # 使用稳定 list 保留 kb_ids 顺序，避免把外部 ID 作为对象字段名。
+                      type: array
+                      item:
+                        type: object
+                        fields:
+                          kb_id:
+                            type: string
+                          effective_count:
+                            type: integer
+                          quota:
+                            type: integer
+                          selected_count:
+                            type: integer
+                          documents:
+                            # 按 discovery 顺序记录每个 doc 的三级配额结果。
+                            type: array
+                            item:
+                              type: object
+                              fields:
+                                doc_id:
+                                  type: string
+                                effective_count:
+                                  type: integer
+                                quota:
+                                  type: integer
+                                selected_count:
+                                  type: integer
       params:
         type: object
+        fields:
+          groups:
+            type: list[string]
+          allowed_types:
+            type: list[string]
+          max_scan_docs_per_kb:
+            type: integer
+          max_scan_chunks:
+            type: integer
 
 execution_flow:
   - 读取 selected_docs、import_cases_manifest 与 build_chunks_params。
-  - 候选扫描预算只服务仍需自动生成的 case；它不是独立的全局 chunk 总数，也不输出为 artifact 字段。
+  - 候选预算 candidate_limit=ceil(auto_case_count*1.5)，只服务仍需自动生成的 case；它不改变由 flow 声明的静态 chunk slot 数。
   - 全局静态 chunk slot 总数固定由 target_case_count 的 1.5 倍（向上取整）决定，定义在 flow；CSV 导入不会改变该数量。
-  - 当 auto_case_count=0 时，不扫描知识库，返回 chunks=[] 与零值筛选统计。
-  - 否则按 selected_docs 的 kb_id/doc_id 来源读取、归一化 type，并沿用既有 groups、allowed_types、候选容量和 fallback 筛选算法。
-  - 每个候选保留原始 kb_id、chunk_id、doc_id 与完整 text；不改写任何数据库 ID，也不在此处重新分配导入 case。
-  - 被过滤节点不消耗配额；返回完整候选列表和 selection_stats，供所有静态 chunk partition 复用。
+  - 当 auto_case_count=0 时，不扫描知识库，返回 chunks=[] 与零值审计统计。
+  - 对 selected_docs 中每个 KB/doc/group 的候选总体做完整统计；实现可由底层数据库聚合或按 doc_id 批量分页完成，但结果不得因分页/上限外的静默截断而失真。超过 max_scan_docs_per_kb 或 max_scan_chunks 必须失败。
+  - 有效条件为 group 命中、type 位于 allowed_types、正文非空且 embedding 存在并合法；type 不允许、空正文和 embedding 问题分别计数，均不消耗配额。
+  - 统计阶段仅保留 group/KB/doc 容量与选取所需的轻量定位信息；完成配额分配后才批量读取入选 chunk 的正文和 embedding。chunk_id/doc_id 保持数据库原值，不拼接或改写。
+  - 按 groups 的全局优先级依次处理：对当前 group 的剩余预算，先按 KB 有效容量分配 quota，再在各 KB 内按 doc 有效容量分配 quota；两层均使用最大余数法，KB/doc 同余时分别按 kb_ids 和 discovery 顺序打破平局。
+  - 每个 doc 以 chunk_id 的稳定 hash 均匀选择 quota 个 chunk（可下推至数据库排序或以轻量定位信息完成），随后按原始 chunk number 输出；只有当前 group 的全局有效容量不足，才进入下一个 group。
+  - 所有 group 仍不足 candidate_limit 时，返回全部可用候选，并在 selection_stats.target.shortfall_count 记录短缺；剩余静态 slot 由 build_chunks 生成占位。
 
 tests:
   auto_generation_capacity:
@@ -99,9 +214,24 @@ tests:
       # auto_case_count=0 时不读取任何知识库 chunk，输出空候选和零统计。
       - imported_only_skips_kb_scan
   candidate_selection:
-    # 非零自动生成路径保持当前的筛选与容量策略，不引入新的多知识库分配算法。
+    # 非零自动生成路径基于真实有效容量进行三级 quota 分配，不再依赖预估 group_counts。
     cases:
-      # 多知识库候选沿 selected_docs 顺序扫描，并保留每个 chunk 的 kb_id 溯源。
-      - preserves_selected_doc_order_and_kb_provenance
-      # allowed_types 过滤项不消耗配额，既有 fallback 与 selection_stats 语义保持不变。
-      - existing_filter_and_fallback_behavior
+      # 对所有已发现文档完整统计；group/type/正文/embedding 过滤后的有效容量才参与 quota。
+      - complete_effective_capacity_accounting_before_allocation
+      # group 为全局优先级；KB 与 doc 使用容量比例和最大余数法分配，tie-break 稳定可复现。
+      - global_group_priority_with_hierarchical_largest_remainder_quotas
+      # doc 内用稳定 hash 均匀选取，避免总是偏向文档开头；输出顺序仍稳定。
+      - deterministic_uniform_in_document_selection
+      # 无效节点与被允许类型之外的节点不消耗 quota，且仅记录聚合统计。
+      - invalid_and_filtered_chunks_are_excluded_with_aggregate_audit_stats
+      # 硬扫描上限必须显式失败，不允许部分扫描后继续产出带偏候选。
+      - scan_safety_limits_fail_without_silent_truncation
+  output_contract:
+    # 输出按候选数据、四块审计统计和实际生效参数组织，避免重复或散落的顶层计数。
+    cases:
+      # chunks 项包含下游所需的来源、正文、embedding 与 metadata，并保持原始数据库 ID。
+      - candidate_chunks_expose_complete_downstream_payload
+      # selection_stats 固定分为 target、scan、eligibility、allocation，字段只能归属一个语义分组。
+      - selection_stats_have_four_non_overlapping_sections
+      # params 回显 groups、allowed_types 与两个扫描硬上限，便于复现实验。
+      - resolved_candidate_params_are_recorded
