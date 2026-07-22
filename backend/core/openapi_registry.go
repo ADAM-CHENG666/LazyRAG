@@ -612,13 +612,6 @@ type agentThreadTraceCompareQueryParams struct {
 	B string `query:"b" required:"true"`
 }
 
-type agentThreadEvalBadCasesQueryParams struct {
-	PageSize    int32  `query:"page_size"`
-	PageToken   string `query:"page_token"`
-	Keyword     string `query:"keyword"`
-	FailureType string `query:"failure_type"`
-}
-
 type agentThreadABTestCaseDetailsQueryParams struct {
 	PageSize  int32  `query:"page_size"`
 	PageToken string `query:"page_token"`
@@ -3806,16 +3799,6 @@ func registeredCoreOperations() []openAPIOperation {
 			Tags:        []string{"agent"},
 			PathParams:  agentThreadGatePathParams{},
 			Responses:   map[int]openAPIResponse{200: evoGateContentResp},
-		},
-		{
-			Method:      "GET",
-			Path:        "/agent/threads/{thread_id}/gates/eval/versions/{version}/bad-cases",
-			Summary:     "List eval bad cases for a gate version",
-			Description: "Proxies Evo GET /threads/{thread_id}/gates/eval/versions/{version}/bad-cases.",
-			Tags:        []string{"agent"},
-			PathParams:  agentThreadGateVersionPathParams{},
-			QueryParams: agentThreadEvalBadCasesQueryParams{},
-			Responses:   map[int]openAPIResponse{200: evoJSONResp("Evo eval bad case page")},
 		},
 		{
 			Method:      "GET",
