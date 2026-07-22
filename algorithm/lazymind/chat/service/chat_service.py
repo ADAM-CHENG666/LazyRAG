@@ -284,7 +284,8 @@ async def handle_chat(request: ChatRequest) -> Union[Dict[str, Any], StreamingRe
     raw_query = str(request.message.query or '')
     filter_query, _ = _normalize_cite_message_query_for_agent(raw_query)
     skip_sensitive_filter = (
-        is_plugin_driver_turn(request.plugin.plugin_context)
+        request.runtime.skip_sensitive_filter
+        or is_plugin_driver_turn(request.plugin.plugin_context)
         or request.runtime.context_usage_preview
         or request.runtime.context_prompt_export
     )
@@ -387,7 +388,10 @@ async def _handle_chat_impl(
     language_query = user_input.strip()
     is_driver_turn = is_plugin_driver_turn(plugin.plugin_context)
     skip_sensitive_filter = (
-        is_driver_turn or runtime.context_usage_preview or runtime.context_prompt_export
+        runtime.skip_sensitive_filter
+        or is_driver_turn
+        or runtime.context_usage_preview
+        or runtime.context_prompt_export
     )
     if skip_sensitive_filter:
         sensitive_match = None
