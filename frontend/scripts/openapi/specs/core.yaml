@@ -411,6 +411,9 @@ components:
                     type: array
                 reasoning_content:
                     type: string
+                thinking_time_s:
+                    format: int64
+                    type: integer
                 seq:
                     type: integer
                 sources:
@@ -438,6 +441,22 @@ components:
                 - message
                 - success
                 - table_count
+            type: object
+        CheckFileHashesRequest:
+            properties:
+                hashes:
+                    items:
+                        type: string
+                    type: array
+            required:
+                - hashes
+            type: object
+        CheckFileHashesResponse:
+            properties:
+                missing_hashes:
+                    items:
+                        type: string
+                    type: array
             type: object
         CheckModelProviderData:
             properties:
@@ -508,6 +527,8 @@ components:
             type: object
         CompleteUploadResponse:
             properties:
+                content_hash:
+                    type: string
                 content_url:
                     type: string
                 convert_error:
@@ -2300,83 +2321,19 @@ components:
             type: object
         PromptItem:
             properties:
-                category:
-                    description: 固定分类编码
-                    type: string
                 content:
-                    description: 话术正文
-                    type: string
-                created_at:
-                    description: 创建时间
                     type: string
                 display_name:
-                    description: 话术展示名称
                     type: string
                 id:
-                    description: 话术唯一标识
                     type: string
-                is_favorite:
-                    description: 是否已收藏
+                is_default:
                     type: boolean
-                last_used_at:
-                    description: 最近使用时间
-                    type: string
                 name:
-                    description: 资源名称
                     type: string
-                source:
-                    description: 话术来源
-                    type: string
-                updated_at:
-                    description: 更新时间
-                    type: string
-                usage_count:
-                    description: 累计使用次数
-                    format: int64
-                    type: integer
-            type: object
-        PromptFacets:
-            properties:
-                categories:
-                    additionalProperties:
-                        format: int64
-                        type: integer
-                    description: 各分类的匹配数量
-                    type: object
-                scopes:
-                    additionalProperties:
-                        format: int64
-                        type: integer
-                    description: 各范围的匹配数量
-                    type: object
-            type: object
-        PromptCategory:
-            properties:
-                id:
-                    description: 用户自定义分类唯一标识
-                    type: string
-                name:
-                    description: 用户自定义分类名称
-                    type: string
-            required:
-                - id
-                - name
-            type: object
-        PromptCategoryListResponse:
-            properties:
-                categories:
-                    items:
-                        $ref: '#/components/schemas/PromptCategory'
-                    type: array
             type: object
         PromptListResponse:
             properties:
-                custom_categories:
-                    items:
-                        $ref: '#/components/schemas/PromptCategory'
-                    type: array
-                facets:
-                    $ref: '#/components/schemas/PromptFacets'
                 next_page_token:
                     type: string
                 prompts:
@@ -2389,23 +2346,10 @@ components:
             type: object
         PromptPatchRequest:
             properties:
-                category:
-                    description: 固定分类编码
-                    type: string
                 content:
-                    description: 话术正文
                     type: string
                 display_name:
-                    description: 话术展示名称
                     type: string
-            type: object
-        PromptCategoryRequest:
-            properties:
-                name:
-                    description: 用户自定义分类名称
-                    type: string
-            required:
-                - name
             type: object
         PromptPolishRequest:
             properties:
@@ -2424,34 +2368,13 @@ components:
             type: object
         PromptRequest:
             properties:
-                category:
-                    description: 固定分类编码
-                    type: string
                 content:
-                    description: 话术正文
                     type: string
                 display_name:
-                    description: 话术展示名称
                     type: string
             required:
                 - display_name
                 - content
-            type: object
-        PromptStateResponse:
-            properties:
-                id:
-                    description: 话术唯一标识
-                    type: string
-                is_favorite:
-                    description: 是否已收藏
-                    type: boolean
-                last_used_at:
-                    description: 最近使用时间
-                    type: string
-                usage_count:
-                    description: 累计使用次数
-                    format: int64
-                    type: integer
             type: object
         QuestionTypeOption:
             properties:
@@ -7616,6 +7539,30 @@ paths:
             summary: Complete upload
             tags:
                 - tasks
+    /api/core/datasets/{dataset}/uploads:checkHashes:
+        post:
+            parameters:
+                - in: path
+                  name: dataset
+                  required: true
+                  schema:
+                    type: string
+            requestBody:
+                content:
+                    application/json:
+                        schema:
+                            $ref: '#/components/schemas/CheckFileHashesRequest'
+                required: true
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/CheckFileHashesResponse'
+                    description: Missing file hashes
+            summary: Check reusable file hashes
+            tags:
+                - tasks
     /api/core/datasets/{dataset}/uploads:initUpload:
         post:
             parameters:
@@ -8801,12 +8748,6 @@ paths:
                   required: false
                   schema:
                     type: string
-                - description: Optional UI locale. zh and zh-* use zh-CN; en and en-* use en-US. Missing or unsupported values default to zh-CN.
-                  in: header
-                  name: Accept-Language
-                  required: false
-                  schema:
-                    type: string
             responses:
                 "200":
                     content:
@@ -9224,13 +9165,6 @@ paths:
     /api/core/model_providers:with_groups:
         get:
             description: Returns user_model_providers for the current user that have at least one non-deleted row in user_model_provider_groups. The current user identity is injected by the auth gateway from the token. Same response shape as GET /model_providers.
-            parameters:
-                - description: Optional UI locale. zh and zh-* use zh-CN; en and en-* use en-US. Missing or unsupported values default to zh-CN.
-                  in: header
-                  name: Accept-Language
-                  required: false
-                  schema:
-                    type: string
             responses:
                 "200":
                     content:
@@ -10059,47 +9993,6 @@ paths:
                 "200":
                     description: OK
             summary: GET /plugins/{plugin_id}
-    /api/core/prompt_categories:
-        get:
-            responses:
-                "200":
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/PromptCategoryListResponse'
-                    description: Prompt category list
-            summary: Prompt category list
-        post:
-            requestBody:
-                content:
-                    application/json:
-                        schema:
-                            $ref: '#/components/schemas/PromptCategoryRequest'
-                required: true
-            responses:
-                "200":
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/PromptCategory'
-                    description: Created prompt category
-            summary: Create prompt category
-    /api/core/prompt_categories/{name}:
-        delete:
-            parameters:
-                - in: path
-                  name: name
-                  required: true
-                  schema:
-                    type: string
-            responses:
-                "200":
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/EmptyObject'
-                    description: Deleted successfully
-            summary: Delete prompt category
     /api/core/prompts:
         get:
             parameters:
@@ -10115,26 +10008,6 @@ paths:
                     type: string
                 - in: query
                   name: keyword
-                  required: false
-                  schema:
-                    type: string
-                - in: query
-                  name: category
-                  required: false
-                  schema:
-                    type: string
-                - in: query
-                  name: scope
-                  required: false
-                  schema:
-                    type: string
-                - in: query
-                  name: sort
-                  required: false
-                  schema:
-                    type: string
-                - in: query
-                  name: locale
                   required: false
                   schema:
                     type: string
@@ -10213,7 +10086,7 @@ paths:
                                 $ref: '#/components/schemas/PromptItem'
                     description: Updated prompt
             summary: Update prompt
-    /api/core/prompts/{name}:favorite:
+    /api/core/prompts/{name}:setDefault:
         post:
             parameters:
                 - in: path
@@ -10226,10 +10099,10 @@ paths:
                     content:
                         application/json:
                             schema:
-                                $ref: '#/components/schemas/PromptStateResponse'
-                    description: Favorited successfully
-            summary: Favorite prompt
-    /api/core/prompts/{name}:unfavorite:
+                                $ref: '#/components/schemas/EmptyObject'
+                    description: Set successfully
+            summary: Set as default prompt
+    /api/core/prompts/{name}:unsetDefault:
         post:
             parameters:
                 - in: path
@@ -10242,25 +10115,9 @@ paths:
                     content:
                         application/json:
                             schema:
-                                $ref: '#/components/schemas/PromptStateResponse'
-                    description: Unfavorited successfully
-            summary: Unfavorite prompt
-    /api/core/prompts/{name}:use:
-        post:
-            parameters:
-                - in: path
-                  name: name
-                  required: true
-                  schema:
-                    type: string
-            responses:
-                "200":
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/PromptStateResponse'
-                    description: Usage recorded
-            summary: Record prompt usage
+                                $ref: '#/components/schemas/EmptyObject'
+                    description: Unset successfully
+            summary: Unset default prompt
     /api/core/prompts:polish:
         post:
             requestBody:
@@ -12281,12 +12138,6 @@ paths:
                   required: false
                   schema:
                     type: integer
-                - description: Optional UI locale. zh and zh-* use zh-CN; en and en-* use en-US. Missing or unsupported values default to zh-CN.
-                  in: header
-                  name: Accept-Language
-                  required: false
-                  schema:
-                    type: string
             responses:
                 "200":
                     content:

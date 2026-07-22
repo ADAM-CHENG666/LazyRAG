@@ -59,6 +59,7 @@ type Client interface {
 
 type ResourceClient interface {
 	CreateDataset(ctx context.Context, req CreateDatasetRequest) (CreateDatasetResponse, error)
+	UpdateDataset(ctx context.Context, req UpdateDatasetRequest) error
 	CreateBindingRootDocument(ctx context.Context, req CreateBindingRootDocumentRequest) (CreateBindingRootDocumentResponse, error)
 	DeleteDocument(ctx context.Context, req DeleteDocumentRequest) error
 	BatchDeleteDocuments(ctx context.Context, req BatchDeleteDocumentsRequest) error
@@ -66,6 +67,12 @@ type ResourceClient interface {
 
 type DatasetDeletionClient interface {
 	DeleteDataset(ctx context.Context, req DeleteDatasetRequest) error
+}
+
+type UpdateDatasetRequest struct {
+	DatasetID   string `json:"-"`
+	DisplayName string `json:"display_name"`
+	UserID      string `json:"-"`
 }
 
 type DatasetAlgo struct {
@@ -79,7 +86,9 @@ type CreateDatasetRequest struct {
 	Name           string       `json:"name"`
 	DisplayName    string       `json:"display_name,omitempty"`
 	CreatedBy      string       `json:"created_by"`
+	UserName       string       `json:"-"`
 	TenantID       string       `json:"tenant_id,omitempty"`
+	Tags           []string     `json:"tags,omitempty"`
 	Algo           *DatasetAlgo `json:"algo,omitempty"`
 }
 
@@ -99,6 +108,7 @@ type CreateBindingRootDocumentRequest struct {
 	ParentDocumentID string `json:"parent_document_id,omitempty"`
 	Name             string `json:"name"`
 	UserID           string `json:"user_id,omitempty"`
+	UserName         string `json:"-"`
 }
 
 type CreateBindingRootDocumentResponse struct {

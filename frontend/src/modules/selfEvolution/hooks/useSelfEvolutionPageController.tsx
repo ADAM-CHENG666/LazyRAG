@@ -35,7 +35,10 @@ import type { Dataset } from "@/api/generated/core-client";
 import { AgentAppsAuth } from "@/components/auth";
 import MarkdownViewer from "@/modules/knowledge/components/MarkdownViewer";
 import { KnowledgeBaseServiceApi } from "@/modules/knowledge/utils/request";
-import { axiosInstance, getLocalizedErrorMessage } from "@/components/request";
+import {
+  axiosInstance,
+  localizeErrorCode,
+} from "@/components/request";
 import type { AxiosError } from "axios";
 import { type HistorySessionModalProps } from "../components/HistorySessions";
 import { type SelfEvolutionHomeViewProps } from "../components/LaunchViews";
@@ -93,6 +96,7 @@ import {
   AbSummaryReport,
   getPxMetricMeta,
   getKnowledgeBaseName,
+  getCatalogApiErrorMessage,
   isCanceledRequest,
   getExistingEvalSetOptions,
   evalSetPreviewData,
@@ -141,6 +145,7 @@ import {
   formatAbMetricLabel,
   buildAbSummaryReports,
   parseAbtestComparisonArtifact,
+  buildAbSummaryFromComparisonArtifact,
   formatMaybePValue,
   parseSSEFrame,
   isDoneSSEFrame,
@@ -298,6 +303,8 @@ export function SelfEvolutionPageController({
   const [isConfirmingNewSession, setIsConfirmingNewSession] = useState(false);
   const [isSendingMessage, setIsSendingMessage] = useState(false);
   const [isPlanningNextStep, setIsPlanningNextStep] = useState(false);
+  const [hasAttemptedFinalResultLoad, setHasAttemptedFinalResultLoad] =
+    useState(false);
   const [isRestoringThread, setIsRestoringThread] = useState(false);
   const [isHistorySessionModalOpen, setIsHistorySessionModalOpen] =
     useState(false);
@@ -314,7 +321,11 @@ export function SelfEvolutionPageController({
   const [newSessionDraft, setNewSessionDraft] = useState<NewSessionDraft>({});
   const [activeWorkbenchTab, setActiveWorkbenchTab] = useState<
     SelfEvolutionWorkbenchTab | undefined
-  >("messages");
+  >(() =>
+    routeState && "activeWorkbenchTab" in routeState
+      ? routeState.activeWorkbenchTab ?? undefined
+      : "messages",
+  );
   const [activeArtifactKind, setActiveArtifactKind] =
     useState<WorkflowResultKind>();
   const [isArtifactPanelOpen, setIsArtifactPanelOpen] = useState(false);
@@ -359,6 +370,7 @@ export function SelfEvolutionPageController({
   const [selectedViewStage, setSelectedViewStage] = useState<string>();
   const [selectedThreadStepId, setSelectedThreadStepId] = useState<string>();
   const [loadingThreadStepId, setLoadingThreadStepId] = useState<string>();
+  const routeSelectionRestoredRef = useRef(false);
   const threadEventsRef = useRef<NormalizedThreadEvent[]>([]);
   const [remoteThreadHistory, setRemoteThreadHistory] = useState<
     ThreadHistoryEntry[]
@@ -435,10 +447,7 @@ export function SelfEvolutionPageController({
             return;
           }
 
-          const fallback = t("selfEvolutionRun.error.knowledgeBaseLoadFailed");
-          setKnowledgeBaseError(
-            getLocalizedErrorMessage(error, fallback) || fallback,
-          );
+          setKnowledgeBaseError(getCatalogApiErrorMessage(error));
         })
         .finally(() => {
           if (!signal?.aborted) {
@@ -661,6 +670,11 @@ export function SelfEvolutionPageController({
       threadStepStatusByStage,
       workflowRuntimeState,
     ],
+  );
+  const isWorkflowComplete = Boolean(
+    !pendingCheckpointWaitPrompt &&
+      processDashboard.overview.length > 0 &&
+      processDashboard.overview.every((item) => item.step.status === "done"),
   );
   const applyLocalStageStreamCompletion = useCallback(
     (completedStage: ThreadEventStage) => {
@@ -969,14 +983,17 @@ export function SelfEvolutionPageController({
   const analysisActionableCaseColumns = useMemo<
     ColumnsType<AnalysisActionableCaseRow>
   >(() => buildAnalysisActionableCaseColumns(t), [t]);
-  const abSummaryReports = useMemo<AbSummaryReport[]>(
-    () => buildAbSummaryReports(workflowResults.abtests.data),
-    [workflowResults.abtests.data],
-  );
   const abtestComparisonArtifact = useMemo(
     () => parseAbtestComparisonArtifact(workflowResults.abtests.data),
     [workflowResults.abtests.data],
   );
+  const abSummaryReports = useMemo<AbSummaryReport[]>(() => {
+    const reports = buildAbSummaryReports(workflowResults.abtests.data);
+    if (reports.length > 0 || !abtestComparisonArtifact) {
+      return reports;
+    }
+    return [buildAbSummaryFromComparisonArtifact(abtestComparisonArtifact)];
+  }, [abtestComparisonArtifact, workflowResults.abtests.data]);
   const abTraceObservation = useMemo(
     () => normalizeTraceObservation(workflowResults.abtests.data),
     [workflowResults.abtests.data],
@@ -1015,7 +1032,24 @@ export function SelfEvolutionPageController({
   >(() => {
     const report = abSummaryReports[0];
     if (!report) {
-      return undefined;
+      if (
+        !isWorkflowComplete ||
+        !hasAttemptedFinalResultLoad ||
+        workflowResults.abtests.loading
+      ) {
+        return undefined;
+      }
+      return {
+        verdict: "done",
+        title: t("selfEvolutionRun.workflowCompleted"),
+        desc:
+          workflowResults.abtests.error ||
+          t("selfEvolutionRun.resultEmptyHint", {
+            label: getWorkflowResultLabels().abtests,
+          }),
+        metrics: [],
+        reasons: [],
+      };
     }
     const verdictText = (report.verdict || "").toLowerCase();
     const verdict: SelfEvolutionFinalResultSummary["verdict"] =
@@ -1099,7 +1133,15 @@ export function SelfEvolutionPageController({
       metrics: metricRows,
       reasons: reasons.slice(0, 3),
     };
-  }, [abSummaryReports, processDashboard.cutoverCompleted, t]);
+  }, [
+    abSummaryReports,
+    hasAttemptedFinalResultLoad,
+    isWorkflowComplete,
+    processDashboard.cutoverCompleted,
+    t,
+    workflowResults.abtests.error,
+    workflowResults.abtests.loading,
+  ]);
   const abComparisonColumns = useMemo<ColumnsType<AbComparisonRow>>(
     () => buildAbComparisonColumns(t),
     [t],
@@ -1359,10 +1401,7 @@ export function SelfEvolutionPageController({
           loading: false,
           key: diffArtifactKey,
           content: "",
-          error: getLocalizedErrorMessage(
-            error,
-            t("selfEvolutionRun.diffLoadFailed"),
-          ),
+          error: getCatalogApiErrorMessage(error),
         });
       });
 
@@ -1510,10 +1549,7 @@ export function SelfEvolutionPageController({
           reportId,
           loading: false,
           loaded: true,
-          error: getLocalizedErrorMessage(
-            error,
-            t("selfEvolutionRun.dataListLoadFailed"),
-          ),
+          error: getCatalogApiErrorMessage(error),
         }));
         return undefined;
       }
@@ -1584,12 +1620,7 @@ export function SelfEvolutionPageController({
             ...prev[kind],
             loading: false,
             loaded: true,
-            error: getLocalizedErrorMessage(
-              error,
-              t("selfEvolutionRun.workflowResultLoadFailed", {
-                label: getWorkflowResultLabels()[kind],
-              }),
-            ),
+            error: getCatalogApiErrorMessage(error),
           },
         }));
         return undefined;
@@ -1597,6 +1628,31 @@ export function SelfEvolutionPageController({
     },
     [activeThreadId, fetchEvalReportBadCases],
   );
+  useEffect(() => {
+    setHasAttemptedFinalResultLoad(false);
+  }, [activeThreadId]);
+
+  useEffect(() => {
+    if (
+      !activeThreadId ||
+      !isWorkflowComplete ||
+      hasAttemptedFinalResultLoad ||
+      workflowResults.abtests.loading ||
+      workflowResults.abtests.loaded
+    ) {
+      return;
+    }
+    setHasAttemptedFinalResultLoad(true);
+    void fetchWorkflowResult("abtests", { force: true });
+  }, [
+    activeThreadId,
+    fetchWorkflowResult,
+    hasAttemptedFinalResultLoad,
+    isWorkflowComplete,
+    workflowResults.abtests.loaded,
+    workflowResults.abtests.loading,
+  ]);
+
   const handleWorkflowDownload = useCallback(
     async (
       kind: WorkflowResultKind,
@@ -1721,9 +1777,15 @@ export function SelfEvolutionPageController({
       }
       navigate(
         `/self-evolution/detail/${encodeURIComponent(activeThreadId)}/observation/${kind}`,
+        {
+          state: {
+            activeWorkbenchTab: activeWorkbenchTab ?? null,
+            selectedViewStage: kind,
+          },
+        },
       );
     },
-    [activeThreadId, navigate],
+    [activeThreadId, activeWorkbenchTab, navigate],
   );
 
   const openCaseArtifact = useCallback(
@@ -1771,10 +1833,7 @@ export function SelfEvolutionPageController({
           caseId,
           title,
           loading: false,
-          error: getLocalizedErrorMessage(
-            error,
-            t("selfEvolutionRun.caseArtifactLoadFailed", { title }),
-          ),
+          error: getCatalogApiErrorMessage(error),
         });
       }
     },
@@ -1826,10 +1885,6 @@ export function SelfEvolutionPageController({
   }, [activeThreadId, workflowResults["eval-reports"].data]);
 
   useEffect(() => {
-    if (view === "detail" && routeThreadId && !isNewSessionConfigOpen) {
-      setIsKnowledgeBaseLoading(false);
-      return;
-    }
     const controller = new AbortController();
     fetchKnowledgeBaseOptions(controller.signal);
 
@@ -2034,12 +2089,12 @@ export function SelfEvolutionPageController({
 
   const showLocalErrorWhenNotHandledByAxios = (
     error: unknown,
-    fallback: string,
+    _fallback: string,
   ) => {
     if ((error as { isAxiosError?: boolean })?.isAxiosError) {
       return;
     }
-    message.error(getLocalizedErrorMessage(error, fallback) || fallback, 2);
+    message.error(getCatalogApiErrorMessage(error), 2);
   };
 
   const createAndStartThread = async (config?: {
@@ -2695,13 +2750,7 @@ export function SelfEvolutionPageController({
         activeSessionId,
       );
     } catch (error) {
-      message.error(
-        getLocalizedErrorMessage(
-          error,
-          t("selfEvolutionRun.sseConnectionError"),
-        ) || t("selfEvolutionRun.sseConnectionError"),
-        2,
-      );
+      message.error(getCatalogApiErrorMessage(error), 2);
     } finally {
       if (loadingThreadStepIdRef.current === step.stepId) {
         loadingThreadStepIdRef.current = undefined;
@@ -2833,12 +2882,10 @@ export function SelfEvolutionPageController({
       );
 
       if (!response.ok) {
-        throw new Error(`SSE connection failed: HTTP ${response.status}`);
+        throw new Error(localizeErrorCode("2000509"));
       }
       if (!response.body) {
-        throw new Error(
-          "SSE connection failed: no readable stream returned by browser",
-        );
+        throw new Error(localizeErrorCode("2000509"));
       }
 
       options?.onStreamConnected?.();
@@ -2923,13 +2970,7 @@ export function SelfEvolutionPageController({
       if (controller.signal.aborted) {
         return;
       }
-      message.error(
-        getLocalizedErrorMessage(
-          error,
-          t("selfEvolutionRun.sseConnectionError"),
-        ),
-        2,
-      );
+      message.error(getCatalogApiErrorMessage(error), 2);
     } finally {
       if (threadEventsAbortRef.current === subscription) {
         threadEventsAbortRef.current = null;
@@ -3224,22 +3265,14 @@ export function SelfEvolutionPageController({
       }
       const responseStatus = (error as AxiosError | undefined)?.response
         ?.status;
-      const errorTextRaw =
-        getLocalizedErrorMessage(
-          error,
-          t("selfEvolutionRun.threadDetailRestoreFailed"),
-        ) || "";
-      const isThreadNotFound =
-        responseStatus === 404 &&
-        errorTextRaw.toLowerCase().includes("thread not found");
+      const errorTextRaw = getCatalogApiErrorMessage(error);
+      const isThreadNotFound = responseStatus === 404;
       if (isThreadNotFound) {
         setWorkflowRuntimeState(createThreadRestoreWorkflowRuntimeState());
         setWorkflowResults(createInitialWorkflowResultsState());
         setCaseArtifact(undefined);
       }
-      const errorText = isThreadNotFound
-        ? t("selfEvolutionRun.threadNotFoundFull")
-        : errorTextRaw || t("selfEvolutionRun.threadDetailRestoreFailed");
+      const errorText = errorTextRaw;
       setThreadRestoreError(errorText);
       setChatSessions([
         {
@@ -3280,6 +3313,29 @@ export function SelfEvolutionPageController({
   useEffect(() => {
     resetThreadStepViewSelection();
   }, [activeSessionId]);
+
+  useEffect(() => {
+    routeSelectionRestoredRef.current = false;
+  }, [routeThreadId]);
+
+  useEffect(() => {
+    const returnedStage = routeState?.selectedViewStage;
+    if (
+      !returnedStage ||
+      isRestoringThread ||
+      routeSelectionRestoredRef.current
+    ) {
+      return;
+    }
+    const returnedStep = threadStepList.steps.find(
+      (step) => toThreadEventStage(step.stage || step.title) === returnedStage,
+    );
+    if (!returnedStep) {
+      return;
+    }
+    routeSelectionRestoredRef.current = true;
+    void onSelectThreadStep(returnedStep);
+  }, [isRestoringThread, routeState?.selectedViewStage, threadStepList]);
 
   useEffect(() => {
     if (!stepListCheckpointPrompt?.completedStage || selectedThreadStepId) {
@@ -3356,6 +3412,22 @@ export function SelfEvolutionPageController({
     });
     setPrompt("");
 
+    const isContinueCheckpointCommand = Boolean(
+      activeThreadId &&
+        pendingCheckpointWaitPrompt?.command &&
+        !requiresManualCheckpointAction(pendingCheckpointWaitPrompt) &&
+        trimmedPrompt === pendingCheckpointWaitPrompt.command.trim(),
+    );
+    if (isContinueCheckpointCommand) {
+      setIsPlanningNextStep(true);
+      try {
+        await continueThreadExecution();
+      } finally {
+        setIsPlanningNextStep(false);
+      }
+      return;
+    }
+
     if (activeThreadId) {
       setIsSendingMessage(true);
       setIsPlanningNextStep(true);
@@ -3379,7 +3451,7 @@ export function SelfEvolutionPageController({
         );
 
         if (!response.ok) {
-          throw new Error(`Message send failed: HTTP ${response.status}`);
+          throw new Error(localizeErrorCode("2000509"));
         }
 
         const contentType = response.headers.get("content-type") || "";
@@ -3424,10 +3496,7 @@ export function SelfEvolutionPageController({
         );
       } catch (error) {
         appendSystemMessage(
-          getLocalizedErrorMessage(
-            error,
-            t("selfEvolutionRun.messageSendFailed"),
-          ) || t("selfEvolutionRun.messageSendFailed"),
+          getCatalogApiErrorMessage(error),
           activeSessionId,
         );
       } finally {
@@ -3456,7 +3525,6 @@ export function SelfEvolutionPageController({
       return;
     }
 
-    const checkpointNextStage = pendingCheckpointWaitPrompt?.nextStage;
     const nextStepRunId = resolveContinueThreadStepId(threadStepListRef.current);
     if (nextStepRunId) {
       pendingNextStepRunIdRef.current = nextStepRunId;
@@ -3470,36 +3538,19 @@ export function SelfEvolutionPageController({
         `${AGENT_API_BASE}/threads/${encodeURIComponent(activeThreadId)}/continue`,
         { command_id: requestedCommandId },
       );
-      const refreshedStepList = await refreshThreadStepList(activeThreadId);
-      const latestStepRunId =
-        pendingNextStepRunIdRef.current || nextStepRunId;
-      const latestStep = refreshedStepList.steps.find(
-        (step) => step.stepId === latestStepRunId,
-      );
-      const activeStep = refreshedStepList.steps.find(
-        (step) => step.active || isThreadStepRunning(step),
-      );
-      const latestViewStage =
-        (latestStep
-          ? resolveThreadStepViewStage(latestStep)
-          : undefined) ||
-        checkpointNextStage ||
-        (activeStep ? resolveThreadStepViewStage(activeStep) : undefined);
+      await refreshThreadStepList(activeThreadId);
 
       setSelectedThreadStepId(undefined);
       setLoadingThreadStepId(undefined);
       loadingThreadStepIdRef.current = undefined;
-      setSelectedViewStage(latestViewStage);
+      setSelectedViewStage(undefined);
       await subscribePendingNextStepRunOrRestoreLatest(
         activeThreadId,
         activeSessionId,
       );
     } catch (error) {
       appendSystemMessage(
-        getLocalizedErrorMessage(
-          error,
-          t("selfEvolutionRun.continueFailed"),
-        ) || t("selfEvolutionRun.continueFailed"),
+        getCatalogApiErrorMessage(error),
         activeSessionId,
       );
     } finally {
@@ -3826,13 +3877,8 @@ export function SelfEvolutionPageController({
           message.info(t("selfEvolutionRun.noHistorySessions"), 1.2);
         }
       } catch (error) {
-        const errorText =
-          getLocalizedErrorMessage(
-            error,
-            t("selfEvolutionRun.historyListLoadFailed"),
-          ) || t("selfEvolutionRun.historyListLoadFailed");
+        const errorText = getCatalogApiErrorMessage(error);
         setThreadHistoryListError(errorText);
-        message.error(errorText, 2);
       } finally {
         isThreadHistoryListFetchingRef.current = false;
         setIsLoadingThreadHistoryList(false);
@@ -3964,9 +4010,8 @@ export function SelfEvolutionPageController({
       }
 
       message.success(t("selfEvolutionRun.message.historyDeleted"), 1.2);
-    } catch (error) {
-      const fallback = t("selfEvolutionRun.error.deleteHistoryFailed");
-      message.error(getLocalizedErrorMessage(error, fallback) || fallback, 2);
+    } catch {
+      // API errors are reported by the shared request interceptor.
     } finally {
       setDeletingHistoryKeys((prev) => prev.filter((key) => key !== entry.key));
     }

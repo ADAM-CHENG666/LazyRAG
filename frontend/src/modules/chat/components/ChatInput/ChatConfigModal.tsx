@@ -36,6 +36,7 @@ export default function ChatConfigPopover({
   );
   // Track whether we've already fetched defaults to avoid repeated requests.
   const fetchedRef = useRef(false);
+  const enforcedWorkflowConversationRef = useRef<string | null>(null);
 
   // Sync external initialSettings into local state; reset fetch cache on conversation change.
   useEffect(() => {
@@ -49,6 +50,31 @@ export default function ChatConfigPopover({
       fetchedRef.current = false;
     }
   }, [conversationId, initialSettings]);
+
+  // Starting/attaching a workflow makes approval mode authoritative for this
+  // conversation. Enforce it once per attached session; users may still switch
+  // between auto and approval afterwards, but cannot disable until it is removed.
+  useEffect(() => {
+    if (!hasPluginSession) {
+      enforcedWorkflowConversationRef.current = null;
+      return;
+    }
+    const key = conversationId || 'pending-conversation';
+    if (enforcedWorkflowConversationRef.current === key) return;
+    enforcedWorkflowConversationRef.current = key;
+    const next: ConversationPluginSettings = {
+      ...settings,
+      enable_plugin: true,
+      plugin_mode: 'dynamic',
+    };
+    setSettings(next);
+    onSave?.(next);
+    if (conversationId && !conversationId.startsWith('temp_')) {
+      void ConversationSettingsApi().patchPluginSettings(conversationId, next).catch(() => {
+        enforcedWorkflowConversationRef.current = null;
+      });
+    }
+  }, [conversationId, hasPluginSession, onSave, settings]);
 
   // Fetch settings from server the first time the popover opens.
   async function ensureSettings() {
@@ -82,7 +108,7 @@ export default function ChatConfigPopover({
   function handleOpenChange(next: boolean) {
     setOpen(next);
     if (next) {
-      ensureSettings();
+      void ensureSettings();
     }
   }
 
@@ -96,7 +122,6 @@ export default function ChatConfigPopover({
       }
       onSave?.(next);
     } catch {
-      message.error(t('chat.conversationConfigSaveFailed'));
       setSettings(settings);
     }
   }
@@ -144,18 +169,6 @@ export default function ChatConfigPopover({
         </p>
       </div>
 
-      {pluginEnabled && pluginItems.length > 0 && (
-        <div className="chat-config-section">
-          <div className="chat-config-label">{t('chat.conversationConfigDefaultPlugins')}</div>
-          {pluginItems.map((item) => (
-            <div className="chat-config-row" key={item.plugin_ref}>
-              <span className="chat-config-row-label">{item.name || item.plugin_id}</span>
-              <Switch checked={item.enabled} onChange={(value) => void handlePluginToggle(item, value)} />
-            </div>
-          ))}
-        </div>
-      )}
-
       {/* Allow subtask toggle */}
       <div className="chat-config-section chat-config-subagent-section">
         <div className="chat-config-row">
@@ -167,7 +180,7 @@ export default function ChatConfigPopover({
           </div>
           <Switch
             checked={settings?.enable_subagent ?? true}
-            onChange={(v) => handleChange({ enable_subagent: v })}
+            onChange={(v: boolean) => handleChange({ enable_subagent: v })}
           />
         </div>
       </div>

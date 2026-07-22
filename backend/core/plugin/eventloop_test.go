@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -129,6 +130,144 @@ func TestOnSubAgentDone_SucceededManualMode(t *testing.T) {
 	}
 }
 
+func TestOnSubAgentDone_HandoffWaitsAndMergesParallelTerminalStatuses(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	if err := db.DB.AutoMigrate(&orm.ChatHistory{}); err != nil {
+		t.Fatalf("migrate history: %v", err)
+	}
+	if _, err := CreateSession(ctx, db.DB, CreateSessionInput{
+		SessionID: "ps-history", ConversationID: "conv-history", PluginID: "image-plugin",
+	}); err != nil {
+		t.Fatalf("session: %v", err)
+	}
+	if _, err := CreateSessionStep(ctx, db.DB, "ps-history", "analyze_subject", "task-history", 1); err != nil {
+		t.Fatalf("step: %v", err)
+	}
+	if _, err := CreateSessionStep(ctx, db.DB, "ps-history", "generate_image", "task-image", 1); err != nil {
+		t.Fatalf("parallel step: %v", err)
+	}
+	now := time.Now()
+	for _, taskID := range []string{"task-history", "task-image"} {
+		if err := db.DB.Exec(
+			"INSERT INTO sub_agent_tasks (id, conversation_id, trigger_history_id, seq_in_conversation, agent_type, title, objective, mode, status, progress_pct, last_heartbeat, workspace_path, input_slots, output_slots, create_user_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			taskID, "conv-history", "history-1", 1, "plugin_step", taskID, "", "manual", "pending", 0, now, "", "[]", "[]", "", now, now,
+		).Error; err != nil {
+			t.Fatalf("task %s: %v", taskID, err)
+		}
+	}
+	if err := db.DB.Create(&orm.ChatHistory{
+		ID: "history-1", ConversationID: "conv-history", Seq: 1,
+		Content: "画一张漫画", Result: "<think>准备执行工作流</think>",
+	}).Error; err != nil {
+		t.Fatalf("history: %v", err)
+	}
+
+	handOff := true
+	pctx := &PluginChatContext{
+		SessionID: "ps-history", PluginID: "image-plugin", StepID: "analyze_subject",
+		ConvID: "conv-history", PluginMode: "dynamic", HandOff: &handOff,
+		TriggerHistoryID: "history-1",
+	}
+	OnSubAgentDone(
+		ctx, db.DB, nil, "task-history", subagent.StatusSucceeded,
+		"Analyzed the requested manga style and saved the subject analysis.",
+		func(string, map[string]any) {}, pctx,
+	)
+	var before orm.ChatHistory
+	_ = db.DB.First(&before, "id = ?", "history-1").Error
+	if before.Result != "<think>准备执行工作流</think>" {
+		t.Fatalf("summary was written before parallel batch finished: %s", before.Result)
+	}
+
+	pctx.StepID = "generate_image"
+	OnSubAgentDone(
+		ctx, db.DB, nil, "task-image", subagent.StatusInterrupted, "user stopped",
+		func(string, map[string]any) {}, pctx,
+	)
+
+	var history orm.ChatHistory
+	if err := db.DB.First(&history, "id = ?", "history-1").Error; err != nil {
+		t.Fatalf("reload history: %v", err)
+	}
+	for _, want := range []string{
+		"<think>准备执行工作流</think>",
+		"已完成 analyze_subject",
+		"用户中断了 generate_image",
+	} {
+		if !strings.Contains(history.Result, want) {
+			t.Fatalf("history result missing %q: %s", want, history.Result)
+		}
+	}
+}
+
+func TestHandoffStepName_PrefersLabelThenID(t *testing.T) {
+	labels := map[string]string{"analyze_subject": "主体分析"}
+	if got := handoffStepName("analyze_subject", labels); got != "主体分析（analyze_subject）" {
+		t.Fatalf("labeled step: %q", got)
+	}
+	if got := handoffStepName("generate_image", labels); got != "generate_image" {
+		t.Fatalf("fallback step: %q", got)
+	}
+}
+
+func TestEnforceWorkflowConversationSettings_EnablesApprovalMode(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	if err := db.DB.AutoMigrate(&orm.Conversation{}); err != nil {
+		t.Fatalf("migrate conversation: %v", err)
+	}
+	disabled := false
+	auto := "auto"
+	conversation := orm.Conversation{
+		ID: "conv-settings", DisplayName: "Workflow chat",
+		EnablePlugin: &disabled, PluginMode: &auto,
+	}
+	if err := db.DB.Create(&conversation).Error; err != nil {
+		t.Fatalf("create conversation: %v", err)
+	}
+	if err := enforceWorkflowConversationSettings(ctx, db.DB, conversation.ID); err != nil {
+		t.Fatalf("enforce settings: %v", err)
+	}
+	var got orm.Conversation
+	if err := db.DB.First(&got, "id = ?", conversation.ID).Error; err != nil {
+		t.Fatalf("reload conversation: %v", err)
+	}
+	if got.EnablePlugin == nil || !*got.EnablePlugin {
+		t.Fatalf("workflow was not enabled: %#v", got.EnablePlugin)
+	}
+	if got.PluginMode == nil || *got.PluginMode != "dynamic" {
+		t.Fatalf("plugin mode: %#v", got.PluginMode)
+	}
+}
+
+func TestAppendHandoffHistorySummary_SkipsInlineExecution(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	if err := db.DB.AutoMigrate(&orm.ChatHistory{}); err != nil {
+		t.Fatalf("migrate history: %v", err)
+	}
+	if err := db.DB.Create(&orm.ChatHistory{
+		ID: "history-inline", ConversationID: "conv-inline-history", Seq: 1,
+		Content: "continue", Result: "original result",
+	}).Error; err != nil {
+		t.Fatalf("history: %v", err)
+	}
+	handOff := false
+	err := appendHandoffHistorySummary(ctx, db.DB, &PluginChatContext{
+		ConvID: "conv-inline-history", StepID: "step-a", HandOff: &handOff,
+		TriggerHistoryID: "history-inline",
+	}, false)
+	if err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	var history orm.ChatHistory
+	_ = db.DB.First(&history, "id = ?", "history-inline").Error
+	if history.Result != "original result" {
+		t.Fatalf("inline execution history changed: %q", history.Result)
+	}
+}
+
 func TestOnSubAgentDone_ExplicitNoHandOffWaitsForChatAgent(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
@@ -200,7 +339,7 @@ func TestOnSubAgentDone_Interrupted_SetsWaiting(t *testing.T) {
 	}
 }
 
-func TestOnSubAgentDone_Failed_SetsSessionWaiting(t *testing.T) {
+func TestOnSubAgentDone_Failed_SetsSessionFailed(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
 
@@ -223,15 +362,13 @@ func TestOnSubAgentDone_Failed_SetsSessionWaiting(t *testing.T) {
 
 	OnSubAgentDone(ctx, db.DB, nil, "task-3", subagent.StatusFailed, "step error", onSSE, pctx)
 
-	// Failed path: first plugin_error (frontend can show error detail on subtask card),
-	// then step_waiting (session is demoted to waiting, not failed).
-	if len(gotEvents) < 2 || gotEvents[0] != "plugin_error" || gotEvents[len(gotEvents)-1] != "step_waiting" {
-		t.Fatalf("expected [plugin_error ... step_waiting], got %v", gotEvents)
+	if len(gotEvents) != 1 || gotEvents[0] != "plugin_error" {
+		t.Fatalf("expected only plugin_error, got %v", gotEvents)
 	}
-	// Session must be waiting so the user can retry.
+	// Session failure is distinct from a successful approval checkpoint.
 	s, _ := GetSession(ctx, db.DB, "ps-3")
-	if s.Status != SessionStatusWaiting {
-		t.Fatalf("expected session waiting, got %s", s.Status)
+	if s.Status != SessionStatusFailed {
+		t.Fatalf("expected session failed, got %s", s.Status)
 	}
 }
 
@@ -301,8 +438,8 @@ func TestCallDriverAgent_DefaultsToFallbackOnEmptyMessage(t *testing.T) {
 	t.Setenv("LAZYMIND_CHAT_SERVICE_URL", srv.URL)
 
 	msg, fallback := callDriverAgent("image-plugin", "analyze_subject", "output", "ps-1", nil, nil, "")
-	if fallback {
-		t.Fatal("empty message should not trigger fallback; got fallback=true")
+	if !fallback {
+		t.Fatal("empty DriverAgent message must trigger the explicit fallback path")
 	}
 	if !strings.Contains(msg, "analyze_subject") {
 		t.Fatalf("fallback message should contain step ID, got %q", msg)
@@ -435,6 +572,12 @@ func TestStopActivePluginSession_SendsTaskCancel(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
+	if _, err := subagent.CreateTask(ctx, db.DB, subagent.CreateTaskInput{
+		TaskID: "stop-task-1", ConversationID: "stop-conv-1", AgentType: "plugin_step",
+		Title: "analyze_subject", Objective: "analyze_subject", CreateUserID: "user-1",
+	}); err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
 	if _, err := CreateSessionStep(ctx, db.DB, "stop-sess-1", "analyze_subject", "stop-task-1", 1); err != nil {
 		t.Fatalf("CreateSessionStep: %v", err)
 	}
@@ -460,6 +603,122 @@ func TestStopActivePluginSession_SendsTaskCancel(t *testing.T) {
 
 	if taskCancelCalls == 0 {
 		t.Fatal("expected at least one /api/plugin/task-cancel call")
+	}
+}
+
+func TestStopActivePluginSession_CancelsAllPendingAndRunningAttempts(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+
+	if _, err := CreateSession(ctx, db.DB, CreateSessionInput{
+		SessionID: "stop-sess-parallel", ConversationID: "stop-conv-parallel", PluginID: "image-plugin",
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	for _, item := range []struct {
+		stepID string
+		taskID string
+		status string
+	}{
+		{stepID: "queued_branch", taskID: "stop-task-pending", status: StepStatusPending},
+		{stepID: "active_branch", taskID: "stop-task-running", status: StepStatusRunning},
+	} {
+		if _, err := subagent.CreateTask(ctx, db.DB, subagent.CreateTaskInput{
+			TaskID: item.taskID, ConversationID: "stop-conv-parallel", AgentType: "plugin_step",
+			Title: item.stepID, Objective: item.stepID, CreateUserID: "user-1",
+		}); err != nil {
+			t.Fatalf("CreateTask(%s): %v", item.taskID, err)
+		}
+		if _, err := CreateSessionStep(ctx, db.DB, "stop-sess-parallel", item.stepID, item.taskID, 1); err != nil {
+			t.Fatalf("CreateSessionStep(%s): %v", item.taskID, err)
+		}
+		if item.status == StepStatusRunning {
+			if err := UpdateStepStatus(ctx, db.DB, item.taskID, item.status); err != nil {
+				t.Fatalf("UpdateStepStatus(%s): %v", item.taskID, err)
+			}
+		}
+	}
+
+	var mu sync.Mutex
+	cancelled := map[string]bool{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "task-cancel") {
+			var body map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			mu.Lock()
+			cancelled[body["task_id"]] = true
+			mu.Unlock()
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	t.Setenv("LAZYMIND_CHAT_SERVICE_URL", srv.URL)
+
+	StopActivePluginSession(ctx, db.DB, nil, "stop-conv-parallel")
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		allCancelled := cancelled["stop-task-pending"] && cancelled["stop-task-running"]
+		mu.Unlock()
+		if allCancelled {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	for _, taskID := range []string{"stop-task-pending", "stop-task-running"} {
+		task, err := subagent.GetTask(ctx, db.DB, taskID)
+		if err != nil || task == nil {
+			t.Fatalf("GetTask(%s): task=%v err=%v", taskID, task, err)
+		}
+		if task.Status != subagent.StatusInterrupted {
+			t.Errorf("task %s status = %q, want interrupted", taskID, task.Status)
+		}
+		step, err := GetStepByTaskID(ctx, db.DB, taskID)
+		if err != nil || step == nil {
+			t.Fatalf("GetStepByTaskID(%s): step=%v err=%v", taskID, step, err)
+		}
+		if step.Status != StepStatusInterrupted {
+			t.Errorf("step %s status = %q, want interrupted", taskID, step.Status)
+		}
+		mu.Lock()
+		wasCancelled := cancelled[taskID]
+		mu.Unlock()
+		if !wasCancelled {
+			t.Errorf("task %s did not receive a Python cancel request", taskID)
+		}
+	}
+}
+
+func TestPluginRunOutboxDoesNotDispatchInterruptedTask(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	const taskID = "outbox-interrupted-task"
+	if _, err := subagent.CreateTask(ctx, db.DB, subagent.CreateTaskInput{
+		TaskID: taskID, ConversationID: "outbox-conv", AgentType: "plugin_step",
+		Title: "outbox", Objective: "outbox", CreateUserID: "user-1",
+	}); err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if err := enqueuePluginAttemptRunner(ctx, db.DB, subagent.RunRequest{TaskID: taskID, AgentType: "plugin_step"}); err != nil {
+		t.Fatalf("enqueuePluginAttemptRunner: %v", err)
+	}
+	if err := subagent.UpdateFinalStatus(ctx, db.DB, taskID, subagent.StatusInterrupted, "stopped"); err != nil {
+		t.Fatalf("interrupt task: %v", err)
+	}
+	dispatchPluginAttemptRunner(db.DB, nil, taskID)
+
+	var row orm.PluginRunOutbox
+	if err := db.Where("task_id = ?", taskID).First(&row).Error; err != nil {
+		t.Fatalf("load outbox: %v", err)
+	}
+	if row.Status != "completed" {
+		t.Fatalf("interrupted task outbox status = %q, want completed", row.Status)
+	}
+	task, err := subagent.GetTask(ctx, db.DB, taskID)
+	if err != nil || task.Status != subagent.StatusInterrupted {
+		t.Fatalf("dispatch revived interrupted task: task=%#v err=%v", task, err)
 	}
 }
 

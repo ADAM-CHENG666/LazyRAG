@@ -1,10 +1,5 @@
 import { message } from "antd";
 import { getLocalizedErrorMessage } from "@/components/request";
-import { dataSourceScanApi } from "../../api/clients";
-import {
-  deleteDatabaseConnection,
-  updateDatabaseConnection,
-} from "../../api/databaseConnections";
 import {
   FEISHU_DATA_SOURCE_OAUTH_CHANNEL,
   finishFeishuDataSourceOAuth,
@@ -20,17 +15,17 @@ import {
 } from "../../utils/schedule";
 import type {
   DataSourceItem,
-  DetailDocumentItem,
   SourceType,
 } from "../../constants/types";
 import { parseFeishuOAuthCallbackInput } from "../../utils/feishuAccount";
-import { mapScanSyncDetail } from "../../mappers/scanDocument";
 import {
   CLOUD_DOCUMENTS_FEISHU_SETUP_PATH,
   CLOUD_DOCUMENTS_NOTION_SETUP_PATH,
 } from "@/modules/modelProvider/utils/cloudDocumentUrls";
 import type { FeishuDataSourceWizardDraft } from "@/modules/dataSource/common/feishuOAuth";
 import type { ManagementContext } from "./context";
+
+type SyncCloudDataSourceProvider = Extract<CloudDataSourceProvider, SourceType>;
 
 export function createWizardFlow(ctx: ManagementContext) {
   const {
@@ -45,6 +40,7 @@ export function createWizardFlow(ctx: ManagementContext) {
     setWizardStep,
     setWizardOpen,
     setOauthConnection,
+    setNotionOauthConnection,
     setOauthState,
     setConnectionVerified,
     setManualOauthModalOpen,
@@ -85,7 +81,7 @@ export function createWizardFlow(ctx: ManagementContext) {
     ctx.applySourceType(type);
   };
 
-  const buildCloudCreateFormValues = (type: CloudDataSourceProvider) => ({
+  const buildCloudCreateFormValues = (type: SyncCloudDataSourceProvider) => ({
     syncMode: "scheduled" as const,
     scheduleWeekdays: DEFAULT_SCHEDULE_WEEKDAYS,
     scheduleTime: DEFAULT_SCHEDULE_TIME,
@@ -96,7 +92,7 @@ export function createWizardFlow(ctx: ManagementContext) {
     fileTypes: DEFAULT_DATA_SOURCE_FILE_TYPES,
   });
 
-  const startCloudAuthForCreate = (type: CloudDataSourceProvider) => {
+  const startCloudAuthForCreate = (type: SyncCloudDataSourceProvider) => {
     ctx.resetWizard();
     setWizardMode("create");
     setEditingId(null);
@@ -135,7 +131,8 @@ export function createWizardFlow(ctx: ManagementContext) {
     }
     const reusableConnection =
       type === "feishu" || type === "notion"
-        ? options?.connection || (type === "notion" ? ctx.notionOauthConnection : ctx.oauthConnection)
+        ? options?.connection ||
+          (type === "notion" ? ctx.notionOauthConnection : ctx.oauthConnection)
         : null;
     ctx.resetWizard();
     setWizardMode("create");
@@ -149,12 +146,15 @@ export function createWizardFlow(ctx: ManagementContext) {
 
     if (
       (type === "feishu" || type === "notion") &&
-      reusableConnection?.connectionId &&
-      getOAuthStateFromConnection(reusableConnection) === "connected"
+      reusableConnection?.connectionId
     ) {
       setOauthConnection(reusableConnection);
-      setOauthState("connected");
-      setConnectionVerified(true);
+      if (type === "notion") {
+        setNotionOauthConnection(reusableConnection);
+      }
+      const nextState = getOAuthStateFromConnection(reusableConnection);
+      setOauthState(nextState);
+      setConnectionVerified(nextState === "connected");
     }
   };
 
@@ -233,12 +233,12 @@ export function createWizardFlow(ctx: ManagementContext) {
 
   const handleOpenFeishuGuideFromAuthSelect = () => {
     saveFeishuDataSourceWizardDraft(buildAuthSelectWizardDraft("feishu"));
-    navigate(`${CLOUD_DOCUMENTS_FEISHU_SETUP_PATH}?from=create-source`);
+    navigate(CLOUD_DOCUMENTS_FEISHU_SETUP_PATH);
   };
 
   const handleOpenNotionGuideFromAuthSelect = () => {
     saveFeishuDataSourceWizardDraft(buildAuthSelectWizardDraft("notion"));
-    navigate(`${CLOUD_DOCUMENTS_NOTION_SETUP_PATH}?from=create-source`);
+    navigate(CLOUD_DOCUMENTS_NOTION_SETUP_PATH);
   };
 
   const handleSubmitManualOauthCallback = async () => {
@@ -250,7 +250,10 @@ export function createWizardFlow(ctx: ManagementContext) {
 
     try {
       setManualOauthSubmitting(true);
-      const connection = await finishFeishuDataSourceOAuth(parsed.code, parsed.state);
+      const connection = await finishFeishuDataSourceOAuth(
+        parsed.code,
+        parsed.state,
+      );
       ctx.applyOauthResult({
         channel: FEISHU_DATA_SOURCE_OAUTH_CHANNEL,
         source: "feishu-data-source",
@@ -259,145 +262,21 @@ export function createWizardFlow(ctx: ManagementContext) {
       });
       setManualOauthModalOpen(false);
       setManualOauthCallbackValue("");
-    } catch (error: any) {
-      const errorMessage =
-        error?.message || t("admin.dataSourceOauthFailedRetry");
-      ctx.applyOauthResult({
-        channel: FEISHU_DATA_SOURCE_OAUTH_CHANNEL,
-        source: "feishu-data-source",
-        status: "error",
-        message: errorMessage,
-      });
+    } catch (error) {
+      const requestError = error as { response?: unknown; request?: unknown };
+      if (requestError?.response || requestError?.request) {
+        ctx.restorePreviousOauthState();
+      } else {
+        const errorMessage = getLocalizedErrorMessage(error);
+        ctx.applyOauthResult({
+          channel: FEISHU_DATA_SOURCE_OAUTH_CHANNEL,
+          source: "feishu-data-source",
+          status: "error",
+          message: errorMessage,
+        });
+      }
     } finally {
       setManualOauthSubmitting(false);
-    }
-  };
-
-  const openDetailPage = (record: DataSourceItem) => {
-    if (record.type === "database") {
-      navigate("/data-sources/database-connections");
-      return;
-    }
-
-    const detailDocuments: DetailDocumentItem[] =
-      record.detailDocuments ||
-      record.fileCandidates.map((item) => ({
-        id: item.id,
-        name: item.name,
-        path: item.path,
-        size: item.size,
-        tags: [],
-        updateState: item.updateState,
-        syncDetail: mapScanSyncDetail(item.updateState, t),
-        parseStatus: item.updateState === "deleted" ? "deleted" : "parsed",
-        sourceUpdatedAt: record.lastSync,
-        updatedAt: record.lastSync,
-      }));
-
-    navigate(`/data-sources/${record.id}`, {
-      state: {
-        source: {
-          id: record.id,
-          name: record.name,
-          target: record.target,
-          rootPath: record.rootPath,
-          targetRef: record.targetRef,
-          targetRefs: record.targetRefs,
-          targetType: record.targetType,
-          targetTypes: record.targetTypes,
-          sourceType: record.type,
-          documentCount: record.documentCount,
-          parsedDocumentCount: record.parsedDocumentCount,
-          status: record.status,
-          lastSync: record.lastSync,
-          addCount: record.addCount,
-          deleteCount: record.deleteCount,
-          changeCount: record.changeCount,
-          storageUsed: record.storageUsed || "0 B",
-          documents: detailDocuments,
-          scanManaged: record.scanManaged,
-          tenantId: record.tenantId,
-          agentId: record.agentId,
-          bindingId: record.bindingId,
-          bindingIds: record.bindingIds,
-          bindingTreeKey: record.bindingTreeKey,
-          bindingTreeKeys: record.bindingTreeKeys,
-          configVersion: record.configVersion,
-        },
-      },
-    });
-  };
-
-  const getDatabaseConnectionId = (record: DataSourceItem) => (
-    record.databaseConnectionId || record.id.replace(/^database:/, "")
-  );
-
-  const openDatabaseConnectionConfig = (record: DataSourceItem) => {
-    if (!record.databaseConnection) {
-      message.error(t("admin.dataSourceDatabaseConfigMissing"));
-      return;
-    }
-    ctx.setDatabaseEditingConnection(record.databaseConnection);
-  };
-
-  const closeDatabaseConnectionConfig = () => {
-    if (ctx.databaseEditSaving) {
-      return;
-    }
-    ctx.setDatabaseEditingConnection(null);
-  };
-
-  const handleSaveDatabaseConnectionConfig = async (
-    payload: Parameters<typeof updateDatabaseConnection>[1],
-  ) => {
-    if (!ctx.databaseEditingConnection || ctx.databaseEditSaving) {
-      return;
-    }
-    ctx.setDatabaseEditSaving(true);
-    try {
-      await updateDatabaseConnection(ctx.databaseEditingConnection.id, payload);
-      message.success(t("admin.dataSourceDatabaseUpdated"));
-      ctx.setDatabaseEditingConnection(null);
-      await ctx.refreshSources(false, { page: ctx.sourceListPage });
-    } catch (error) {
-      message.error(
-        getLocalizedErrorMessage(error, t("admin.dataSourceDatabaseSaveFailed")) ||
-          t("admin.dataSourceDatabaseSaveFailed"),
-      );
-    } finally {
-      ctx.setDatabaseEditSaving(false);
-    }
-  };
-
-  const executeDeleteDatabaseConnection = async (record: DataSourceItem) => {
-    try {
-      await deleteDatabaseConnection(getDatabaseConnectionId(record));
-      message.success(t("admin.dataSourceDatabaseDeleted"));
-      await ctx.refreshSources(false, { page: ctx.sourceListPage });
-    } catch (error) {
-      message.error(
-        getLocalizedErrorMessage(error, t("admin.dataSourceDatabaseDeleteFailed")) ||
-          t("admin.dataSourceDatabaseDeleteFailed"),
-      );
-      throw error;
-    }
-  };
-
-  const executeDeleteSource = async (record: DataSourceItem) => {
-    try {
-      await dataSourceScanApi.deleteSource({ sourceId: record.id });
-      message.success(t("admin.dataSourceDeleteSuccess"));
-      const nextPage =
-        ctx.sources.length <= 1 && ctx.sourceListPage > 1
-          ? ctx.sourceListPage - 1
-          : ctx.sourceListPage;
-      await Promise.all([ctx.refreshSources(false, { page: nextPage })]);
-    } catch (error) {
-      message.error(
-        getLocalizedErrorMessage(error, t("admin.dataSourceDeleteFailed")) ||
-          t("admin.dataSourceDeleteFailed"),
-      );
-      throw error;
     }
   };
 
@@ -409,9 +288,16 @@ export function createWizardFlow(ctx: ManagementContext) {
       }
       if (
         ctx.selectedType === "feishu" &&
-        !(ctx.oauthConnection?.provider === "feishu" && ctx.oauthConnection.connectionId)
+        !(
+          ctx.oauthConnection?.provider === "feishu" &&
+          ctx.oauthConnection.connectionId
+        )
       ) {
-        if (ctx.isFeishuSetupReady && ctx.feishuAppSetup && ctx.oauthState !== "waiting") {
+        if (
+          ctx.isFeishuSetupReady &&
+          ctx.feishuAppSetup &&
+          ctx.oauthState !== "waiting"
+        ) {
           void ctx.startCloudOAuth("feishu", {
             setup: ctx.feishuAppSetup,
             draftSelectedType: "feishu",
@@ -426,9 +312,16 @@ export function createWizardFlow(ctx: ManagementContext) {
       }
       if (
         ctx.selectedType === "notion" &&
-        !(ctx.oauthConnection?.provider === "notion" && ctx.oauthConnection.connectionId)
+        !(
+          ctx.oauthConnection?.provider === "notion" &&
+          ctx.oauthConnection.connectionId
+        )
       ) {
-        if (ctx.isNotionSetupReady && ctx.notionAppSetup && ctx.oauthState !== "waiting") {
+        if (
+          ctx.isNotionSetupReady &&
+          ctx.notionAppSetup &&
+          ctx.oauthState !== "waiting"
+        ) {
           void ctx.startCloudOAuth("notion", {
             setup: ctx.notionAppSetup,
             draftSelectedType: "notion",
@@ -457,12 +350,6 @@ export function createWizardFlow(ctx: ManagementContext) {
     handleOpenFeishuGuideFromAuthSelect,
     handleOpenNotionGuideFromAuthSelect,
     handleSubmitManualOauthCallback,
-    openDetailPage,
-    openDatabaseConnectionConfig,
-    closeDatabaseConnectionConfig,
-    handleSaveDatabaseConnectionConfig,
-    executeDeleteSource,
-    executeDeleteDatabaseConnection,
     handleNextStep,
   };
 }

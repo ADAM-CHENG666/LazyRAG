@@ -3,11 +3,10 @@
 Tool types registered dynamically per-conversation:
 
 - trigger_<plugin_id>       : Cold-start tool. Injected when no active plugin session exists.
-- advance_step_and_hand_off : Step-advancement tool (stop-tool). Default; queues step and hands off control to user.
-- advance_step              : Synchronous step-advancement tool. Only in 'dynamic' mode; blocks until
-                              the SubAgent finishes before ReAct continues.
+- advance_step_and_hand_off : Asynchronous stop-tool accepting one or more step commands.
+- advance_step              : Synchronous tool accepting one or more step commands; dynamic mode only.
 - ask_user                  : Ask the user a question (stop-tool). ChatAgent only; absent in auto mode.
-- update_intent             : Upsert a global or step-level intent/constraint (ChatAgent only).
+- intentwrite               : Extended with plugin-session and plugin-step scopes when active.
 - list_plugin_steps         : Read-only step status query (ChatAgent only, when session active).
 - get_step_result           : Read-only artifact summary for a step (ChatAgent only).
 - get_failed_steps          : Read-only failed steps with error info (ChatAgent only).
@@ -31,6 +30,8 @@ import lazyllm
 from lazyllm.tools.agent.base import _write_agent_data
 
 from lazymind.chat.plugin import plugin_loader
+from lazymind.chat.engine.subagent import SUBAGENT_CORE_TOOL_NAMES
+from lazymind.chat.engine.tools.intent_writer import enable_plugin_intent_scopes
 from lazymind.model_config import is_model_role_available
 
 LOG = logging.getLogger(__name__)
@@ -39,13 +40,273 @@ _PREFLIGHT_DECISIONS = {'ready', 'need_information', 'not_applicable'}
 _PREFLIGHT_TIMEOUT_SECONDS = 30.0
 
 
+@dataclass
+class PluginAgentContribution:
+    tools: List[Any]
+    system_prompt: str
+    stop_tools: List[str]
+    agentic_config_patch: Dict[str, Any]
+    runtime_context: str
+
+
 @dataclass(frozen=True)
 class _ReachabilitySnapshot:
     current_step: str
     session_id: str
     forward_steps: List[str]
     rewind_steps: List[str]
+    retry_steps: List[str]
     reachable_steps: List[str]
+
+
+@dataclass(frozen=True)
+class _TransitionSubmission:
+    accepted: bool
+    message: str
+    command_id: str = ''
+    task_id: str = ''
+    session_id: str = ''
+    state_version: int = 0
+    projection: Optional[Dict[str, Any]] = None
+    tasks: Optional[List[Dict[str, str]]] = None
+
+
+def _core_response_data(response: Any) -> Dict[str, Any]:
+    try:
+        body = response.json()
+    except Exception:
+        return {}
+    if isinstance(body, dict) and isinstance(body.get('data'), dict):
+        return body['data']
+    return body if isinstance(body, dict) else {}
+
+
+def _format_transition_rejection(step_id: str, data: Dict[str, Any]) -> str:
+    error = data.get('error') if isinstance(data.get('error'), dict) else {}
+    code = str(error.get('code') or 'TRANSITION_REJECTED')
+    reason = str(error.get('message') or 'Go rejected the plugin state transition.')
+    details = error.get('details') if isinstance(error.get('details'), dict) else {}
+    projection = data.get('projection') if isinstance(data.get('projection'), dict) else {}
+    ready = projection.get('ready') or details.get('ready') or []
+    blocked = projection.get('blocked') or []
+    missing = details.get('missing_groups') or []
+    rejected_targets = details.get('targets') or []
+    lines = [
+        f'Transition rejected [{code}].',
+        f'Target: {step_id}',
+        f'Reason: {reason}',
+    ]
+    if missing:
+        lines.append(f'Missing material groups: {missing}')
+    if rejected_targets:
+        lines.append(f'Rejected batch targets: {rejected_targets}')
+    if ready:
+        lines.append(f'Currently ready: {ready}')
+    if blocked:
+        lines.append(f'Currently blocked: {blocked}')
+    lines.append(
+        'Do not wait for this step. Use the returned live projection to choose '
+        'another action or explain the blocker.'
+    )
+    return '\n'.join(lines)
+
+
+def _submit_transition_to_core(
+        *, plugin_id: str, step_id: str, session_id: str, task_id: str,
+        objective: str, user_input: str, hand_off: bool,
+        runtime_instruction: str, partial_indices: Dict[str, List[int]],
+        operation: str = 'advance', is_start: bool = False,
+        preflight_id: str = '',
+        targets: Optional[List[Dict[str, Any]]] = None) -> _TransitionSubmission:
+    import httpx
+    from lazymind.config import config as _cfg
+
+    cfg = _agentic_config()
+    core_url = str(_cfg['core_api_url']).rstrip('/')
+    projection_data: Dict[str, Any] = {}
+    if not is_start:
+        try:
+            projection_resp = httpx.get(
+                f'{core_url}/internal/plugin-sessions/{session_id}/projection', timeout=5.0,
+            )
+            if projection_resp.status_code == 200:
+                projection_data = _core_response_data(projection_resp)
+        except Exception as exc:
+            LOG.warning('[plugin.transition] projection prefetch failed session=%s error=%s', session_id, exc)
+    command_id = str(uuid.uuid4())
+    expected_version = int(projection_data.get('state_version') or cfg.get('_plugin_state_version') or 0)
+    graph_hash = str(projection_data.get('graph_hash') or '')
+    payload = {
+        'command_id': command_id,
+        'operation': operation,
+        'target_step_id': step_id,
+        'expected_state_version': expected_version,
+        'graph_hash': graph_hash,
+        'task_id': task_id,
+        'objective': objective,
+        'user_input': user_input,
+        'runtime_instruction': runtime_instruction,
+        'partial_indices': partial_indices,
+        'hand_off': hand_off,
+        'plugin_mode': str(cfg.get('plugin_mode') or 'dynamic'),
+        'chat_session_id': str(cfg.get('session_id') or ''),
+        'history_files_per_turn': cfg.get('history_files_per_turn') or {},
+        'filters': cfg.get('filters') or {},
+        'llm_config': cfg.get('llm_config') or {},
+        'tool_config': cfg.get('tool_config') or {},
+        'parent_agentic_config': _export_parent_agentic_config(cfg),
+        'plugin_id': plugin_id,
+        'plugin_ref': str(cfg.get('plugin_ref') or ''),
+        'plugin_revision_id': str(cfg.get('revision_id') or ''),
+        'plugin_revision_no': int(cfg.get('revision_no') or 0),
+        'plugin_tree_hash': str(cfg.get('tree_hash') or ''),
+        'plugin_remote_root': str(cfg.get('remote_root') or ''),
+        'conversation_id': str(cfg.get('conversation_id') or ''),
+        'trigger_history_id': str(cfg.get('history_id') or ''),
+        'user_id': str(cfg.get('user_id') or ''),
+        'preflight_id': preflight_id,
+        'external_materials': cfg.get('plugin_external_materials') or {},
+    }
+    if targets:
+        payload['targets'] = targets
+    endpoint = (
+        f'{core_url}/internal/plugin-sessions:start'
+        if is_start else f'{core_url}/internal/plugin-sessions/{session_id}:transition'
+    )
+    try:
+        response = httpx.post(endpoint, json=payload, timeout=15.0)
+        data = _core_response_data(response)
+    except httpx.TimeoutException:
+        # The command id makes an ambiguous network timeout reconcilable without
+        # submitting a second transition.
+        try:
+            status_resp = httpx.get(
+                f'{core_url}/internal/plugin-transition-commands/{command_id}', timeout=5.0,
+            )
+            data = _core_response_data(status_resp)
+            response = status_resp
+        except Exception:
+            message = (
+                'Transition result unknown [TRANSITION_RESULT_UNKNOWN].\n'
+                f'Command id: {command_id}\nDo not resubmit with a new command id.'
+            )
+            return _TransitionSubmission(False, message, command_id=command_id)
+    except Exception as exc:
+        return _TransitionSubmission(
+            False,
+            f'Transition result unknown [TRANSITION_RESULT_UNKNOWN].\nCommand id: {command_id}\nReason: {exc}',
+            command_id=command_id,
+        )
+    error = data.get('error') if isinstance(data.get('error'), dict) else {}
+    if response.status_code == 409 and error.get('code') == 'STATE_VERSION_CONFLICT':
+        details = error.get('details') if isinstance(error.get('details'), dict) else {}
+        latest_version = int(details.get('actual') or data.get('state_version') or 0)
+        if latest_version > expected_version:
+            # Step completion and route freezing are separate writes. The task waiter can
+            # observe "succeeded" just before route reconciliation increments the session
+            # version. Retry this explicitly retryable admission conflict once against the
+            # authoritative version returned by Go.
+            command_id = str(uuid.uuid4())
+            payload['command_id'] = command_id
+            payload['expected_state_version'] = latest_version
+            try:
+                response = httpx.post(endpoint, json=payload, timeout=15.0)
+                data = _core_response_data(response)
+                expected_version = latest_version
+            except Exception as exc:
+                return _TransitionSubmission(
+                    False,
+                    f'Transition result unknown [TRANSITION_RESULT_UNKNOWN].\n'
+                    f'Command id: {command_id}\nReason: {exc}',
+                    command_id=command_id,
+                )
+    accepted = bool(data.get('accepted')) and response.status_code < 300
+    if not accepted:
+        rejection = data.get('error') if isinstance(data.get('error'), dict) else {}
+        LOG.warning(
+            '[plugin.transition] rejected plugin=%s step=%s session=%s command=%s operation=%s '
+            'http_status=%s code=%s reason=%s details=%s',
+            plugin_id, step_id, session_id, command_id, operation,
+            response.status_code, rejection.get('code', ''), rejection.get('message', ''),
+            rejection.get('details') if isinstance(rejection.get('details'), dict) else {},
+        )
+        return _TransitionSubmission(
+            False, _format_transition_rejection(step_id, data), command_id=command_id,
+            state_version=int(data.get('state_version') or expected_version),
+            projection=data.get('projection') if isinstance(data.get('projection'), dict) else {},
+        )
+    state_version = int(data.get('state_version') or expected_version)
+    cfg['_plugin_state_version'] = state_version
+    response_tasks = data.get('tasks') if isinstance(data.get('tasks'), list) else []
+    normalised_tasks = [
+        {
+            'step_id': str(item.get('step_id') or ''),
+            'task_id': str(item.get('task_id') or ''),
+            'step_state': str(item.get('step_state') or ''),
+        }
+        for item in response_tasks if isinstance(item, dict) and item.get('task_id')
+    ]
+    if not normalised_tasks:
+        normalised_tasks = [{
+            'step_id': step_id,
+            'task_id': str(data.get('task_id') or task_id),
+            'step_state': str(data.get('step_state') or 'pending'),
+        }]
+    cfg['_last_plugin_task_id'] = normalised_tasks[0]['task_id']
+    cfg['_last_plugin_tasks'] = normalised_tasks
+    if is_start:
+        cfg['plugin_session_id'] = str(data.get('session_id') or '')
+        cfg['plugin_id'] = plugin_id
+        cfg['plugin_step'] = step_id
+    return _TransitionSubmission(
+        True,
+        (
+            f'Batch advance for steps {[item["step_id"] for item in normalised_tasks]!r} '
+            'accepted by Go and durably queued.'
+            if len(normalised_tasks) > 1
+            else f'Advance for step {step_id!r} accepted by Go and durably queued.'
+        ),
+        command_id=command_id,
+        task_id=str(data.get('task_id') or task_id),
+        session_id=str(data.get('session_id') or session_id),
+        state_version=state_version,
+        projection=data.get('projection') if isinstance(data.get('projection'), dict) else {},
+        tasks=normalised_tasks,
+    )
+
+
+def _fetch_go_start_candidates(plugin_id: str) -> List[str]:
+    """Return Go's authoritative Ready set for a not-yet-started session."""
+    import httpx
+    from lazymind.config import config as _cfg
+
+    cfg = _agentic_config()
+    core_url = str(_cfg['core_api_url']).rstrip('/')
+    payload = {
+        'plugin_id': plugin_id,
+        'plugin_revision_id': str(cfg.get('revision_id') or ''),
+        'external_materials': cfg.get('plugin_external_materials') or {},
+    }
+    response = httpx.post(
+        f'{core_url}/internal/plugin-sessions:plan-start', json=payload, timeout=10.0,
+    )
+    data = _core_response_data(response)
+    if response.status_code >= 300:
+        raise RuntimeError(str(data.get('error') or data.get('message') or 'Go start planning failed'))
+    projection = data.get('projection') or {}
+    ready = projection.get('ready') or []
+    if not isinstance(ready, list):
+        raise RuntimeError('Go start planning returned an invalid Ready set')
+    hints: Dict[str, List[str]] = {}
+    for edge in projection.get('edges') or []:
+        if not isinstance(edge, dict) or edge.get('state') != 'active':
+            continue
+        target = str(edge.get('to') or '')
+        when = str(edge.get('when') or '').strip()
+        if target and when:
+            hints.setdefault(target, []).append(when)
+    cfg['_plugin_start_route_hints'] = hints
+    return [str(step_id) for step_id in ready if step_id]
 
 
 def is_plugin_driver_turn(plugin_context: Any) -> bool:
@@ -57,32 +318,32 @@ def is_plugin_driver_turn(plugin_context: Any) -> bool:
 
 
 _COLD_START_PLUGIN_PROMPT = (
-    '## Available Plugins\n'
-    'IMPORTANT: Only trigger a plugin when the capability matches the '
+    '## Available Workflows\n'
+    'The product term is workflow. "Plugin" is a legacy internal synonym only.\n'
+    'IMPORTANT: Only trigger a workflow when the capability matches the '
     "user's PRIMARY and DIRECT intent — the main goal they are asking for "
-    'right now. Never trigger a plugin for a sub-step that the model has '
+    'right now. Never trigger a workflow for a sub-step that the model has '
     "internally decided is part of a larger multi-step plan. If the user's "
     'request involves multiple steps and only one of those steps would use a '
-    'plugin, do NOT trigger the plugin. Never infer plugin intent from '
+    'workflow, do NOT trigger the workflow. Never infer workflow intent from '
     'indirect or implicit cues.\n'
-    'When a plugin matches, call its `trigger_<plugin>` preflight tool. Trigger does NOT '
-    'start a task. It loads the full plugin and returns ready, need_information, '
+    'When a workflow matches, call its `trigger_<workflow>` preflight tool. Trigger does NOT '
+    'start a task. It loads the full workflow and returns ready, need_information, '
     'not_applicable, or preflight_failed.\n'
     'If trigger returns ready, you MUST immediately follow its returned instruction and '
     'call the applicable advancement tool in the SAME turn. Do not explain, confirm, or '
     'end the turn first.\n'
     'If it returns need_information, use ask_user only when that tool is available.\n\n'
-    'CRITICAL — explicit plugin start requests:\n'
-    'If the user explicitly asks to start, launch, or enable a plugin (e.g. '
-    '"启动绘图插件", "打开图片生成插件", "启动图片插件", "start the image plugin"), '
-    'you MUST call the matching `trigger_<plugin_id>_plugin` tool in this same '
+    'CRITICAL — explicit workflow requests:\n'
+    'If the user explicitly names a workflow and asks to use, run, start, launch, open, or '
+    'enable it (e.g. "使用 AI Writer workflow", "用 AI Writer 工作流", '
+    '"启动绘图工作流", "use the image workflow"), '
+    'you MUST call the matching `trigger_<workflow_id>` tool in this same '
     'response before any other action. Do NOT reply with text only, do NOT call '
-    '`image_generator` / `image_editor` directly, and do NOT ask clarification '
-    'questions first. Pass the complete user request as `request_context` (or repeat their '
-    'start phrase if they gave no further detail), and set `explicit_plugin_request=true`. '
-    'An explicit plugin request is authoritative: plugin suitability heuristics may not '
-    'downgrade it to not_applicable.\n'
-    'For the AI image plugin (`image-plugin`), call `trigger_image_plugin`.\n\n'
+    'a generic toolkit or same-domain tool directly (including writing, image, or video tools), '
+    'and do NOT ask clarification '
+    'questions first. Pass the complete request as `request_context` and set '
+    '`explicit_workflow_request=true`.\n\n'
 )
 
 
@@ -91,24 +352,11 @@ _COLD_START_PLUGIN_PROMPT = (
 # the plugin's state.yml declares.
 # ---------------------------------------------------------------------------
 
-_FRAMEWORK_TOOLS: List[str] = [
-    'save_artifact',
-    'get_artifact',
-    'list_artifacts',
-    'list_knowledge_bases',
-    'read_user_attachment',
-    'find_user_attachment',
-    'find_artifact',
-    'patch_artifact',
-    'discard_draft',
-]
-
-
 def _merge_tools(declared: List[str]) -> List[str]:
     """Return a deduplicated tool list with framework tools prepended."""
     seen = set()
     merged: List[str] = []
-    for t in _FRAMEWORK_TOOLS + list(declared):
+    for t in (*SUBAGENT_CORE_TOOL_NAMES, *declared):
         if t not in seen:
             seen.add(t)
             merged.append(t)
@@ -119,25 +367,27 @@ def _merge_tools(declared: List[str]) -> List[str]:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _fetch_succeeded_steps(session_id: str) -> set:
-    """Return the set of step_ids that have ever succeeded in this session.
-
-    Queries the Go core REST API.  Returns an empty set on any error so that
-    the caller degrades gracefully (ancestor rewind is simply not offered).
-    """
+def _fetch_go_projection(session_id: str) -> Dict[str, Any]:
+    """Return Go's authoritative runtime projection for a session."""
     if not session_id:
-        return set()
+        return {}
     try:
         import httpx
         from lazymind.config import config as _cfg
         core_url = str(_cfg['core_api_url']).rstrip('/')
-        resp = httpx.get(f'{core_url}/plugin-sessions/{session_id}', timeout=3.0)
+        resp = httpx.get(
+            f'{core_url}/internal/plugin-sessions/{session_id}/projection', timeout=5.0,
+        )
         if resp.status_code != 200:
-            return set()
-        steps = resp.json().get('data', {}).get('session', {}).get('steps', [])
-        return {s['step_id'] for s in steps if isinstance(s, dict) and s.get('status') == 'succeeded'}
+            return {}
+        data = _core_response_data(resp)
+        projection = data.get('projection') or {}
+        if isinstance(projection, dict):
+            _agentic_config()['_plugin_state_version'] = int(data.get('state_version') or 0)
+            return projection
     except Exception:
-        return set()
+        pass
+    return {}
 
 
 def _agentic_config() -> Dict[str, Any]:
@@ -151,7 +401,9 @@ def _export_parent_agentic_config(config: Dict[str, Any]) -> Dict[str, Any]:
     """Return the JSON-safe request context a plugin SubAgent should inherit."""
     exported: Dict[str, Any] = {}
     for key, value in (config or {}).items():
-        if key == 'citation_state':
+        # Credentials/config blobs have dedicated top-level transport fields and
+        # must not be duplicated into the persisted SubAgent context.
+        if key in {'citation_state', 'llm_config', 'tool_config', 'ocr_config'}:
             continue
         try:
             json.dumps(value)
@@ -187,11 +439,12 @@ def _trigger_plugin_step(
         hand_off: bool = False,
         preflight_id: str = '',
         runtime_instruction: str = '',
-        partial_indices: Optional[Dict[str, List[int]]] = None) -> str:
+        partial_indices: Optional[Dict[str, List[int]]] = None,
+        operation: str = 'advance') -> str:
     """Shared implementation for trigger_<plugin_id> and advance_step.
 
-    Performs two-layer validation then emits a task_created signal.
-    Returns a short status string (the tool return value seen by the LLM).
+    Performs local request-shape validation, then submits a synchronous Go
+    transition command. Go is the sole authority for Reachable/Ready admission.
 
     Args:
         plugin_id: The plugin identifier.
@@ -221,172 +474,20 @@ def _trigger_plugin_step(
     if not user_input:
         raise ValueError('user_input must not be empty.')
 
-    sm = plugin_loader.get_state_machine(plugin_id)
-    if sm is None:
+    if plugin_loader.get_plugin(plugin_id) is None:
         raise ValueError(f'plugin {plugin_id!r} not found.')
 
-    if not sm.is_reachable(current_step, step_id):
-        # Condition B: allow rewind to an ancestor that has previously succeeded.
-        ancestors = sm.get_ancestors(current_step)
-        if step_id in ancestors:
-            succeeded = _fetch_succeeded_steps(session_id)
-            if step_id not in succeeded:
-                raise ValueError(
-                    f'step {step_id!r} is an ancestor of {current_step!r} '
-                    f'but has not succeeded in this session yet. '
-                    f'Run it first before rewinding.'
-                )
-            # Ancestor rewind allowed — fall through to Layer 2.
-        else:
-            reachable = sm.get_reachable_steps(current_step)
-            current_label = repr(current_step) if current_step else "'__start__'"
-            raise ValueError(
-                f'step {step_id!r} is not reachable from '
-                f'{current_label}. '
-                f'Reachable steps: {reachable}.'
-            )
-    LOG.info(
-        '[plugin.advance] state_machine accepted plugin=%s step=%s session=%s current=%s cold=%s',
-        plugin_id, step_id, session_id, current_step or '__start__', is_cold_start,
-    )
-
-    # --- Layer 2: dependency validation (via Go core REST API) ---
+    # Step existence and prompt rendering remain local metadata concerns. Never
+    # reject a transition from the Python graph: Go evaluates the compiled graph
+    # and returns a structured rejection with the authoritative projection.
     step_config = plugin_loader.get_step_config(plugin_id, step_id)
     if not step_config:
         raise ValueError(f'step {step_id!r} is not defined in plugin {plugin_id!r}.')
-    inputs: List[Dict[str, Any]] = step_config.get('inputs', [])
-    if inputs and not is_cold_start and session_id:
-        import httpx
-        from lazymind.config import config as _cfg
-        core_url = str(_cfg['core_api_url']).rstrip('/')
-        try:
-            resp = httpx.get(
-                f'{core_url}/plugin-sessions/{session_id}',
-                timeout=3.0,
-            )
-            if resp.status_code == 200:
-                steps_data = {
-                    s['step_id']: s['status']
-                    for s in resp.json().get('data', {}).get('session', {}).get('steps', [])
-                    if isinstance(s, dict)
-                }
-                for inp in inputs:
-                    slot = inp.get('slot')
-                    if not slot:
-                        continue
-                    required = inp.get('required', True)
-                    producer_steps = plugin_loader.find_producer_steps(plugin_id, slot)
-                    if not producer_steps:
-                        continue
-                    producer_statuses = {
-                        producer_step: steps_data.get(producer_step)
-                        for producer_step in producer_steps
-                    }
-                    if any(status == 'succeeded' for status in producer_statuses.values()):
-                        continue
-
-                    preferred_producer = (
-                        current_step if current_step in producer_steps else producer_steps[0]
-                    )
-                    step_status = producer_statuses.get(preferred_producer)
-                    if step_status is None:
-                        if required:
-                            LOG.warning(
-                                '[plugin.advance] dependency missing plugin=%s step=%s session=%s slot=%s producer=%s',
-                                plugin_id, step_id, session_id, slot, preferred_producer,
-                            )
-                            return (
-                                f'Error: required artifact {slot!r} not available. '
-                                f'Please trigger {preferred_producer!r} first.'
-                            )
-                        continue
-                    if step_status in ('running', 'interrupted'):
-                        LOG.warning(
-                            '[plugin.advance] dependency not ready '
-                            'plugin=%s step=%s session=%s slot=%s producer=%s status=%s',
-                            plugin_id, step_id, session_id, slot, preferred_producer, step_status,
-                        )
-                        return (
-                            f'Error: artifact {slot!r} not ready '
-                            f'(producer step {preferred_producer!r} status: {step_status!r}).'
-                        )
-                    if step_status == 'failed':
-                        if not required:
-                            continue
-                        LOG.warning(
-                            '[plugin.advance] dependency failed plugin=%s step=%s session=%s slot=%s producer=%s',
-                            plugin_id, step_id, session_id, slot, preferred_producer,
-                        )
-                        return (
-                            f'Error: artifact {slot!r} not ready '
-                            f'(producer step {preferred_producer!r} status: {step_status!r}).'
-                        )
-        except Exception as exc:
-            LOG.warning(
-                '[plugin.advance] dependency check skipped plugin=%s step=%s session=%s error=%s',
-                plugin_id, step_id, session_id, exc,
-            )
-            pass  # Defensive: skip DB check on error; Go will re-validate
-
-    # --- Emit task_created signal ---
+    # --- Submit transition command ---
     task_id = str(uuid.uuid4())
-    output_defs = step_config.get('outputs', [])
-    output_keys = [o['slot'] for o in output_defs if o.get('slot')]
-    required_output_keys = [
-        o['slot']
-        for o in output_defs
-        if o.get('slot') and o.get('required', True)
-    ]
-    input_keys = [i['slot'] for i in inputs if i.get('slot')]
-
-    # Framework tools are always present regardless of plugin declaration.
-    # Domain tools (e.g. kb) come only from state.yml — Go does not forward this
-    # list to the SubAgent runner; runner re-resolves tools from plugin_loader.
-    declared_tools: List[str] = step_config.get('tools', [])
-    merged_tools = _merge_tools(declared_tools)
-
-    params: Dict[str, Any] = {
-        'plugin_id': plugin_id,
-        'step_id': step_id,
-        'session_id': session_id,
-        'user_input': user_input,
-        'is_cold_start': is_cold_start,
-        'hand_off': bool(hand_off),
-    }
-    if preflight_id:
-        params['preflight_id'] = preflight_id
-    for runtime_key in ('plugin_ref', 'revision_id', 'revision_no', 'tree_hash', 'remote_root'):
-        if cfg.get(runtime_key) not in (None, ''):
-            params[runtime_key] = cfg[runtime_key]
-    chat_session_id = str(cfg.get('session_id') or '').strip()
-    if chat_session_id:
-        params['chat_session_id'] = chat_session_id
-    parent_agentic_config = _export_parent_agentic_config(cfg)
-    if parent_agentic_config:
-        params['parent_agentic_config'] = parent_agentic_config
-    # Map Python-side runtime_instruction to Go-side retry_hint field name.
-    if runtime_instruction:
-        params['retry_hint'] = runtime_instruction
-    if partial_indices:
-        params['partial_indices'] = partial_indices
-    params['required_output_artifact_keys'] = required_output_keys
-    # Propagate full per-turn attachment index so SubAgent can access user files.
-    history_files_per_turn: dict = cfg.get('history_files_per_turn') or {}
-    if history_files_per_turn:
-        params['history_files_per_turn'] = history_files_per_turn
-
-    # Propagate KB filters and user_id so plugin SubAgents can call kb_search.
-    filters: dict = dict(cfg.get('filters') or {})
-    if filters:
-        params['filters'] = filters
-    user_id: str = str(cfg.get('user_id') or '').strip()
-    if user_id:
-        params['user_id'] = user_id
     LOG.info(
-        '[plugin.advance] emitting task_created plugin=%s step=%s session=%s '
-        'chat_sid=%s task=%s cold=%s inputs=%s outputs=%s required_outputs=%s',
-        plugin_id, step_id, session_id, chat_session_id, task_id, is_cold_start,
-        input_keys, output_keys, required_output_keys,
+        '[plugin.advance] submitting command plugin=%s step=%s session=%s task=%s cold=%s',
+        plugin_id, step_id, session_id, task_id, is_cold_start,
     )
 
     # Inject focused_tab (UI context hint) into the objective.
@@ -400,59 +501,106 @@ def _trigger_plugin_step(
         sep = ' ' if enriched_instruction else ''
         enriched_instruction = enriched_instruction + sep + f'User is currently viewing tab: {focused_tab}.'
 
-    _write_agent_data(
-        'task_created',
+    objective = _render_step_objective(step_config, user_input, enriched_instruction)
+    submission = _submit_transition_to_core(
+        plugin_id=plugin_id,
+        step_id=step_id,
+        session_id=session_id,
         task_id=task_id,
-        title=f'{plugin_id}:{step_id}',
-        agent_type='plugin_step',
-        mode='manual',          # Plugin steps always async; Go controls auto-advance
-        objective=_render_step_objective(step_config, user_input, enriched_instruction),
-        params=params,
-        input_slots=input_keys,
-        output_slots=output_keys,
-        tools=merged_tools,
-        resume=False,
+        objective=objective,
+        user_input=user_input,
+        hand_off=hand_off,
+        runtime_instruction=runtime_instruction,
+        partial_indices=partial_indices or {},
+        operation=operation,
+        is_start=is_cold_start,
+        preflight_id=preflight_id,
     )
+    cfg['_last_plugin_transition_accepted'] = submission.accepted
+    if submission.accepted:
+        cfg['_last_plugin_task_id'] = submission.task_id
     LOG.info(
-        '[plugin.advance] task_created emitted plugin=%s step=%s session=%s task=%s',
-        plugin_id, step_id, session_id, task_id,
+        '[plugin.transition] core result plugin=%s step=%s session=%s command=%s accepted=%s',
+        plugin_id, step_id, submission.session_id or session_id,
+        submission.command_id, submission.accepted,
     )
-    cfg['_last_plugin_task_id'] = task_id
-    step_label = step_config.get('label', '')
-    display_name = f'{step_id} ({step_label})' if step_label else step_id
-    return f'Advance for step {display_name!r} submitted; backend acceptance is pending.'
+    return submission.message
 
 
-def _trigger_plugin_end(plugin_id: str) -> str:
-    """Emit a task_created event with step_id='__end__' to signal plugin session completion.
+def _trigger_plugin_steps(
+        plugin_id: str,
+        steps: List[Dict[str, Any]],
+        *,
+        hand_off: bool = False) -> _TransitionSubmission:
+    """Atomically submit multiple currently-Ready steps to Go.
 
-    Go's HandlePluginStepCreated intercepts this sentinel and marks the session as completed.
+    Go validates every target against one projection and either persists every
+    attempt or rejects the whole command. Previously attempted targets deliberately
+    remain on the single-step path.
     """
+    if not isinstance(steps, list) or len(steps) < 2:
+        raise ValueError('steps must contain at least two step commands; use advance_step for one target.')
+    if plugin_loader.get_plugin(plugin_id) is None:
+        raise ValueError(f'plugin {plugin_id!r} not found.')
+
     cfg = _agentic_config()
-    session_id: str = cfg.get('plugin_session_id', '')
+    session_id = str(cfg.get('plugin_session_id') or '')
     if not session_id:
-        raise ValueError('no active plugin session to complete.')
-    task_id = str(uuid.uuid4())
-    _write_agent_data(
-        'task_created',
-        task_id=task_id,
-        title=f'{plugin_id}:__end__',
-        agent_type='plugin_step',
-        mode='manual',
+        raise ValueError('batch advancement requires an active workflow session.')
+    focused_tab = cfg.get('focused_tab')
+    targets: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in steps:
+        if not isinstance(raw, dict):
+            raise ValueError('every batch item must be an object.')
+        step_id = str(raw.get('step_id') or '').strip()
+        if not step_id or step_id == '__end__':
+            raise ValueError('every batch item requires a non-__end__ step_id.')
+        if step_id in seen:
+            raise ValueError(f'duplicate batch step_id: {step_id!r}.')
+        seen.add(step_id)
+        step_config = plugin_loader.get_step_config(plugin_id, step_id)
+        if not step_config:
+            raise ValueError(f'step {step_id!r} is not defined in plugin {plugin_id!r}.')
+        user_input = str(raw.get('user_input') or cfg.get('query') or '').strip()
+        if not user_input:
+            raise ValueError(f'user_input must not be empty for step {step_id!r}.')
+        runtime_instruction = str(raw.get('runtime_instruction') or '')
+        enriched_instruction = runtime_instruction
+        if focused_tab:
+            enriched_instruction += (' ' if enriched_instruction else '') + (
+                f'User is currently viewing tab: {focused_tab}.'
+            )
+        partial_indices = raw.get('partial_indices') or {}
+        if not isinstance(partial_indices, dict):
+            raise ValueError(f'partial_indices for step {step_id!r} must be an object.')
+        targets.append({
+            'target_step_id': step_id,
+            'task_id': str(uuid.uuid4()),
+            'objective': _render_step_objective(step_config, user_input, enriched_instruction),
+            'user_input': user_input,
+            'runtime_instruction': runtime_instruction,
+            'partial_indices': partial_indices,
+        })
+
+    submission = _submit_transition_to_core(
+        plugin_id=plugin_id,
+        step_id=', '.join(target['target_step_id'] for target in targets),
+        session_id=session_id,
+        task_id=targets[0]['task_id'],
         objective='',
-        params={
-            'plugin_id': plugin_id,
-            'step_id': '__end__',
-            'session_id': session_id,
-            'user_input': '',
-            'is_cold_start': False,
-        },
-        input_slots=[],
-        output_slots=[],
-        tools=[],
-        resume=False,
+        user_input='',
+        hand_off=hand_off,
+        runtime_instruction='',
+        partial_indices={},
+        operation='execute_batch',
+        targets=targets,
     )
-    return 'Plugin session completed. Stop here.'
+    cfg['_last_plugin_transition_accepted'] = submission.accepted
+    if submission.accepted:
+        cfg['_last_plugin_task_id'] = submission.task_id
+        cfg['_last_plugin_tasks'] = submission.tasks or []
+    return submission
 
 
 def _build_step_choices_doc(
@@ -465,11 +613,8 @@ def _build_step_choices_doc(
 ) -> str:
     """Return a formatted string listing available step choices for the LLM.
 
-    When plugin_id and current_step are supplied, each forward step is annotated
-    with the condition (if any) under which it should be taken, derived from the
-    expanded transitions (skipif bypass conditions are already inlined).
+    Forward and previously attempted candidates come exclusively from Go's projection.
     """
-    sm = plugin_loader.get_state_machine(plugin_id) if plugin_id else None
     lines = [
         '## Available steps at this moment (authoritative — state machine computed)',
         '--------------------------------------------------------------------------',
@@ -477,22 +622,10 @@ def _build_step_choices_doc(
         'Do NOT infer step names from scenario descriptions or chat history.',
     ]
     if forward_steps:
-        # Build a condition map from the expanded transitions so each step shows
-        # the condition (if any) under which it should be taken.
-        condition_map: Dict[str, str] = {}
-        if sm and current_step is not None:
-            for edge in sm.get_expanded_transitions(current_step):
-                tgt = edge['to']
-                cond = edge.get('condition', '').strip()
-                if tgt not in condition_map and cond:
-                    condition_map[tgt] = cond
-
-        lines.append('Forward (next steps):')
+        lines.append('Ready steps reported by Go:')
         for s in forward_steps:
             label = step_labels.get(s, '')
             label_suffix = f'  ({label})' if label else ''
-            cond = condition_map.get(s, '')
-            cond_note = f'  [when: {cond}]' if cond else ''
             approval_note = ''
             if include_default_approval:
                 approval = (
@@ -501,29 +634,17 @@ def _build_step_choices_doc(
                     else 'not required'
                 )
                 approval_note = f'  [default approval: {approval}]'
-            lines.append(f'  - {s}{label_suffix}{cond_note}{approval_note}')
-
-        if len(forward_steps) > 1 and sm:
-            lines.append('')
-            lines.append(
-                '  NOTE: If these exits belong to a parallel node (route:all), you MUST trigger\n'
-                '  ALL of them by calling advance_step_and_hand_off once per step_id.\n'
-                '  If they belong to a choice node (route:choice), pick exactly ONE based on conditions.\n'
-                '  For steps annotated with [when: ...], only advance to that step if the condition holds.'
-            )
-    # Self-retry: current_step is injected into all_reachable without a graph self-loop.
-    # Document it here so ChatAgent knows it can pass step_id=current_step to re-run.
+            lines.append(f'  - {s}{label_suffix}{approval_note}')
+    rerun_steps: List[str] = []
     if current_step and current_step not in {'__start__', '__end__'}:
-        label = step_labels.get(current_step, '')
-        suffix = f'  ({label})' if label else ''
-        lines.append('Retry (re-run current step):')
-        lines.append(f'  - {current_step}{suffix}  <- full or partial retry of this step')
-    if rewind_steps:
-        lines.append('Rewind (re-run a past step):')
-        for s in rewind_steps:
+        rerun_steps.append(current_step)
+    rerun_steps.extend(step for step in rewind_steps if step not in rerun_steps)
+    if rerun_steps:
+        lines.append('Previously attempted steps that may be run again:')
+        for s in rerun_steps:
             label = step_labels.get(s, '')
             suffix = f'  ({label})' if label else ''
-            lines.append(f'  - {s}{suffix}  <- previously completed, can re-trigger')
+            lines.append(f'  - {s}{suffix}  <- select this ID to run it again')
     lines.append('')
     lines.append('Pass one of the above IDs as step_id. Any other value will be rejected.')
     return '\n'.join(lines)
@@ -562,7 +683,7 @@ def _build_step_name_index(plugin_id: str) -> str:
     if not entries:
         return ''
     return (
-        '## Plugin Step Name Index [AUTHORITATIVE]\n'
+        '## Workflow Step Name Index [AUTHORITATIVE]\n'
         'Use this compact id/name list only to match a user-named target boundary. '
         'It does not imply reachability or execution order.\n'
         + ', '.join(entries)
@@ -601,8 +722,8 @@ def _evaluate_plugin_preflight(
     previous_json = json.dumps(previous or {}, ensure_ascii=False)
     prompt = f'''You are a plugin launch preflight evaluator. Return exactly one JSON object and no prose.
 
-Plugin id: {plugin_id}
-Plugin name: {plugin_name}
+Workflow id: {plugin_id}
+Workflow name: {plugin_name}
 Description: {description}
 When to use: {when_to_use}
 Valid first steps: {json.dumps(first_steps, ensure_ascii=False)}
@@ -618,16 +739,16 @@ Persisted preflight from earlier clarification turns:
 Current consolidated request context:
 {request_context}
 
-Explicit plugin request: {json.dumps(bool(explicit_plugin_request))}
+Explicit workflow request: {json.dumps(bool(explicit_plugin_request))}
 
-If Explicit plugin request is true, the user has authoritatively selected this plugin.
+If Explicit workflow request is true, the user has authoritatively selected this workflow.
 You MUST NOT return not_applicable. Return ready when safe defaults are available, or
 need_information only when information is genuinely required before the first step can run.
 
 Classify the request as exactly one of:
 - ready: applicable and all truly required information is available or has an explicit safe default.
 - need_information: applicable but required information is missing.
-- not_applicable: this plugin should not be launched for the request.
+- not_applicable: this workflow should not be launched for the request.
 
 For ready, choose one valid first_step_id. Do not decide how execution continues after launch;
 the caller applies the current execution policy.
@@ -734,21 +855,30 @@ def _emit_preflight_snapshot(snapshot: Optional[Dict[str, Any]]) -> None:
 def build_cold_start_tools(
     plugin_catalog: Optional[List[Dict[str, Any]]] = None,
     disabled_builtin_plugins: Optional[List[str]] = None,
+    allowed_plugin_refs: Optional[List[str]] = None,
 ) -> List[Any]:
     """Build one side-effect-free preflight trigger per loaded plugin."""
     tools = []
     disabled = set(disabled_builtin_plugins or [])
+    allowed = set(allowed_plugin_refs or [])
     candidates = [
         (spec, None)
         for spec in (plugin_loader._registry or {}).values()
-        if not spec.plugin_id.startswith('user_') and spec.plugin_id not in disabled
+        if (
+            not spec.plugin_id.startswith('user_')
+            and spec.plugin_id not in disabled
+            and (not allowed or f'builtin:{spec.plugin_id}' in allowed)
+        )
     ]
-    candidates.extend((None, entry) for entry in (plugin_catalog or []))
+    candidates.extend(
+        (None, entry) for entry in (plugin_catalog or [])
+        if not allowed or str(entry.get('plugin_ref') or '') in allowed
+    )
     for spec, catalog_entry in candidates:
         if catalog_entry is not None:
             pid = str(catalog_entry.get('plugin_id') or 'plugin')
             name = str(catalog_entry.get('name') or pid)
-            desc = str(catalog_entry.get('description') or f'Trigger the {name} plugin.')
+            desc = str(catalog_entry.get('description') or f'Trigger the {name} workflow.')
             when_to_use = str(catalog_entry.get('when_to_use') or '').strip()
             first_steps: List[str] = []
             plugin_ref = str(catalog_entry.get('plugin_ref', pid)).encode()
@@ -758,9 +888,12 @@ def build_cold_start_tools(
             assert spec is not None
             pid = spec.plugin_id
             name = spec.yaml.get('name', pid)
-            desc = spec.yaml.get('description', f'Trigger the {name} plugin.')
+            desc = spec.yaml.get('description', f'Trigger the {name} workflow.')
             when_to_use = spec.yaml.get('when_to_use', '').strip()
-            first_steps = spec.state_machine.get_reachable_steps('__start__')
+            # Entry candidates are resolved by Go when the trigger runs. Keeping
+            # them out of the static tool definition prevents stale local graph
+            # semantics from being presented as runtime Ready state.
+            first_steps = []
             public_tool_name = f'trigger_{pid.replace("-", "_")}'
 
         def _make_trigger(
@@ -773,9 +906,9 @@ def build_cold_start_tools(
             tool_name='',
         ):
 
-            def _trigger(request_context: str, explicit_plugin_request: bool) -> str:
+            def _trigger(request_context: str, explicit_workflow_request: bool) -> str:
                 request_context = str(request_context or '').strip()
-                explicit_plugin_request = bool(explicit_plugin_request)
+                explicit_plugin_request = bool(explicit_workflow_request)
                 if not request_context:
                     return json.dumps({
                         'status': 'preflight_failed',
@@ -787,47 +920,70 @@ def build_cold_start_tools(
                 resolved_first = first
                 runtime_meta: Dict[str, Any] = {}
                 if entry is not None:
-                    resolved_plugin_id, runtime_spec = plugin_loader.resolve_remote_plugin(entry)
-                    resolved_first = runtime_spec.state_machine.get_reachable_steps('__start__')
+                    resolved_plugin_id, _runtime_spec = plugin_loader.resolve_remote_plugin(entry)
                     runtime_meta = {
                         key: entry.get(key)
                         for key in ('plugin_ref', 'revision_id', 'revision_no', 'tree_hash', 'remote_root')
                     }
                 resolved_spec = plugin_loader.get_plugin(resolved_plugin_id)
-                if resolved_spec is None or not resolved_first:
+                if resolved_spec is None:
                     return json.dumps({
                         'status': 'preflight_failed',
                         'outcome': 'preflight_failed',
-                        'reason': f'plugin {resolved_plugin_id!r} has no reachable first step',
-                        'error': f'plugin {resolved_plugin_id!r} has no reachable first step',
+                        'reason': f'plugin {resolved_plugin_id!r} is not loaded',
+                        'error': f'plugin {resolved_plugin_id!r} is not loaded',
                     }, ensure_ascii=False)
                 cfg = _agentic_config()
+                cfg.update(runtime_meta)
+                try:
+                    resolved_first = _fetch_go_start_candidates(resolved_plugin_id)
+                except Exception as exc:
+                    return json.dumps({
+                        'status': 'preflight_failed',
+                        'outcome': 'preflight_failed',
+                        'reason': f'Go could not plan the plugin start: {exc}',
+                        'error': str(exc),
+                    }, ensure_ascii=False)
+                if not resolved_first:
+                    return json.dumps({
+                        'status': 'preflight_failed',
+                        'outcome': 'preflight_failed',
+                        'reason': 'Go reports no Ready entry step for the current materials',
+                        'error': 'no Ready entry step',
+                    }, ensure_ascii=False)
                 cfg.pop('prepared_plugin', None)
                 if cfg.get('plugin_session_id'):
                     return json.dumps({
                         'status': 'preflight_failed',
                         'outcome': 'preflight_failed',
-                        'reason': 'an active plugin session already exists',
-                        'error': 'an active plugin session already exists',
+                        'reason': 'an active workflow session already exists',
+                        'error': 'an active workflow session already exists',
                     }, ensure_ascii=False)
                 previous = cfg.get('plugin_preflight_context')
                 if not isinstance(previous, dict) or previous.get('plugin_id') != resolved_plugin_id:
                     previous = None
-                # Once the user explicitly selects a plugin, retain that choice
-                # across any clarification turns whose text may no longer repeat
-                # the plugin name.
+                # Once the user explicitly selects a workflow, retain that choice
+                # across clarification turns whose text may no longer repeat its name.
                 explicit_plugin_request = bool(
                     explicit_plugin_request
                     or (previous or {}).get('explicit_plugin_request')
                 )
                 plugin_mode = str(cfg.get('plugin_mode') or 'dynamic')
                 try:
+                    start_hints = cfg.pop('_plugin_start_route_hints', {})
+                    preflight_scenario = resolved_spec.scenario_md
+                    if start_hints:
+                        hint_lines = ['Start route candidates (natural-language ChatAgent decision):']
+                        for step_id in resolved_first:
+                            hints = start_hints.get(step_id) or []
+                            hint_lines.append(f'- {step_id}: {" OR ".join(hints) if hints else "always applicable"}')
+                        preflight_scenario = preflight_scenario + '\n\n' + '\n'.join(hint_lines)
                     raw_result = _evaluate_plugin_preflight(
                         plugin_id=resolved_plugin_id,
                         plugin_name=plugin_name,
                         description=plugin_desc,
                         when_to_use=plugin_when_to_use,
-                        scenario=resolved_spec.scenario_md,
+                        scenario=preflight_scenario,
                         request_context=request_context,
                         previous=previous,
                         first_steps=resolved_first,
@@ -852,7 +1008,7 @@ def build_cold_start_tools(
                         )
                         result.update({
                             'decision': 'ready',
-                            'reason': 'The user explicitly requested this plugin.',
+                            'reason': 'The user explicitly requested this workflow.',
                             'missing_information': [],
                             'first_step_id': resolved_first[0],
                         })
@@ -943,7 +1099,7 @@ def build_cold_start_tools(
                     'must_advance': True,
                     'advance_committed': False,
                     'requires_hand_off_choice': not static_advancement,
-                    'fallback_hand_off': first_step_default_approval == 'required',
+                    'fallback_hand_off': True,
                     'step_name_index': step_name_index,
                     'launch_plan': launch_plan,
                     'scenario': resolved_spec.scenario_md,
@@ -959,9 +1115,9 @@ def build_cold_start_tools(
                     )
                 else:
                     instruction = (
-                        'You MUST now choose `advance_step` or `advance_step_and_hand_off` '
-                        'for first_step_id using the current request policy, step-name index, '
-                        'and first-step default approval. Do not answer with prose first.'
+                        'Infer whether the user explicitly requested multiple workflow steps. '
+                        'If yes, choose `advance_step`; otherwise choose the default '
+                        '`advance_step_and_hand_off`. Do not answer with prose first.'
                     )
                 return json.dumps({
                     'status': 'ready',
@@ -986,11 +1142,12 @@ def build_cold_start_tools(
                 'Args:\n'
                 '    request_context (str): The complete user goal. When clarification has\n'
                 '        occurred, consolidate the original request and all answers.\n\n'
-                '    explicit_plugin_request (bool): Always supply this flag. Set true when the user explicitly names,\n'
-                '        starts, enables, or asks to run this plugin. Explicit selection cannot\n'
+                '    explicit_workflow_request (bool): Always supply this flag. Set true when the user\n'
+                '        explicitly names and asks to use, run, start, launch, open, or enable this\n'
+                '        workflow. Explicit selection cannot\n'
                 '        be rejected as not_applicable.\n\n'
                 'Returns:\n'
-                '    A structured preflight result. This tool never starts the plugin.\n'
+                '    A structured preflight result. This tool never starts the workflow.\n'
                 '    When status is ready, immediately call an advance tool in the same turn.'
             )
             return _trigger
@@ -1031,6 +1188,10 @@ def _commit_prepared_plugin(
         hand_off=hand_off,
         preflight_id=preflight_id,
     )
+    if not cfg.get('_last_plugin_transition_accepted', False):
+        if hand_off:
+            raise RuntimeError(result)
+        return result
     prepared['advance_committed'] = True
     cfg['prepared_plugin'] = prepared
     if hand_off or not wait_for_result:
@@ -1039,18 +1200,18 @@ def _commit_prepared_plugin(
     task_id = str(cfg.get('_last_plugin_task_id') or '')
     if not task_id:
         raise RuntimeError('Cold-start task id was not recorded.')
-    _, session_id = _wait_for_task_started(task_id)
+    session_id = str(cfg.get('plugin_session_id') or '')
     if not session_id:
-        raise RuntimeError('Core acknowledged cold start without a plugin session id.')
+        raise RuntimeError('Go accepted cold start without a plugin session id.')
     cfg.update({
         'plugin_id': plugin_id,
         'plugin_session_id': session_id,
         'plugin_step': step_id,
     })
-    summary = _wait_for_step_done(step_id, result)
+    summary = _wait_for_go_task(step_id, result)
     spec = plugin_loader.get_plugin(plugin_id)
     if spec is None:
-        raise RuntimeError(f'Plugin {plugin_id!r} disappeared after launch was prepared.')
+        raise RuntimeError(f'Workflow {plugin_id!r} disappeared after launch was prepared.')
     labels = {
         sid: scfg.get('label', '')
         for sid, scfg in (spec._steps or {}).items()
@@ -1062,7 +1223,7 @@ def _commit_prepared_plugin(
         current_step=step_id,
         rewind_steps=[],
         step_labels=labels,
-    ) + '\n\n---\nPlugin scenario:\n' + str(prepared.get('scenario') or '')
+    ) + '\n\n---\nWorkflow scenario:\n' + str(prepared.get('scenario') or '')
 
 
 def build_cold_advance_tools(plugin_mode: str = 'dynamic') -> List[Any]:
@@ -1086,8 +1247,10 @@ def build_cold_advance_tools(plugin_mode: str = 'dynamic') -> List[Any]:
             return build_advance_step_tool(
                 str(cfg['plugin_id']), str(cfg.get('plugin_step') or '')
             )(
-                step_id=step_id,
-                user_input=str(plan.get('normalized_request') or cfg.get('query') or ''),
+                steps=[{
+                    'step_id': step_id,
+                    'user_input': str(plan.get('normalized_request') or cfg.get('query') or ''),
+                }],
             )
         return _commit_prepared_plugin(step_id, hand_off=False)
 
@@ -1109,14 +1272,16 @@ def build_cold_advance_tools(plugin_mode: str = 'dynamic') -> List[Any]:
             return build_advance_step_and_hand_off_tool(
                 str(cfg['plugin_id']), str(cfg.get('plugin_step') or '')
             )(
-                step_id=step_id,
-                user_input=str(plan.get('normalized_request') or cfg.get('query') or ''),
+                steps=[{
+                    'step_id': step_id,
+                    'user_input': str(plan.get('normalized_request') or cfg.get('query') or ''),
+                }],
             )
         return _commit_prepared_plugin(step_id, hand_off=True)
 
     if plugin_mode == 'auto':
         return [advance_step_and_hand_off]
-    return [advance_step, advance_step_and_hand_off]
+    return [advance_step_and_hand_off, advance_step]
 
 
 def commit_prepared_plugin_fallback() -> str:
@@ -1172,7 +1337,9 @@ async def _enforce_prepared_plugin_advance(
     ):
         return
 
-    from lazymind.chat.engine.agent_core import drive_agent
+    from lazymind.chat.engine.agent_runtime import (
+        AgentExecutor, AgentRole, AgentRunPlan, PromptBuilder,
+    )
     from lazymind.chat.service.component.status_retry import _new_react_agent
 
     launch_plan = dict(prepared.get('launch_plan') or {})
@@ -1195,13 +1362,11 @@ async def _enforce_prepared_plugin_advance(
     )
     if requires_hand_off_choice:
         correction = (
-            '## Mandatory plugin launch correction\n'
-            'The plugin trigger already returned ready. Do not answer, explain, confirm, '
-            'or ask another question. Immediately start first_step_id. Choose between '
-            '`advance_step` and `advance_step_and_hand_off` from the latest user request, '
-            'the compact step-name index, and the first-step default approval. A requested '
-            'confirmation at a later named boundary does not require handing off the first '
-            'step. Launch plan:\n'
+            '## Mandatory workflow launch correction\n'
+            'The workflow trigger already returned ready. Do not answer, explain, confirm, '
+            'or ask another question. Immediately start first_step_id. Infer whether the user '
+            'explicitly requested multiple workflow steps. Use `advance_step` only if they did; '
+            'otherwise use the default `advance_step_and_hand_off`. Launch plan:\n'
             + json.dumps(visible_launch_plan, ensure_ascii=False)
             + '\n'
             + str(prepared.get('step_name_index') or '')
@@ -1214,7 +1379,23 @@ async def _enforce_prepared_plugin_advance(
             'using the advancement tool named by this plan exactly as specified:\n'
             + json.dumps(visible_launch_plan, ensure_ascii=False)
         )
-    async for kind, payload in drive_agent(retry_agent, correction, history=history):
+    retry_prompt = (
+        PromptBuilder.for_role(AgentRole.CHAT)
+        .runtime(
+            'plugin_launch_correction', 'Mandatory Workflow Launch Correction', correction,
+            'plugin.runtime',
+            authoritative=True,
+            content_kind='instruction',
+        )
+        .input(query, source='user')
+        .build()
+    )
+    retry_plan = AgentRunPlan(
+        role=AgentRole.CHAT,
+        prompt=retry_prompt,
+        history=history or [],
+    )
+    async for kind, payload in AgentExecutor().stream_agent(retry_agent, retry_plan):
         if kind == 'event' and _should_suppress_prepared_plugin_text(payload):
             continue
         yield kind, payload
@@ -1276,71 +1457,32 @@ def _live_reachability_snapshot(
     fallback_current_step: str,
     rewind_steps: Optional[List[str]] = None,
 ) -> _ReachabilitySnapshot:
-    """Compute live step reachability from current ChatAgent state."""
+    """Read Ready/Past from Go without a local graph fallback."""
     cfg = _agentic_config()
     current_step = cfg.get('plugin_step', '') or fallback_current_step
     session_id = cfg.get('plugin_session_id', '')
-    sm = plugin_loader.get_state_machine(plugin_id)
-    forward_steps = sm.get_reachable_steps(current_step) if sm else []
+    forward_steps: List[str] = []
     rewind = list(rewind_steps or [])
-    reachable = list(forward_steps) + rewind
-    if current_step and current_step not in reachable:
-        reachable = [current_step] + reachable
+    projection: Dict[str, Any] = {}
+    if session_id:
+        projection = _fetch_go_projection(session_id)
+        forward_steps = list(projection.get('ready') or [])
+        rewind = list(projection.get('past') or [])
+    nodes = projection.get('nodes') if isinstance(projection.get('nodes'), dict) else {}
+    current_execution = (
+        str(nodes.get(current_step, {}).get('execution') or '')
+        if isinstance(nodes.get(current_step), dict) else ''
+    )
+    retry = [current_step] if current_execution in {'failed', 'interrupted'} else []
+    reachable = list(dict.fromkeys(forward_steps + retry + rewind))
     return _ReachabilitySnapshot(
         current_step=current_step,
         session_id=session_id,
         forward_steps=forward_steps,
         rewind_steps=rewind,
+        retry_steps=retry,
         reachable_steps=reachable,
     )
-
-
-def _validate_live_step_reachable(
-    *,
-    tool_name: str,
-    plugin_id: str,
-    step_id: str,
-    fallback_current_step: str,
-    rewind_steps: Optional[List[str]],
-    runtime_instruction: Optional[str],
-    partial_indices: Optional[Dict[str, List[int]]],
-    input_len: Optional[int] = None,
-) -> _ReachabilitySnapshot:
-    """Validate a step tool call against live reachability and log consistently."""
-    snapshot = _live_reachability_snapshot(plugin_id, fallback_current_step, rewind_steps)
-    if input_len is None:
-        LOG.info(
-            '[plugin.advance] %s called plugin=%s target=%s session=%s current=%s '
-            'reachable=%s runtime_instruction=%s partial=%s',
-            tool_name, plugin_id, step_id, snapshot.session_id,
-            snapshot.current_step or '__start__', snapshot.reachable_steps,
-            bool(runtime_instruction), bool(partial_indices),
-        )
-    else:
-        LOG.info(
-            '[plugin.advance] %s called plugin=%s target=%s session=%s current=%s '
-            'input_len=%d reachable=%s runtime_instruction=%s partial=%s',
-            tool_name, plugin_id, step_id, snapshot.session_id,
-            snapshot.current_step or '__start__', input_len, snapshot.reachable_steps,
-            bool(runtime_instruction), bool(partial_indices),
-        )
-    if step_id not in snapshot.reachable_steps:
-        LOG.warning(
-            '[plugin.advance] %s rejected unreachable plugin=%s target=%s '
-            'session=%s current=%s reachable=%s',
-            tool_name, plugin_id, step_id, snapshot.session_id,
-            snapshot.current_step or '__start__', snapshot.reachable_steps,
-        )
-        raise ValueError(
-            f'step {step_id!r} is not reachable from '
-            f'{snapshot.current_step!r}. Reachable: {snapshot.reachable_steps}.'
-        )
-    LOG.info(
-        '[plugin.advance] %s reachable plugin=%s target=%s session=%s current=%s reachable=%s',
-        tool_name, plugin_id, step_id, snapshot.session_id,
-        snapshot.current_step or '__start__', snapshot.reachable_steps,
-    )
-    return snapshot
 
 
 def build_advance_step_and_hand_off_tool(
@@ -1350,14 +1492,10 @@ def build_advance_step_and_hand_off_tool(
     step_labels: Optional[Dict[str, str]] = None,
     include_approval_guidance: bool = True,
 ) -> Any:
-    """Build the advance_step_and_hand_off tool (stop-tool).
-
-    Queues the step asynchronously and immediately ends the current ReAct turn.
-    Mode-specific continuation behavior is defined by the system guidance.
-    """
-    sm = plugin_loader.get_state_machine(plugin_id)
-    forward = sm.get_reachable_steps(current_step) if sm else []
-    rewind = list(rewind_steps or [])
+    """Build the asynchronous advancement stop-tool for one or more steps."""
+    snapshot = _live_reachability_snapshot(plugin_id, current_step, rewind_steps)
+    forward = snapshot.forward_steps
+    rewind = snapshot.rewind_steps
     labels = step_labels or {}
 
     choices_doc = _build_step_choices_doc(
@@ -1365,49 +1503,37 @@ def build_advance_step_and_hand_off_tool(
         rewind,
         labels,
         plugin_id=plugin_id,
-        current_step=current_step,
+        current_step=current_step if current_step in snapshot.retry_steps else '',
         include_default_approval=include_approval_guidance,
     )
 
-    def advance_step_and_hand_off(
-        step_id: str,
-        user_input: str,
-        runtime_instruction: Optional[str] = None,
-        partial_indices: Optional[Dict[str, List[int]]] = None,
-    ) -> str:
-        """Start the next step asynchronously and hand off subsequent control.
-
-        After calling this tool, the current ReAct loop exits and the SSE stream closes.
-        The step runs in the background. Mode-specific system guidance determines
-        what happens after it completes.
-
-        Use this when the user explicitly requests review/a boundary, or when the
-        target step is annotated with default approval required. Use
-        `advance_step` when approval is explicitly skipped or defaults to not required.
-
-        Terminal plugin steps are normally completed by the plugin event loop after
-        the terminal task succeeds. Use `step_id="__end__"` only as an explicit
-        close signal when the final step has already succeeded and the session is
-        still open.
-        """
+    def advance_step_and_hand_off(steps: List[Dict[str, Any]]) -> str:
+        """Start one or more Ready steps and end the current ReAct turn."""
+        if not isinstance(steps, list) or not steps:
+            raise ValueError('steps must contain at least one step command.')
+        if len(steps) > 1:
+            submission = _trigger_plugin_steps(plugin_id, steps, hand_off=True)
+            if not submission.accepted:
+                raise RuntimeError(submission.message)
+            return submission.message
+        command = steps[0]
+        if not isinstance(command, dict):
+            raise ValueError('each steps item must be an object.')
+        step_id = str(command.get('step_id') or '')
         if step_id == '__end__':
-            return _trigger_plugin_end(plugin_id)
-        _validate_live_step_reachable(
-            tool_name='advance_step_and_hand_off',
-            plugin_id=plugin_id,
-            step_id=step_id,
-            fallback_current_step=current_step,
-            rewind_steps=rewind_steps,
-            runtime_instruction=runtime_instruction,
-            partial_indices=partial_indices,
-        )
-        return _trigger_plugin_step(
-            plugin_id, step_id, user_input,
+            raise ValueError('Manual __end__ transitions are disabled; Go computes session completion.')
+        result = _trigger_plugin_step(
+            plugin_id, step_id, str(command.get('user_input') or ''),
             is_cold_start=False,
             hand_off=True,
-            runtime_instruction=runtime_instruction or '',
-            partial_indices=partial_indices or {},
+            runtime_instruction=str(command.get('runtime_instruction') or ''),
+            partial_indices=command.get('partial_indices') or {},
+            operation='advance',
         )
+        if not _agentic_config().get('_last_plugin_transition_accepted', False):
+            raise RuntimeError(result)
+        _set_local_plugin_step(step_id)
+        return result
 
     selection_guidance = (
         'Use the current request policy to decide when this asynchronous boundary is required.\n'
@@ -1415,48 +1541,15 @@ def build_advance_step_and_hand_off_tool(
         else 'Use this tool to start the selected next step.\n'
     )
     advance_step_and_hand_off.__doc__ = (
-        'Start the next plugin step asynchronously and end the current ReAct turn.\n\n'
+        'Start one or more Ready workflow steps asynchronously and end the current turn.\n\n'
         + selection_guidance
-        + 'Terminal steps are also boundaries; after a\n'
-        'terminal task succeeds, the plugin event loop completes the session.\n\n'
-        '## Intent-change rewind (MUST read before advancing)\n\n'
-        'If the user expresses dissatisfaction with or changes to the result of a step that\n'
-        'has ALREADY SUCCEEDED, you MUST rewind to the earliest affected step instead of\n'
-        'advancing the next forward step.\n\n'
-        'Examples:\n'
-        '  User: "我不喜欢日系风格，改成北欧简约风" → the style was set in an earlier step\n'
-        '    → advance_step_and_hand_off(step_id=<that_step>, rewind=True,\n'
-        '        user_input="北欧简约风格，...")\n'
-        '  User: "不要树，改成蓝天白云" → subject was defined in analyze_subject\n'
-        '    → advance_step_and_hand_off(step_id="analyze_subject", rewind=True,\n'
-        '        user_input="主体：蓝天白云...")\n\n'
-        '## Checkpoint-Resume (interrupted steps)\n\n'
-        'When the user says "继续" and the step was interrupted (not "重试"):\n'
-        '  advance_step_and_hand_off(step_id=<current_step>, runtime_instruction=(\n'
-        '    "Previous attempt was interrupted. Check existing artifacts for this step "\n'
-        '    "and only produce missing outputs (resume from checkpoint). "\n'
-        '    "Do not regenerate already-saved artifacts."))\n'
-        'When the user says "重试": advance_step_and_hand_off(step_id=..., rewind=True)\n'
-        '  (rewind=True discards previous partial artifacts and restarts the step from scratch)\n\n'
-        '## Completing the plugin\n\n'
-        'Prefer handing off the terminal pipeline step itself. The plugin event loop will\n'
-        'mark the session completed after that terminal task succeeds. Call with\n'
-        'step_id="__end__" only if the final step has already succeeded but the session\n'
-        'still needs an explicit close signal.\n\n'
-        '## Rewind guidance\n\n'
-        'If the DriverAgent or user indicates a prior step produced bad output, rewind by\n'
-        'passing its step_id. Rewind-eligible steps are listed in the "Rewind" section below.\n\n'
+        + 'Pass one command for one step. Pass multiple commands only for independent Ready\n'
+        'steps that should be submitted atomically. Never batch dependent or previously\n'
+        'attempted steps. Terminal steps are also hand-off boundaries.\n\n'
         + choices_doc + '\n\n'
         'Args:\n'
-        '    step_id (str): Step to advance to (see list above) or "__end__".\n'
-        '    user_input (str): Concise goal statement for the SubAgent based on the latest\n'
-        '        user query only. Do NOT pass vague phrases like "继续" or "continue", and\n'
-        '        do NOT include prior-turn context unless the user explicitly repeats it.\n'
-        '    runtime_instruction (str, optional): Ephemeral directive for this run only.\n'
-        '    partial_indices (dict, optional): Maps slot → list_index values to\n'
-        '        overwrite (list-cardinality slots only).\n\n'
-        'Returns:\n'
-        '    Confirmation that the step was queued. Exits ReAct immediately after.'
+        '    steps: One or more objects containing step_id and user_input; each may also\n'
+        '        contain runtime_instruction and partial_indices.'
     )
     return advance_step_and_hand_off
 
@@ -1467,70 +1560,70 @@ def build_advance_step_tool(
     rewind_steps: Optional[List[str]] = None,
     step_labels: Optional[Dict[str, str]] = None,
 ) -> Any:
-    """Build the synchronous advance_step tool for policies that allow it.
-
-    Blocks until the SubAgent completes, then returns the step result summary so
-    ChatAgent can continue reasoning. Use for explicit continuous execution and
-    for steps whose default approval is not required.
-    """
-    sm = plugin_loader.get_state_machine(plugin_id)
-    forward = sm.get_reachable_steps(current_step) if sm else []
-    rewind = list(rewind_steps or [])
+    """Build the synchronous advancement tool for one or more steps."""
+    snapshot = _live_reachability_snapshot(plugin_id, current_step, rewind_steps)
+    forward = snapshot.forward_steps
+    rewind = snapshot.rewind_steps
     labels = step_labels or {}
 
-    choices_doc = _build_step_choices_doc(forward, rewind, labels, plugin_id=plugin_id, current_step=current_step)
+    choices_doc = _build_step_choices_doc(
+        forward, rewind, labels, plugin_id=plugin_id,
+        current_step=current_step if current_step in snapshot.retry_steps else '',
+    )
 
-    def advance_step(
-        step_id: str,
-        user_input: str,
-        runtime_instruction: Optional[str] = None,
-        partial_indices: Optional[Dict[str, List[int]]] = None,
-    ) -> str:
-        """Advance the active plugin to the next step and WAIT for completion.
-
-        Blocks until the SubAgent finishes, then returns the step result summary.
-        Use when the user explicitly requests continuous/no-approval execution, or
-        when the target step defaults to no approval and the user has not overridden it.
-        """
+    def advance_step(steps: List[Dict[str, Any]]) -> str:
+        """Start one or more Ready steps and wait for their results."""
+        if not isinstance(steps, list) or not steps:
+            raise ValueError('steps must contain at least one step command.')
+        if len(steps) > 1:
+            submission = _trigger_plugin_steps(plugin_id, steps, hand_off=False)
+            if not submission.accepted:
+                return submission.message
+            summaries = []
+            cfg = _agentic_config()
+            for task in submission.tasks or []:
+                step_id, task_id = str(task.get('step_id') or ''), str(task.get('task_id') or '')
+                if step_id and task_id:
+                    cfg['_last_plugin_task_id'] = task_id
+                    summaries.append(f'## {step_id}\n{_wait_for_go_task(step_id, submission.message)}')
+            cfg['_last_plugin_tasks'] = submission.tasks or []
+            return (
+                submission.message if not summaries else '\n\n'.join(summaries)
+            ) + _append_step_transition_hint(
+                '', plugin_id=plugin_id, current_step='', rewind_steps=rewind_steps or [],
+                step_labels=labels,
+            )
+        command = steps[0]
+        if not isinstance(command, dict):
+            raise ValueError('each steps item must be an object.')
+        step_id = str(command.get('step_id') or '')
         if step_id == '__end__':
-            return _trigger_plugin_end(plugin_id)
-        reachability = _validate_live_step_reachable(
-            tool_name='advance_step',
-            plugin_id=plugin_id,
-            step_id=step_id,
-            fallback_current_step=current_step,
-            rewind_steps=rewind_steps,
-            runtime_instruction=runtime_instruction,
-            partial_indices=partial_indices,
-            input_len=len(user_input or ''),
-        )
-        _clear_step_signal_queues(step_id)
+            raise ValueError('Manual __end__ transitions are disabled; Go computes session completion.')
         result = _trigger_plugin_step(
-            plugin_id, step_id, user_input,
+            plugin_id, step_id, str(command.get('user_input') or ''),
             is_cold_start=False,
-            runtime_instruction=runtime_instruction or '',
-            partial_indices=partial_indices or {},
+            runtime_instruction=str(command.get('runtime_instruction') or ''),
+            partial_indices=command.get('partial_indices') or {},
+            operation='advance',
         )
-        # First wait for Go/Core to acknowledge that it consumed the streaming
-        # task_created event and launched the plugin_step. Without this ack, a
-        # lost task_created event would look like a long-running step.
-        task_id = _wait_for_step_started(step_id)
-        # Core updates plugin_sessions.current_step_id when it accepts
-        # task_created. Keep ChatAgent's local state on the same boundary.
+        if not _agentic_config().get('_last_plugin_transition_accepted', False):
+            return result
+        task_id = str(_agentic_config().get('_last_plugin_task_id') or '')
+        # Keep only a conversational focus hint. It is not a runtime state fact;
+        # parallel Current/Ready sets always come from Go's projection.
         _set_local_plugin_step(step_id)
         LOG.info(
             '[plugin.advance] local current_step updated plugin=%s step=%s session=%s task=%s',
-            plugin_id, step_id, reachability.session_id, task_id,
+            plugin_id, step_id, _agentic_config().get('plugin_session_id', ''), task_id,
         )
-        # Poll for completion via FileSystemQueue.
         LOG.info(
-            '[plugin.advance] waiting for step_done plugin=%s step=%s session=%s task=%s',
-            plugin_id, step_id, reachability.session_id, task_id,
+            '[plugin.advance] polling Go task plugin=%s step=%s session=%s task=%s',
+            plugin_id, step_id, _agentic_config().get('plugin_session_id', ''), task_id,
         )
-        summary = _wait_for_step_done(step_id, result)
+        summary = _wait_for_go_task(step_id, result)
         LOG.info(
             '[plugin.advance] advance_step completed plugin=%s step=%s session=%s task=%s summary_len=%d',
-            plugin_id, step_id, reachability.session_id, task_id, len(summary or ''),
+            plugin_id, step_id, _agentic_config().get('plugin_session_id', ''), task_id, len(summary or ''),
         )
         return _append_step_transition_hint(
             summary,
@@ -1541,26 +1634,21 @@ def build_advance_step_tool(
         )
 
     advance_step.__doc__ = (
-        'Advance the active plugin step synchronously and return the result.\n\n'
-        'Use this tool in continuous/uninterrupted mode, or when the target step is\n'
-        'annotated `[default approval: not required]` and the user did not override it.\n'
-        'Continuous mode is active when the user intent contains phrases like\n'
-        '"一次性完成", "不要中断", "一次性写完", "run all steps", "no interruptions".\n'
+        'Start one or more Ready workflow steps synchronously and return their results.\n\n'
+        'Use only when the user explicitly requests multiple workflow steps, for example\n'
+        '"帮我执行 N 步", "连续执行到 X", "一次性执行完", "run N steps",\n'
+        '"continue through X", or "run all steps". A complete-deliverable request alone\n'
+        'does not authorize this synchronous tool.\n'
         'In continuous mode with an explicit target boundary, use `advance_step` only\n'
         'for prerequisite steps before that boundary, then execute the boundary step\n'
         'with `advance_step_and_hand_off` and stop. If the user did not set a boundary,\n'
         'run prerequisite remaining steps with this tool, then execute the terminal step\n'
         'with `advance_step_and_hand_off` and stop.\n\n'
-        'If the target step defaults to approval, or the user asks to review/confirm it,\n'
-        'use `advance_step_and_hand_off` instead.\n\n'
+        'For every other request, use `advance_step_and_hand_off` instead.\n\n'
         + choices_doc + '\n\n'
-        'Args:\n'
-        '    step_id (str): Step to advance to (see list above).\n'
-        '    user_input (str): Concise goal statement from the latest user query only.\n'
-        '    runtime_instruction (str, optional): Ephemeral directive for this run.\n'
-        '    partial_indices (dict, optional): List-slot overwrite indices.\n\n'
-        'Returns:\n'
-        '    Step result summary after SubAgent completes.'
+        'Pass one command for one step, or multiple independent Ready step commands for one\n'
+        'atomic batch. Each command contains step_id and user_input and may contain\n'
+        'runtime_instruction and partial_indices.'
     )
     return advance_step
 
@@ -1573,19 +1661,22 @@ def _append_step_transition_hint(
     step_labels: Dict[str, str],
 ) -> str:
     """Append live transition guidance to advance_step's tool result."""
-    sm = plugin_loader.get_state_machine(plugin_id)
-    forward = sm.get_reachable_steps(current_step) if sm else []
+    snapshot = _live_reachability_snapshot(plugin_id, current_step, rewind_steps)
+    # Only expose retry option when Go's projection confirms the step is retryable
+    # (i.e. its last execution was failed or interrupted). A just-succeeded step
+    # must NOT appear as a Retry candidate — the LLM should advance forward instead.
+    retryable_step = current_step if current_step in snapshot.retry_steps else ''
     choices_doc = _build_step_choices_doc(
-        forward,
-        rewind_steps,
+        snapshot.forward_steps,
+        snapshot.rewind_steps,
         step_labels,
         plugin_id=plugin_id,
-        current_step=current_step,
+        current_step=retryable_step,
     )
     return (
         f'{summary}\n\n'
         '---\n'
-        'Plugin state after this step:\n'
+        'Workflow state after this step:\n'
         f'- Current step: {current_step}\n'
         '- The next advance_step call in this same turn must follow this live state:\n\n'
         f'{choices_doc}\n\n'
@@ -1594,210 +1685,69 @@ def _append_step_transition_hint(
         '(for example "执行到 X", "到 X 为止", "until X", "up to X"), match X against '
         'the available step ids, labels, and transition descriptions. Execute that '
         'target boundary step with `advance_step_and_hand_off`, then stop. Do not '
-        'advance to downstream steps or manually close `__end__` after the boundary hand-off.'
+        'advance to downstream steps or submit a completion command after the boundary hand-off.'
     )
 
 
 def _set_local_plugin_step(step_id: str) -> None:
-    """Update ChatAgent's in-process current step after Core accepts the task."""
+    """Update the ChatAgent display focus after Go accepts a transition."""
     try:
         lazyllm.globals['agentic_config']['plugin_step'] = step_id
     except Exception as exc:
         LOG.warning('[plugin.advance] failed to update local plugin_step step=%s error=%s', step_id, exc)
 
 
-def _clear_step_signal_queues(step_id: str) -> None:
-    """Drop stale started/done signals before launching a fresh dynamic step."""
-    try:
-        from lazyllm.common.queue import FileSystemQueue
-        cfg = _agentic_config()
-        session_id = cfg.get('plugin_session_id', '')
-        for prefix in ('step_started', 'step_done'):
-            FileSystemQueue(klass=f'{prefix}_{session_id}_{step_id}').clear()
-        LOG.info('[plugin.advance] cleared step signal queues step=%s session=%s', step_id, session_id)
-    except Exception as exc:
-        LOG.warning('[plugin.advance] failed to clear step signal queues step=%s error=%s', step_id, exc)
-
-
-def _wait_for_step_started(step_id: str, timeout: float = 15.0) -> str:
-    """Poll FileSystemQueue for a step_started ack from Go/Core.
-
-    Raises TimeoutError when the streaming task_created event was not consumed
-    by Core in time. This is a launch failure, not a step execution timeout.
-    """
-    import time
-    from lazyllm.common.queue import FileSystemQueue
-
-    cfg = _agentic_config()
-    session_id = cfg.get('plugin_session_id', '')
-    queue_key = f'step_started_{session_id}_{step_id}'
-    fsq = FileSystemQueue(klass=queue_key)
-    deadline = time.monotonic() + timeout
-    LOG.info('[plugin.advance] waiting for step_started step=%s session=%s timeout=%.0fs', step_id, session_id, timeout)
-    while time.monotonic() < deadline:
-        for raw in fsq.dequeue():
-            try:
-                msg = json.loads(raw)
-            except Exception as exc:
-                LOG.warning(
-                    '[plugin.advance] ignored malformed step_started signal '
-                    'step=%s session=%s error=%s',
-                    step_id, session_id, exc,
-                )
-                continue
-            if msg.get('tag') == 'step_started':
-                task_id = str(msg.get('task_id') or '')
-                LOG.info(
-                    '[plugin.advance] received step_started step=%s session=%s task=%s',
-                    step_id, session_id, task_id,
-                )
-                return task_id
-            if msg.get('tag') == 'cancel':
-                LOG.warning(
-                    '[plugin.advance] received cancel before step_started step=%s session=%s',
-                    step_id, session_id,
-                )
-                raise RuntimeError(f'Step {step_id!r} was stopped before launch completed.')
-        time.sleep(0.2)
-    LOG.error('[plugin.advance] step_started timeout step=%s session=%s timeout=%.0fs', step_id, session_id, timeout)
-    raise TimeoutError(
-        f'Step {step_id!r} was not acknowledged by Core within {timeout:.0f}s. '
-        'The task_created stream event may not have been consumed.'
-    )
-
-
-def _wait_for_task_started(task_id: str, timeout: float = 15.0) -> tuple[str, str]:
-    """Wait for the cold-start ACK keyed by task id and return task/session ids."""
-    import time
-    from lazyllm.common.queue import FileSystemQueue
-
-    queue_key = f'step_started_task_{task_id}'
-    fsq = FileSystemQueue(klass=queue_key)
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        for raw in fsq.dequeue():
-            msg = json.loads(raw)
-            if msg.get('tag') == 'step_started':
-                return str(msg.get('task_id') or task_id), str(msg.get('session_id') or '')
-            if msg.get('tag') == 'cancel':
-                raise RuntimeError(f'Plugin task {task_id!r} was stopped before launch completed.')
-        time.sleep(0.2)
-    raise TimeoutError(
-        f'Plugin task {task_id!r} was not acknowledged by Core within {timeout:.0f}s.'
-    )
-
-
-def _wait_for_step_done(step_id: str, trigger_result: str, timeout: float = 600.0) -> str:
-    """Poll FileSystemQueue for a step_done signal; return result summary or timeout message.
-
-    The step_done signal is enqueued by the subagent runner at step completion.
-    Polls every 2 seconds up to `timeout` seconds.  Exits early if a 'cancel' control
-    message arrives on the step_done queue.
-    """
+def _wait_for_go_task(step_id: str, trigger_result: str, timeout: float = 600.0) -> str:
+    """Poll Go's persisted task status after transition acceptance."""
     import time
     try:
-        from lazyllm.common.queue import FileSystemQueue
+        import httpx
+        from lazymind.config import config as _cfg
         cfg = _agentic_config()
         session_id = cfg.get('plugin_session_id', '')
-        queue_key = f'step_done_{session_id}_{step_id}'
-        fsq = FileSystemQueue(klass=queue_key)
+        task_id = str(cfg.get('_last_plugin_task_id') or '')
+        if not task_id:
+            return trigger_result
+        core_url = str(_cfg['core_api_url']).rstrip('/')
         deadline = time.monotonic() + timeout
-        LOG.info('[plugin.advance] polling step_done step=%s session=%s timeout=%.0fs', step_id, session_id, timeout)
+        LOG.info(
+            '[plugin.advance] polling Go task step=%s session=%s task=%s timeout=%.0fs',
+            step_id, session_id, task_id, timeout,
+        )
         while time.monotonic() < deadline:
-            for raw in fsq.dequeue():
-                try:
-                    msg = json.loads(raw)
-                    # Support both old tag='step_done' format and new {status, summary} format.
-                    if msg.get('tag') == 'step_done' or 'status' in msg:
-                        LOG.info(
-                            '[plugin.advance] received step_done step=%s session=%s status=%s summary_len=%d',
-                            step_id, session_id, msg.get('status', ''), len(msg.get('summary', '') or ''),
-                        )
-                        return msg.get('summary', f"Step '{step_id}' completed.")
-                    if msg.get('tag') == 'cancel':
-                        LOG.warning(
-                            '[plugin.advance] received cancel while waiting step_done '
-                            'step=%s session=%s',
-                            step_id, session_id,
-                        )
-                        return f"Step '{step_id}' was stopped by the user."
-                except Exception as exc:
-                    LOG.warning(
-                        '[plugin.advance] ignored malformed step_done signal '
-                        'step=%s session=%s error=%s',
-                        step_id, session_id, exc,
-                    )
+            response = httpx.get(f'{core_url}/internal/subagent/tasks/{task_id}', timeout=5.0)
+            if response.status_code == 200:
+                data = _core_response_data(response)
+                status = str(data.get('status') or '')
+                if status in {'succeeded', 'failed', 'interrupted', 'canceled'}:
+                    summary = str(data.get('summary') or '')
+                    return summary or f"Step '{step_id}' finished with status {status}."
             time.sleep(2.0)
-        LOG.error('[plugin.advance] step_done timeout step=%s session=%s timeout=%.0fs', step_id, session_id, timeout)
-        return f"Step '{step_id}' timed out waiting for completion (partial result may be available)."
+        return f"Step '{step_id}' was accepted and is still running after {timeout:.0f}s. Task id: {task_id}."
     except Exception as exc:
-        LOG.warning('[plugin.advance] step_done wait failed step=%s error=%s; returning trigger result', step_id, exc)
+        LOG.warning('[plugin.advance] Go task polling failed step=%s error=%s', step_id, exc)
         return trigger_result
 
 
-# ---------------------------------------------------------------------------
-# update_intent — ChatAgent only, persists intent/constraint to DB
-# ---------------------------------------------------------------------------
+def update_intentwriter(tool: Any, plugin_context: Optional[Dict[str, Any]]) -> Any:
+    """Extend a conversation IntentWriter with active-plugin scopes.
 
-def build_update_intent_tool() -> Any:
-    """Build the update_intent tool for ChatAgent.
-
-    UPSERT a global or step-level intent/constraint. Plugin-agnostic — the
-    framework manages this, not the plugin author.
+    ChatService owns the base tool. Plugin internals stay here: ChatService does
+    not inspect step ids, DAG state, or plugin lifecycle.
     """
-    def update_intent(
-        scope: str,
-        content: str,
-        step_id: Optional[str] = None,
-    ) -> str:
-        """Record or update an intent/constraint for this plugin session.
-
-        ALWAYS call this tool BEFORE advancing any step when the user expresses
-        a style preference, quality requirement, or execution constraint in their
-        message. Do not skip this even if you are about to call advance_step_and_hand_off.
-
-        Also call this tool when:
-        - The user repeats or emphasizes the same point across multiple turns.
-        - The user pushes back on a result and explains why (e.g. "that's wrong because...",
-          "I didn't mean X, I meant Y") — capture the clarification so future steps honour it.
-
-        Scope 'session' — applies to the entire session (global constraint):
-          e.g. "keep the tone formal throughout", "always use bullet points"
-          → update_intent(scope='session', content='keep the tone formal throughout')
-
-        Scope 'step' — applies to a specific step only:
-          e.g. "make step 2 output shorter", "use a different format for the summary step"
-          → update_intent(scope='step', step_id='<step_id>', content='output should be shorter')
-
-        Args:
-            scope (str): 'session' for global or 'step' for step-specific constraint.
-            content (str): A concise model-generated summary of the user's emphasized
-                constraints in the latest query (not a full raw quote). If no explicit
-                constraints are present, do not call this tool.
-            step_id (str, optional): Required when scope='step'.
-
-        Returns:
-            Confirmation string.
-        """
-        cfg = _agentic_config()
-        session_id = cfg.get('plugin_session_id', '')
-        if not session_id:
-            raise ValueError('no active plugin session.')
-        if scope not in ('session', 'step'):
-            raise ValueError(f'unknown scope {scope!r}. Use "session" or "step".')
-        if scope == 'step' and not step_id:
-            raise ValueError('step_id required for scope="step".')
-        # Emit via SSE so Go writes the DB and pushes an intent_updated convEvent
-        # to notify the frontend immediately — avoids the user having to refresh.
-        _write_agent_data('intent_updated', **{
-            'session_id': session_id,
-            'scope': scope,
-            'content': content,
-            'step_id': step_id or '',
-        })
-        return '约束已更新'
-
-    return update_intent
+    if not isinstance(plugin_context, dict):
+        return tool
+    session_id = str(plugin_context.get('session_id') or '').strip()
+    plugin_id = str(plugin_context.get('plugin_id') or '').strip()
+    spec = plugin_loader.get_plugin(plugin_id) if session_id and plugin_id else None
+    if not spec:
+        return tool
+    return enable_plugin_intent_scopes(
+        tool,
+        session_id=session_id,
+        plugin_id=plugin_id,
+        valid_step_ids=list(spec._steps.keys()),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1810,7 +1760,7 @@ def build_query_tools() -> List[Any]:
     """Build read-only plugin state query tools for ChatAgent."""
 
     def list_plugin_steps(session_id: Optional[str] = None) -> str:
-        """List all steps and their current status in the active plugin session.
+        """List all steps and their current status in the active workflow session.
 
         Use this when the user asks "where are we in the pipeline" or
         "which steps are done / failed".  Read-only — does not trigger execution.
@@ -1818,7 +1768,7 @@ def build_query_tools() -> List[Any]:
         cfg = _agentic_config()
         sid = session_id or cfg.get('plugin_session_id', '')
         if not sid:
-            return 'No active plugin session.'
+            return 'No active workflow session.'
         try:
             import httpx
             from lazymind.config import config as _cfg
@@ -1841,7 +1791,7 @@ def build_query_tools() -> List[Any]:
                     runs[-1].append(s)
                 else:
                     runs.append([s])
-            lines = ['## Plugin session steps']
+            lines = ['## Workflow session steps']
             for run in runs:
                 latest = run[-1]
                 if latest.get('status') == 'succeeded':
@@ -1868,7 +1818,7 @@ def build_query_tools() -> List[Any]:
         cfg = _agentic_config()
         session_id = cfg.get('plugin_session_id', '')
         if not session_id:
-            return 'No active plugin session.'
+            return 'No active workflow session.'
         try:
             from lazymind.chat.engine.subagent.db import TaskQueryDB
             artifacts = TaskQueryDB().get_step_artifacts(session_id, step_id)
@@ -1890,7 +1840,7 @@ def build_query_tools() -> List[Any]:
         cfg = _agentic_config()
         session_id = cfg.get('plugin_session_id', '')
         if not session_id:
-            return 'No active plugin session.'
+            return 'No active workflow session.'
         try:
             import httpx
             from lazymind.config import config as _cfg
@@ -1967,10 +1917,10 @@ def _build_preflight_context_section(preflight: Any) -> str:
     if not visible:
         return ''
     return (
-        '## Plugin Preflight Context [AUTHORITATIVE]\n'
+        '## Workflow Preflight Context [AUTHORITATIVE]\n'
         'This durable snapshot survives history compaction. Preserve original_intent, '
         'merge new answers into normalized_request, and pass the consolidated result to '
-        'trigger_<plugin>(request_context).\n'
+        'trigger_<workflow>(request_context).\n'
         + json.dumps(visible, ensure_ascii=False, indent=2)
     )
 
@@ -1979,22 +1929,24 @@ def _build_cold_execution_policy(plugin_mode: str) -> str:
     """Return request-local guidance for choosing the first advancement tool."""
     if plugin_mode == 'auto':
         return (
-            '## Current Plugin Launch Policy [AUTHORITATIVE]\n'
+            '## Current Workflow Launch Policy [AUTHORITATIVE]\n'
             'After a trigger returns ready, call the only available advancement tool named '
             'in launch_plan. Do not make an approval or continuation decision.'
         )
     return (
-        '## Current Plugin Launch Policy [AUTHORITATIVE]\n'
-        'After a trigger returns ready, it provides a compact index of every plugin step, '
-        'the valid first step, and that first step\'s default approval. Match any user-named '
+        '## Current Workflow Launch Policy [AUTHORITATIVE]\n'
+        'After a trigger returns ready, it provides a compact index of every workflow step, '
+        'the valid first step, and that first step\'s default approval. You must still infer '
+        'the execution scope from the user\'s words; approval metadata does not choose the tool. '
+        'Match any user-named '
         'target boundary against the full id/name index. The index contains names only and '
         'does not imply order or reachability.\n'
-        '- If the requested boundary is the first step, use `advance_step_and_hand_off`.\n'
-        '- If the user requests continuous execution to a different named boundary, use '
-        '`advance_step` for the first step. A request to confirm at that later boundary must '
-        'not hand off the first step.\n'
-        '- Otherwise explicit approval/continuation intent wins; when absent, use the first '
-        'step\'s default approval.\n'
+        '- DEFAULT: use `advance_step_and_hand_off` for the first step.\n'
+        '- Use `advance_step` only when the user explicitly requests more than one workflow '
+        'step, such as "帮我执行 N 步", "连续执行到 X", "一次性执行完", '
+        '"run N steps", "continue through X", or "run the whole workflow without stopping".\n'
+        '- Asking for a complete article, image, report, or other final deliverable does NOT '
+        'by itself request multi-step or uninterrupted execution.\n'
         'Always start only the first_step_id returned by the trigger. After each synchronous '
         '`advance_step` result, use only the newly returned reachable-step details and repeat '
         'the decision. Continue synchronously through prerequisites; when the named boundary '
@@ -2007,7 +1959,8 @@ def resolve_plugin_injection(
     conversation_id: str = '',
     plugin_catalog: Optional[List[Dict[str, Any]]] = None,
     disabled_builtin_plugins: Optional[List[str]] = None,
-) -> tuple:
+    allowed_plugin_refs: Optional[List[str]] = None,
+) -> PluginAgentContribution:
     """Resolve plugin tools, system prompt, stop-tools and agentic_config patches.
 
     Called once per request from handle_chat.  Encapsulates all plugin-context
@@ -2017,14 +1970,8 @@ def resolve_plugin_injection(
     here — they are handled independently in chat_service.py so that schedule
     availability and task context visibility are not affected by enable_plugin.
 
-    Returns:
-        (plugin_tools, plugin_system_prompt, plugin_stop_tools, agentic_config_patch, plugin_artifact_context)
-
-        plugin_tools             – list of callables to append to the agent tool list.
-        plugin_system_prompt     – extra system-prompt text to append (may be empty).
-        plugin_stop_tools        – list of tool names that terminate the ReAct loop.
-        agentic_config_patch     – dict to merge into agentic_config (may be empty).
-        plugin_artifact_context  – artifact summary to prepend to the current user-turn (not system prompt).
+    Returns a structured contribution containing tools, stable plugin policy,
+    stop tools, runtime config patches, and request-local runtime context.
     """
     plugin_tools: List[Any] = []
     plugin_system_prompt: str = ''
@@ -2035,11 +1982,17 @@ def resolve_plugin_injection(
     # Honour enable_plugin=false: skip all plugin tooling and fall back to pure QA.
     cfg = _agentic_config()
     if not cfg.get('enable_plugin', True):
-        return plugin_tools, plugin_system_prompt, plugin_stop_tools, agentic_config_patch, plugin_artifact_context
+        return PluginAgentContribution(
+            plugin_tools, plugin_system_prompt, plugin_stop_tools,
+            agentic_config_patch, plugin_artifact_context,
+        )
 
     if not plugin_loader._registry:
         # No plugins registered — return empty; task context is injected by chat_service.
-        return plugin_tools, plugin_system_prompt, plugin_stop_tools, agentic_config_patch, plugin_artifact_context
+        return PluginAgentContribution(
+            plugin_tools, plugin_system_prompt, plugin_stop_tools,
+            agentic_config_patch, plugin_artifact_context,
+        )
 
     # Resolve plugin_mode from plugin_context (injected by Go).
     plugin_mode = 'dynamic'
@@ -2078,17 +2031,12 @@ def resolve_plugin_injection(
                 'focused_tab': plugin_context.get('focused_tab'),
                 'focused_sort_order': plugin_context.get('focused_sort_order'),
             })
-            sm = plugin_loader.get_state_machine(p_plugin_id)
-
-            rewind_steps: List[str] = []
-            if sm and p_session_id and p_current_step:
-                ancestors = sm.get_ancestors(p_current_step)
-                succeeded = _fetch_succeeded_steps(p_session_id)
-                # Only ancestors (not current_step itself) are rewind candidates.
-                # current_step is the "pending" step for this turn and is shown
-                # separately in the step-status context; including it in rewind
-                # would mislead the LLM into thinking it has already succeeded.
-                rewind_steps = sorted(ancestors & succeeded)
+            projection = _fetch_go_projection(p_session_id)
+            projected_current = list(projection.get('current') or [])
+            if p_current_step not in projected_current:
+                p_current_step = projected_current[0] if projected_current else ''
+                agentic_config_patch['plugin_step'] = p_current_step
+            rewind_steps = list(projection.get('past') or [])
 
             step_labels: Dict[str, str] = {}
             spec = plugin_loader.get_plugin(p_plugin_id)
@@ -2101,23 +2049,24 @@ def resolve_plugin_injection(
             # Build plugin tools according to plugin_mode.
             # advance_step_and_hand_off is always registered (stop-tool).
             # advance_step (sync) is only registered in dynamic mode.
-            plugin_tools = [build_advance_step_and_hand_off_tool(
-                p_plugin_id, p_current_step,
-                rewind_steps=rewind_steps,
-                step_labels=step_labels,
-                include_approval_guidance=plugin_mode != 'auto',
-            )]
-            plugin_stop_tools = ['advance_step_and_hand_off']
-
-            if plugin_mode == 'dynamic':
-                plugin_tools.append(build_advance_step_tool(
+            plugin_tools = [
+                build_advance_step_and_hand_off_tool(
                     p_plugin_id, p_current_step,
                     rewind_steps=rewind_steps,
                     step_labels=step_labels,
-                ))
+                    include_approval_guidance=plugin_mode != 'auto',
+                ),
+            ]
+            plugin_stop_tools = ['advance_step_and_hand_off']
 
-            # update_intent for ChatAgent only.
-            plugin_tools.append(build_update_intent_tool())
+            if plugin_mode == 'dynamic':
+                plugin_tools.extend([
+                    build_advance_step_tool(
+                        p_plugin_id, p_current_step,
+                        rewind_steps=rewind_steps,
+                        step_labels=step_labels,
+                    ),
+                ])
 
             # Read-only query tools (active session required).
             plugin_tools.extend(build_query_tools())
@@ -2153,19 +2102,16 @@ def resolve_plugin_injection(
             # Inject the current execution policy into this request only. Keeping
             # it in plugin_artifact_context (rather than the system prompt/history)
             # makes configuration changes take effect on the next chat turn.
-            sm_for_mode = plugin_loader.get_state_machine(p_plugin_id)
-            terminal_steps = (
-                sm_for_mode.get_terminal_steps(from_step=p_current_step)
-                if sm_for_mode else []
-            )
-            mode_guidance = _build_mode_guidance(plugin_mode, terminal_steps, step_labels)
+            mode_guidance = _build_mode_guidance(plugin_mode)
             if mode_guidance:
                 plugin_artifact_context = (
                     plugin_artifact_context + '\n\n' + mode_guidance
                 ).strip()
         else:
             # Cold start: no active session yet
-            triggers = build_cold_start_tools(plugin_catalog, disabled_builtin_plugins)
+            triggers = build_cold_start_tools(
+                plugin_catalog, disabled_builtin_plugins, allowed_plugin_refs,
+            )
             plugin_tools = triggers + build_cold_advance_tools(plugin_mode)
             plugin_stop_tools = ['advance_step_and_hand_off']
             plugin_artifact_context = _build_preflight_context_section(
@@ -2181,16 +2127,22 @@ def resolve_plugin_injection(
                     for spec in (plugin_loader._registry or {}).values()
                     if (
                         spec.plugin_id not in set(disabled_builtin_plugins or [])
+                        and (not allowed_plugin_refs or f'builtin:{spec.plugin_id}' in set(allowed_plugin_refs))
                         and not spec.plugin_id.startswith('user_')
                     )
                 ]
-                scenarios.extend(_catalog_intro(entry) for entry in (plugin_catalog or []))
+                scenarios.extend(
+                    _catalog_intro(entry) for entry in (plugin_catalog or [])
+                    if not allowed_plugin_refs or str(entry.get('plugin_ref') or '') in set(allowed_plugin_refs)
+                )
                 plugin_system_prompt = (
                     _COLD_START_PLUGIN_PROMPT
                 ) + '\n\n---\n\n'.join(s for s in scenarios if s)
     else:
         # No plugin_context provided: still inject cold-start triggers
-        triggers = build_cold_start_tools(plugin_catalog, disabled_builtin_plugins)
+        triggers = build_cold_start_tools(
+            plugin_catalog, disabled_builtin_plugins, allowed_plugin_refs,
+        )
         plugin_tools = triggers + build_cold_advance_tools(plugin_mode)
         plugin_stop_tools = ['advance_step_and_hand_off']
         plugin_artifact_context = _build_cold_execution_policy(plugin_mode)
@@ -2200,19 +2152,28 @@ def resolve_plugin_injection(
                 for spec in (plugin_loader._registry or {}).values()
                 if (
                     spec.plugin_id not in set(disabled_builtin_plugins or [])
+                    and (not allowed_plugin_refs or f'builtin:{spec.plugin_id}' in set(allowed_plugin_refs))
                     and not spec.plugin_id.startswith('user_')
                 )
             ]
-            scenarios.extend(_catalog_intro(entry) for entry in (plugin_catalog or []))
+            scenarios.extend(
+                _catalog_intro(entry) for entry in (plugin_catalog or [])
+                if not allowed_plugin_refs or str(entry.get('plugin_ref') or '') in set(allowed_plugin_refs)
+            )
             plugin_system_prompt = (
                 _COLD_START_PLUGIN_PROMPT
             ) + '\n\n---\n\n'.join(s for s in scenarios if s)
 
-    return plugin_tools, plugin_system_prompt, plugin_stop_tools, agentic_config_patch, plugin_artifact_context
+    return PluginAgentContribution(
+        plugin_tools, plugin_system_prompt, plugin_stop_tools,
+        agentic_config_patch, plugin_artifact_context,
+    )
 
 
 def _catalog_intro(entry: Dict[str, Any]) -> str:
-    lines = [f'## Plugin: {entry.get("plugin_id") or entry.get("name") or "plugin"}']
+    workflow_id = entry.get('plugin_id') or entry.get('plugin_ref') or 'workflow'
+    workflow_name = entry.get('name') or workflow_id
+    lines = [f'## Workflow: {workflow_name} (id: {workflow_id})']
     if entry.get('description'):
         lines.append(str(entry['description']))
     if entry.get('when_to_use'):
@@ -2225,11 +2186,9 @@ def _catalog_intro(entry: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 def _build_intent_section(session_id: str, step_id: Optional[str] = None) -> str:
-    """Serialize session-level and step-level intent/constraints for injection into ChatAgent prompts.
+    """Serialize plugin-session intent for ChatAgent prompt injection.
 
-    Both global (session-level) and all recorded step-level constraints are injected here
-    so ChatAgent has full visibility when deciding whether to call update_intent and which
-    step to advance next.
+    Step intent is execution detail and is injected only into its SubAgent.
     """
     if not session_id:
         return ''
@@ -2237,17 +2196,13 @@ def _build_intent_section(session_id: str, step_id: Optional[str] = None) -> str
         from lazymind.chat.engine.subagent.db import TaskQueryDB
         db = TaskQueryDB()
         session_intent = db.get_session_intent(session_id) if hasattr(db, 'get_session_intent') else None
-        step_intents: Dict[str, str] = db.list_step_intents(session_id) if hasattr(db, 'list_step_intents') else {}
-
-        if not session_intent and not step_intents:
+        if not session_intent:
             return ''
 
         lines = ['## User Intent & Constraints']
         lines.append('These constraints were recorded from the user and MUST be respected when advancing steps.')
         if session_intent:
             lines.append(f'Global: {session_intent}')
-        for sid, txt in step_intents.items():
-            lines.append(f'Step "{sid}": {txt}')
         return '\n'.join(lines)
     except Exception:
         return ''
@@ -2272,14 +2227,23 @@ def _build_step_status_section(
             lbl = labels.get(sid, '')
             return f'{sid} ({lbl})' if lbl else sid
 
-        sm = plugin_loader.get_state_machine(plugin_id)
-        succeeded = _fetch_succeeded_steps(session_id) if session_id else set()
+        projection = _fetch_go_projection(session_id)
+        succeeded = list(projection.get('past') or [])
+        ready = list(projection.get('ready') or [])
+        route_hints: Dict[str, List[str]] = {}
+        for edge in projection.get('edges') or []:
+            if not isinstance(edge, dict) or edge.get('state') != 'active':
+                continue
+            target = str(edge.get('to') or '')
+            when = str(edge.get('when') or '').strip()
+            if target and when:
+                route_hints.setdefault(target, []).append(when)
 
-        lines = ['## Plugin Step Status [AUTHORITATIVE — queried at request time]']
+        lines = ['## Workflow Step Status [AUTHORITATIVE — queried at request time]']
         lines.append('> Any step-status information in the conversation history is OUTDATED. Use only this section.')
 
         if current_step:
-            lines.append(f'\nCurrent plugin step state: **{_label(current_step)}**')
+            lines.append(f'\nCurrent workflow step state: **{_label(current_step)}**')
             lines.append(
                 'This is the step the session is currently positioned at; it is not automatically '
                 'the next action target. If the user clearly wants to proceed and does not modify '
@@ -2289,23 +2253,29 @@ def _build_step_status_section(
             lines.append('\nCurrent step: pipeline not yet started')
 
         if succeeded:
-            sm_steps = list(sm._transitions.keys()) if sm else []
-            ordered = [s for s in sm_steps if s not in sm._RESERVED and s in succeeded]
-            unordered = sorted(succeeded - set(ordered))
-            all_succeeded = ordered + unordered
-            lines.append('Succeeded steps (in execution order): ' + ', '.join(_label(s) for s in all_succeeded))
+            lines.append('Effective succeeded steps: ' + ', '.join(_label(s) for s in succeeded))
         else:
             lines.append('Succeeded steps: none yet')
 
         if rewind_steps:
-            lines.append('Rewind-eligible steps (already succeeded, can be re-run): '
+            lines.append('Previously completed steps that can be run again: '
                          + ', '.join(_label(s) for s in rewind_steps))
 
-        if sm and current_step:
-            forward = [s for s in sm.get_reachable_steps(current_step) if s not in sm._RESERVED]
-            if forward:
-                lines.append('Next forward steps (valid targets for continuing): '
-                             + ', '.join(_label(s) for s in forward))
+        if ready:
+            ready_labels = []
+            for step in ready:
+                hints = route_hints.get(step) or []
+                suffix = f' [when: {" OR ".join(hints)}]' if hints else ''
+                ready_labels.append(_label(step) + suffix)
+            lines.append('Ready steps reported by Go (valid targets now): '
+                         + ', '.join(ready_labels))
+            if len(ready) > 1:
+                lines.append(
+                    'Decision hint: evaluate every natural-language `when` hint against the current '
+                    'user intent. A hinted step is Reachable, not automatically selected. Batch only '
+                    'the independent Ready steps that are simultaneously applicable; for N-select-1 '
+                    'alternatives, advance only the selected step.'
+                )
 
         return '\n'.join(lines)
     except Exception:
@@ -2313,15 +2283,15 @@ def _build_step_status_section(
 
 
 def _build_mode_guidance(
-        plugin_mode: str,
-        terminal_steps: Optional[List[str]] = None,
-        step_labels: Optional[Dict[str, str]] = None) -> str:
+        plugin_mode: str) -> str:
     """Return the request-local execution policy selected by application code."""
     if plugin_mode == 'auto':
         return (
-            '## Current Plugin Execution Policy [AUTHORITATIVE]\n\n'
-            'Only `advance_step_and_hand_off` is available for step advancement. '
-            'Always use it to start the selected next step and end the current turn.\n'
+            '## Current Workflow Execution Policy [AUTHORITATIVE]\n\n'
+            'Only asynchronous advancement tools are available. Use '
+            '`advance_step_and_hand_off` with one command for one Ready step, or multiple '
+            'commands for independent Ready steps that should start atomically. The tool ends '
+            'the current turn only after Go accepts the full command.\n'
             'After the step completes, the backend controller evaluates the result and '
             'starts the next decision turn. Do not wait for synchronous step results or ask '
             'the user questions during execution.'
@@ -2330,18 +2300,18 @@ def _build_mode_guidance(
     global_rules = (
         '\n\n## Step decision rules (READ BEFORE EVERY ACTION)\n\n'
         '### Rule 0 — Intent capture from latest user query (highest priority)\n'
-        'At the beginning of each plugin turn, inspect ONLY the latest user query.\n'
+        'At the beginning of each workflow turn, compare the latest user query with the inherited intent.\n'
         'If it contains explicit constraints/emphasis or a named execution boundary (e.g.\n'
         '"必须/不要/只能/执行到 X/做到 X/完成 X 后确认/until X"),\n'
-        'you MUST call `update_intent(scope="session", content="<concise summary>")` FIRST,\n'
+        'you MUST call `intentwrite` with the minimal intent delta FIRST,\n'
         'before any step-advance tool call. Summarize 1-2 key constraints in concise Chinese.\n'
-        'If the latest query has no explicit new constraints, do NOT call update_intent.\n\n'
+        'If the latest query has no explicit new constraints, do NOT call intentwrite.\n\n'
         'ALSO: if the "User Intent & Constraints" section is empty (no session intent recorded yet)\n'
         'AND the conversation history contains a persistent execution preference such as\n'
         '"一次性", "不要中断", "执行到 X", "完成 X 后确认", "每步确认", "每一步审批",\n'
         '"无需审批", "一次性写完", "run all steps", "approve every step",\n'
         '"do it all at once", or similar phrases,\n'
-        'call `update_intent(scope="session", content="<concise summary of the constraint>")`\n'
+        'call `intentwrite(scope="plugin_session", operations=[...])`\n'
         'to persist the constraint before advancing any step.\n\n'
         '### Rule 1 — Intent-change detection\n'
         'Before advancing any step, check whether the user is rejecting or changing\n'
@@ -2350,80 +2320,57 @@ def _build_mode_guidance(
         '  - Implicit correction: user describes a different style/subject/content\n'
         '    than what the current artifacts reflect.\n'
         'If intent has changed, identify the EARLIEST step whose output is now\n'
-        'invalidated and rewind to that step using `advance_step_and_hand_off` with\n'
-        '`step_id=<affected_step>` and `rewind=True` (clears that step\'s artifacts\n'
-        'and re-runs from scratch). Do NOT continue to the next forward step.\n\n'
-        '### Rule 2 — Step order enforcement\n'
-        'Steps MUST be executed in the order defined by the pipeline. You may only\n'
-        'execute `current_step` or rewind to a rewind-eligible step. The next forward\n'
-        'step becomes available only AFTER `current_step` succeeds.\n'
-        'Never skip steps — do not call a downstream step while an upstream step is\n'
-        'still pending.\n\n'
-        '### Rule 3 — Approval precedence and workflow advancement\n'
-        'Select the advancement tool with this priority:\n'
-        '  1. Explicit intent in the latest query or persisted session intent wins. Match a\n'
-        '     user-named target against the compact "Plugin Step Name Index". If that boundary\n'
-        '     is a currently valid next step, use `advance_step_and_hand_off` for it. If it is\n'
-        '     another known step and the user requests continuous execution until that boundary,\n'
-        '     use `advance_step` for prerequisite currently reachable steps. Do NOT hand off an\n'
-        '     intermediate step merely because the user requested confirmation at the later\n'
-        '     boundary. If the user requests uninterrupted execution without a boundary, use\n'
-        '     `advance_step`.\n'
-        '  2. If the user expresses no approval preference, read the target step\'s\n'
-        '     `[default approval: ...]` annotation. Use `advance_step_and_hand_off` when\n'
-        '     approval is required; use `advance_step` when it is not required.\n'
-        'After an `advance_step` result, repeat this decision for the next target. This lets\n'
-        'automatic steps continue until the workflow reaches a step that requires approval.\n\n'
-        'If the user clearly asks to proceed with the existing plugin workflow and\n'
+        'invalidated and select that step again using `advance_step_and_hand_off` with\n'
+        '`step_id=<affected_step>`. The backend clears affected artifacts and determines\n'
+        'the lifecycle operation automatically. Do NOT continue to the next forward step.\n\n'
+        '### Rule 2 — DAG frontier and atomic batching\n'
+        'The authoritative Ready list is the only forward execution frontier. Never infer\n'
+        'serial order from `current_step`, conversation history, or visual position.\n'
+        'If exactly one Ready step should start now, use the single-step tool. If two or more\n'
+        'independent Ready steps should start now, issue ONE batch call containing all of them,\n'
+        'with a separate user_input/runtime_instruction for every step. Do not issue repeated\n'
+        'single-step calls for the same frontier. Never include a Blocked node or a downstream\n'
+        'node that needs another batch item\'s future output. Running an attempted step again remains single-step.\n\n'
+        '### Rule 3 — Dynamic mode defaults to hand-off\n'
+        'DEFAULT: call `advance_step_and_hand_off` and stop after starting the selected Ready step(s).\n'
+        'Use `advance_step` only when the latest query or persisted session intent explicitly asks\n'
+        'to execute multiple workflow steps, for example "帮我执行 N 步", "连续执行到 X",\n'
+        '"一次性执行完", "run N steps", "continue through X", or "run all steps".\n'
+        'A request for a complete deliverable or a named workflow is NOT a request for continuous\n'
+        'execution. Step approval annotations are context only and never override this dynamic-mode default.\n'
+        'When several independent Ready steps form the same frontier, pass them in one call to the\n'
+        'chosen tool; the number of parallel Ready nodes does not itself imply continuous execution.\n\n'
+        'If the user clearly asks to proceed with the existing workflow and\n'
         'does not add new requirements, corrections, or dissatisfaction signals:\n'
-        '  - If continuous mode is NOT active: apply the target step\'s default approval.\n'
+        '  - If continuous mode is NOT active: use `advance_step_and_hand_off` and stop.\n'
         '  - If continuous mode IS active (Rule 4) and the user set a target boundary:\n'
         '    use `advance_step` for prerequisite steps before that boundary, then use\n'
         '    `advance_step_and_hand_off` for the boundary step and stop.\n'
         '  - If continuous mode IS active with no target boundary: use `advance_step`\n'
         '    for prerequisite remaining steps, then use `advance_step_and_hand_off`\n'
         '    for the terminal/final-deliverable step and stop.\n'
-        'Select the target from "Next forward steps (valid targets for continuing)"\n'
-        'in the step-status block. If multiple forward targets are listed, choose\n'
-        'the target whose transition condition best matches the current artifacts\n'
-        'and user intent; if the choice is genuinely ambiguous, ask the user.\n'
+        'Select targets only from "Ready steps reported by Go" in the status block. Multiple\n'
+        'listed targets are valid parallel choices, not an implicit N-select-1 choice. Unless\n'
+        'the user explicitly limits the work to a subset, start all Ready steps that advance\n'
+        'the requested workflow in one plural-tool call.\n'
         'Do NOT reply only with prose such as "正在生成..." without calling a tool.\n'
-        'Do NOT pass the current plugin step state unless it is explicitly listed\n'
-        'as a valid forward or rewind target.\n'
+        'Do NOT pass the current workflow step state unless it is explicitly listed\n'
+        'as a valid forward or previously-attempted target.\n'
     )
     common = (
-        '\n\n## Plugin execution guidance\n\n'
+        '\n\n## Workflow execution guidance\n\n'
         'Tools for step advancement:\n'
         '- `advance_step_and_hand_off`: Start a step asynchronously and end the current turn.\n'
     )
-    labels = step_labels or {}
-    terminal_hint = ''
-    if terminal_steps:
-        names = ', '.join(
-            f'`{s}`' + (f' ({labels[s]})' if s in labels else '')
-            for s in terminal_steps
-        )
-        terminal_hint = (
-            f'\n\n## Terminal steps (last steps before pipeline completion)\n\n'
-            f'The following steps lead directly to the end of the pipeline: {names}.\n'
-            'If the user explicitly targets one of these terminal steps as the boundary,\n'
-            'execute it with `advance_step_and_hand_off` and stop. If the user asks to\n'
-            'complete the whole pipeline and no narrower boundary is specified, run\n'
-            'prerequisite steps with `advance_step`, execute the terminal step with\n'
-            '`advance_step_and_hand_off`, and let the plugin event loop complete the\n'
-            'session after that terminal task finishes.\n'
-            'In default single-step mode, use `advance_step_and_hand_off` and stop.'
-        )
     common += (
         (
             'An asynchronous boundary returns the next decision to the user.\n'
-            '- `advance_step`: Queue a step and WAIT for its result. '
-            'Use this in continuous/uninterrupted mode (see Rule 4 below). '
+            '- `advance_step`: Queue one step and WAIT for its result.\n'
+            'Pass multiple step commands to `advance_step` to atomically queue independent Ready '
+            'steps and WAIT for all results. Use this in continuous/uninterrupted mode (see Rule 4 below). '
             'Use `advance_step` for prerequisite steps before a requested boundary, then '
             '`advance_step_and_hand_off` for the boundary step.\n'
-            'When there is no explicit approval preference, use the target step annotation: '
-            '`advance_step_and_hand_off` for `[default approval: required]`, otherwise '
-            '`advance_step` and evaluate the next target after it completes.\n\n'
+            'Unless explicit multi-step intent is present, always use `advance_step_and_hand_off`.\n\n'
             '### Rule 4 — Continuous / uninterrupted execution mode (MUST check before every action)\n'
             'Activate continuous mode when ANY of the following is true:\n'
             '  a) The "User Intent & Constraints" section contains phrases such as:\n'
@@ -2433,34 +2380,33 @@ def _build_mode_guidance(
             'Before executing continuous mode, determine whether the latest user query sets\n'
             'an explicit target boundary with phrases like "执行到 X", "做到 X", "到 X 为止",\n'
             '"生成到 X", "until X", or "up to X". Match X against the full compact\n'
-            '"Plugin Step Name Index". Use detailed conditions, routing, and default approval\n'
+            '"Workflow Step Name Index". Use detailed conditions, routing, and default approval\n'
             'only from the currently reachable steps shown by the step tools/status. The full\n'
             'name index does not imply reachability or execution order.\n'
             'A target boundary has higher priority than generic uninterrupted phrases. For\n'
             'example, "一次性执行到 X，中间不要问我" means run only through the\n'
             'matched boundary step X, then stop after queuing X.\n'
             'In continuous mode:\n'
-            '  1. If an explicit target boundary exists, use `advance_step` only for steps\n'
-            '     before the boundary, in pipeline order.\n'
+            '  1. If an explicit target boundary exists, use singular or plural waiting tools\n'
+            '     for each Ready frontier before the boundary; batch every multi-step frontier.\n'
             '  2. Execute the target boundary step with `advance_step_and_hand_off`, then stop.\n'
             '     Do NOT wait for the boundary step with `advance_step`.\n'
             '  3. Do NOT call downstream steps and do NOT call `__end__` after a non-`__end__`\n'
             '     boundary hand-off.\n'
             '  4. If there is no explicit target boundary and the user requested the whole\n'
-            '     pipeline/final deliverable, run prerequisite steps with `advance_step`,\n'
+            '     pipeline/final deliverable, run prerequisite Ready frontiers with the\n'
+            '     appropriate singular/plural waiting tool,\n'
             '     execute the terminal step with `advance_step_and_hand_off`, then stop.\n'
             '  5. NEVER call `advance_step_and_hand_off` for intermediate steps — '
             '     it hands off control and breaks the continuous run.\n'
-            '  6. If `advance_step` returns an error, stop the sequence immediately and '
+            '  6. If any advancement tool returns an error, stop the sequence immediately and '
             '     report the failure; do not skip or continue to a later step.\n\n'
-            'Outside explicit continuous mode, step defaults still apply whenever the user has '
-            'not stated an approval preference.\n\n'
+            'Outside explicit continuous mode, always hand off after starting the selected frontier.\n\n'
             'When a step is interrupted and user says "继续": call advance_step_and_hand_off with '
             'runtime_instruction="Previous attempt was interrupted. Check existing artifacts '
             'and only produce missing outputs (resume from checkpoint)."\n'
-            'When user says "重试": call advance_step_and_hand_off with rewind=True '
-            '(restarts the interrupted step from scratch, ignoring previous partial artifacts).'
-            + terminal_hint
+            'When user says "重试": call the single-step advance_step_and_hand_off for that '
+            'failed/interrupted step; never place a previously attempted step in a batch.'
         )
     )
     return global_rules + common

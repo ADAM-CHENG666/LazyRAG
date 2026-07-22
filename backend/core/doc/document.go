@@ -56,6 +56,9 @@ func requireDatasetPermission(r *http.Request, datasetID string, action string) 
 	if !canAccessDataset(&ds, userID, action) {
 		return &ds, userID, false
 	}
+	if !datasetAllowedByScanSource(r, ds.ID, action) {
+		return &ds, userID, false
+	}
 	return &ds, userID, true
 }
 
@@ -710,7 +713,8 @@ func DeleteDocument(w http.ResponseWriter, r *http.Request) {
 		common.ReplyErr(w, "missing X-User-Id", http.StatusBadRequest)
 		return
 	}
-	if _, _, ok := requireDatasetPermission(r, datasetID, acl.PermissionDatasetWrite); !ok {
+	ds, _, ok := requireDatasetPermission(r, datasetID, acl.PermissionDatasetWrite)
+	if !ok {
 		replyDatasetForbidden(w)
 		return
 	}
@@ -727,6 +731,10 @@ func DeleteDocument(w http.ResponseWriter, r *http.Request) {
 	if err := deleteExternalDocs(r, datasetID, rowsToDelete); err != nil {
 		common.ReplyErr(w, "external delete failed", http.StatusBadGateway)
 		return
+	}
+	// Delete uploaded source files and clean up residual files in the shared folder.
+	if err := deleteUploadedFiles(r.Context(), ds.TenantID, datasetID, rowsToDelete); err != nil {
+		log.Logger.Error().Err(err).Str("handler", "DeleteDocument").Msg("failed to delete uploaded files")
 	}
 	now := time.Now().UTC()
 	docIDs := documentIDsFromRows(rowsToDelete)
@@ -908,7 +916,7 @@ func SearchAllDocuments(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	datasetIDs, err := accessibleDatasetIDs(r.Context(), userID)
+	datasetIDs, err := accessibleDatasetIDs(r, userID)
 	if err != nil {
 		common.ReplyErr(w, fmt.Sprintf("%s: %v", "search documents failed", err), http.StatusInternalServerError)
 		return
@@ -980,7 +988,7 @@ func ListDocumentsByDatasets(w http.ResponseWriter, r *http.Request) {
 		common.ReplyErr(w, "dataset_ids required", http.StatusBadRequest)
 		return
 	}
-	readableDatasetIDs, err := readableRequestedDatasetIDs(r.Context(), userID, datasetIDs)
+	readableDatasetIDs, err := readableRequestedDatasetIDs(r, userID, datasetIDs)
 	if err != nil {
 		common.ReplyErr(w, fmt.Sprintf("%s: %v", "query datasets failed", err), http.StatusInternalServerError)
 		return
@@ -1213,7 +1221,8 @@ func BatchDeleteDocument(w http.ResponseWriter, r *http.Request) {
 		common.ReplyErr(w, "missing X-User-Id", http.StatusBadRequest)
 		return
 	}
-	if _, _, ok := requireDatasetPermission(r, datasetID, acl.PermissionDatasetWrite); !ok {
+	ds, _, ok := requireDatasetPermission(r, datasetID, acl.PermissionDatasetWrite)
+	if !ok {
 		replyDatasetForbidden(w)
 		return
 	}
@@ -1243,6 +1252,10 @@ func BatchDeleteDocument(w http.ResponseWriter, r *http.Request) {
 	if err := deleteExternalDocs(r, datasetID, rowsToDelete); err != nil {
 		common.ReplyErr(w, "external delete failed", http.StatusBadGateway)
 		return
+	}
+	// Delete uploaded source files and clean up residual files in the shared folder.
+	if err := deleteUploadedFiles(r.Context(), ds.TenantID, datasetID, rowsToDelete); err != nil {
+		log.Logger.Error().Err(err).Str("handler", "DeleteDocument").Msg("failed to delete uploaded files")
 	}
 	now := time.Now().UTC()
 	docIDs := documentIDsFromRows(rowsToDelete)
@@ -1512,6 +1525,68 @@ func deleteExternalDocs(r *http.Request, datasetID string, rows []orm.Document) 
 	return nil
 }
 
+// deleteUploadedFiles deletes uploaded files associated with documents and cleans up residual upload_xxx file directories in the shared folder.
+// Finds the corresponding upload_file_id via UploadedFile.document_id, then removes the file directory.
+func deleteUploadedFiles(ctx context.Context, tenantID, datasetID string, rows []orm.Document) error {
+	docIDs := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if strings.TrimSpace(row.ID) == "" {
+			continue
+		}
+		docIDs = append(docIDs, row.ID)
+	}
+	if len(docIDs) == 0 {
+		return nil
+	}
+	// Look up the corresponding upload_file_id from the UploadedFile table by document_id.
+	var uploadedFiles []orm.UploadedFile
+	if err := store.DB().WithContext(ctx).
+		Where("document_id IN ? AND deleted_at IS NULL", docIDs).
+		Find(&uploadedFiles).Error; err != nil {
+		return fmt.Errorf("query uploaded files: %w", err)
+	}
+	if len(uploadedFiles) == 0 {
+		return nil
+	}
+	log.Logger.Info().
+		Str("handler", "deleteUploadedFiles").
+		Str("tenant_id", tenantID).
+		Str("dataset_id", datasetID).
+		Int("file_count", len(uploadedFiles)).
+		Msg("cleaning up uploaded source files")
+	for _, uf := range uploadedFiles {
+		fid := strings.TrimSpace(uf.UploadFileID)
+		if fid == "" {
+			continue
+		}
+		dir := buildDatasetDocFileDir(tenantID, datasetID, "", fid)
+		if err := os.RemoveAll(dir); err != nil {
+			log.Logger.Warn().
+				Str("file_id", fid).
+				Str("path", dir).
+				Err(err).
+				Msg("failed to remove upload file directory")
+		} else {
+			log.Logger.Debug().
+				Str("file_id", fid).
+				Str("path", dir).
+				Msg("removed upload file directory")
+		}
+	}
+	// Soft-delete UploadedFile records.
+	now := time.Now().UTC()
+	fileIDs := make([]string, 0, len(uploadedFiles))
+	for _, uf := range uploadedFiles {
+		fileIDs = append(fileIDs, uf.UploadFileID)
+	}
+	if err := store.DB().WithContext(ctx).Model(&orm.UploadedFile{}).
+		Where("upload_file_id IN ?", fileIDs).
+		Updates(map[string]any{"deleted_at": now, "updated_at": now}).Error; err != nil {
+		return fmt.Errorf("soft delete uploaded file records: %w", err)
+	}
+	return nil
+}
+
 type UserInfo struct {
 	ID   string `json:"id,omitempty"`
 	Name string `json:"name,omitempty"`
@@ -1733,16 +1808,22 @@ func normalizeKeywordList(keywordList []string) []string {
 	return out
 }
 
-func accessibleDatasetIDs(ctx context.Context, userID string) ([]string, error) {
+func accessibleDatasetIDs(r *http.Request, userID string) ([]string, error) {
+	ctx := r.Context()
 	var datasets []orm.Dataset
 	if err := store.DB().WithContext(ctx).Where("deleted_at IS NULL").Find(&datasets).Error; err != nil {
 		return nil, err
 	}
-	ids := make([]string, 0, len(datasets))
+	visible := make([]orm.Dataset, 0, len(datasets))
 	for _, ds := range datasets {
 		if canAccessDataset(&ds, userID, acl.PermissionDatasetRead) {
-			ids = append(ids, ds.ID)
+			visible = append(visible, ds)
 		}
+	}
+	visible = filterDatasetsByScanSourceAccess(r, visible, acl.PermissionDatasetRead)
+	ids := make([]string, 0, len(visible))
+	for _, ds := range visible {
+		ids = append(ids, ds.ID)
 	}
 	return ids, nil
 }
@@ -2273,10 +2354,11 @@ func normalizeDocumentDatasetIDs(ids []string) []string {
 	return out
 }
 
-func readableRequestedDatasetIDs(ctx context.Context, userID string, datasetIDs []string) ([]string, error) {
+func readableRequestedDatasetIDs(r *http.Request, userID string, datasetIDs []string) ([]string, error) {
 	if len(datasetIDs) == 0 {
 		return nil, nil
 	}
+	ctx := r.Context()
 	var datasets []orm.Dataset
 	if err := store.DB().WithContext(ctx).Where("id IN ? AND deleted_at IS NULL", datasetIDs).Find(&datasets).Error; err != nil {
 		return nil, err
@@ -2285,15 +2367,20 @@ func readableRequestedDatasetIDs(ctx context.Context, userID string, datasetIDs 
 	for _, ds := range datasets {
 		byID[ds.ID] = ds
 	}
-	out := make([]string, 0, len(datasetIDs))
+	visible := make([]orm.Dataset, 0, len(datasetIDs))
 	for _, id := range datasetIDs {
 		ds, ok := byID[id]
 		if !ok {
 			continue
 		}
 		if canAccessDataset(&ds, userID, acl.PermissionDatasetRead) {
-			out = append(out, id)
+			visible = append(visible, ds)
 		}
+	}
+	visible = filterDatasetsByScanSourceAccess(r, visible, acl.PermissionDatasetRead)
+	out := make([]string, 0, len(visible))
+	for _, ds := range visible {
+		out = append(out, ds.ID)
 	}
 	return out, nil
 }
@@ -2855,7 +2942,7 @@ func documentTypeFromName(name string) string {
 		return "DOCX"
 	case ".csv":
 		return "CSV"
-	case ".pptx":
+	case ".pptx", ".pptm":
 		return "PPTX"
 	case ".ppt":
 		return "PPT"

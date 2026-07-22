@@ -21,7 +21,10 @@ import {
   LinkOutlined,
   LockOutlined,
 } from "@ant-design/icons";
-import { getLocalizedErrorMessage } from "@/components/request";
+import {
+  getLocalizedErrorMessage,
+  localizeErrorCode,
+} from "@/components/request";
 import { useTranslation } from "react-i18next";
 import {
   Outlet,
@@ -52,6 +55,7 @@ import {
   getSkillReviewSummary,
   listIncomingSkillShares,
   listOutgoingSkillShares,
+  listSkillReviewResultsByRequest,
   listSkillReviewTasks,
   listSkillShareTargets,
   listSkillAssetsPage,
@@ -433,8 +437,6 @@ export default function MemoryManagement() {
   const [experienceProfileSaving, setExperienceProfileSaving] = useState<
     Set<string>
   >(new Set());
-  const [expandedExperienceProfileIds, setExpandedExperienceProfileIds] =
-    useState<string[]>([]);
   const [experienceProfileEditTarget, setExperienceProfileEditTarget] =
     useState<ExperienceProfileEditTarget | null>(null);
   const [experienceSettingSaving, setExperienceSettingSaving] = useState(false);
@@ -753,7 +755,9 @@ export default function MemoryManagement() {
             title: item.title,
             content: item.content,
             agentPersona: item.agentPersona,
+            summary: item.summary,
             draftStatus: item.draftStatus,
+            hasPendingReviewResult: item.hasPendingReviewResult,
             hasPendingReviewSuggestions: item.hasPendingReviewSuggestions,
             protect: item.protect,
             responseStyle: item.responseStyle,
@@ -771,14 +775,6 @@ export default function MemoryManagement() {
         console.error("Load preference assets failed:", error);
         if (options?.silent) {
           throw error;
-        }
-        if (!options?.silent) {
-          message.error(
-            getLocalizedErrorMessage(
-              error,
-              t("admin.memoryExperienceLoadFailed"),
-            ) || t("admin.memoryExperienceLoadFailed"),
-          );
         }
       } finally {
         if (!options?.silent) {
@@ -798,14 +794,6 @@ export default function MemoryManagement() {
         if (options?.silent) {
           throw error;
         }
-        if (!options?.silent) {
-          message.error(
-            getLocalizedErrorMessage(
-              error,
-              t("admin.memoryExperienceSettingLoadFailed"),
-            ) || t("admin.memoryExperienceSettingLoadFailed"),
-          );
-        }
       }
     },
     [t],
@@ -824,14 +812,6 @@ export default function MemoryManagement() {
         ]);
       } catch (error) {
         console.error("Refresh preference section failed:", error);
-        if (!silent) {
-          message.error(
-            getLocalizedErrorMessage(
-              error,
-              t("admin.memoryExperienceLoadFailed"),
-            ) || t("admin.memoryExperienceLoadFailed"),
-          );
-        }
       } finally {
         setExperienceInitialized(true);
         if (!silent) {
@@ -908,6 +888,20 @@ export default function MemoryManagement() {
     [category, skillKeyword, skillListPage, skillListPageSize, skillView, tag],
   );
 
+  const refreshSkillCategories = useCallback(async () => {
+    setSkillCategoriesLoading(true);
+    try {
+      const categories = await listSkillCategories();
+      setSkillCategories(categories);
+      setSkillCategoriesLoaded(true);
+    } catch (error) {
+      console.error("Load skill categories failed:", error);
+      setSkillCategoriesLoaded(false);
+    } finally {
+      setSkillCategoriesLoading(false);
+    }
+  }, []);
+
   const clearManualSkillReviewPollTimer = useCallback(() => {
     if (manualSkillReviewPollTimerRef.current !== null) {
       window.clearTimeout(manualSkillReviewPollTimerRef.current);
@@ -942,14 +936,6 @@ export default function MemoryManagement() {
           return;
         }
         console.error("Load manual skill review summary failed:", error);
-        if (!silent) {
-          message.error(
-            getLocalizedErrorMessage(
-              error,
-              t("admin.memoryManualSkillReviewLoadFailed"),
-            ) || t("admin.memoryManualSkillReviewLoadFailed"),
-          );
-        }
       } finally {
         if (manualSkillReviewRequestIdRef.current === requestId && !silent) {
           setManualSkillReviewLoading(false);
@@ -1062,9 +1048,15 @@ export default function MemoryManagement() {
           clearManualSkillReviewPollTimer();
 
           if (task?.status === "failed") {
-            throw new Error(
-              task.task?.errorMessage || task.runStatus || "skill review failed",
+            message.error(
+              localizeErrorCode(
+                task.task?.errorCode,
+                localizeErrorCode("2000509"),
+              ),
             );
+            setManualSkillReviewRunning(false);
+            await refreshManualSkillReviewSummary({ silent: true });
+            return;
           }
 
           const results =
@@ -1095,12 +1087,6 @@ export default function MemoryManagement() {
           clearManualSkillReviewPollTimer();
           setManualSkillReviewRunning(false);
           console.error("Poll manual skill review tasks failed:", error);
-          message.error(
-            getLocalizedErrorMessage(
-              error,
-              t("admin.memoryManualSkillReviewRunFailed"),
-            ) || t("admin.memoryManualSkillReviewRunFailed"),
-          );
           await refreshManualSkillReviewSummary({ silent: true });
         }
       };
@@ -1140,12 +1126,6 @@ export default function MemoryManagement() {
       }
       setManualSkillReviewRunning(false);
       console.error("Run manual skill review failed:", error);
-      message.error(
-        getLocalizedErrorMessage(
-          error,
-          t("admin.memoryManualSkillReviewRunFailed"),
-        ) || t("admin.memoryManualSkillReviewRunFailed"),
-      );
       await refreshManualSkillReviewSummary({ silent: true });
     }
   }, [pollManualSkillReviewTasks, refreshManualSkillReviewSummary, t]);
@@ -1343,16 +1323,9 @@ export default function MemoryManagement() {
           return;
         }
 
-        const errorMessage =
-          getLocalizedErrorMessage(
-            error,
-            t("admin.memoryGlossaryLoadFailed"),
-          ) || t("admin.memoryGlossaryLoadFailed");
+        const errorMessage = getLocalizedErrorMessage(error);
 
         setGlossaryLoadError(errorMessage);
-        if (!options?.silent) {
-          message.error(errorMessage);
-        }
       } finally {
         if (glossaryRequestIdRef.current === requestId) {
           setGlossaryInitialized(true);
@@ -1457,16 +1430,9 @@ export default function MemoryManagement() {
           return;
         }
 
-        const errorMessage =
-          getLocalizedErrorMessage(
-            error,
-            t("admin.memoryGlossaryInboxLoadFailed"),
-          ) || t("admin.memoryGlossaryInboxLoadFailed");
+        const errorMessage = getLocalizedErrorMessage(error);
 
         setGlossaryInboxError(errorMessage);
-        if (options?.showErrorToast) {
-          message.error(errorMessage);
-        }
       } finally {
         if (glossaryConflictRequestIdRef.current === requestId) {
           setGlossaryInboxLoading(false);
@@ -1524,16 +1490,9 @@ export default function MemoryManagement() {
           return;
         }
 
-        const errorMessage =
-          getLocalizedErrorMessage(
-            error,
-            t("admin.memorySkillShareLoadFailed"),
-          ) || t("admin.memorySkillShareLoadFailed");
+        const errorMessage = getLocalizedErrorMessage(error);
 
         setSkillShareCenterError(errorMessage);
-        if (options?.showErrorToast) {
-          message.error(errorMessage);
-        }
       } finally {
         if (skillShareRequestIdRef.current === requestId) {
           setSkillShareCenterLoading(false);
@@ -1572,16 +1531,9 @@ export default function MemoryManagement() {
           return;
         }
 
-        const errorMessage =
-          getLocalizedErrorMessage(
-            error,
-            t("admin.memoryShareStatusLoadFailed"),
-          ) || t("admin.memoryShareStatusLoadFailed");
+        const errorMessage = getLocalizedErrorMessage(error);
 
         setShareStatusError(errorMessage);
-        if (options?.showErrorToast) {
-          message.error(errorMessage);
-        }
       } finally {
         if (shareStatusRequestIdRef.current === requestId) {
           setShareStatusLoading(false);
@@ -1706,34 +1658,13 @@ export default function MemoryManagement() {
       return undefined;
     }
 
-    let ignore = false;
-    setSkillCategoriesLoading(true);
-
-    void listSkillCategories()
-      .then((categories) => {
-        if (ignore) {
-          return;
-        }
-        setSkillCategories(categories);
-        setSkillCategoriesLoaded(true);
-      })
-      .catch((error) => {
-        if (ignore) {
-          return;
-        }
-        console.error("Load skill categories failed:", error);
-        setSkillCategoriesLoaded(false);
-      })
-      .finally(() => {
-        if (!ignore) {
-          setSkillCategoriesLoading(false);
-        }
-      });
-
-    return () => {
-      ignore = true;
-    };
-  }, [reviewRouteTab, routeMemoryTab, skillRouteItemId]);
+    void refreshSkillCategories();
+  }, [
+    refreshSkillCategories,
+    reviewRouteTab,
+    routeMemoryTab,
+    skillRouteItemId,
+  ]);
 
   useEffect(() => {
     const shouldRefreshExperience =
@@ -1918,12 +1849,6 @@ export default function MemoryManagement() {
           return;
         }
         console.error("Load glossary detail failed:", error);
-        message.error(
-          getLocalizedErrorMessage(
-            error,
-            t("admin.memoryGlossaryLoadFailed"),
-          ) || t("admin.memoryGlossaryLoadFailed"),
-        );
         navigateToMemoryList("glossary", { replace: true });
       }
     })();
@@ -2351,12 +2276,6 @@ export default function MemoryManagement() {
         } catch (error) {
           if (!ignore) {
             console.error("Load draft preview failed:", error);
-            const errorKey = isSkillProposal
-              ? "admin.memorySkillDraftPreviewFailed"
-              : "admin.memoryPreferenceDraftPreviewFailed";
-            message.error(
-              getLocalizedErrorMessage(error, t(errorKey)) || t(errorKey),
-            );
           }
         } finally {
           if (!ignore) {
@@ -2645,23 +2564,8 @@ export default function MemoryManagement() {
 
   const filteredExperienceItems = experienceAssets;
   useEffect(() => {
-    const profileIds = experienceAssets
-      .filter(isExperienceProfileAsset)
-      .map((item) => item.id);
     const validIdSet = new Set(experienceAssets.map((item) => item.id));
 
-    setExpandedExperienceProfileIds((previous) => {
-      const next = previous.filter((id) => profileIds.includes(id));
-      profileIds.forEach((id) => {
-        if (!next.includes(id)) {
-          next.push(id);
-        }
-      });
-      return next.length === previous.length &&
-        next.every((id, index) => id === previous[index])
-        ? previous
-        : next;
-    });
     setExperienceProfileDrafts((previous) => {
       const nextEntries = Object.entries(previous).filter(([id]) =>
         validIdSet.has(id),
@@ -2701,6 +2605,13 @@ export default function MemoryManagement() {
     });
   }, []);
 
+  const openExperienceProfileEditor = useCallback(
+    (recordId: string, fieldKey: ExperienceProfileFieldKey) => {
+      setExperienceProfileEditTarget({ recordId, fieldKey });
+    },
+    [],
+  );
+
   const saveExperienceProfileDraft = useCallback(
     async (record: ExperienceAsset, fieldKey: ExperienceProfileFieldKey) => {
       const draft =
@@ -2735,17 +2646,6 @@ export default function MemoryManagement() {
         return true;
       } catch (error) {
         console.error("Save user profile preference failed:", error);
-        message.error(
-          getLocalizedErrorMessage(
-            error,
-            t("admin.memoryProfileSaveFailed", {
-              defaultValue: "保存用户画像配置失败",
-            }),
-          ) ||
-            t("admin.memoryProfileSaveFailed", {
-              defaultValue: "保存用户画像配置失败",
-            }),
-        );
         return false;
       } finally {
         setExperienceProfileSaving((previous) => {
@@ -3134,14 +3034,7 @@ export default function MemoryManagement() {
     setModalOpen(true);
   };
 
-  const openSkillCreateModal = (source: SkillCreateSource = "manual") => {
-    if (source === "manual") {
-      setPendingSkillPackageFile(null);
-      setPendingSkillSourceUrl("");
-      openModal("add");
-      return;
-    }
-
+  const openSkillCreateModal = (source: SkillCreateSource) => {
     if (source === "zip") {
       setPendingSkillSourceUrl("");
       skillZipInputRef.current?.click();
@@ -3170,6 +3063,16 @@ export default function MemoryManagement() {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) {
+      return;
+    }
+    const name = file.name.toLowerCase();
+    const valid =
+      name.endsWith(".zip") ||
+      name.endsWith(".tgz") ||
+      name.endsWith(".tar") ||
+      name.endsWith(".gz");
+    if (!valid) {
+      message.warning(t("admin.memorySkillUploadPackageTypeError"));
       return;
     }
 
@@ -3266,12 +3169,6 @@ export default function MemoryManagement() {
       ]);
     } catch (error) {
       console.error("Accept skill share failed:", error);
-      message.error(
-        getLocalizedErrorMessage(
-          error,
-          t("admin.memorySkillShareAcceptFailed"),
-        ) || t("admin.memorySkillShareAcceptFailed"),
-      );
     } finally {
       setSkillShareAction(share.id);
     }
@@ -3286,12 +3183,6 @@ export default function MemoryManagement() {
       await refreshSkillShareCenter({ silent: true });
     } catch (error) {
       console.error("Reject skill share failed:", error);
-      message.error(
-        getLocalizedErrorMessage(
-          error,
-          t("admin.memorySkillShareRejectFailed"),
-        ) || t("admin.memorySkillShareRejectFailed"),
-      );
     } finally {
       setSkillShareAction(share.id);
     }
@@ -3311,14 +3202,33 @@ export default function MemoryManagement() {
       console.error("Update preference setting failed:", error);
       setExperienceFeatureEnabled(previousValue);
       await refreshExperienceSection({ silent: true });
-      message.error(
-        getLocalizedErrorMessage(
-          error,
-          t("admin.memoryExperienceSettingSaveFailed"),
-        ) || t("admin.memoryExperienceSettingSaveFailed"),
-      );
     } finally {
       setExperienceSettingSaving(false);
+    }
+  };
+
+  const handleExperienceAutoEvoToggle = async (
+    record: ExperienceAsset,
+    checked: boolean,
+  ) => {
+    setExperienceAutoEvoLoading((previous) =>
+      new Set(previous).add(record.id),
+    );
+    try {
+      await patchPersonalResourceMetadata(
+        resolvePersonalResourceApiType(record.resourceType),
+        { autoEvo: checked },
+      );
+      await refreshExperienceSection({ silent: true });
+    } catch (error) {
+      console.error("Toggle auto_evo failed:", error);
+      await refreshExperienceSection({ silent: true });
+    } finally {
+      setExperienceAutoEvoLoading((previous) => {
+        const next = new Set(previous);
+        next.delete(record.id);
+        return next;
+      });
     }
   };
 
@@ -3434,12 +3344,6 @@ export default function MemoryManagement() {
             }
           } catch (error) {
             console.error("Load skill draft preview failed:", error);
-            message.error(
-              getLocalizedErrorMessage(
-                error,
-                t("admin.memorySkillDraftPreviewFailed"),
-              ) || t("admin.memorySkillDraftPreviewFailed"),
-            );
             return false;
           } finally {
             setReviewSuggestionLoadingId("");
@@ -3495,12 +3399,6 @@ export default function MemoryManagement() {
           }
         } catch (error) {
           console.error("Load preference draft preview failed:", error);
-          message.error(
-            getLocalizedErrorMessage(
-              error,
-              t("admin.memoryPreferenceDraftPreviewFailed"),
-            ) || t("admin.memoryPreferenceDraftPreviewFailed"),
-          );
           return false;
         } finally {
           setReviewSuggestionLoadingId("");
@@ -3741,12 +3639,6 @@ export default function MemoryManagement() {
         "Submit evolution suggestion field decision failed:",
         error,
       );
-      message.error(
-        getLocalizedErrorMessage(
-          error,
-          t("admin.memoryExperienceSaveFailed"),
-        ) || t("admin.memoryExperienceSaveFailed"),
-      );
     } finally {
       setFieldDecisionSubmitting((previous) => {
         const next = { ...previous };
@@ -3838,12 +3730,6 @@ export default function MemoryManagement() {
         setActiveReviewStep(0);
         setBackendDraftLoading(false);
       }
-      message.error(
-        getLocalizedErrorMessage(
-          error,
-          t("admin.memoryExperienceSaveFailed"),
-        ) || t("admin.memoryExperienceSaveFailed"),
-      );
     } finally {
       clearBackendSuggestionSubmitting([suggestionId]);
       backendSuggestionMutationLockRef.current = false;
@@ -3960,12 +3846,6 @@ export default function MemoryManagement() {
         setActiveReviewStep(0);
         setBackendDraftLoading(false);
       }
-      message.error(
-        getLocalizedErrorMessage(
-          error,
-          t("admin.memoryExperienceSaveFailed"),
-        ) || t("admin.memoryExperienceSaveFailed"),
-      );
     } finally {
       clearBackendSuggestionSubmitting(suggestionIds);
       setBackendSuggestionBatchSubmitting("");
@@ -4017,13 +3897,6 @@ export default function MemoryManagement() {
       return true;
     } catch (error) {
       console.error("Load draft preview failed:", error);
-      const errorKey =
-        activeProposal.tab === "skills"
-          ? "admin.memorySkillDraftPreviewFailed"
-          : "admin.memoryPreferenceDraftPreviewFailed";
-      message.error(
-        getLocalizedErrorMessage(error, t(errorKey)) || t(errorKey),
-      );
       return false;
     } finally {
       setBackendDraftLoading(false);
@@ -4073,13 +3946,6 @@ export default function MemoryManagement() {
       return true;
     } catch (error) {
       console.error("Load managed draft preview failed:", error);
-      const errorKey =
-        activeProposal?.tab === "skills"
-          ? "admin.memorySkillDraftPreviewFailed"
-          : "admin.memoryPreferenceDraftPreviewFailed";
-      message.error(
-        getLocalizedErrorMessage(error, t(errorKey)) || t(errorKey),
-      );
       return false;
     } finally {
       setBackendDraftLoading(false);
@@ -4118,12 +3984,6 @@ export default function MemoryManagement() {
         "Submit personal resource draft hunk decision failed:",
         error,
       );
-      message.error(
-        getLocalizedErrorMessage(
-          error,
-          t("admin.memoryDraftHunkActionFailed"),
-        ) || t("admin.memoryDraftHunkActionFailed"),
-      );
     } finally {
       setBackendDraftHunkSubmitting({});
     }
@@ -4149,12 +4009,6 @@ export default function MemoryManagement() {
       message.success(t("admin.memoryDraftReviewUndoSuccess"));
     } catch (error) {
       console.error("Undo personal resource draft review failed:", error);
-      message.error(
-        getLocalizedErrorMessage(
-          error,
-          t("admin.memoryDraftReviewUndoFailed"),
-        ) || t("admin.memoryDraftReviewUndoFailed"),
-      );
     } finally {
       setBackendDraftReviewUndoing(false);
     }
@@ -4189,17 +4043,6 @@ export default function MemoryManagement() {
       navigateToMemoryList(activeProposal.tab);
     } catch (error) {
       console.error("Confirm managed draft failed:", error);
-      message.error(
-        getLocalizedErrorMessage(
-          error,
-          activeProposal.tab === "skills"
-            ? t("admin.memorySkillDraftConfirmFailed")
-            : t("admin.memoryPreferenceDraftConfirmFailed"),
-        ) ||
-          (activeProposal.tab === "skills"
-            ? t("admin.memorySkillDraftConfirmFailed")
-            : t("admin.memoryPreferenceDraftConfirmFailed")),
-      );
     } finally {
       setBackendDraftSubmitting("");
     }
@@ -4241,17 +4084,6 @@ export default function MemoryManagement() {
       await refreshExperienceSection({ silent: true });
     } catch (error) {
       console.error("Discard managed draft failed:", error);
-      message.error(
-        getLocalizedErrorMessage(
-          error,
-          activeProposal?.tab === "skills"
-            ? t("admin.memorySkillDraftDiscardFailed")
-            : t("admin.memoryPreferenceDraftDiscardFailed"),
-        ) ||
-          (activeProposal?.tab === "skills"
-            ? t("admin.memorySkillDraftDiscardFailed")
-            : t("admin.memoryPreferenceDraftDiscardFailed")),
-      );
     } finally {
       setBackendDraftSubmitting("");
     }
@@ -4374,10 +4206,7 @@ export default function MemoryManagement() {
       }
 
       setBackendSuggestionLoadMoreError(
-        getLocalizedErrorMessage(
-          error,
-          t("admin.memoryPreferenceDraftPreviewFailed"),
-        ) || t("admin.memoryPreferenceDraftPreviewFailed"),
+        getLocalizedErrorMessage(error),
       );
     } finally {
       if (backendSuggestionLoadMoreRequestIdRef.current === requestId) {
@@ -4624,12 +4453,6 @@ export default function MemoryManagement() {
         }
       } catch (error) {
         console.error("Submit evolution suggestion failed:", error);
-        message.error(
-          getLocalizedErrorMessage(
-            error,
-            t("admin.memoryExperienceSaveFailed"),
-          ) || t("admin.memoryExperienceSaveFailed"),
-        );
       } finally {
         setReviewSuggestionSubmitting(false);
       }
@@ -4756,12 +4579,6 @@ export default function MemoryManagement() {
             message.success(t("admin.memorySkillDeleteSuccess"));
           } catch (error) {
             console.error("Delete skill asset failed:", error);
-            message.error(
-              getLocalizedErrorMessage(
-                error,
-                t("admin.memorySkillDeleteFailed"),
-              ) || t("admin.memorySkillDeleteFailed"),
-            );
           }
           return;
         }
@@ -4787,12 +4604,6 @@ export default function MemoryManagement() {
             clearGlossaryProposalsByAssetIds(removedIds);
           } catch (error) {
             console.error("Delete glossary asset failed:", error);
-            message.error(
-              getLocalizedErrorMessage(
-                error,
-                t("admin.memoryGlossaryDeleteFailed"),
-              ) || t("admin.memoryGlossaryDeleteFailed"),
-            );
             return;
           }
 
@@ -4821,16 +4632,12 @@ export default function MemoryManagement() {
       );
       try {
         await enableBuiltinSkill(builtinSkillUid);
-        await refreshSkillAssets({ page: skillListPage });
+        // No extra list refresh here — caller handles optimistic UI update.
+        // Data syncs when the user switches tabs.
         message.success(t("admin.memoryBuiltinSkillEnableSuccess"));
       } catch (error) {
         console.error("Enable builtin skill failed:", error);
-        message.error(
-          getLocalizedErrorMessage(
-            error,
-            t("admin.memoryBuiltinSkillEnableFailed"),
-          ) || t("admin.memoryBuiltinSkillEnableFailed"),
-        );
+        throw error;
       } finally {
         setBuiltinSkillEnableLoading((previous) => {
           const next = new Set(previous);
@@ -4839,7 +4646,7 @@ export default function MemoryManagement() {
         });
       }
     },
-    [refreshSkillAssets, skillListPage, t],
+    [t],
   );
 
   const handleBatchDeleteGlossary = () => {
@@ -4878,12 +4685,6 @@ export default function MemoryManagement() {
           message.success(t("admin.memoryGlossaryBatchDeleteSuccess"));
         } catch (error) {
           console.error("Batch delete glossary assets failed:", error);
-          message.error(
-            getLocalizedErrorMessage(
-              error,
-              t("admin.memoryGlossaryBatchDeleteFailed"),
-            ) || t("admin.memoryGlossaryBatchDeleteFailed"),
-          );
         }
       },
     });
@@ -5088,12 +4889,6 @@ export default function MemoryManagement() {
             silent: true,
           });
         }
-        message.error(
-          getLocalizedErrorMessage(
-            error,
-            t("admin.memoryGlossarySaveFailed"),
-          ) || t("admin.memoryGlossarySaveFailed"),
-        );
       } finally {
         setGlossarySaving(false);
       }
@@ -5132,12 +4927,6 @@ export default function MemoryManagement() {
         message.success(t(saveSuccessMessageKey));
       } catch (error) {
         console.error("Save preference asset failed:", error);
-        message.error(
-          getLocalizedErrorMessage(
-            error,
-            t("admin.memoryExperienceSaveFailed"),
-          ) || t("admin.memoryExperienceSaveFailed"),
-        );
       } finally {
         setExperienceSaving(false);
       }
@@ -5235,13 +5024,9 @@ export default function MemoryManagement() {
           setPendingSkillSourceUrl("");
         }
 
-        await refreshSkillAssets();
+        await Promise.all([refreshSkillAssets(), refreshSkillCategories()]);
       } catch (error) {
         console.error("Save skill draft failed:", error);
-        message.error(
-          getLocalizedErrorMessage(error, t("common.saveFailed")) ||
-            t("common.saveFailed"),
-        );
         return;
       } finally {
         setSkillSaving(false);
@@ -5320,7 +5105,6 @@ export default function MemoryManagement() {
         );
       } catch (error) {
         console.error("Fetch share targets failed:", error);
-        message.error(t("admin.memoryShareLoadFailed"));
       } finally {
         setShareLoading(false);
       }
@@ -5646,12 +5430,6 @@ export default function MemoryManagement() {
       message.success(t("admin.memoryGlossaryInboxAcceptSuccess"));
     } catch (error) {
       console.error("Accept glossary conflicts failed:", error);
-      message.error(
-        getLocalizedErrorMessage(
-          error,
-          t("admin.memoryGlossaryInboxAcceptFailed"),
-        ) || t("admin.memoryGlossaryInboxAcceptFailed"),
-      );
     } finally {
       setGlossaryInboxSubmitting("");
     }
@@ -5687,12 +5465,6 @@ export default function MemoryManagement() {
       message.success(t("admin.memoryGlossaryInboxRejectSuccess"));
     } catch (error) {
       console.error("Reject glossary conflicts failed:", error);
-      message.error(
-        getLocalizedErrorMessage(
-          error,
-          t("admin.memoryGlossaryInboxRejectFailed"),
-        ) || t("admin.memoryGlossaryInboxRejectFailed"),
-      );
     } finally {
       setGlossaryInboxSubmitting("");
     }
@@ -5841,12 +5613,6 @@ export default function MemoryManagement() {
               } catch (error) {
                 console.error("Toggle is_enabled failed:", error);
                 await refreshSkillAssets({ preserveChangeProposals: true });
-                message.error(
-                  getLocalizedErrorMessage(
-                    error,
-                    t("admin.memorySkillEnableToggleFailed"),
-                  ) || t("admin.memorySkillEnableToggleFailed"),
-                );
               } finally {
                 setSkillEnableLoading((prev) => {
                   const next = new Set(prev);
@@ -5888,12 +5654,6 @@ export default function MemoryManagement() {
                 } catch (error) {
                   console.error("Toggle auto_evo failed:", error);
                   await refreshSkillAssets({ preserveChangeProposals: true });
-                  message.error(
-                    getLocalizedErrorMessage(
-                      error,
-                      t("admin.memoryAutoEvoToggleFailed"),
-                    ) || t("admin.memoryAutoEvoToggleFailed"),
-                  );
                 } finally {
                   setSkillAutoEvoLoading((prev) => {
                     const next = new Set(prev);
@@ -6010,190 +5770,6 @@ export default function MemoryManagement() {
     [experienceProfileEditTarget, experienceProfileFields],
   );
 
-  const renderExperienceProfileEditor = useCallback(
-    (record: ExperienceAsset): ReactNode => {
-      const draft =
-        experienceProfileDrafts[record.id] || getExperienceProfileDraft(record);
-      const isSaving = experienceProfileSaving.has(record.id);
-      const emptyText = t("admin.memoryProfileEmpty", {
-        defaultValue: "未配置",
-      });
-
-      return (
-        <div className="memory-profile-editor">
-          <div className="memory-profile-editor-head">
-            <div>
-              <strong>
-                {t("admin.memoryProfileEditorTitle", {
-                  defaultValue: "用户画像配置",
-                })}
-              </strong>
-              <span>
-                {t("admin.memoryProfileEditorDesc", {
-                  defaultValue:
-                    "作为用户画像的二级信息参与对话偏好，不影响主内容结构。",
-                })}
-              </span>
-            </div>
-            <Tag bordered={false}>
-              {t("admin.memoryProfileEditorTag", { defaultValue: "二级结构" })}
-            </Tag>
-          </div>
-          <div className="memory-profile-field-grid">
-            {experienceProfileFields.map((field) => (
-              <div className="memory-profile-field" key={field.key}>
-                <div className="memory-profile-field-copy">
-                  <span className="memory-profile-field-label">
-                    {field.label}
-                  </span>
-                  <span className="memory-profile-field-desc">
-                    {field.description}
-                  </span>
-                </div>
-                <div className="memory-profile-field-value">
-                  <span className={draft[field.key] ? "" : "is-empty"}>
-                    {draft[field.key] || emptyText}
-                  </span>
-                </div>
-                <Button
-                  disabled={isSaving}
-                  icon={<EditOutlined />}
-                  size="small"
-                  onClick={() =>
-                    setExperienceProfileEditTarget({
-                      recordId: record.id,
-                      fieldKey: field.key,
-                    })
-                  }
-                >
-                  {t("common.edit")}
-                </Button>
-              </div>
-            ))}
-          </div>
-        </div>
-      );
-    },
-    [
-      experienceProfileFields,
-      experienceProfileDrafts,
-      experienceProfileSaving,
-      t,
-    ],
-  );
-
-  const experienceProfileExpandable = useMemo(
-    () => ({
-      expandedRowClassName: () => "memory-profile-expanded-row",
-      expandedRowKeys: expandedExperienceProfileIds,
-      expandedRowRender: renderExperienceProfileEditor,
-      rowExpandable: isExperienceProfileAsset,
-      onExpandedRowsChange: (keys: readonly unknown[]) =>
-        setExpandedExperienceProfileIds(keys.map(String)),
-    }),
-    [expandedExperienceProfileIds, renderExperienceProfileEditor],
-  );
-
-  const experienceColumns: ColumnsType<ExperienceAsset> = [
-    {
-      title: t("admin.memoryTitleCol"),
-      dataIndex: "title",
-      key: "title",
-      width: 320,
-      render: (_value, record) => {
-        const showPendingTag = hasDraftPreviewStatus(record);
-
-        return (
-          <div className="memory-table-main">
-            <div className="memory-table-main-title">
-              <button
-                type="button"
-                className="memory-term-link"
-                onClick={() => navigateToExperienceDetail(record.id)}
-              >
-                {record.title}
-              </button>
-              {showPendingTag ? (
-                <Tag color="orange">{t("admin.memoryDiffPendingTag")}</Tag>
-              ) : null}
-              {record.protect ? (
-                <Tag className="memory-protect-tag" bordered={false}>
-                  <LockOutlined />
-                  <span>
-                    {t("admin.memoryProtect", { defaultValue: "保护" })}
-                  </span>
-                </Tag>
-              ) : null}
-            </div>
-          </div>
-        );
-      },
-    },
-    {
-      title: t("admin.memoryContentSummary"),
-      dataIndex: "content",
-      key: "content",
-      width: 520,
-      className: "memory-content-summary-column",
-      render: (value: string) =>
-        value ? (
-          <Tooltip
-            title={<div className="memory-text-popover-content">{value}</div>}
-            overlayClassName="memory-text-popover"
-            placement="topLeft"
-            trigger="hover"
-          >
-            <div className="memory-content-preview memory-content-preview-single-line">
-              {value}
-            </div>
-          </Tooltip>
-        ) : (
-          <div className="memory-content-preview memory-content-preview-single-line">
-            {value}
-          </div>
-        ),
-    },
-    {
-      title: t("admin.memoryAutoUpdate"),
-      key: "autoEvo",
-      width: 90,
-      render: (_value, record) => (
-        <Switch
-          checked={Boolean(record.autoEvo)}
-          loading={experienceAutoEvoLoading.has(record.id)}
-          onChange={(checked) => {
-            void (async () => {
-              setExperienceAutoEvoLoading((prev) =>
-                new Set(prev).add(record.id),
-              );
-              try {
-                await patchPersonalResourceMetadata(
-                  resolvePersonalResourceApiType(record.resourceType),
-                  { autoEvo: checked },
-                );
-                await refreshExperienceSection({ silent: true });
-              } catch (error) {
-                console.error("Toggle auto_evo failed:", error);
-                await refreshExperienceSection({ silent: true });
-                message.error(
-                  getLocalizedErrorMessage(
-                    error,
-                    t("admin.memoryAutoEvoToggleFailed"),
-                  ) || t("admin.memoryAutoEvoToggleFailed"),
-                );
-              } finally {
-                setExperienceAutoEvoLoading((prev) => {
-                  const next = new Set(prev);
-                  next.delete(record.id);
-                  return next;
-                });
-              }
-            })();
-          }}
-        />
-      ),
-    },
-  ];
   const glossaryColumns: ColumnsType<GlossaryAsset> = [
     {
       title: t("admin.memoryGlossaryTerm"),
@@ -6399,6 +5975,8 @@ export default function MemoryManagement() {
     experienceFeatureEnabled,
     experienceSettingSaving,
     handleExperienceFeatureToggle,
+    handleExperienceAutoEvoToggle,
+    openExperienceProfileEditor,
     refreshSkillAssets,
     refreshAllSkillAssets,
     refreshExperienceSection,
@@ -6423,9 +6001,8 @@ export default function MemoryManagement() {
     filteredExperienceItems,
     experienceAssets,
     experienceLoading,
+    experienceAutoEvoLoading,
     experienceInitialized,
-    experienceColumns,
-    experienceProfileExpandable,
     filteredGlossaryItems,
     glossaryColumns,
     selectedGlossaryAssetIds,

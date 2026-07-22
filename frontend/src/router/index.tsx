@@ -19,12 +19,12 @@ import TaskCenterPage from "@/modules/taskCenter";
 import UserManagement from "@/modules/admin/pages/user";
 import GroupManagement from "@/modules/admin/pages/group";
 import GroupDetail from "@/modules/admin/pages/group/detail.tsx";
-import DataSourceManagement from "@/modules/dataSource";
 import DatabaseConnectionsPage from "@/modules/dataSource/database";
-import DataSourceDetail from "@/modules/dataSource/detail";
 import DataSourceFeishuCallback from "@/modules/dataSource/common/feishuCallback";
 import CloudDocumentsPage from "@/modules/modelProvider/pages/CloudDocumentsPage";
 import FeishuAccountPage from "@/modules/modelProvider/pages/FeishuAccountPage";
+import GoogleDriveConnectionPage from "@/modules/modelProvider/pages/GoogleDriveConnectionPage";
+import GoogleDriveSetupGuide from "@/modules/modelProvider/pages/GoogleDriveSetupGuide";
 import LocalDataSourcePage from "@/modules/modelProvider/pages/LocalDataSourcePage";
 import FeishuSetupGuide from "@/modules/modelProvider/pages/FeishuSetupGuide";
 import NotionSetupGuide from "@/modules/modelProvider/pages/NotionSetupGuide";
@@ -37,10 +37,13 @@ import MemoryGlossaryDetailPage from "@/modules/memory/pages/glossaryDetail";
 import MemorySkillDetailPage from "@/modules/memory/pages/skillDetail";
 import MemoryExperienceDetailPage from "@/modules/memory/pages/experienceDetail";
 import ModelProviderPage from "@/modules/modelProvider";
+import CloudDocumentsLayout from "@/modules/modelProvider/CloudDocumentsLayout";
 import ModelProvidersPage from "@/modules/modelProvider/pages/ModelProvidersPage";
 import ExternalServicesPage from "@/modules/modelProvider/pages/ExternalServicesPage";
 import DefaultServicesPage from "@/modules/modelProvider/pages/DefaultServicesPage";
 import {
+  SelfEvolutionAlgorithmManagementPage,
+  SelfEvolutionRoutingStrategyPage,
   SelfEvolutionHomePage,
   SelfEvolutionDetailPage,
   SelfEvolutionObservationPage,
@@ -96,6 +99,14 @@ export default function AppRouter() {
           element={<DataSourceFeishuCallback provider="notion" />}
         />
         <Route
+          path="/oauth/googledrive/data-source/callback"
+          element={<DataSourceFeishuCallback provider="googledrive" />}
+        />
+        <Route
+          path="/oauth/googledrive/callback"
+          element={<DataSourceFeishuCallback provider="googledrive" />}
+        />
+        <Route
           path="/loginTransition"
           element={
             localSessionEnabled ? (
@@ -128,47 +139,60 @@ export default function AppRouter() {
               element={<Knowledge />}
             />
           </Route>
-          <Route path="data-sources" element={<DataSourceManagement />} />
-          <Route path="data-sources/database-connections" element={<DatabaseConnectionsPage />} />
-          <Route path="data-sources/:id" element={<DataSourceDetail />} />
           <Route path="dataset-management" element={<DatasetListPage />} />
           <Route
             path="dataset-management/:datasetId"
             element={<DatasetDetailPage />}
           />
+          <Route path="databases" element={<DatabaseConnectionsPage />} />
+          <Route path="cloud-documents" element={<CloudDocumentsLayout />}>
+            <Route index element={<CloudDocumentsPage />} />
+            <Route path="local" element={<LocalDataSourcePage />} />
+            <Route path="feishu" element={<FeishuAccountPage />} />
+            <Route path="google-drive" element={<GoogleDriveConnectionPage />} />
+            <Route path="docs/feishu-setup" element={<FeishuSetupGuide />} />
+            <Route path="docs/notion-setup" element={<NotionSetupGuide />} />
+            <Route path="docs/google-drive-setup" element={<GoogleDriveSetupGuide />} />
+          </Route>
           <Route path="model-providers" element={<ModelProviderPage />}>
             <Route index element={<Navigate to="default-services" replace />} />
             <Route path="models" element={<ModelProvidersPage />} />
             <Route
               path="document-parsing"
-              element={<ExternalServicesPage section="parsing" />}
+              element={<Navigate to="/model-providers/tools" replace />}
             />
+            <Route path="tools" element={<ExternalServicesPage />} />
             <Route
-              path="tools"
-              element={<ExternalServicesPage section="tools" />}
+              path="cloud-documents"
+              element={<Navigate to="/cloud-documents" replace />}
             />
-            <Route path="cloud-documents" element={<CloudDocumentsPage />} />
             <Route
               path="cloud-documents/local"
-              element={<LocalDataSourcePage />}
+              element={<Navigate to="/cloud-documents/local" replace />}
             />
             <Route
               path="cloud-documents/feishu"
-              element={<FeishuAccountPage />}
+              element={<Navigate to="/cloud-documents/feishu" replace />}
+            />
+            <Route
+              path="cloud-documents/google-drive"
+              element={<Navigate to="/cloud-documents/google-drive" replace />}
             />
             <Route
               path="cloud-documents/docs/feishu-setup"
-              element={<FeishuSetupGuide />}
+              element={<Navigate to="/cloud-documents/docs/feishu-setup" replace />}
             />
             <Route
               path="cloud-documents/docs/notion-setup"
-              element={<NotionSetupGuide />}
+              element={<Navigate to="/cloud-documents/docs/notion-setup" replace />}
+            />
+            <Route
+              path="cloud-documents/docs/google-drive-setup"
+              element={<Navigate to="/cloud-documents/docs/google-drive-setup" replace />}
             />
             <Route
               path="external-services"
-              element={
-                <Navigate to="/model-providers/document-parsing" replace />
-              }
+              element={<Navigate to="/model-providers/tools" replace />}
             />
             <Route path="default-services" element={<DefaultServicesPage />} />
           </Route>
@@ -205,6 +229,14 @@ export default function AppRouter() {
               <Route
                 path="self-evolution"
                 element={<SelfEvolutionHomePage />}
+              />
+              <Route
+                path="self-evolution/algorithms"
+                element={<SelfEvolutionAlgorithmManagementPage />}
+              />
+              <Route
+                path="self-evolution/algorithms/routing-strategy"
+                element={<SelfEvolutionRoutingStrategyPage />}
               />
               <Route
                 path="self-evolution/detail/:threadId/observation/:kind"

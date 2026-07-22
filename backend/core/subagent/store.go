@@ -126,6 +126,53 @@ func ListTasksByConversation(ctx context.Context, db *gorm.DB, convID string) ([
 	return tasks, nil
 }
 
+// ListTasksByConversationForUser returns tasks only when they belong to the
+// requesting user. Public Task Center APIs must use this ownership-scoped form.
+func ListTasksByConversationForUser(
+	ctx context.Context, db *gorm.DB, convID, userID string,
+) ([]orm.SubAgentTask, error) {
+	var tasks []orm.SubAgentTask
+	if err := db.WithContext(ctx).
+		Where("conversation_id = ? AND create_user_id = ?", convID, userID).
+		Order("seq_in_conversation ASC").Find(&tasks).Error; err != nil {
+		return nil, err
+	}
+	return tasks, nil
+}
+
+// ConversationArtifactRecord combines an artifact with the task metadata needed
+// by conversation-level download views.
+type ConversationArtifactRecord struct {
+	ArtifactID       string          `gorm:"column:artifact_id"`
+	TaskID           string          `gorm:"column:task_id"`
+	TriggerHistoryID string          `gorm:"column:trigger_history_id"`
+	WorkspacePath    string          `gorm:"column:workspace_path"`
+	Slot             string          `gorm:"column:slot"`
+	ContentType      string          `gorm:"column:content_type"`
+	Value            json.RawMessage `gorm:"column:value"`
+	Seq              int             `gorm:"column:seq"`
+	Caption          *string         `gorm:"column:caption"`
+	CreatedAt        time.Time       `gorm:"column:created_at"`
+}
+
+// ListArtifactsByConversationForUser loads visible artifacts and their task
+// metadata in one query, avoiding one artifact query per SubAgent task.
+func ListArtifactsByConversationForUser(
+	ctx context.Context, db *gorm.DB, convID, userID string,
+) ([]ConversationArtifactRecord, error) {
+	var records []ConversationArtifactRecord
+	err := db.WithContext(ctx).
+		Table("sub_agent_artifacts AS artifact").
+		Select(`artifact.id AS artifact_id, artifact.task_id, task.trigger_history_id,
+			task.workspace_path, artifact.slot, artifact.content_type, artifact.value,
+			artifact.seq, artifact.caption, artifact.created_at`).
+		Joins("JOIN sub_agent_tasks AS task ON task.id = artifact.task_id").
+		Where("task.conversation_id = ? AND task.create_user_id = ? AND artifact.hidden = ?", convID, userID, false).
+		Order("artifact.created_at ASC, artifact.id ASC").
+		Scan(&records).Error
+	return records, err
+}
+
 // UpdateStatus transitions a task to running and refreshes heartbeat.
 func UpdateStatus(ctx context.Context, db *gorm.DB, taskID, status string) error {
 	now := time.Now().UTC()
@@ -135,6 +182,21 @@ func UpdateStatus(ctx context.Context, db *gorm.DB, taskID, status string) error
 			"last_heartbeat": now,
 			"updated_at":     now,
 		}).Error
+}
+
+// AcceptTaskStart applies a runner's task_start event only while the task is
+// still launchable. Explicit resume uses UpdateStatus above; a late start event
+// must never revive a task that Stop already made terminal.
+func AcceptTaskStart(ctx context.Context, db *gorm.DB, taskID string) (bool, error) {
+	now := time.Now().UTC()
+	result := db.WithContext(ctx).Model(&orm.SubAgentTask{}).
+		Where("id = ? AND status IN ?", taskID, []string{StatusPending, StatusRunning}).
+		Updates(map[string]any{
+			"status":         StatusRunning,
+			"last_heartbeat": now,
+			"updated_at":     now,
+		})
+	return result.RowsAffected > 0, result.Error
 }
 
 // UpdateProgress writes progress percentage / phase / eta and refreshes heartbeat.
@@ -152,12 +214,20 @@ func UpdateProgress(ctx context.Context, db *gorm.DB, taskID string, pct int, ph
 	return db.WithContext(ctx).Model(&orm.SubAgentTask{}).Where("id = ?", taskID).Updates(updates).Error
 }
 
-// UpdateFinalStatus marks a terminal status (succeeded/failed/interrupted/canceled) with optional summary.
-// "failed" is never allowed to overwrite an already-terminal interrupted or succeeded status: a race
-// between StopActivePluginSession (which writes interrupted) and the SSE-EOF handler (which calls
-// routeError → UpdateFinalStatus with failed) would otherwise silently downgrade interrupted → failed,
-// breaking the checkpoint-resume path and causing the frontend to display "failed" after a user stop.
+// UpdateFinalStatus marks a terminal status with optional summary. Terminal state
+// is first-writer-wins so late runner frames cannot overwrite an explicit stop.
 func UpdateFinalStatus(ctx context.Context, db *gorm.DB, taskID, status, summary string) error {
+	_, err := AcceptFinalStatus(ctx, db, taskID, status, summary)
+	return err
+}
+
+// AcceptFinalStatus makes terminal task state first-writer-wins. This prevents
+// a delayed succeeded/error frame from overwriting an explicit user stop.
+func AcceptFinalStatus(
+	ctx context.Context,
+	db *gorm.DB,
+	taskID, status, summary string,
+) (bool, error) {
 	now := time.Now().UTC()
 	updates := map[string]any{
 		"status":         status,
@@ -168,12 +238,11 @@ func UpdateFinalStatus(ctx context.Context, db *gorm.DB, taskID, status, summary
 	if status == StatusSucceeded {
 		updates["progress_pct"] = 100
 	}
-	q := db.WithContext(ctx).Model(&orm.SubAgentTask{}).Where("id = ?", taskID)
-	if status == StatusFailed {
-		// Do not downgrade a terminal interrupted/succeeded status to failed.
-		q = q.Where("status NOT IN ?", []string{StatusInterrupted, StatusSucceeded})
-	}
-	return q.Updates(updates).Error
+	terminal := []string{StatusSucceeded, StatusFailed, StatusInterrupted, StatusCanceled}
+	result := db.WithContext(ctx).Model(&orm.SubAgentTask{}).
+		Where("id = ? AND (status NOT IN ? OR status = ?)", taskID, terminal, status).
+		Updates(updates)
+	return result.RowsAffected > 0, result.Error
 }
 
 // SaveArtifact appends one artifact row for a task.

@@ -47,6 +47,7 @@ import type {
 import { PromptServiceApi } from "@/modules/chat/utils/request";
 import { useTranslation } from "react-i18next";
 import { canManagePrompt, setPromptFavorite } from "./promptLibrary";
+import { localizeErrorCode } from "@/components/request";
 import "./index.scss";
 
 interface ForwardProps {
@@ -67,7 +68,7 @@ interface PromptCategoryFormValues {
   name: string; // 用户自定义分类名称
 }
 
-type PromptScope = "all" | "recent" | "favorite" | "custom";
+type PromptScope = "all" | "recent" | "favorite";
 type PromptSort = "updated_desc" | "usage_desc" | "name_asc";
 type PromptLayout = "grid" | "list";
 
@@ -78,7 +79,6 @@ const CATEGORY_KEYS = [
   "structured_analysis",
   "report_generation",
   "data_analysis",
-  "custom",
 ] as const;
 
 const CATEGORY_ICONS = {
@@ -197,7 +197,7 @@ function PromptModalComponent(
 
   const scopeOptions = useMemo(
     () =>
-      (["all", "recent", "favorite", "custom"] as PromptScope[]).map((key) => ({
+      (["all", "recent", "favorite"] as PromptScope[]).map((key) => ({
         value: key,
         label: `${t(`chat.promptScope.${key}`)} (${facets.scopes?.[key] ?? 0})`,
       })),
@@ -206,7 +206,7 @@ function PromptModalComponent(
 
   function openCreateForm() {
     setEditingPrompt(null);
-    form.setFieldsValue({ display_name: "", content: "", category: "custom" });
+    form.setFieldsValue({ display_name: "", content: "", category: "general" });
     setFormVisible(true);
   }
 
@@ -242,7 +242,7 @@ function PromptModalComponent(
       setRefreshKey((value) => value + 1);
       message.success(t("chat.promptCategoryCreateSuccess"));
     } catch {
-      message.error(t("chat.promptCategoryCreateFailed"));
+      // API errors are reported by the shared request interceptor.
     } finally {
       setCategorySaving(false);
     }
@@ -263,9 +263,8 @@ function PromptModalComponent(
           if (category === promptCategory.id) setCategory("");
           setRefreshKey((value) => value + 1);
           message.success(t("chat.promptCategoryDeleteSuccess"));
-        } catch {
-          message.error(t("chat.promptCategoryDeleteFailed"));
-          throw new Error("prompt category delete failed");
+        } catch (error) {
+          throw error;
         }
       },
     });
@@ -277,7 +276,7 @@ function PromptModalComponent(
     form.setFieldsValue({
       display_name: prompt.display_name ?? "",
       content: prompt.content ?? "",
-      category: prompt.category ?? "custom",
+      category: prompt.category === "custom" ? "general" : prompt.category ?? "general",
     });
     setFormVisible(true);
   }
@@ -304,7 +303,7 @@ function PromptModalComponent(
       form.resetFields();
       setRefreshKey((value) => value + 1);
     } catch {
-      message.error(t("chat.promptSaveFailed"));
+      // API errors are reported by the shared request interceptor.
     } finally {
       setSaving(false);
     }
@@ -323,9 +322,8 @@ function PromptModalComponent(
           await PromptServiceApi().deletePrompt(prompt.id!);
           message.success(t("chat.deletePromptSuccess"));
           setRefreshKey((value) => value + 1);
-        } catch {
-          message.error(t("chat.promptDeleteFailed"));
-          throw new Error("prompt delete failed");
+        } catch (error) {
+          throw error;
         }
       },
     });
@@ -344,7 +342,6 @@ function PromptModalComponent(
       setRefreshKey((value) => value + 1);
     } catch {
       setPrompts((items) => setPromptFavorite(items, prompt.id!, !nextFavorite));
-      message.error(t("chat.promptFavoriteFailed"));
     }
   }
 
@@ -354,9 +351,7 @@ function PromptModalComponent(
     setVisible(false);
     onSelectPrompt(content);
     if (prompt.id) {
-      void PromptServiceApi()
-        .usePrompt(prompt.id)
-        .catch(() => message.warning(t("chat.promptUsageRecordFailed")));
+      void PromptServiceApi().usePrompt(prompt.id).catch(() => {});
     }
   }
 
@@ -598,7 +593,7 @@ function PromptModalComponent(
                   <Alert
                     type="error"
                     showIcon
-                    message={t("chat.promptLoadFailed")}
+                    message={localizeErrorCode("2000509")}
                     action={
                       <Button size="small" onClick={() => setRefreshKey((value) => value + 1)}>
                         {t("common.retry")}
@@ -616,13 +611,7 @@ function PromptModalComponent(
                   </div>
                 ) : null}
                 {!loading && !loadError && prompts.length === 0 ? (
-                  <Empty description={t("chat.noPromptMatched")}>
-                    {scope === "custom" || category === "custom" ? (
-                      <Button type="primary" icon={<PlusOutlined />} onClick={openCreateForm}>
-                        {t("chat.newTemplate")}
-                      </Button>
-                    ) : null}
-                  </Empty>
+                  <Empty description={t("chat.noPromptMatched")} />
                 ) : null}
                 {!loading && !loadError && prompts.length > 0 ? (
                   <div className={`prompt-library-grid ${layout}`}>

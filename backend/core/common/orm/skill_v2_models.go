@@ -84,7 +84,7 @@ type SkillV2Draft struct {
 	DraftStatus    string     `gorm:"column:draft_status;type:varchar(32);not null;default:''"`
 	DraftUpdatedAt *time.Time `gorm:"column:draft_updated_at"`
 	TaskID         string     `gorm:"column:task_id;type:varchar(128);not null;default:''"`
-	ConversationID *string    `gorm:"column:conversation_id;type:varchar(36)"`
+	ConversationID *string    `gorm:"column:conversation_id;type:varchar(128)"`
 	UpdatedBy      *string    `gorm:"column:updated_by;type:varchar(255)"`
 	Version        int64      `gorm:"column:version;not null;default:1"`
 	CreatedAt      time.Time  `gorm:"column:created_at;not null"`
@@ -113,6 +113,7 @@ type SkillMarketItem struct {
 	ID            string     `gorm:"column:id;type:varchar(36);primaryKey"`
 	SourceSkillID string     `gorm:"column:source_skill_id;type:varchar(36);not null"`
 	Status        string     `gorm:"column:status;type:varchar(32);not null;default:'draft'"`
+	Tags          []byte     `gorm:"column:tags;type:json;not null;default:'[]'"`
 	Icon          string     `gorm:"column:icon;type:text;not null;default:''"`
 	SortOrder     int        `gorm:"column:sort_order;not null;default:0"`
 	VersionNote   string     `gorm:"column:version_note;type:text;not null;default:''"`

@@ -234,6 +234,8 @@ export function useChatConversation({
       const taskStore = useTaskCenterStore.getState();
       taskStore.upsertTask(convId, {
         task_id: tc.task_id,
+        trigger_history_id: tc.trigger_history_id || result.history_id,
+        seq_in_conversation: tc.seq_in_conversation,
         title: tc.title,
         agent_type: tc.agent_type,
         mode: tc.mode,
@@ -245,6 +247,14 @@ export function useChatConversation({
           usePluginStore.getState().loadActiveSession(convId);
         });
       }
+    }
+
+    if (result.artifact_created?.artifact_id) {
+      const convId = result.conversation_id || currentConversationIdRef.current || "";
+      useTaskCenterStore.getState().upsertConversationArtifact(
+        convId,
+        result.artifact_created,
+      );
     }
 
     const messageConversationId = result.conversation_id || "";
@@ -745,6 +755,7 @@ export function useChatConversation({
         ChatConversationsResponseFinishReasonEnum.FinishReasonStop,
       create_time,
       model_mode: "value_engineering",
+      mentions: params.mentions || [],
     };
     const assistantMessage = {
       role: RoleTypes.ASSISTANT,
@@ -764,6 +775,7 @@ export function useChatConversation({
     scroll.scrollToEnd();
     openSSE(inputs, ChatConversationsRequestActionEnum.ChatActionNext, {
       ...(params.run_in_background ? { run_in_background: true } : {}),
+      ...(params.mentions?.length ? { mentions: params.mentions } : {}),
     });
 
     const currentId = currentConversationIdRef.current;

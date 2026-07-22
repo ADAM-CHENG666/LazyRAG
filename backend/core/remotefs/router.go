@@ -31,8 +31,9 @@ func NewHandler(db *gorm.DB) *Handler {
 	return &Handler{
 		db: db,
 		skill: skillremotefs.NewHandler(skillremotefs.HandlerDeps{
-			DB:        db,
-			BlobStore: skillremotefs.NewBlobStore(db, skillremotefs.NewLocalObjectStore(skillObjectRoot())),
+			DB:         db,
+			BlobStore:  skillremotefs.NewBlobStore(db, skillremotefs.NewLocalObjectStore(skillObjectRoot())),
+			StateStore: store.State(),
 		}),
 		fs: resourcefs.NewService(resourcefs.ServiceDeps{DB: db}),
 	}
@@ -282,7 +283,7 @@ func (h *Handler) readPersonalContent(w http.ResponseWriter, r *http.Request, pa
 		return
 	}
 	refType := resourcefs.FileRefHead
-	if strings.HasPrefix(strings.TrimSpace(r.URL.Query().Get("task_id")), "review_") {
+	if isMemoryReviewTaskID(r.URL.Query().Get("task_id")) {
 		if draft, err := h.fs.ReadFile(r.Context(), resourcefs.ReadFileRequest{Ref: ref, RefType: resourcefs.FileRefDraft}); err == nil && strings.TrimSpace(draft.DraftStatus) == "pending_confirm" {
 			refType = resourcefs.FileRefDraft
 		}
@@ -324,7 +325,7 @@ func (h *Handler) writePersonalContent(w http.ResponseWriter, r *http.Request, p
 		replyError(w, err)
 		return
 	}
-	if !strings.HasPrefix(taskID, "review_") && strings.TrimSpace(draft.DraftStatus) == "pending_confirm" {
+	if !isMemoryReviewTaskID(taskID) && strings.TrimSpace(draft.DraftStatus) == "pending_confirm" {
 		replyError(w, resourcefs.ErrConflict)
 		return
 	}
@@ -345,6 +346,10 @@ func (h *Handler) writePersonalContent(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "draft_version": resp.DraftVersion})
+}
+
+func isMemoryReviewTaskID(taskID string) bool {
+	return strings.HasPrefix(strings.TrimSpace(taskID), "memory_review_")
 }
 
 func (h *Handler) ensurePersonal(ctx context.Context, userID, pathValue string) (resourcefs.ResourceRef, error) {

@@ -18,6 +18,7 @@ import {
   type SkillDraftStatusOpenAPIResponse,
   type SkillFileOpenAPIResponse,
   type SkillListItemOpenAPIResponse,
+  type SkillOrganizeOpenAPIResponse,
   type SkillRevisionOpenAPIResponse,
   type SkillShareDetailOpenAPIResponse,
   type SkillShareListItemOpenAPIResponse,
@@ -25,7 +26,11 @@ import {
   type SkillTreeNodeOpenAPIResponse,
   type SkillUpdateManagedOpenAPIRequest,
 } from "@/api/generated/core-client";
-import { axiosInstance, BASE_URL } from "@/components/request";
+import {
+  axiosInstance,
+  BASE_URL,
+  localizeErrorCode,
+} from "@/components/request";
 import { mapDiffEntryLines } from "./components/skillPackage/skillDiffUtils";
 import type { DiffLine } from "./shared";
 
@@ -42,6 +47,13 @@ const skillDiffApi = SkillDiffApiFactory(coreConfig, BASE_URL, axiosInstance);
 const coreBasePath = `${BASE_URL}/api/core`;
 
 const SKILL_MD_PATH = "SKILL.md";
+
+const createSkillOrganizeRequestId = () => {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return `org_${crypto.randomUUID()}`;
+  }
+  return `org_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+};
 
 interface ApiEnvelope<T> {
   code?: number;
@@ -123,6 +135,12 @@ export interface SkillAssetListResult {
   total: number;
   page: number;
   pageSize: number;
+}
+
+export interface SkillOrganizeRunRecord {
+  requestId: string;
+  status: string;
+  taskId: string;
 }
 
 export interface ShareSkillPayload {
@@ -250,6 +268,7 @@ export interface SkillRevisionRecord {
   createdBy: string;
   parentRevisionId: string;
   treeHash: string;
+  isHead: boolean;
 }
 
 export interface SkillDraftStatusRecord {
@@ -498,7 +517,9 @@ const normalizeOutgoingShare = (
   message: item.message || "",
   status: normalizeSkillShareStatus(item.status),
   rawStatus: item.status,
-  errorMessage: item.error_message,
+  errorMessage: item.error_message
+    ? localizeErrorCode("2000509")
+    : undefined,
   sender: {
     id: item.source_user_id,
     name: item.source_user_name || item.source_user_id,
@@ -535,7 +556,9 @@ const normalizeShareTarget = (
   message: item.message || "",
   status: normalizeSkillShareStatus(item.status),
   rawStatus: item.status,
-  errorMessage: item.error_message,
+  errorMessage: item.error_message
+    ? localizeErrorCode("2000509")
+    : undefined,
   sender: null,
   recipients: [
     {
@@ -583,6 +606,7 @@ const normalizeRevision = (item: SkillRevisionOpenAPIResponse): SkillRevisionRec
   createdBy: item.created_by || "",
   parentRevisionId: item.parent_revision_id || "",
   treeHash: item.tree_hash || "",
+  isHead: Boolean(item.is_head),
 });
 
 const normalizeTreeNode = (node: SkillTreeNodeOpenAPIResponse): SkillTreeNodeRecord => ({
@@ -698,7 +722,12 @@ const normalizeResourceUpdateTask = (value: unknown): ResourceUpdateTaskRecord |
     triggerId: toStringValue(raw?.trigger_id, ""),
     status: toStringValue(raw?.status, ""),
     errorCode: toStringValue(raw?.error_code, ""),
-    errorMessage: toStringValue(raw?.error_message, ""),
+    errorMessage: raw?.error_message
+      ? localizeErrorCode(
+          toStringValue(raw?.error_code, ""),
+          localizeErrorCode("2000509"),
+        )
+      : "",
     createdAt: toStringValue(raw?.created_at, ""),
     updatedAt: toStringValue(raw?.updated_at, ""),
     startedAt: toStringValue(raw?.started_at, "") || undefined,
@@ -843,6 +872,26 @@ export async function listSkillAssets(
 ): Promise<SkillAssetRecord[]> {
   const result = await listSkillAssetsPage(options);
   return result.records;
+}
+
+export async function organizeSkills(
+  skills: string[],
+): Promise<SkillOrganizeRunRecord> {
+  const response = await skillsApi.apiCoreSkillOrganizePost(
+    {
+      skillOrganizeOpenAPIRequest: {
+        requestid: createSkillOrganizeRequestId(),
+        skills,
+      },
+    },
+    { silentError: true } as never,
+  );
+  const payload = unwrapEnvelope<SkillOrganizeOpenAPIResponse>(response.data);
+  return {
+    requestId: payload.requestid || "",
+    status: payload.status || "",
+    taskId: payload.taskid || "",
+  };
 }
 
 export async function listSkillTags(): Promise<string[]> {
@@ -1220,6 +1269,14 @@ export async function getSkillRevisionFile(
   return payload.content || "";
 }
 
+export class RollbackConflictError extends Error {
+  readonly isConflict = true;
+  constructor(message = 'rollback conflict: uncommitted draft exists') {
+    super(message);
+    this.name = 'RollbackConflictError';
+  }
+}
+
 export async function rollbackSkill(
   skillId: string,
   targetRevisionId: string,
@@ -1230,13 +1287,19 @@ export async function rollbackSkill(
       revision_id: targetRevisionId,
       target_revision_id: targetRevisionId,
     },
+  }).catch((err: unknown) => {
+    const status = (err as { response?: { status?: number } })?.response?.status;
+    if (status === 409) {
+      throw new RollbackConflictError();
+    }
+    throw err;
   });
   const payload = unwrapEnvelope<{
     head_revision_id?: string;
     revision_no?: number;
   }>(response.data);
   return {
-    headRevisionId: payload.head_revision_id || "",
+    headRevisionId: payload.head_revision_id || '',
     revisionNo: payload.revision_no ?? 0,
   };
 }
@@ -1244,14 +1307,14 @@ export async function rollbackSkill(
 const readRawString = (value: Record<string, unknown>, keys: string[]): string => {
   for (const key of keys) {
     const field = value[key];
-    if (typeof field === "string" && field.trim()) {
+    if (typeof field === 'string' && field.trim()) {
       return field.trim();
     }
-    if (typeof field === "number" && Number.isFinite(field)) {
+    if (typeof field === 'number' && Number.isFinite(field)) {
       return String(field);
     }
   }
-  return "";
+  return '';
 };
 
 const readRawBoolean = (value: Record<string, unknown>, keys: string[]) => {

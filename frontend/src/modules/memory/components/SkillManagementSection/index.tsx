@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { message, Modal } from "antd";
-import { InfoCircleOutlined } from "@ant-design/icons";
+import { Button, Input, message, Modal, Select, Tooltip } from "antd";
+import { AppstoreOutlined, SearchOutlined } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 import PluginInstalledView from "./PluginInstalledView";
 import { AgentAppsAuth } from "@/components/auth";
-import { getLocalizedErrorMessage } from "@/components/request";
+import { localizeErrorCode } from "@/components/request";
 import { isAdminRole } from "@/modules/dataSource/utils/role";
 import { useMemoryManagementOutletContext } from "../../context";
-import type { StructuredAsset } from "../../shared";
+import type { SkillViewMode, StructuredAsset } from "../../shared";
 import type { MarketSkillAsset } from "./skillMarketMockData";
 import {
   getSkillMarketItem,
@@ -15,6 +15,7 @@ import {
   listBuiltinSkills,
   listSkillMarketPage,
   listTrashedSkillAssetsPage,
+  organizeSkills,
   emptySkillTrash,
   purgeSkillAsset,
   restoreSkillAsset,
@@ -24,21 +25,45 @@ import SkillInstalledView from "./SkillInstalledView";
 import SkillManagementToolbar from "./SkillManagementToolbar";
 import SkillMarketView from "./SkillMarketView";
 import SkillTrashedView from "./SkillTrashedView";
-import { collectMarketCategories, mapSkillAssetRecordToStructuredAsset } from "./skillHelpers";
+import {
+  collectMarketCategories,
+  filterMarketSkills,
+  mapSkillAssetRecordToStructuredAsset,
+} from "./skillHelpers";
 import { mapMarketSkillRecordToAsset } from "./skillMarketMockData";
 import NewPluginModal from "@/modules/plugin/components/NewPluginModal";
 import { shouldShowSkillMessageCenter } from "./collaborationVisibility";
+import { renderSkillCategoryIcon } from "./skillCategoryIcon";
 import "./index.scss";
+
+const DEFAULT_MARKET_PAGE_SIZE = 8;
+const MAX_SKILL_ORGANIZE_SELECTION = 20;
 
 export default function SkillManagementSection() {
   const listContentRef = useRef<HTMLDivElement>(null);
+  const marketRequestIdRef = useRef(0);
   const navigate = useNavigate();
   const [newPluginOpen, setNewPluginOpen] = useState(false);
+  const [organizeMode, setOrganizeMode] = useState(false);
+  const [organizeSubmitting, setOrganizeSubmitting] = useState(false);
+  const [selectedOrganizeSkills, setSelectedOrganizeSkills] = useState<
+    Map<string, StructuredAsset>
+  >(new Map());
   const [memoryTableBodyHeight, setMemoryTableBodyHeight] = useState<number>();
   const [marketKeyword, setMarketKeyword] = useState("");
+  const [marketSearchExpanded, setMarketSearchExpanded] = useState(false);
+  const [marketCategoryExpanded, setMarketCategoryExpanded] = useState(false);
+  const [debouncedMarketKeyword, setDebouncedMarketKeyword] = useState("");
   const [adminPublishOpen, setAdminPublishOpen] = useState(false);
   const [marketCatalogAssets, setMarketCatalogAssets] = useState<MarketSkillAsset[]>([]);
+  // Use a ref for the builtin cache so updating it never triggers useCallback/useEffect rebuilds.
+  const marketBuiltinCacheRef = useRef<MarketSkillAsset[]>([]);
+  // Keep a state copy only for rendering (installedSkills comparison in SkillMarketView).
+  const [marketBuiltinAssets, setMarketBuiltinAssets] = useState<MarketSkillAsset[]>([]);
   const [marketCatalogLoading, setMarketCatalogLoading] = useState(false);
+  const [marketListPage, setMarketListPage] = useState(1);
+  const [marketListPageSize, setMarketListPageSize] = useState(DEFAULT_MARKET_PAGE_SIZE);
+  const [marketListTotal, setMarketListTotal] = useState(0);
   const [marketInstallingId, setMarketInstallingId] = useState<string>();
   const [trashAssets, setTrashAssets] = useState<StructuredAsset[]>([]);
   const [trashLoading, setTrashLoading] = useState(false);
@@ -94,47 +119,134 @@ export default function SkillManagementSection() {
 
   const isAdmin = isAdminRole(AgentAppsAuth.getUserInfo()?.role);
 
-  const loadMarketCatalog = useCallback(async () => {
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedMarketKeyword(marketKeyword.trim());
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [marketKeyword]);
+
+  useEffect(() => {
+    setMarketListPage(1);
+  }, [debouncedMarketKeyword, marketCategory, marketSkillSource, marketListPageSize]);
+
+  const ensureMarketBuiltins = useCallback(async (forceRefresh = false) => {
+    if (!forceRefresh && marketBuiltinCacheRef.current.length) {
+      return marketBuiltinCacheRef.current;
+    }
+    const records = await listBuiltinSkills();
+    const assets = records.map(mapMarketSkillRecordToAsset);
+    marketBuiltinCacheRef.current = assets;
+    setMarketBuiltinAssets(assets);
+    return assets;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const loadMarketCatalog = useCallback(async (forceRefreshBuiltins = false) => {
+    const requestId = ++marketRequestIdRef.current;
     setMarketCatalogLoading(true);
     try {
-      const [firstResult, builtinRecords] = await Promise.all([
-        listSkillMarketPage({
-          page: 1,
-          pageSize: 100,
-          category: marketCategory,
-        }),
-        listBuiltinSkills(),
-      ]);
-
-      const records = [...builtinRecords, ...firstResult.records];
-      const pageSize = Math.max(1, firstResult.pageSize || 100);
-      const totalPages = Math.ceil(firstResult.total / pageSize);
-
-      for (let page = 2; page <= totalPages; page += 1) {
-        const pageResult = await listSkillMarketPage({
-          page,
-          pageSize,
-          category: marketCategory,
-        });
-        records.push(...pageResult.records);
+      const builtins = await ensureMarketBuiltins(forceRefreshBuiltins);
+      if (requestId !== marketRequestIdRef.current) {
+        return;
       }
 
-      const deduped = new Map<string, MarketSkillAsset>();
-      records.forEach((item) => {
-        deduped.set(item.marketItemId, mapMarketSkillRecordToAsset(item));
+      const filteredBuiltins =
+        marketSkillSource === "admin"
+          ? []
+          : filterMarketSkills(builtins, {
+              keyword: debouncedMarketKeyword,
+              category: marketCategory,
+              source: "builtin",
+            });
+
+      if (marketSkillSource === "builtin") {
+        const start = (marketListPage - 1) * marketListPageSize;
+        setMarketCatalogAssets(
+          filteredBuiltins.slice(start, start + marketListPageSize) as MarketSkillAsset[],
+        );
+        setMarketListTotal(filteredBuiltins.length);
+        return;
+      }
+
+      const builtinCount = marketSkillSource === "all" ? filteredBuiltins.length : 0;
+      const start = (marketListPage - 1) * marketListPageSize;
+      const end = start + marketListPageSize;
+      const pageItems: MarketSkillAsset[] = [];
+
+      if (builtinCount > 0 && start < builtinCount) {
+        pageItems.push(
+          ...(filteredBuiltins.slice(start, Math.min(end, builtinCount)) as MarketSkillAsset[]),
+        );
+      }
+
+      const marketStart = Math.max(0, start - builtinCount);
+      const marketEnd = Math.max(0, end - builtinCount);
+      const needMarketItems = marketEnd > marketStart;
+      const apiPage = needMarketItems
+        ? Math.floor(marketStart / marketListPageSize) + 1
+        : 1;
+
+      const firstPage = await listSkillMarketPage({
+        page: apiPage,
+        pageSize: marketListPageSize,
+        keyword: debouncedMarketKeyword,
+        category: marketCategory,
       });
-      setMarketCatalogAssets(Array.from(deduped.values()));
+      if (requestId !== marketRequestIdRef.current) {
+        return;
+      }
+
+      if (needMarketItems) {
+        const offsetInPage = marketStart % marketListPageSize;
+        const needed = marketEnd - marketStart;
+        let records = firstPage.records.slice(offsetInPage, offsetInPage + needed);
+
+        if (
+          records.length < needed &&
+          firstPage.total > apiPage * marketListPageSize
+        ) {
+          const secondPage = await listSkillMarketPage({
+            page: apiPage + 1,
+            pageSize: marketListPageSize,
+            keyword: debouncedMarketKeyword,
+            category: marketCategory,
+          });
+          if (requestId !== marketRequestIdRef.current) {
+            return;
+          }
+          records = [
+            ...records,
+            ...secondPage.records.slice(0, needed - records.length),
+          ];
+        }
+
+        pageItems.push(...records.map(mapMarketSkillRecordToAsset));
+      }
+
+      setMarketCatalogAssets(pageItems);
+      setMarketListTotal(builtinCount + firstPage.total);
     } catch (error) {
+      if (requestId !== marketRequestIdRef.current) {
+        return;
+      }
       console.error("Load skill plaza catalog failed:", error);
       setMarketCatalogAssets([]);
-      message.error(
-        getLocalizedErrorMessage(error, t("admin.memorySkillMarketLoadFailed")) ||
-          t("admin.memorySkillMarketLoadFailed"),
-      );
+      setMarketListTotal(0);
     } finally {
-      setMarketCatalogLoading(false);
+      if (requestId === marketRequestIdRef.current) {
+        setMarketCatalogLoading(false);
+      }
     }
-  }, [marketCategory, t]);
+  }, [
+    debouncedMarketKeyword,
+    ensureMarketBuiltins,
+    marketCategory,
+    marketListPage,
+    marketListPageSize,
+    marketSkillSource,
+    t,
+  ]);
 
   const loadTrashAssets = useCallback(async () => {
     setTrashLoading(true);
@@ -151,10 +263,6 @@ export default function SkillManagementSection() {
       console.error("Load trashed skills failed:", error);
       setTrashAssets([]);
       setTrashListTotal(0);
-      message.error(
-        getLocalizedErrorMessage(error, t("admin.memorySkillTrashLoadFailed")) ||
-          t("admin.memorySkillTrashLoadFailed"),
-      );
     } finally {
       setTrashLoading(false);
     }
@@ -193,7 +301,11 @@ export default function SkillManagementSection() {
   }, [skillAssets.length, skillListTotal]);
 
   useEffect(() => {
-    if (skillView !== "installed") {
+    if (
+      skillView !== "installed" &&
+      skillView !== "plugins" &&
+      skillView !== "trash"
+    ) {
       return undefined;
     }
 
@@ -223,10 +335,13 @@ export default function SkillManagementSection() {
     updateTableHeight();
     const resizeObserver = new ResizeObserver(updateTableHeight);
     resizeObserver.observe(contentElement);
+    const mutationObserver = new MutationObserver(updateTableHeight);
+    mutationObserver.observe(contentElement, { childList: true, subtree: true });
     window.addEventListener("resize", updateTableHeight);
 
     return () => {
       resizeObserver.disconnect();
+      mutationObserver.disconnect();
       window.removeEventListener("resize", updateTableHeight);
     };
   }, [
@@ -235,16 +350,24 @@ export default function SkillManagementSection() {
     skillListPageSize,
     skillAssets.length,
     filteredInstalledSkillTree.length,
+    trashListPage,
+    trashListPageSize,
+    trashAssets.length,
   ]);
 
   const marketSkillAssets = marketCatalogAssets;
 
   const installedTableData = filteredInstalledSkillTree;
 
-  const marketCategories = useMemo(
-    () => collectMarketCategories(marketSkillAssets),
-    [marketSkillAssets],
-  );
+  const marketCategories = useMemo(() => {
+    const fromCatalog = collectMarketCategories([
+      ...marketBuiltinAssets,
+      ...marketSkillAssets,
+    ]);
+    return [
+      ...new Set([...fromCatalog, ...availableCategories].filter(Boolean)),
+    ].sort((left, right) => left.localeCompare(right, "zh-CN"));
+  }, [availableCategories, marketBuiltinAssets, marketSkillAssets]);
 
   const messageCenterCount = incomingPendingCount;
   const manualSkillReviewCount = manualSkillReviewSummary?.qualifiedSessionCount ?? 0;
@@ -256,6 +379,13 @@ export default function SkillManagementSection() {
     manualSkillReviewLoading ||
     manualSkillReviewButtonBusy ||
     manualSkillReviewCount <= 0;
+  const manualSkillReviewDisabledReason = manualSkillReviewLoading
+    ? t("admin.memorySkillReviewDisabledLoading")
+    : manualSkillReviewButtonBusy
+      ? t("admin.memorySkillReviewDisabledRunning")
+      : manualSkillReviewCount <= 0
+        ? t("admin.memorySkillReviewDisabledEmpty")
+        : undefined;
 
   const tableScroll = memoryTableBodyHeight
     ? { x: 1070, y: memoryTableBodyHeight }
@@ -277,7 +407,6 @@ export default function SkillManagementSection() {
     actionKey: string,
     action: () => Promise<void>,
     successMessage: string,
-    failureMessage: string,
   ) => {
     setTrashActionLoading((previous) => new Set(previous).add(actionKey));
     try {
@@ -289,7 +418,9 @@ export default function SkillManagementSection() {
       message.success(successMessage);
     } catch (error) {
       console.error("Skill trash action failed:", error);
-      message.error(getLocalizedErrorMessage(error, failureMessage) || failureMessage);
+      if (!(error as { isAxiosError?: boolean })?.isAxiosError) {
+        message.error(localizeErrorCode("2000509"));
+      }
     } finally {
       setTrashActionLoading((previous) => {
         const next = new Set(previous);
@@ -309,7 +440,6 @@ export default function SkillManagementSection() {
         }
       },
       t("admin.memorySkillTrashRestoreSuccess"),
-      t("admin.memorySkillTrashRestoreFailed"),
     );
   };
 
@@ -330,7 +460,6 @@ export default function SkillManagementSection() {
             }
           },
           t("admin.memorySkillTrashPurgeSuccess"),
-          t("admin.memorySkillTrashPurgeFailed"),
         );
       },
     });
@@ -349,10 +478,6 @@ export default function SkillManagementSection() {
       );
     } catch (error) {
       console.error("Empty skill trash failed:", error);
-      message.error(
-        getLocalizedErrorMessage(error, t("admin.memorySkillTrashEmptyFailed")) ||
-          t("admin.memorySkillTrashEmptyFailed"),
-      );
     } finally {
       setEmptyTrashLoading(false);
     }
@@ -360,17 +485,123 @@ export default function SkillManagementSection() {
 
   const handleMarketReset = () => {
     setMarketKeyword("");
+    setDebouncedMarketKeyword("");
     setMarketSkillSource("all");
     setMarketCategory("all");
+    setMarketListPage(1);
   };
 
   const handleSkillMessageCenter = () => {
     openSkillShareCenter("incoming");
   };
 
+  const cancelSkillOrganize = () => {
+    setOrganizeMode(false);
+    setSelectedOrganizeSkills(new Map());
+  };
+
+  const handleSkillViewChange = (
+    nextView: SkillViewMode | "plugins",
+  ) => {
+    if (nextView !== "installed") {
+      cancelSkillOrganize();
+    }
+    setSkillView(nextView);
+  };
+
+  const handleOrganizeSelectionChange = (
+    records: StructuredAsset[],
+    selected: boolean,
+  ) => {
+    const next = new Map(selectedOrganizeSkills);
+    if (!selected) {
+      records.forEach((record) => next.delete(record.id));
+      setSelectedOrganizeSkills(next);
+      return;
+    }
+
+    const additions = records.filter((record) => !next.has(record.id));
+    const availableSlots = Math.max(
+      0,
+      MAX_SKILL_ORGANIZE_SELECTION - next.size,
+    );
+    additions.slice(0, availableSlots).forEach((record) => {
+      next.set(record.id, record);
+    });
+    setSelectedOrganizeSkills(next);
+
+    if (additions.length > availableSlots) {
+      message.warning(t("admin.memorySkillOrganizeLimitWarning"));
+    }
+  };
+
+  const handleOrganizeSubmit = () => {
+    const skills = [...selectedOrganizeSkills.values()];
+    if (skills.length === 0 || organizeSubmitting) {
+      return;
+    }
+
+    Modal.confirm({
+      title: t("admin.memorySkillOrganizeConfirmTitle", {
+        count: skills.length,
+      }),
+      content: t("admin.memorySkillOrganizeConfirmContent"),
+      okText: t("admin.memorySkillOrganizeConfirmSubmit"),
+      cancelText: t("common.cancel"),
+      onOk: async () => {
+        setOrganizeSubmitting(true);
+        try {
+          const result = await organizeSkills(
+            skills.map((skill) => `skills/${skill.category}/${skill.name}`),
+          );
+          if (!result.taskId || result.status !== "running") {
+            throw new Error("Skill organize task was not accepted");
+          }
+          message.success(
+            t("admin.memorySkillOrganizeSuccess", { count: skills.length }),
+          );
+          cancelSkillOrganize();
+        } catch (error) {
+          console.error("Submit skill organize task failed:", error);
+          const reasonCode = String(
+            (error as { response?: { data?: { data?: { code?: unknown } } } })
+              ?.response?.data?.data?.code ?? "",
+          );
+          if (reasonCode === "skill_organize_draft_conflict") {
+            message.error(t("admin.memorySkillOrganizeDraftConflict"));
+          } else if (reasonCode === "skill_maintenance_task_running") {
+            message.error(t("admin.memorySkillOrganizeTaskRunning"));
+          } else {
+            message.error(t("admin.memorySkillOrganizeFailed"));
+          }
+        } finally {
+          setOrganizeSubmitting(false);
+        }
+      },
+    });
+  };
+
   const handleMarketInstall = (item: StructuredAsset) => {
     if ((item as MarketSkillAsset).marketSource === "builtin") {
-      void _handleEnableBuiltinSkill(item);
+      void (async () => {
+        try {
+          await _handleEnableBuiltinSkill(item);
+          // Optimistically mark this builtin item as installed so the UI
+          // updates immediately without triggering a loading state.
+          const updated = marketBuiltinCacheRef.current.map((asset) =>
+            asset.id === item.id ? { ...asset, installed: true } : asset,
+          );
+          marketBuiltinCacheRef.current = updated;
+          setMarketBuiltinAssets(updated);
+          setMarketCatalogAssets((previous) =>
+            previous.map((asset) =>
+              asset.id === item.id ? { ...asset, installed: true } : asset,
+            ),
+          );
+        } catch {
+          // Error already handled and shown by _handleEnableBuiltinSkill.
+        }
+      })();
       return;
     }
     const marketItemId = (item as MarketSkillAsset).marketItemId || item.id;
@@ -388,10 +619,6 @@ export default function SkillManagementSection() {
         message.success(t("admin.memoryBuiltinSkillEnableSuccess"));
       } catch (error) {
         console.error("Install market skill failed:", error);
-        message.error(
-          getLocalizedErrorMessage(error, t("admin.memoryBuiltinSkillEnableFailed")) ||
-            t("admin.memoryBuiltinSkillEnableFailed"),
-        );
       } finally {
         setMarketInstallingId(undefined);
       }
@@ -428,19 +655,113 @@ export default function SkillManagementSection() {
   };
 
   const installingUid = marketInstallingId || [...builtinSkillEnableLoading][0];
+  const marketFilters = (
+    <div className="memory-skill-market-toolbar-filters">
+      <div className="memory-skill-market-category-popover">
+        <Tooltip title={t("admin.memoryCategory")}>
+          <Button
+            aria-label={t("admin.memoryCategory")}
+            aria-expanded={marketCategoryExpanded}
+            className={marketCategory !== "all" ? "is-active" : undefined}
+            icon={<AppstoreOutlined />}
+            onClick={() => setMarketCategoryExpanded((expanded) => !expanded)}
+          />
+        </Tooltip>
+        {marketCategoryExpanded ? (
+          <div className="memory-skill-category-bar is-popover">
+            <button
+              type="button"
+              className={`memory-skill-category-pill ${marketCategory === "all" ? "is-active" : ""}`}
+              onClick={() => {
+                setMarketCategory("all");
+                setMarketListPage(1);
+                setMarketCategoryExpanded(false);
+              }}
+            >
+              <AppstoreOutlined />
+              {t("admin.memorySkillCategoryAll")}
+            </button>
+            {marketCategories.map((item) => (
+              <button
+                key={item}
+                type="button"
+                className={`memory-skill-category-pill ${marketCategory === item ? "is-active" : ""}`}
+                onClick={() => {
+                  setMarketCategory(item);
+                  setMarketListPage(1);
+                  setMarketCategoryExpanded(false);
+                }}
+              >
+                {renderSkillCategoryIcon(item)}
+                {item}
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </div>
+      <div className="memory-skill-market-search-popover">
+        <Tooltip title={t("admin.memorySkillMarketSearchPlaceholder")}>
+          <Button
+            aria-label={t("admin.memorySkillMarketSearchPlaceholder")}
+            aria-expanded={marketSearchExpanded}
+            icon={<SearchOutlined />}
+            onClick={() => setMarketSearchExpanded((expanded) => !expanded)}
+          />
+        </Tooltip>
+        {marketSearchExpanded ? (
+          <Input.Search
+            autoFocus
+            allowClear
+            value={marketKeyword}
+            onChange={(event) => setMarketKeyword(event.target.value)}
+            onSearch={(value) => {
+              const nextKeyword = value.trim();
+              setMarketKeyword(value);
+              setDebouncedMarketKeyword(nextKeyword);
+              setMarketListPage(1);
+            }}
+            placeholder={t("admin.memorySkillMarketSearchPlaceholder")}
+            className="memory-skill-market-search"
+          />
+        ) : null}
+      </div>
+      <Select
+        value={marketSkillSource}
+        className="memory-skill-market-source"
+        options={[
+          { value: "all", label: t("admin.memorySkillMarketSourceAll") },
+          { value: "builtin", label: t("admin.memorySkillMarketSourceBuiltin") },
+          { value: "admin", label: t("admin.memorySkillMarketSourceAdmin") },
+        ]}
+        onChange={(value) => {
+          setMarketSkillSource(value);
+          setMarketListPage(1);
+        }}
+      />
+      <Button onClick={handleMarketReset}>{t("admin.memoryReset")}</Button>
+    </div>
+  );
 
   return (
     <div className="memory-skill-management">
       <SkillManagementToolbar
         t={t}
         skillView={skillView}
-        onSkillViewChange={setSkillView}
+        onSkillViewChange={handleSkillViewChange}
         installedCount={skillListTotal}
         trashCount={trashListTotal}
         onCreateSkill={openSkillCreateModal}
+        organizeMode={organizeMode}
+        organizeDisabled={
+          skillLoading || manualSkillReviewButtonBusy || skillListTotal <= 0
+        }
+        onOrganizeSkills={() => {
+          setSelectedOrganizeSkills(new Map());
+          setOrganizeMode(true);
+        }}
         manualSkillReviewCount={manualSkillReviewCount}
-        manualSkillReviewLoading={manualSkillReviewLoading}
-        manualSkillReviewRunning={manualSkillReviewButtonBusy}
+        manualSkillReviewDisabled={manualSkillReviewButtonDisabled}
+        manualSkillReviewDisabledReason={manualSkillReviewDisabledReason}
         onSkillReviewClick={handleSkillReviewClick}
         messageCenterCount={messageCenterCount}
         onMessageCenterClick={handleSkillMessageCenter}
@@ -449,6 +770,7 @@ export default function SkillManagementSection() {
           hideUserGroupSurfaces,
         })}
         isAdmin={isAdmin}
+        marketFilters={marketFilters}
         onAdminPublish={() => setAdminPublishOpen(true)}
         onNewPlugin={() => setNewPluginOpen(true)}
       />
@@ -469,6 +791,12 @@ export default function SkillManagementSection() {
           source={installedSkillSource}
           onSourceChange={setInstalledSkillSource}
           onReset={handleInstalledReset}
+          organizeMode={organizeMode}
+          organizeLoading={organizeSubmitting}
+          selectedOrganizeSkillIds={[...selectedOrganizeSkills.keys()]}
+          onOrganizeSelectionChange={handleOrganizeSelectionChange}
+          onOrganizeCancel={cancelSkillOrganize}
+          onOrganizeSubmit={handleOrganizeSubmit}
           columns={genericColumns}
           page={skillListPage}
           pageSize={skillListPageSize}
@@ -484,30 +812,21 @@ export default function SkillManagementSection() {
 
       {skillView === "market" ? (
         <div className="memory-skill-market-panel">
-          <div className="memory-skill-view-market-desc">
-            <span className="memory-skill-view-market-desc__icon" aria-hidden="true">
-              <InfoCircleOutlined />
-            </span>
-            <p className="memory-skill-view-market-desc__text">
-              {t("admin.memorySkillViewMarketHelp")}
-            </p>
-          </div>
           <SkillMarketView
             t={t}
             loading={marketCatalogLoading}
             skillAssets={marketSkillAssets}
             installedSkills={skillAssets}
-            keyword={marketKeyword}
-            onKeywordChange={setMarketKeyword}
-            source={marketSkillSource}
-            onSourceChange={setMarketSkillSource}
-            category={marketCategory}
-            onCategoryChange={setMarketCategory}
-            categories={marketCategories}
-            onReset={handleMarketReset}
             onInstall={handleMarketInstall}
             onDetail={handleMarketDetail}
             installingUid={installingUid}
+            page={marketListPage}
+            pageSize={marketListPageSize}
+            total={marketListTotal}
+            onPageChange={(nextPage, nextPageSize) => {
+              setMarketListPage(nextPage);
+              setMarketListPageSize(nextPageSize);
+            }}
           />
         </div>
       ) : null}
@@ -559,7 +878,12 @@ export default function SkillManagementSection() {
       />
 
       {skillView === "plugins" ? (
-        <PluginInstalledView t={t} onNewPlugin={() => setNewPluginOpen(true)} />
+        <PluginInstalledView
+          t={t}
+          onNewPlugin={() => setNewPluginOpen(true)}
+          tableScroll={tableScroll}
+          listContentRef={listContentRef}
+        />
       ) : null}
 
       <NewPluginModal

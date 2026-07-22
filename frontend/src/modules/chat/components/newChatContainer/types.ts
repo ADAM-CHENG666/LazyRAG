@@ -5,6 +5,7 @@ import {
   Source,
 } from "@/api/generated/chatbot-client";
 import type { SendMessageParams } from "../ChatInput";
+import type { ChatMention } from "../ChatInput/MentionEditor";
 import type { ChatConfig } from "../ChatConfigs";
 
 export interface ChatImperativeProps {
@@ -73,6 +74,8 @@ export interface ChatMessage {
   finish_reason?: string;
   inputs?: Query[];
   reasoning_content?: string;
+  thinking_duration_s?: number | string;
+  thinking_time_s?: number | string;
   history_id?: string;
   sources?: Source[];
   feed_back?: string;
@@ -92,4 +95,9 @@ export interface ChatMessage {
   cite_message?: string;
   cite_messages?: string[];
   tool_call_turns?: number;
+  mentions?: ChatMention[];
+  intent_updated?: {
+    scope: "conversation";
+    intent_context: Record<string, unknown>;
+  };
 }

@@ -1,4 +1,8 @@
-import { axiosInstance, BASE_URL } from "@/components/request";
+import {
+  axiosInstance,
+  BASE_URL,
+  localizeErrorCode,
+} from "@/components/request";
 import type { DiffEntryLine } from "@/api/generated/core-client";
 
 const coreBasePath = `${BASE_URL}/api/core`;
@@ -21,6 +25,7 @@ interface ManagedStateItem {
   auto_evo_error?: string;
   content?: string;
   content_summary?: string;
+  has_pending_review_result?: boolean;
   has_pending_review_suggestions?: boolean;
   response_style?: string;
   resource_id?: string;
@@ -41,6 +46,7 @@ export interface PreferenceAssetRecord {
   autoEvo: boolean;
   agentPersona?: string;
   draftStatus?: string;
+  hasPendingReviewResult?: boolean;
   hasPendingReviewSuggestions?: boolean;
   responseStyle?: string;
   resourceType?: string;
@@ -284,7 +290,9 @@ const normalizeEvolutionSuggestion = (
     createdAt: toStringValue(item.created_at, ""),
     fileExt: toStringValue(item.file_ext, ""),
     fullContent: toStringValue(item.full_content, ""),
-    invalidReason: toStringValue(item.invalid_reason, ""),
+    invalidReason: item.invalid_reason
+      ? localizeErrorCode("2000509")
+      : "",
     outdated: toBoolean(item.outdated, false),
     parentSkillName: toStringValue(item.parent_skill_name, ""),
     reason: toStringValue(item.reason, ""),
@@ -534,6 +542,10 @@ const normalizeManagedPreference = (item: ManagedStateItem): PreferenceAssetReco
     item.has_pending_review_suggestions,
     false,
   );
+  const hasPendingReviewResult = toBoolean(
+    item.has_pending_review_result,
+    false,
+  );
   const reviewStatus = toStringValue(item.review_status, "none");
   const suggestionStatus = toStringValue(item.suggestion_status, "");
 
@@ -557,6 +569,7 @@ const normalizeManagedPreference = (item: ManagedStateItem): PreferenceAssetReco
 
   return {
     ...parsed,
+    hasPendingReviewResult,
     hasPendingReviewSuggestions,
     title: sanitizeInlineValue(title) || parsed.title,
     agentPersona: agentPersona || parsed.agentPersona,
@@ -566,7 +579,9 @@ const normalizeManagedPreference = (item: ManagedStateItem): PreferenceAssetReco
     suggestionStatus,
     autoEvoApplyStatus: toStringValue(item.auto_evo_apply_status, ""),
     autoEvoGeneration: toNumberValue(item.auto_evo_generation, 0),
-    autoEvoError: toStringValue(item.auto_evo_error, ""),
+    autoEvoError: item.auto_evo_error
+      ? localizeErrorCode("2000509")
+      : "",
   };
 };
 
@@ -787,7 +802,9 @@ export async function createPreferenceSuggestions(input: {
     .map((item) => ({
       id: toStringValue(item.id, ""),
       status: toStringValue(item.status, ""),
-      invalidReason: toStringValue(item.invalid_reason, ""),
+      invalidReason: item.invalid_reason
+        ? localizeErrorCode("2000509")
+        : "",
     }))
     .filter((item) => Boolean(item.id));
 }
@@ -1073,32 +1090,34 @@ export interface PersonalResourceRevisionRecord {
   createdAt: string;
   createdBy: string;
   parentRevisionId: string;
+  isHead: boolean;
 }
 
 const normalizePersonalResourceRevision = (
   item: RawObject,
 ): PersonalResourceRevisionRecord => {
   const nested =
-    item.revisionSummary && typeof item.revisionSummary === "object"
+    item.revisionSummary && typeof item.revisionSummary === 'object'
       ? (item.revisionSummary as RawObject)
-      : item.revision_summary && typeof item.revision_summary === "object"
+      : item.revision_summary && typeof item.revision_summary === 'object'
         ? (item.revision_summary as RawObject)
         : null;
   const source = nested || item;
   const revisionId = toStringValue(
     source.revision_id,
-    toStringValue(source.id, ""),
+    toStringValue(source.id, ''),
   );
 
   return {
     id: toStringValue(source.id, revisionId),
     revisionId,
     revisionNo: toNumberValue(source.revision_no, 0),
-    changeSource: toStringValue(source.change_source, ""),
-    message: toStringValue(source.message, ""),
-    createdAt: toStringValue(source.created_at, ""),
-    createdBy: toStringValue(source.created_by, ""),
-    parentRevisionId: toStringValue(source.parent_revision_id, ""),
+    changeSource: toStringValue(source.change_source, ''),
+    message: toStringValue(source.message, ''),
+    createdAt: toStringValue(source.created_at, ''),
+    createdBy: toStringValue(source.created_by, ''),
+    parentRevisionId: toStringValue(source.parent_revision_id, ''),
+    isHead: Boolean(source.is_head),
   };
 };
 
@@ -1128,6 +1147,14 @@ export async function getPersonalResourceRevision(
   };
 }
 
+export class RollbackConflictError extends Error {
+  readonly isConflict = true;
+  constructor(message = 'rollback conflict: uncommitted draft exists') {
+    super(message);
+    this.name = 'RollbackConflictError';
+  }
+}
+
 export async function rollbackPersonalResource(
   resourceType: PersonalResourceApiType,
   options: {
@@ -1149,7 +1176,13 @@ export async function rollbackPersonalResource(
   const response = await axiosInstance.post(
     `${coreBasePath}/personal-resource/${resourceType}:rollback`,
     requestPayload,
-  );
+  ).catch((err: unknown) => {
+    const status = (err as { response?: { status?: number } })?.response?.status;
+    if (status === 409) {
+      throw new RollbackConflictError();
+    }
+    throw err;
+  });
   const payload = unwrapEnvelope<RawObject>(response.data);
   return {
     revisionId: toStringValue(payload?.revision_id, ""),

@@ -5,16 +5,32 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"gorm.io/gorm"
 
 	"lazymind/core/algo"
-	"lazymind/core/common"
 	"lazymind/core/common/orm"
+	"lazymind/core/skillv2/taskguard"
 )
 
 func (w *Worker) handleSkillGenerate(ctx context.Context, task orm.ResourceUpdateTask) taskOutcome {
+	decision, err := taskguard.EvaluateSkillOperation(ctx, w.db, nil, taskguard.SkillOperationRequest{
+		UserID:        task.UserID,
+		TaskID:        task.ID,
+		Operation:     taskguard.TriggerSkillReview,
+		TriggerSource: "scheduled",
+	})
+	if err != nil {
+		if decision.Disposition == taskguard.DispositionDefer {
+			return deferredOutcome(decision.ReasonCode, decision.Message, decision.RetryAfter)
+		}
+		return retryableOutcome(taskguard.ReasonTaskStatusUnavailable, err)
+	}
+	if !decision.Allowed {
+		return deferredOutcome(decision.ReasonCode, decision.Message, decision.RetryAfter)
+	}
 	request, outcome := w.freezeSkillRequest(ctx, task)
 	if outcome.Status != "" {
 		return outcome
@@ -42,8 +58,6 @@ func (w *Worker) handleSkillGenerate(ctx context.Context, task orm.ResourceUpdat
 		EndTime:      request.EndTime,
 		MinUserTurns: w.cfg.MinUserTurns,
 		MinToolTurns: w.cfg.MinToolTurns,
-		SkillBaseDir: defaultSkillBaseDir,
-		FSBaseURL:    common.CoreSelfEndpoint(),
 		ModelConfigs: modelConfigs,
 	})
 	if err != nil {
@@ -58,7 +72,7 @@ func (w *Worker) handleSkillGenerate(ctx context.Context, task orm.ResourceUpdat
 			Msg(logEventSkillReviewCallFailed)
 		return retryableOutcome("skill_review_call_failed", fmt.Errorf("http_status=%d: %w", status, err))
 	}
-	if status != 200 || resp == nil || resp.Code != 0 || !skillReviewResponseStatusAccepted(resp.Data.Status) || resp.Data.RequestID != request.RequestID {
+	if status != 200 || resp == nil || resp.Code != 0 || !skillReviewResponseStatusAccepted(resp.Data.Status) || resp.Data.RequestID != request.RequestID || strings.TrimSpace(resp.Data.TaskID) == "" {
 		resourceUpdateWarn(logEventSkillReviewCallFailed, nil).
 			Str("task_id", task.ID).
 			Str("user_id", request.UserID).
@@ -78,7 +92,7 @@ func (w *Worker) handleSkillGenerate(ctx context.Context, task orm.ResourceUpdat
 		Str("requestid", request.RequestID).
 		Int("http_status", status).
 		Msg(logEventSkillReviewAccepted)
-	return taskOutcome{Status: orm.ResourceUpdateTaskStatusDone}
+	return taskOutcome{Status: orm.ResourceUpdateTaskStatusDone, ResultID: strings.TrimSpace(resp.Data.TaskID)}
 }
 
 func (w *Worker) freezeSkillRequest(ctx context.Context, task orm.ResourceUpdateTask) (skillGenerateRequestJSON, taskOutcome) {
@@ -97,6 +111,15 @@ func (w *Worker) freezeSkillRequest(ctx context.Context, task orm.ResourceUpdate
 	}
 
 	if request.WindowFrozen {
+		normalizedRequestID := normalizeSkillReviewRequestID(request.RequestID)
+		if normalizedRequestID != strings.TrimSpace(request.RequestID) {
+			request.RequestID = normalizedRequestID
+			if outcome := w.saveFrozenSkillRequest(ctx, task, request); outcome.Status != "" {
+				return request, outcome
+			}
+		} else {
+			request.RequestID = normalizedRequestID
+		}
 		start, err := parseTaskTime(request.StartTime)
 		if err != nil {
 			return request, permanentOutcome("invalid_start_time", err.Error())
@@ -191,7 +214,9 @@ func (w *Worker) freezeSkillRequest(ctx context.Context, task orm.ResourceUpdate
 		}
 		request.WindowFrozen = true
 		if strings.TrimSpace(request.RequestID) == "" {
-			request.RequestID = common.GenerateID()
+			request.RequestID = newSkillReviewRequestID()
+		} else {
+			request.RequestID = normalizeSkillReviewRequestID(request.RequestID)
 		}
 		body, err := json.Marshal(request)
 		if err != nil {
@@ -262,6 +287,19 @@ func (w *Worker) freezeSkillRequest(ctx context.Context, task orm.ResourceUpdate
 	return frozen, taskOutcome{}
 }
 
+func (w *Worker) saveFrozenSkillRequest(ctx context.Context, task orm.ResourceUpdateTask, request skillGenerateRequestJSON) taskOutcome {
+	body, err := json.Marshal(request)
+	if err != nil {
+		return permanentOutcome("invalid_request_json", err.Error())
+	}
+	if err := w.db.WithContext(ctx).Model(&orm.ResourceUpdateTask{}).
+		Where("id = ? AND status = ? AND locked_by = ?", task.ID, orm.ResourceUpdateTaskStatusRunning, w.workerID).
+		Updates(map[string]any{"request_json": body, "updated_at": w.clock().UTC()}).Error; err != nil {
+		return retryableOutcome("persist_request_json_failed", err)
+	}
+	return taskOutcome{}
+}
+
 func (w *Worker) handleMemoryGenerate(ctx context.Context, task orm.ResourceUpdateTask) taskOutcome {
 	var request memoryGenerateRequestJSON
 	if len(task.RequestJSON) == 0 {
@@ -278,11 +316,11 @@ func (w *Worker) handleMemoryGenerate(ctx context.Context, task orm.ResourceUpda
 	if sessionID == "" {
 		return permanentOutcome("missing_session_id", "session_id required")
 	}
-	memoryContent, userContent := memoryReviewContentsFromRequest(request)
 	llmConfig, err := w.loadLLMConfig(ctx, w.db, userID)
 	if err != nil {
 		return retryableOutcome("load_llm_config_failed", err)
 	}
+	reviewTaskID := "memory_review_" + strings.TrimSpace(task.ID)
 	resourceUpdateInfo(logEventMemoryReviewCallStart).
 		Str("task_id", task.ID).
 		Str("user_id", userID).
@@ -291,10 +329,9 @@ func (w *Worker) handleMemoryGenerate(ctx context.Context, task orm.ResourceUpda
 		Str("session_id", sessionID).
 		Msg(logEventMemoryReviewCallStart)
 	resp, status, err := w.callers.Memory(ctx, algo.MemoryReviewRequest{
+		TaskID:    reviewTaskID,
 		UserID:    userID,
 		History:   decodeHistory(request.History),
-		Memory:    memoryContent,
-		User:      userContent,
 		LLMConfig: llmConfig,
 	})
 	if err != nil {
@@ -306,9 +343,13 @@ func (w *Worker) handleMemoryGenerate(ctx context.Context, task orm.ResourceUpda
 			Int("http_status", status).
 			Str("reason", "request_failed").
 			Msg(logEventMemoryReviewCallFailed)
+		message := fmt.Sprintf("http_status=%d: %v", status, err)
+		if status == http.StatusUnprocessableEntity {
+			return permanentOutcome("memory_review_invalid_request", message)
+		}
 		return retryableOutcome("memory_review_call_failed", fmt.Errorf("http_status=%d: %w", status, err))
 	}
-	if status != 200 || resp == nil || strings.TrimSpace(resp.Status) != "success" {
+	if status != http.StatusOK || resp == nil || strings.TrimSpace(resp.Status) != "success" || strings.TrimSpace(resp.TaskID) != reviewTaskID {
 		resourceUpdateWarn(logEventMemoryReviewCallFailed, nil).
 			Str("task_id", task.ID).
 			Str("user_id", userID).
@@ -316,9 +357,10 @@ func (w *Worker) handleMemoryGenerate(ctx context.Context, task orm.ResourceUpda
 			Str("session_id", sessionID).
 			Int("http_status", status).
 			Str("response_status", safeMemoryStatus(resp)).
+			Str("response_task_id", safeMemoryTaskID(resp)).
 			Str("reason", "unexpected_response").
 			Msg(logEventMemoryReviewCallFailed)
-		return retryableOutcome("memory_review_unexpected_response", fmt.Errorf("http_status=%d status=%q", status, safeMemoryStatus(resp)))
+		return retryableOutcome("memory_review_unexpected_response", fmt.Errorf("http_status=%d status=%q task_id=%q", status, safeMemoryStatus(resp), safeMemoryTaskID(resp)))
 	}
 	resourceUpdateInfo(logEventMemoryReviewCallDone).
 		Str("task_id", task.ID).
@@ -327,23 +369,7 @@ func (w *Worker) handleMemoryGenerate(ctx context.Context, task orm.ResourceUpda
 		Str("session_id", sessionID).
 		Int("http_status", status).
 		Msg(logEventMemoryReviewCallDone)
-	return taskOutcome{Status: orm.ResourceUpdateTaskStatusDone}
-}
-
-func memoryReviewContentsFromRequest(request memoryGenerateRequestJSON) (string, string) {
-	memoryContent := request.Memory
-	userContent := request.User
-	switch strings.TrimSpace(request.Target) {
-	case orm.ResourceUpdateResourceTypeMemory:
-		if memoryContent == "" {
-			memoryContent = request.CurrentContent
-		}
-	case orm.ResourceUpdateResourceTypeUserPreference:
-		if userContent == "" {
-			userContent = request.CurrentContent
-		}
-	}
-	return memoryContent, userContent
+	return taskOutcome{Status: orm.ResourceUpdateTaskStatusDone, ResultID: reviewTaskID}
 }
 
 func decodeHistory(raw json.RawMessage) any {
@@ -395,7 +421,7 @@ func safeSkillTaskID(resp *algo.SkillReviewResponse) string {
 
 func skillReviewResponseStatusAccepted(status string) bool {
 	switch strings.TrimSpace(status) {
-	case "running", "completed":
+	case "pending", "running", "completed":
 		return true
 	default:
 		return false
@@ -407,6 +433,13 @@ func safeMemoryStatus(resp *algo.MemoryReviewResponse) string {
 		return ""
 	}
 	return resp.Status
+}
+
+func safeMemoryTaskID(resp *algo.MemoryReviewResponse) string {
+	if resp == nil {
+		return ""
+	}
+	return resp.TaskID
 }
 
 func (w *Worker) stageFor(index int) Stage {

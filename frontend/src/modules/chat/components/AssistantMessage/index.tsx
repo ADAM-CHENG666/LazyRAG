@@ -26,6 +26,7 @@ import { PluginPanel } from "@/modules/chat/components/PluginPanel";
 import MultiAnswerDisplay, { type PreferenceType } from "../MultiAnswerDisplay";
 import FeedbackModal from "../FeedbackModal";
 import AskCard from "@/modules/chat/components/AskCard";
+import ArtifactDownloadButton from "@/modules/chat/components/ArtifactCollectorCard/ArtifactDownloadButton";
 
 const BotAvatarIcon = new URL(
   "../../assets/images/bot_avatar.png",
@@ -65,7 +66,7 @@ async function copyTextToClipboard(text: string) {
   try {
     const copied = document.execCommand("copy");
     if (!copied) {
-      throw new Error("Copy command failed");
+      throw new Error();
     }
   } finally {
     document.body.removeChild(textarea);
@@ -546,7 +547,6 @@ const AssistantMessage = (props: any) => {
         });
       })
       .catch(() => {
-        message.error(t("chat.feedbackFailedRetry"));
         dispatch({ type: "SUBMIT_FAIL" });
       });
   }
@@ -625,7 +625,6 @@ const AssistantMessage = (props: any) => {
         message.success(t("chat.thanksFeedback"));
       })
       .catch(() => {
-        message.error(t("chat.feedbackSubmitFailedRetry"));
         dispatch({ type: "SUBMIT_FAIL" });
       });
   }
@@ -663,9 +662,7 @@ const AssistantMessage = (props: any) => {
         updateMessage(item);
         onPreferenceSelect?.(preference, sessionId);
       })
-      .catch(() => {
-        message.error(t("chat.feedbackFailedRetry"));
-      });
+      .catch(() => {});
   }
 
   function renderAnswerKnowledgeBase(answerIndex: number) {
@@ -727,6 +724,10 @@ const AssistantMessage = (props: any) => {
                 onClick={() => handleCopy(answer.content)}
               />
             </Tooltip>
+            <ArtifactDownloadButton
+              sessionId={sessionId}
+              historyId={answerHistoryId}
+            />
             {showFullToolbar && index === length - 1 && (
               <Tooltip title={t("chat.regenerate")}>
                 <Button
@@ -795,6 +796,10 @@ const AssistantMessage = (props: any) => {
                 onClick={() => handleCopy(item.delta)}
               />
             </Tooltip>
+            <ArtifactDownloadButton
+              sessionId={sessionId}
+              historyId={item.history_id}
+            />
             {index === length - 1 && (
               <Tooltip title={t("chat.regenerate")}>
                 <Button
@@ -845,33 +850,6 @@ const AssistantMessage = (props: any) => {
   }
 
   function renderBottom() {
-    if (
-      item.finish_reason ===
-      ChatConversationsResponseFinishReasonEnum.FinishReasonUnspecified
-    ) {
-      return (
-        <Button className="stop-btn" onClick={stopGeneration}>
-          {t("chat.stopGenerate")}
-        </Button>
-      );
-    }
-    if (
-      item.finish_reason ===
-      ChatConversationsResponseFinishReasonEnum.FinishReasonUnknown
-    ) {
-      return (
-        <>
-          <span style={{ color: "#b8c3d7" }}>{item.errMessage}</span>
-          <Button
-            className="stop-btn"
-            style={{ marginLeft: 10 }}
-            onClick={regenerate}
-          >
-            {t("chat.regenerate")}
-          </Button>
-        </>
-      );
-    }
     // Render ask_pending card if present
     if (item.ask_pending) {
       const askPending = item.ask_pending;
@@ -898,6 +876,35 @@ const AssistantMessage = (props: any) => {
             props.sendMessage?.(payload.text, undefined, { ask_answers_structured: payload.structured });
           }}
         />
+      );
+    }
+    // Show stop button while still streaming (no card present).
+    if (
+      item.finish_reason ===
+      ChatConversationsResponseFinishReasonEnum.FinishReasonUnspecified
+    ) {
+      return (
+        <Button className="stop-btn" onClick={stopGeneration}>
+          {t("chat.stopGenerate")}
+        </Button>
+      );
+    }
+    // Show error + regenerate on unknown/failed finish.
+    if (
+      item.finish_reason ===
+      ChatConversationsResponseFinishReasonEnum.FinishReasonUnknown
+    ) {
+      return (
+        <>
+          <span style={{ color: "#b8c3d7" }}>{item.errMessage}</span>
+          <Button
+            className="stop-btn"
+            style={{ marginLeft: 10 }}
+            onClick={regenerate}
+          >
+            {t("chat.regenerate")}
+          </Button>
+        </>
       );
     }
     return null;

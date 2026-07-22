@@ -26,12 +26,50 @@ import {
   isDeveloperModeActive,
 } from "@/utils/developerMode";
 import { DetailPageHeader } from "@/components/ui";
+import { localizeErrorCode } from "@/components/request";
 import "./index.scss";
 
 type KnowledgeDetail = Doc & {
   file_url?: string;
   download_file_url?: string;
 };
+
+async function writeTextToClipboard(text: string) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+  } catch {
+    // Fall back for denied permissions and browsers with partial Clipboard API support.
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.left = "0";
+  textarea.style.top = "0";
+  textarea.style.width = "1px";
+  textarea.style.height = "1px";
+  textarea.style.opacity = "0";
+  textarea.style.pointerEvents = "none";
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  textarea.setSelectionRange(0, text.length);
+
+  try {
+    if (
+      typeof document.execCommand !== "function" ||
+      !document.execCommand("copy")
+    ) {
+      throw new Error("Copy command failed");
+    }
+  } finally {
+    document.body.removeChild(textarea);
+  }
+}
 
 const Detail = () => {
   const { t } = useTranslation();
@@ -156,10 +194,8 @@ const Detail = () => {
     try {
       await fileViewerRef.current?.exportImagePdf();
       message.success("已导出图片 PDF");
-    } catch (err) {
-      message.error(
-        `导出失败: ${err instanceof Error ? err.message : String(err)}`,
-      );
+    } catch {
+      message.error(localizeErrorCode("2000509"));
     } finally {
       setExportingImagePdf(false);
     }
@@ -238,17 +274,23 @@ const Detail = () => {
               >
                 ID: {knowledgeId}
               </span>
-              <CopyOutlined
-                style={{ color: "var(--color-text-description)" }}
-                onClick={async () => {
-                  try {
-                    await navigator.clipboard.writeText(knowledgeId);
-                    message.success(t("knowledge.copySuccess"));
-                  } catch {
-                    message.error(t("knowledge.copyFailedManual"));
-                  }
-                }}
-              />
+              <Tooltip title={t("common.copy")}>
+                <Button
+                  type="text"
+                  size="small"
+                  aria-label={t("common.copy")}
+                  icon={<CopyOutlined />}
+                  style={{ color: "var(--color-text-description)" }}
+                  onClick={async () => {
+                    try {
+                      await writeTextToClipboard(knowledgeId);
+                      message.success(t("knowledge.copySuccess"));
+                    } catch {
+                      message.error(t("knowledge.copyFailedManual"));
+                    }
+                  }}
+                />
+              </Tooltip>
             </div>
           ) : null
         }

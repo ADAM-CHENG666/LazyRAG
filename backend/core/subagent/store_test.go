@@ -110,6 +110,41 @@ func TestStatusAndArtifactLifecycle(t *testing.T) {
 	}
 }
 
+func TestListTasksByConversationForUserEnforcesOwnership(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	for _, input := range []CreateTaskInput{
+		{TaskID: "mine", ConversationID: "conv", AgentType: "research", Title: "mine", Mode: "auto", CreateUserID: "user-1"},
+		{TaskID: "other", ConversationID: "conv", AgentType: "research", Title: "other", Mode: "auto", CreateUserID: "user-2"},
+	} {
+		if _, err := CreateTask(ctx, db.DB, input); err != nil {
+			t.Fatalf("create task %s: %v", input.TaskID, err)
+		}
+	}
+
+	tasks, err := ListTasksByConversationForUser(ctx, db.DB, "conv", "user-1")
+	if err != nil {
+		t.Fatalf("list tasks: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].ID != "mine" {
+		t.Fatalf("expected only user-1 task, got %#v", tasks)
+	}
+	for _, taskID := range []string{"mine", "other"} {
+		if err := SaveArtifact(
+			ctx, db.DB, taskID, "result", "text", json.RawMessage(`{"text":"ok"}`), 1,
+		); err != nil {
+			t.Fatalf("save artifact for %s: %v", taskID, err)
+		}
+	}
+	artifacts, err := ListArtifactsByConversationForUser(ctx, db.DB, "conv", "user-1")
+	if err != nil {
+		t.Fatalf("list conversation artifacts: %v", err)
+	}
+	if len(artifacts) != 1 || artifacts[0].TaskID != "mine" {
+		t.Fatalf("expected only user-1 artifact, got %#v", artifacts)
+	}
+}
+
 func TestMarkInterrupted(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
@@ -137,5 +172,33 @@ func TestMarkInterrupted(t *testing.T) {
 	got, _ := GetTask(ctx, db.DB, "stale")
 	if got.Status != StatusInterrupted {
 		t.Fatalf("expected interrupted, got %s", got.Status)
+	}
+}
+
+func TestLateRunnerEventsDoNotReviveInterruptedTask(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	if _, err := CreateTask(ctx, db.DB, CreateTaskInput{
+		TaskID: "stopped", ConversationID: "conv", AgentType: "plugin_step", Title: "stopped",
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := UpdateFinalStatus(ctx, db.DB, "stopped", StatusInterrupted, "stopped by user"); err != nil {
+		t.Fatalf("interrupt: %v", err)
+	}
+
+	if accepted, err := AcceptTaskStart(ctx, db.DB, "stopped"); err != nil || accepted {
+		t.Fatalf("late task_start accepted=%v err=%v", accepted, err)
+	}
+	if accepted, err := AcceptFinalStatus(ctx, db.DB, "stopped", StatusSucceeded, "late success"); err != nil || accepted {
+		t.Fatalf("late success accepted=%v err=%v", accepted, err)
+	}
+
+	got, err := GetTask(ctx, db.DB, "stopped")
+	if err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	if got.Status != StatusInterrupted || got.Summary != "stopped by user" {
+		t.Fatalf("task revived after stop: status=%q summary=%q", got.Status, got.Summary)
 	}
 }
