@@ -9,7 +9,7 @@ from typing import Literal
 
 from .artifact import ArtifactCommit, ArtifactKey, ArtifactSnapshot
 from .errors import DefinitionError, OperationExecutionError
-from .execution import ExecutionHandle, start_execution
+from .execution import ExecutionCleanupError, ExecutionHandle, start_execution
 from .operation import OperationContext, OperationInvocation, OperationResult
 from .planning import (
     PlanAwaiting,
@@ -115,6 +115,7 @@ class RunSession:
 
         self._status: RunStatus = 'created'
         self._error: RuntimeErrorInfo | None = None
+        self._failure_pending: RuntimeErrorInfo | None = None
         self._artifacts = ArtifactSnapshot()
         self._retries: tuple[ArtifactRetryRequest, ...] = ()
         self._decision: PlanningResult | None = None
@@ -302,10 +303,20 @@ class RunSession:
             'close': self._close,
         }
         try:
+            await self._flush_failure()
             await actions[command.kind]()
         except Exception as exc:
+            reply_error: Exception = exc
+            if self._failure_pending is not None:
+                try:
+                    await self._flush_failure()
+                except Exception as persistence_error:
+                    reply_error = ExceptionGroup(
+                        'command and failure persistence both failed',
+                        [exc, persistence_error],
+                    )
             if not command.reply.done():
-                command.reply.set_exception(exc)
+                command.reply.set_exception(reply_error)
         else:
             if not command.reply.done():
                 command.reply.set_result(self._snapshot)
@@ -356,7 +367,6 @@ class RunSession:
             raise DefinitionError(f'cannot retry run from {self._status}')
         if self._active:
             await self._terminate(tuple(self._active.values()))
-        self._error = None
         await self._enter_running()
 
     async def _cancel(self) -> None:
@@ -380,7 +390,7 @@ class RunSession:
         if self._status in {'running', 'pausing'}:
             if self._status == 'running':
                 await self._persist_status('pausing')
-            await self._terminate(tuple(self._active.values()), final='paused')
+            await self._terminate(tuple(self._active.values()), final='interrupted')
             self._status = 'paused'
         elif self._status == 'cancelling':
             await self._terminate(tuple(self._active.values()), final='cancelled')
@@ -620,7 +630,11 @@ class RunSession:
             else:
                 error = _as_exception(event.error)
             execution.attempt = await self._fail_attempt(execution.attempt, error)
-            self._active.pop(event.attempt_id, None)
+            if not (
+                isinstance(event.error, ExecutionCleanupError)
+                and event.error.cleanup_pending
+            ):
+                self._active.pop(event.attempt_id, None)
             await self._terminate_failed_siblings()
             await self._publish()
             return
@@ -657,20 +671,38 @@ class RunSession:
 
     async def _fail_run(self, error: Exception) -> None:
         info = RuntimeErrorInfo(type(error).__name__, str(error) or type(error).__name__)
-        await self._store.set_run_state(self.run_id, 'failed', error=info)
         self._status = 'failed'
         self._error = info
+        self._failure_pending = info
+        await self._flush_failure()
+
+    async def _flush_failure(self) -> None:
+        info = self._failure_pending
+        if info is None:
+            return
+        await self._store.set_run_state(self.run_id, 'failed', error=info)
+        self._failure_pending = None
 
     async def _fail_running(self, error: Exception) -> None:
-        await self._fail_run(error)
+        persistence_error: Exception | None = None
+        try:
+            await self._fail_run(error)
+        except Exception as exc:
+            persistence_error = exc
         try:
             await self._terminate(tuple(self._active.values()))
         except _TerminationFailure:
             pass
         await self._publish()
+        if persistence_error is not None:
+            raise persistence_error
 
     async def _handle_internal_error(self, error: Exception) -> None:
         if self._status == 'failed':
+            try:
+                await self._flush_failure()
+            except Exception:
+                pass
             try:
                 await self._terminate(tuple(self._active.values()))
             except _TerminationFailure:
@@ -704,7 +736,9 @@ class RunSession:
             await self._terminate(targets)
 
     async def _terminate(self, executions: tuple[_ActiveExecution, ...], *,
-                         final: Literal['paused', 'cancelled'] | None = None
+                         final: Literal[
+                             'paused', 'cancelled', 'interrupted'
+                         ] | None = None
                          ) -> None:
         failures: list[Exception] = []
         for execution in executions:
@@ -732,24 +766,48 @@ class RunSession:
                     execution.attempt = await self._store.set_attempt_status(
                         self.run_id,
                         execution.attempt.attempt_id,
-                        'cancelled',
+                        (
+                            'interrupted'
+                            if final == 'interrupted'
+                            else 'cancelled'
+                        ),
                     )
             except Exception as exc:
                 failures.append(exc)
                 continue
             self._active.pop(execution.attempt.attempt_id, None)
 
-        if not failures and final == 'paused':
-            await self._store.finish_pause(self.run_id)
-        elif not failures and final == 'cancelled':
-            await self._store.finish_cancel(self.run_id)
+        if not failures:
+            try:
+                if final in {'paused', 'interrupted'}:
+                    await self._store.finish_pause(self.run_id)
+                elif final == 'cancelled':
+                    await self._store.finish_cancel(self.run_id)
+            except Exception as exc:
+                failures.append(exc)
         if failures:
+            failure = _TerminationFailure(
+                'operation cleanup did not reach a verified terminal state',
+                failures,
+            )
+            if self._status != 'failed':
+                try:
+                    await self._fail_run(failure)
+                except Exception as exc:
+                    failure = _TerminationFailure(
+                        'operation cleanup and failure persistence both failed',
+                        [failure, exc],
+                    )
             await self._publish()
-            raise _TerminationFailure('operation process trees failed to terminate', failures)
+            raise failure
 
     async def _persist_status(self, status: RunStatus) -> None:
-        await self._store.set_run_state(self.run_id, status, error=self._error if status == 'failed' else None)
+        if status == 'failed':
+            raise ValueError('failed status must be persisted through _fail_run')
+        await self._store.set_run_state(self.run_id, status)
         self._status = status
+        self._error = None
+        self._failure_pending = None
 
     async def _publish(self) -> None:
         view = self._artifacts if self._decision is None else self._decision.view

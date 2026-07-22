@@ -66,11 +66,11 @@ def prepare_candidate_workspace(
     }
 
 
-def run_repair_loop(workspace: Mapping[str, Any], cases: tuple[Mapping[str, Any], ...],
-                    baseline_judges: tuple[Mapping[str, Any], ...], eval_policy: Mapping[str, Any],
-                    candidate_config: Mapping[str, Any], repair_policy: Mapping[str, Any], ctx: Any,
-                    plan: Mapping[str, Any] | None = None,
-                    trace: Any | None = None) -> dict[str, Any]:
+async def run_repair_loop(workspace: Mapping[str, Any], cases: tuple[Mapping[str, Any], ...],
+                          baseline_judges: tuple[Mapping[str, Any], ...], eval_policy: Mapping[str, Any],
+                          candidate_config: Mapping[str, Any], repair_policy: Mapping[str, Any], ctx: Any,
+                          plan: Mapping[str, Any] | None = None,
+                          trace: Any | None = None) -> dict[str, Any]:
     plan = plan if isinstance(plan, Mapping) else {}
     baseline_algo_id = next((text for judge in baseline_judges for text in (algo_id(judge),) if text), '')
     ready = _ready_workspace(workspace, plan, repair_policy)
@@ -127,8 +127,10 @@ def run_repair_loop(workspace: Mapping[str, Any], cases: tuple[Mapping[str, Any]
         elif pre.get('status') != 'passed':
             candidate = _rejected_candidate('pre_validation_failed', _text(pre.get('reason')) or 'pre_validation_failed')
         else:
-            candidate = validate_candidate_patch(root, diff_info['diff'], plan, case_map, baseline_map, eval_policy,
-                                                 candidate_config, ctx, trace, attempt_no)
+            candidate = await validate_candidate_patch(
+                root, diff_info['diff'], plan, case_map, baseline_map,
+                eval_policy, candidate_config, ctx, trace, attempt_no,
+            )
         status = 'validated' if candidate.get('accepted') is True else 'failed'
         attempt = {
             'attempt': attempt_no,
@@ -157,6 +159,13 @@ def run_repair_loop(workspace: Mapping[str, Any], cases: tuple[Mapping[str, Any]
             safe_emit(trace, 'repair.loop_completed', status='completed', terminal=True,
                       payload={'status': 'validated', 'attempt_count': len(attempts)})
             return _result('validated', plan, workspace, attempts, attempt, 'validated repair patch',
+                           baseline_algo_id, trace_cursor(trace))
+        if candidate.get('early_stop_reason') == 'chat_runtime_error':
+            reason = 'candidate validation failed: chat_runtime_error'
+            safe_emit(trace, 'repair.loop_completed', status='failed', terminal=True,
+                      payload={'status': 'failed', 'attempt_count': len(attempts), 'reason': reason})
+            reset_workspace(root)
+            return _result('failed', plan, workspace, attempts, {}, reason,
                            baseline_algo_id, trace_cursor(trace))
     fallback = _latest_prevalidated_patch(attempts)
     if fallback:

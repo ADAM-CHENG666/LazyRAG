@@ -622,8 +622,16 @@ class ArtifactStore:
         async with self._transaction():
             cursor = await self._connection.execute(
                 """
-                SELECT run_id, status FROM runs
-                WHERE status IN ('running', 'pausing', 'cancelling') ORDER BY run_id
+                SELECT run_id, status FROM runs AS run
+                WHERE status IN ('running', 'pausing', 'cancelling')
+                   OR (
+                     status = 'failed' AND EXISTS (
+                       SELECT 1 FROM attempts AS attempt
+                       WHERE attempt.run_id = run.run_id
+                         AND attempt.status IN ('scheduled', 'running', 'cancelling')
+                     )
+                   )
+                ORDER BY run_id
                 """
             )
             rows = await cursor.fetchall()
@@ -641,6 +649,16 @@ class ArtifactStore:
                 )
                 has_active_attempt = await cursor.fetchone() is not None
                 if row['status'] == 'running' and not has_active_attempt:
+                    continue
+                if row['status'] == 'failed':
+                    await self._connection.execute(
+                        """
+                        UPDATE attempts SET status = 'interrupted', finished_at = ?
+                        WHERE run_id = ? AND status IN ('scheduled', 'running', 'cancelling')
+                        """,
+                        (now, run_id),
+                    )
+                    recovered.append(run_id)
                     continue
                 attempt_status = 'cancelled' if cancelling else 'interrupted'
                 run_status = 'cancelled' if cancelling else 'paused'

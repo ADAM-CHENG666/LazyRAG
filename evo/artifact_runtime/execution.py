@@ -8,15 +8,14 @@ import os
 import pickle
 import signal
 import socket
-import subprocess
 import sys
 import tempfile
-import threading
-from collections.abc import Mapping
-from contextlib import suppress
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, Self
+
+import psutil
 
 from .errors import DefinitionError, OperationExecutionError
 from .operation import Operation, OperationContext, OperationInvocation, OperationResult
@@ -35,6 +34,7 @@ class _IsolatedRequest:
     invocation_id: str
     partition_key: str
     inputs: tuple[tuple[str, object], ...]
+    cleanup_timeout: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,8 +57,17 @@ class ExecutionHandle(Protocol):
         ...
 
 
-class _TerminationError(OperationExecutionError):
-    pass
+class ExecutionCleanupError(OperationExecutionError):
+    def __init__(self, message: str, alive_processes: Sequence[psutil.Process] = (), *,
+                 unverified: bool = False
+                 ) -> None:
+        super().__init__(message)
+        self.alive_processes = tuple(alive_processes)
+        self.unverified = unverified
+
+    @property
+    def cleanup_pending(self) -> bool:
+        return self.unverified or bool(self.alive_processes)
 
 
 class _CooperativeHandle:
@@ -83,8 +92,7 @@ class _IsolatedHandle:
     def __init__(self, operation: Operation, process: asyncio.subprocess.Process,
                  stdout_task: asyncio.Task[bytes], stderr_task: asyncio.Task[bytes],
                  progress_task: asyncio.Task[None], result_path: Path,
-                 directory: tempfile.TemporaryDirectory[str], parent_watch: int,
-                 terminate_timeout: float
+                 directory: tempfile.TemporaryDirectory[str], terminate_timeout: float
                  ) -> None:
         self._operation = operation
         self._process = process
@@ -93,94 +101,121 @@ class _IsolatedHandle:
         self._progress_task = progress_task
         self._result_path = result_path
         self._directory = directory
-        self._parent_watch = parent_watch
-        self._terminate_timeout = terminate_timeout
+        self._cleanup_timeout = terminate_timeout
         self._terminate_requested = False
         self._terminate_lock = asyncio.Lock()
-        self._terminated = asyncio.Event()
+        self._tracked_descendants: tuple[psutil.Process, ...] = ()
+        self._unverified_cleanup: ExecutionCleanupError | None = None
         self._cleaned = False
-        self._termination_failure: asyncio.Future[OperationExecutionError] = (
-            asyncio.get_running_loop().create_future()
-        )
         self._completion = asyncio.create_task(
             self._complete(),
             name=f'isolated:{operation.spec.op_id}:{process.pid}',
         )
 
     async def wait(self) -> OperationResult:
-        done, _ = await asyncio.wait(
-            (self._completion, self._termination_failure),
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if self._termination_failure in done:
-            raise self._termination_failure.result()
-        try:
-            result = await asyncio.shield(self._completion)
-        except _TerminationError:
-            if self._terminated.is_set():
-                raise asyncio.CancelledError
-            raise
+        result = await asyncio.shield(self._completion)
         if result is None:
             raise asyncio.CancelledError
         return result
 
     async def terminate(self) -> None:
         async with self._terminate_lock:
-            if self._completion.done():
-                error = None if self._completion.cancelled() else self._completion.exception()
-                if not isinstance(error, _TerminationError):
-                    await _consume_completion(self._completion)
-                    return
-            if self._termination_failure.done():
-                self._termination_failure = asyncio.get_running_loop().create_future()
+            if self._unverified_cleanup is not None:
+                raise self._unverified_cleanup
+            if self._completion.done() and not self._tracked_descendants:
+                await _consume_completion(self._completion)
+                return
             self._terminate_requested = True
             try:
-                await _terminate_process_group(
-                    self._process.pid,
-                    self._terminate_timeout,
+                self._tracked_descendants = await _terminate_process_tree(
+                    self._process,
+                    self._tracked_descendants,
+                    self._cleanup_timeout,
                 )
-                self._terminated.set()
-                await asyncio.shield(self._process.wait())
+            except ExecutionCleanupError as exc:
+                self._tracked_descendants = exc.alive_processes
+                if exc.unverified and not exc.alive_processes:
+                    self._unverified_cleanup = exc
+                raise
             except Exception as exc:
-                error = (
-                    exc
-                    if isinstance(exc, OperationExecutionError)
-                    else _TerminationError(str(exc) or type(exc).__name__)
-                )
-                if not self._termination_failure.done():
-                    self._termination_failure.set_result(error)
-                raise error
+                if isinstance(exc, OperationExecutionError):
+                    raise
+                raise ExecutionCleanupError(str(exc) or type(exc).__name__) from exc
+            self._unverified_cleanup = None
             self._progress_task.cancel()
-            if self._completion.done():
-                self._cleanup()
-            else:
-                await _consume_completion(self._completion)
+            await _consume_completion(self._completion)
 
     async def _complete(self) -> OperationResult | None:
-        process_group_finished = False
+        process_waiter = asyncio.create_task(
+            self._process.wait(),
+            name=f'worker-wait:{self._process.pid}',
+        )
         try:
-            await self._process.wait()
-            if self._terminate_requested:
-                await self._terminated.wait()
-            else:
-                await _finish_process_group(
-                    self._process.pid,
-                    self._terminate_timeout,
-                )
-            process_group_finished = True
-            await self._process.wait()
+            progress_error: Exception | None = None
+            done, _ = await asyncio.wait(
+                (process_waiter, self._progress_task),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if self._progress_task in done:
+                try:
+                    self._progress_task.result()
+                except asyncio.CancelledError:
+                    if not self._terminate_requested:
+                        raise
+                except Exception as exc:
+                    progress_error = exc
+
+            if progress_error is not None and not self._terminate_requested:
+                if not await _wait_direct_process(self._process, self._cleanup_timeout):
+                    try:
+                        self._tracked_descendants = await _terminate_process_tree(
+                            self._process,
+                            self._tracked_descendants,
+                            self._cleanup_timeout,
+                        )
+                    except ExecutionCleanupError as exc:
+                        self._tracked_descendants = exc.alive_processes
+                        if exc.unverified and not exc.alive_processes:
+                            self._unverified_cleanup = exc
+                        exc.add_note(
+                            f'{self._operation.spec.op_id} also emitted invalid progress'
+                        )
+                        raise
+            elif (
+                self._progress_task in done
+                and not self._terminate_requested
+                and not self._result_path.is_file()
+                and not await _wait_direct_process(self._process, self._cleanup_timeout)
+            ):
+                _signal_process_group(self._process.pid, signal.SIGKILL)
+            await asyncio.shield(process_waiter)
+            if not self._terminate_requested and not self._result_path.is_file():
+                _signal_process_group(self._process.pid, signal.SIGKILL)
+            if not self._progress_task.done():
+                try:
+                    async with asyncio.timeout(self._cleanup_timeout):
+                        await asyncio.shield(self._progress_task)
+                except TimeoutError as exc:
+                    self._progress_task.cancel()
+                    await asyncio.gather(self._progress_task, return_exceptions=True)
+                    progress_error = OperationExecutionError(
+                        f'{self._operation.spec.op_id} worker descendants kept progress pipe open'
+                    )
+                    progress_error.__cause__ = exc
+                except asyncio.CancelledError:
+                    if not self._terminate_requested:
+                        raise
+                except Exception as exc:
+                    progress_error = exc
             stdout, stderr = await self._output()
-            try:
-                await self._progress_task
-            except asyncio.CancelledError:
-                if not self._terminate_requested:
-                    raise
-            except Exception as exc:
-                raise OperationExecutionError(
-                    f'{self._operation.spec.op_id} worker emitted invalid progress'
-                ) from exc
             if self._terminate_requested:
                 return None
+            if progress_error is not None:
+                if isinstance(progress_error, OperationExecutionError):
+                    raise progress_error
+                raise OperationExecutionError(
+                    f'{self._operation.spec.op_id} worker emitted invalid progress'
+                ) from progress_error
             if self._result_path.is_file():
                 try:
                     response = pickle.loads(self._result_path.read_bytes())
@@ -202,24 +237,33 @@ class _IsolatedHandle:
                 f'{self._operation.spec.op_id} worker produced no result'
             )
         finally:
-            if process_group_finished:
-                self._cleanup()
+            if not process_waiter.done():
+                process_waiter.cancel()
+                await asyncio.gather(process_waiter, return_exceptions=True)
+            self._cleanup()
 
     async def _output(self) -> tuple[bytes, bytes]:
-        stdout, stderr = await asyncio.gather(
-            self._stdout_task,
-            self._stderr_task,
-        )
-        return stdout, stderr
+        try:
+            async with asyncio.timeout(self._cleanup_timeout):
+                return await asyncio.gather(
+                    self._stdout_task,
+                    self._stderr_task,
+                )
+        except TimeoutError as exc:
+            await asyncio.gather(
+                self._stdout_task,
+                self._stderr_task,
+                return_exceptions=True,
+            )
+            raise OperationExecutionError(
+                f'{self._operation.spec.op_id} worker descendants kept output pipes open'
+            ) from exc
 
     def _cleanup(self) -> None:
         if self._cleaned:
             return
         self._cleaned = True
-        try:
-            os.close(self._parent_watch)
-        finally:
-            self._directory.cleanup()
+        self._directory.cleanup()
 
 
 async def start_execution(invocation: OperationInvocation, ctx: OperationContext,
@@ -235,7 +279,7 @@ async def start_execution(invocation: OperationInvocation, ctx: OperationContext
         return _CooperativeHandle(task)
     if os.name != 'posix':
         raise OperationExecutionError(
-            'isolated execution requires POSIX process groups'
+            'isolated execution requires POSIX process sessions'
         )
     return await _start_isolated(invocation, ctx, inputs, terminate_timeout)
 
@@ -261,34 +305,27 @@ async def _start_isolated(invocation: OperationInvocation, ctx: OperationContext
         ctx.invocation_id,
         ctx.partition_key,
         tuple(inputs.items()),
+        terminate_timeout,
     )
     request_path.write_bytes(pickle.dumps(request, protocol=pickle.HIGHEST_PROTOCOL))
 
-    watch_reader = watch_writer = -1
     progress_reader: socket.socket | None = None
     progress_writer: socket.socket | None = None
     process: asyncio.subprocess.Process | None = None
+    stdout_task: asyncio.Task[bytes] | None = None
+    stderr_task: asyncio.Task[bytes] | None = None
+    progress_task: asyncio.Task[None] | None = None
     try:
-        watch_reader, watch_writer = os.pipe()
         progress_reader, progress_writer = socket.socketpair()
         progress_reader.setblocking(False)
         progress_fd = progress_writer.fileno()
-        command = _worker_command(
-            'supervise',
-            request_path,
-            result_path,
-            watch_reader,
-            progress_fd,
-        )
         process = await asyncio.create_subprocess_exec(
-            *command,
+            *_worker_command(request_path, result_path, progress_fd),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
-            pass_fds=(watch_reader, progress_fd),
+            pass_fds=(progress_fd,),
         )
-        os.close(watch_reader)
-        watch_reader = -1
         progress_writer.close()
         progress_writer = None
         assert process.stdout is not None
@@ -296,8 +333,7 @@ async def _start_isolated(invocation: OperationInvocation, ctx: OperationContext
         stdout_task = asyncio.create_task(_drain_output(process.stdout))
         stderr_task = asyncio.create_task(_drain_output(process.stderr))
         progress_task = asyncio.create_task(_forward_progress(progress_reader, ctx))
-        progress_reader = None
-        return _IsolatedHandle(
+        handle = _IsolatedHandle(
             invocation.operation,
             process,
             stdout_task,
@@ -305,26 +341,220 @@ async def _start_isolated(invocation: OperationInvocation, ctx: OperationContext
             progress_task,
             result_path,
             directory,
-            watch_writer,
             terminate_timeout,
         )
-    except BaseException:
-        if watch_reader >= 0:
-            os.close(watch_reader)
-        if watch_writer >= 0:
-            os.close(watch_writer)
+        progress_reader = None
+        return handle
+    except BaseException as start_error:
         if progress_reader is not None:
             progress_reader.close()
         if progress_writer is not None:
             progress_writer.close()
+        cleanup_errors: list[BaseException] = []
         try:
             if process is not None:
-                with suppress(ProcessLookupError):
-                    os.killpg(process.pid, signal.SIGKILL)
-                await asyncio.shield(process.wait())
+                try:
+                    await _terminate_process_tree(process, (), terminate_timeout)
+                except Exception as exc:
+                    cleanup_errors.append(exc)
+                    _signal_process_group(process.pid, signal.SIGKILL)
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                    except Exception as fallback_signal_error:
+                        cleanup_errors.append(fallback_signal_error)
+                    try:
+                        async with asyncio.timeout(terminate_timeout):
+                            await asyncio.shield(process.wait())
+                    except BaseException as fallback_error:
+                        cleanup_errors.append(fallback_error)
+            tasks = tuple(
+                task
+                for task in (stdout_task, stderr_task, progress_task)
+                if task is not None
+            )
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
         finally:
             directory.cleanup()
+        if cleanup_errors:
+            detail = '; '.join(str(error) or type(error).__name__ for error in cleanup_errors)
+            start_error.add_note(f'isolated worker cleanup also failed: {detail}')
         raise
+
+
+async def _terminate_process_tree(
+    process: asyncio.subprocess.Process,
+    tracked: Sequence[psutil.Process],
+    timeout: float,
+) -> tuple[psutil.Process, ...]:
+    errors: list[Exception] = []
+    try:
+        discovered = await asyncio.to_thread(_descendants, process.pid)
+    except Exception as exc:
+        discovered = ()
+        errors.append(exc)
+    descendants = _merge_processes(tracked, discovered)
+    errors.extend(await asyncio.to_thread(_signal_processes, descendants, signal.SIGTERM))
+    group_error = _signal_process_group(process.pid, signal.SIGTERM)
+    if group_error is not None:
+        errors.append(group_error)
+
+    root_exited, alive = await asyncio.gather(
+        _wait_direct_process(process, timeout),
+        asyncio.to_thread(_wait_processes, descendants, timeout),
+    )
+    if root_exited and not alive:
+        if errors:
+            raise ExecutionCleanupError(
+                _termination_error_detail(errors),
+                (),
+                unverified=True,
+            )
+        return ()
+
+    if not root_exited:
+        try:
+            discovered = await asyncio.to_thread(_descendants, process.pid)
+        except Exception as exc:
+            discovered = ()
+            errors.append(exc)
+        descendants = _merge_processes(alive, discovered)
+    else:
+        descendants = tuple(alive)
+    errors.extend(await asyncio.to_thread(_signal_processes, descendants, signal.SIGKILL))
+    group_error = _signal_process_group(process.pid, signal.SIGKILL)
+    if group_error is not None:
+        errors.append(group_error)
+
+    root_exited, alive = await asyncio.gather(
+        _wait_direct_process(process, timeout),
+        asyncio.to_thread(_wait_processes, descendants, timeout),
+    )
+    if not root_exited or alive or errors:
+        detail = []
+        if not root_exited:
+            detail.append(f'worker {process.pid}')
+        if alive:
+            detail.append('descendants ' + ','.join(str(item.pid) for item in alive))
+        if errors:
+            detail.append(_termination_error_detail(errors))
+        raise ExecutionCleanupError(
+            'isolated process tree cleanup was not verified: ' + '; '.join(detail),
+            alive,
+            unverified=bool(errors),
+        )
+    return ()
+
+
+async def _wait_direct_process(
+    process: asyncio.subprocess.Process,
+    timeout: float,
+) -> bool:
+    try:
+        async with asyncio.timeout(timeout):
+            await asyncio.shield(process.wait())
+        return True
+    except TimeoutError:
+        return False
+
+
+def _descendants(pid: int) -> tuple[psutil.Process, ...]:
+    try:
+        return tuple(psutil.Process(pid).children(recursive=True))
+    except psutil.NoSuchProcess:
+        return ()
+
+
+def _merge_processes(
+    *groups: Sequence[psutil.Process],
+) -> tuple[psutil.Process, ...]:
+    merged: dict[tuple[int, float], psutil.Process] = {}
+    for group in groups:
+        for process in group:
+            try:
+                key = (process.pid, process.create_time())
+            except psutil.NoSuchProcess:
+                continue
+            except psutil.AccessDenied:
+                key = (process.pid, 0.0)
+            merged[key] = process
+    return tuple(merged.values())
+
+
+def _signal_processes(
+    processes: Sequence[psutil.Process],
+    sig: signal.Signals,
+) -> tuple[Exception, ...]:
+    errors = []
+    for process in processes:
+        try:
+            process.send_signal(sig)
+        except psutil.NoSuchProcess:
+            continue
+        except Exception as exc:
+            errors.append(exc)
+    return tuple(errors)
+
+
+def _wait_processes(
+    processes: Sequence[psutil.Process],
+    timeout: float,
+) -> tuple[psutil.Process, ...]:
+    if not processes:
+        return ()
+    try:
+        _, alive = psutil.wait_procs(tuple(processes), timeout=timeout)
+    except (psutil.Error, OSError):
+        return tuple(processes)
+    remaining = []
+    for process in alive:
+        try:
+            if process.status() != psutil.STATUS_ZOMBIE:
+                remaining.append(process)
+        except psutil.NoSuchProcess:
+            continue
+        except (psutil.AccessDenied, OSError):
+            remaining.append(process)
+    return tuple(remaining)
+
+
+def _signal_process_group(process_group: int, sig: signal.Signals) -> Exception | None:
+    try:
+        os.killpg(process_group, sig)
+    except ProcessLookupError:
+        return None
+    except Exception as exc:
+        return exc
+    return None
+
+
+def _termination_error_detail(errors: Sequence[Exception]) -> str:
+    return 'process inspection failed: ' + '; '.join(
+        str(error) or type(error).__name__
+        for error in errors
+    )
+
+
+def _cleanup_worker_descendants(pid: int, timeout: float) -> None:
+    descendants = _descendants(pid)
+    errors = list(_signal_processes(descendants, signal.SIGTERM))
+    alive = _wait_processes(descendants, timeout)
+    errors.extend(_signal_processes(alive, signal.SIGKILL))
+    alive = _wait_processes(alive, timeout)
+    if alive or errors:
+        detail = []
+        if alive:
+            detail.append('descendants ' + ','.join(str(item.pid) for item in alive))
+        if errors:
+            detail.append(_termination_error_detail(errors))
+        raise ExecutionCleanupError(
+            'operation left descendants that could not be cleaned: ' + '; '.join(detail),
+            alive,
+            unverified=bool(errors),
+        )
 
 
 async def _drain_output(stream: asyncio.StreamReader, *, limit: int = 64 * 1024) -> bytes:
@@ -360,47 +590,6 @@ async def _forward_progress(sock: socket.socket, ctx: OperationContext) -> None:
         await writer.wait_closed()
 
 
-async def _finish_process_group(process_group: int, timeout: float) -> None:
-    if not _process_group_exists(process_group):
-        return
-    try:
-        async with asyncio.timeout(timeout):
-            await _wait_process_group(process_group)
-        return
-    except TimeoutError:
-        with suppress(ProcessLookupError):
-            os.killpg(process_group, signal.SIGKILL)
-
-    try:
-        async with asyncio.timeout(timeout):
-            await _wait_process_group(process_group)
-    except TimeoutError as exc:
-        raise _TerminationError(
-            f'isolated process group {process_group} survived SIGKILL'
-        ) from exc
-
-
-async def _terminate_process_group(process_group: int, timeout: float) -> None:
-    if not _process_group_exists(process_group):
-        return
-    with suppress(ProcessLookupError):
-        os.killpg(process_group, signal.SIGTERM)
-    try:
-        async with asyncio.timeout(timeout):
-            await _wait_process_group(process_group)
-        return
-    except TimeoutError:
-        with suppress(ProcessLookupError):
-            os.killpg(process_group, signal.SIGKILL)
-    try:
-        async with asyncio.timeout(timeout):
-            await _wait_process_group(process_group)
-    except TimeoutError as exc:
-        raise _TerminationError(
-            f'isolated process group {process_group} survived SIGKILL'
-        ) from exc
-
-
 async def _consume_completion(completion: asyncio.Task[OperationResult | None]) -> None:
     try:
         await asyncio.shield(completion)
@@ -409,21 +598,6 @@ async def _consume_completion(completion: asyncio.Task[OperationResult | None]) 
             raise
     except OperationExecutionError:
         return
-
-
-async def _wait_process_group(process_group: int) -> None:
-    while _process_group_exists(process_group):
-        await asyncio.sleep(0.01)
-
-
-def _process_group_exists(process_group: int) -> bool:
-    try:
-        os.killpg(process_group, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
 
 
 def _validated_result(operation: Operation, result: object) -> OperationResult:
@@ -454,6 +628,7 @@ class _ProgressWriter:
     async def open(cls, progress_fd: int) -> Self:
         sock = socket.socket(fileno=progress_fd)
         sock.setblocking(False)
+        sock.set_inheritable(False)
         try:
             _, writer = await asyncio.open_connection(sock=sock)
         except BaseException:
@@ -487,6 +662,7 @@ async def _worker(request_path: Path, result_path: Path, progress_fd: int) -> No
         raise TypeError('isolated operation request has an invalid type')
     operation = _resolve_operation(request.module, request.qualname)
     reporter = await _ProgressWriter.open(progress_fd)
+    os.register_at_fork(after_in_child=lambda: _close_inherited_fd(progress_fd))
     context = OperationContext(
         request.run_id,
         request.invocation_id,
@@ -494,10 +670,17 @@ async def _worker(request_path: Path, result_path: Path, progress_fd: int) -> No
         reporter,
     )
     try:
-        result = _validated_result(
-            operation,
-            await operation(context, **dict(request.inputs)),
-        )
+        try:
+            result = _validated_result(
+                operation,
+                await operation(context, **dict(request.inputs)),
+            )
+        finally:
+            await asyncio.to_thread(
+                _cleanup_worker_descendants,
+                os.getpid(),
+                request.cleanup_timeout,
+            )
         response = _IsolatedResponse.from_result(result)
         temporary = result_path.with_suffix('.tmp')
         temporary.write_bytes(pickle.dumps(response, protocol=pickle.HIGHEST_PROTOCOL))
@@ -506,59 +689,31 @@ async def _worker(request_path: Path, result_path: Path, progress_fd: int) -> No
         await reporter.close()
 
 
-def _watch_parent(parent_watch: int) -> None:
-    def stop_with_parent() -> None:
-        try:
-            while os.read(parent_watch, 1):
-                pass
-        finally:
-            os.close(parent_watch)
-        with suppress(ProcessLookupError):
-            os.killpg(os.getpgrp(), signal.SIGKILL)
-
-    threading.Thread(
-        target=stop_with_parent,
-        name='artifact-parent-watch',
-        daemon=True,
-    ).start()
+def _close_inherited_fd(file_descriptor: int) -> None:
+    try:
+        os.close(file_descriptor)
+    except OSError:
+        pass
 
 
-def _supervise(request_path: Path, result_path: Path, parent_watch: int, progress_fd: int) -> None:
-    _watch_parent(parent_watch)
-    child = subprocess.Popen(
-        _worker_command('work', request_path, result_path, progress_fd),
-        pass_fds=(progress_fd,),
-    )
-    os.close(progress_fd)
-    returncode = child.wait()
-    os.killpg(os.getpgrp(), signal.SIGKILL)
-    os._exit(max(0, min(returncode, 255)))
-
-
-def _worker_command(mode: str, *arguments: object) -> list[str]:
+def _worker_command(request_path: Path, result_path: Path, progress_fd: int) -> list[str]:
     return [
         sys.executable,
         '-c',
         _WORKER_ENTRYPOINT,
-        mode,
-        *(str(argument) for argument in arguments),
+        str(request_path),
+        str(result_path),
+        str(progress_fd),
     ]
 
 
 def _main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument('mode', choices=('supervise', 'work'))
     parser.add_argument('request', type=Path)
     parser.add_argument('result', type=Path)
-    parser.add_argument('file_descriptors', type=int, nargs='+')
+    parser.add_argument('progress_fd', type=int)
     args = parser.parse_args()
-    match args.mode, args.file_descriptors:
-        case 'supervise', [parent_watch, progress_fd]:
-            _supervise(args.request, args.result, parent_watch, progress_fd)
-        case 'work', [progress_fd]:
-            asyncio.run(_worker(args.request, args.result, progress_fd))
-        case _:
-            parser.error(f'invalid file descriptors for {args.mode}')
+    asyncio.run(_worker(args.request, args.result, args.progress_fd))
 
 
-__all__ = ['ExecutionHandle', 'start_execution']
+__all__ = ['ExecutionCleanupError', 'ExecutionHandle', 'start_execution']
