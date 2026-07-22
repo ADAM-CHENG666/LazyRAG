@@ -106,6 +106,8 @@ class KnowledgeBaseClient:
         doc_ids: list[str] | None,
         groups: list[str],
         page_size: int,
+        *,
+        require_embeddings: bool = True,
     ) -> Iterator[list[Any]]:
         if not groups:
             raise ValueError('groups is required')
@@ -138,10 +140,11 @@ class KnowledgeBaseClient:
                     batch = list(nodes or [])
                     if not batch:
                         break
-                    self._attach_stored_embeddings(
-                        document, batch, kb_id=kb_id, doc_id=doc_id, group=group,
-                    )
-                    self._require_embeddings(batch, kb_id=kb_id, doc_id=doc_id, group=group)
+                    if require_embeddings:
+                        self._attach_stored_embeddings(
+                            document, batch, kb_id=kb_id, doc_id=doc_id, group=group,
+                        )
+                        self._require_embeddings(batch, kb_id=kb_id, doc_id=doc_id, group=group)
                     yield batch
                     offset += len(batch)
                     if offset >= int(total or offset):

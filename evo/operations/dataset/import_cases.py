@@ -116,7 +116,9 @@ def _chunk_index(client: KnowledgeBaseClient, kb_ids: list[str]) -> dict[str, di
     for kb_id in kb_ids:
         for doc in client.list_documents(kb_id):
             doc_id = str(doc['doc_id'])
-            for batch in client.iter_chunks(kb_id, [doc_id], ['block', 'line'], 200):
+            for batch in client.iter_chunks(
+                kb_id, [doc_id], ['block', 'line'], 200, require_embeddings=False,
+            ):
                 for node in batch:
                     chunk_id = str(getattr(node, 'uid', '') or getattr(node, '_uid', '') or '')
                     if chunk_id in values:
