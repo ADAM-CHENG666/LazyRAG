@@ -1060,10 +1060,12 @@ const zhCN = {
     pluginDismissedLoading: "加载中…",
     pluginNoDismissed: "暂无已移除的 工作流",
     slots: {
-      rawData: "原始数据",
       download: "下载",
-      viewContent: "查看内容",
+      downloadOriginalFile: "下载原始文件",
       contentLoadFailed: "内容加载失败",
+    },
+    writer: {
+      downloadMarkdown: "下载 Markdown",
     },
     greetingMorning: "上午好",
     greetingAfternoon: "下午好",

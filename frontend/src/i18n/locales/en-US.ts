@@ -1074,10 +1074,12 @@ const enUS = {
     pluginPanelShrinkShort: "Shrink",
     pluginRailConversation: "Chat",
     slots: {
-      rawData: "Raw data",
       download: "Download",
-      viewContent: "View content",
+      downloadOriginalFile: "Download original file",
       contentLoadFailed: "Failed to load content",
+    },
+    writer: {
+      downloadMarkdown: "Download Markdown",
     },
     pluginStatusRunning: "Running",
     pluginStatusDone: "Done",
