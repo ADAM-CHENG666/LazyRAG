@@ -89,19 +89,25 @@ output_payload:
     json_compatible: true
     fields:
       nodes:
+        # 精确检索关系图中的 Chunk 节点；仅在用户切换到关系图时读取。
         type: array
         item:
           type: object
           fields:
             chunk_id:
+              # 与 manifest.clusters[].chunk_ids 关联。
               type: string
             doc_id:
+              # 节点来源文档标识；正文仍需读取 dataset.chunk。
               type: string
             group:
+              # 节点所属业务分组，可用于图中辅助筛选或说明。
               type: string
             entities:
+              # 当前 Chunk 参与实体关联的实体列表；STEP2 第一版只读。
               type: list[string]
       edges:
+        # Chunk 之间由共同实体形成的关系边。
         type: array
         item:
           type: object
@@ -111,10 +117,13 @@ output_payload:
             target_chunk_id:
               type: string
             score:
+              # 关联强弱；前端可映射为边的粗细或深浅，不开放参数调整。
               type: number
             overlapped_items:
+              # 形成当前边的共同实体，用于点击边后的解释。
               type: list[string]
       skipped_chunks:
+        # 未参与实体图的 Chunk，仅在关系图或异常说明中按需展示。
         type: array
         item:
           type: object
@@ -122,13 +131,16 @@ output_payload:
             chunk_id:
               type: string
             reason:
+              # 前端映射为“Chunk 不可用”或“未提取到实体”。
               type: string
               enum:
                 - unavailable_chunk
                 - empty_entities
             detail:
+              # 面向排查的补充信息，不作为默认总览文案。
               type: string
       stats:
+        # 关系图自身的规模摘要；仅在打开精确检索关系图时读取。
         type: object
         fields:
           source_chunk_count:

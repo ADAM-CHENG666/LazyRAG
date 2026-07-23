@@ -93,28 +93,37 @@ output_payload:
     json_compatible: true
     fields:
       clusters:
+        # 精确检索主题的可编辑源 Artifact；前端只允许修改每项的 topics。
         type: array
         item:
           type: object
           fields:
             cluster_id:
+              # 上游 Cluster 稳定 ID，应被最终 manifest 保留为 source_cluster_id。
               type: string
             cluster_type:
+              # 固定为 entity；前端展示为“精确检索主题”。
               type: string
               enum:
                 - entity
             topics:
+              # 当前 STEP 允许人工增删改的唯一字段；同一数组中的 Topic 共享 chunk_ids。
               type: list[string]
             chunk_ids:
+              # Topic 的支撑 Chunk，第一版只读，不允许增删或移动。
               type: list[string]
             chunk_count:
+              # 必须等于 chunk_ids 长度；决定 Topic 的 1 / 2 / 3+ 支撑能力。
               type: integer
             scores:
+              # 算法保留字段；当前 STEP2 页面不读取，最终 manifest 不再透传。
               type: object
             metadata:
+              # 算法保留字段；当前 STEP2 页面不读取，最终 manifest 不再透传。
               type: object
               required: false
       stats:
+        # 算法过程统计，不作为 STEP2 默认总览的 Topic 统计来源。
         type: object
         fields:
           source_node_count:

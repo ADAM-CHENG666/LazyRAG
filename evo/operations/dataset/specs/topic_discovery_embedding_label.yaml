@@ -33,6 +33,7 @@ input_payload:
   embedding_cluster_candidates:
     fields:
       clusters:
+        # 综合推理主题的可编辑源 Artifact；前端只允许修改每项的 topics。
         type: array
         required: true
         item:
@@ -135,25 +136,34 @@ output_payload:
           type: object
           fields:
             cluster_id:
+              # 上游 Cluster 稳定 ID，应被最终 manifest 保留为 source_cluster_id。
               type: string
             cluster_type:
+              # 固定为 embedding；前端展示为“综合推理主题”。
               type: string
               enum:
                 - embedding
             topics:
+              # LLM 为当前 Cluster 生成的 Topic 名称列表，也是本 Artifact 唯一允许人工修改的字段。
               type: list[string]
             chunk_ids:
+              # Topic 的支撑 Chunk，第一版只读，不允许增删或移动。
               type: list[string]
             chunk_count:
+              # 必须等于 chunk_ids 长度；决定 Topic 的 1 / 2 / 3+ 支撑能力。
               type: integer
             scores:
+              # 聚类算法保留字段；当前 STEP2 页面不读取，最终 manifest 不再透传。
               type: object
             metadata:
+              # 聚类算法保留字段；当前 STEP2 页面不读取，最终 manifest 不再透传。
               type: object
               required: false
       skipped_chunks:
+        # 未进入 embedding Cluster 的 Chunk；当前总览不读取，必要时用于异常说明。
         type: array
       stats:
+        # embedding 命名过程统计，不作为 STEP2 默认总览的 Topic 统计来源。
         type: object
         fields:
           candidate_count:

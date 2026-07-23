@@ -155,20 +155,26 @@ output_payload:
           type: object
           fields:
             available:
+              # false 表示静态占位，不应进入有效 Chunk 详情。
               type: boolean
             kb_id:
               type: string
             chunk_id:
+              # 与 topic_discovery_manifest.clusters[].chunk_ids 关联。
               type: string
             doc_id:
+              # Chunk 来源文档标识。
               type: string
             filename:
+              # Chunk 来源文件名，可在读取正文前先展示。
               type: string
             group:
+              # Chunk 所属业务分组。
               type: string
             type:
               type: string
             partition:
+              # 定位 partitioned dataset.chunk 的运行时分区；点击 Chunk 详情时使用。
               type: string
       stats:
         type: object

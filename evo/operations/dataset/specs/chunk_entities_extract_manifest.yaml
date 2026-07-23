@@ -33,6 +33,7 @@ input_payload:
   build_chunks_manifest:
     fields:
       chunks:
+        # Chunk 详情中的实体数据源；用户点击 Chunk 后按 chunk_id 查找，STEP2 第一版只读。
         type: array
         required: true
         item:
@@ -44,6 +45,7 @@ input_payload:
               validation:
                 - non_empty_after_strip
             available:
+              # false 表示占位 Chunk，不应作为有效 Topic 支撑材料展示。
               type: boolean
               required: false
               default: true
@@ -126,17 +128,21 @@ output_payload:
             kb_id:
               type: string
             chunk_id:
+              # 与 topic_discovery_manifest.clusters[].chunk_ids 关联。
               type: string
             doc_id:
               type: string
             group:
               type: string
             partition:
+              # 对应静态 runtime partition；可辅助定位 partitioned dataset.chunk。
               type: string
               required: false
             entities:
+              # Chunk 的实体列表；当前页面只展示，不提供增删改入口。
               type: list[string]
       stats:
+        # 实体抽取过程摘要；不作为 STEP2 Topic 默认总览的数据源。
         type: object
         fields:
           slot_count:

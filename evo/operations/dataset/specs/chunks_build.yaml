@@ -42,20 +42,27 @@ output_payload:
         type: string
         required: false
       chunk_id:
+        # Topic 详情关联键；payload chunk_id 与静态 artifact partition 不一定相同。
         type: string
       doc_id:
+        # Chunk 来源文档标识。
         type: string
       filename:
+        # Chunk 详情中面向用户展示的来源文件名。
         type: string
       group:
+        # Chunk 详情中展示的业务分组。
         type: string
       type:
         type: string
       text:
+        # Chunk 正文；仅在用户点击 Chunk 详情时读取。
         type: string
       embedding:
+        # 算法输入，STEP2 页面不读取或展示。
         type: object
       metadata:
+        # 原始扩展信息，第一版 STEP2 页面不读取。
         type: object
 
 execution_flow:
