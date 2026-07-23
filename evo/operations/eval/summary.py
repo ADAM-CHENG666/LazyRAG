@@ -2,12 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping
-from typing import Any, Callable
-
-from evo.operations.public_contracts import build_eval_summary_root
-
-from .answer import answer_case
-from .judge import judge_case
+from typing import Any
 
 UNSCORED = {'infra_failure', 'judge_contract_error', 'dataset_contract_error'}
 SCORES = (
@@ -22,26 +17,9 @@ SCORES = (
 )
 
 
-def eval_materializers() -> dict[str, Callable[[Any, Mapping[str, object]], Mapping[str, object]]]:
-    def answer(ctx: Any, inputs: Mapping[str, object]) -> Mapping[str, object]:
-        return {'answer': answer_case(_mapping(inputs['case'], 'case'),
-                                      _mapping(inputs.get('target_config') or {}, 'target_config'))}
-
-    def judge(ctx: Any, inputs: Mapping[str, object]) -> Mapping[str, object]:
-        return {'judge': judge_case(_mapping(inputs['case'], 'case'),
-                                    _mapping(inputs['answer'], 'answer'),
-                                    _mapping(inputs.get('policy') or {}, 'policy'))}
-
-    def summary(ctx: Any, inputs: Mapping[str, object]) -> Mapping[str, object]:
-        judges = inputs.get('judges')
-        if not isinstance(judges, tuple):
-            raise ValueError('eval.summary judges input must be a partitioned tuple')
-        return {'summary': build_eval_summary_root(ctx.run_id, judges)}
-
-    return {'eval.answer': answer, 'eval.judge': judge, 'eval.summary': summary}
-
-
-def build_eval_detail_summary(judges: tuple[Mapping[str, Any], ...] | list[Mapping[str, Any]]) -> dict[str, Any]:
+def build_eval_detail_summary(
+    judges: tuple[Mapping[str, Any], ...] | list[Mapping[str, Any]],
+) -> dict[str, Any]:
     rows = []
     for index, judge in enumerate(judges, 1):
         if not isinstance(judge, Mapping):
@@ -98,7 +76,10 @@ def build_eval_detail_summary(judges: tuple[Mapping[str, Any], ...] | list[Mappi
             'trace_id': str(judge.get('trace_id') or ''),
             'target': dict(target),
         })
-    scored = [row for row in rows if row['failure_type'] not in UNSCORED and row['quality_label'] != 'infra_failure']
+    scored = [
+        row for row in rows
+        if row['failure_type'] not in UNSCORED and row['quality_label'] != 'infra_failure'
+    ]
     failures = [
         {
             'case_id': str(row.get('case_id') or ''),
@@ -109,7 +90,7 @@ def build_eval_detail_summary(judges: tuple[Mapping[str, Any], ...] | list[Mappi
             'chat_error_message': str(row.get('chat_error_message') or ''),
         }
         for row in rows
-        if row['failure_type'] in {'infra_failure', 'judge_contract_error', 'dataset_contract_error'}
+        if row['failure_type'] in UNSCORED
     ]
     routing_failures = [row for row in failures if row['failure_type'] == 'dataset_contract_error']
     execution_failures = [row for row in failures if row['failure_type'] != 'dataset_contract_error']
@@ -128,25 +109,25 @@ def build_eval_detail_summary(judges: tuple[Mapping[str, Any], ...] | list[Mappi
             'answer_correctness_avg': _avg(scored, 'answer_correctness'),
             'groundedness_avg': _avg(scored, 'groundedness'),
             'answer_relevance_avg': _avg(scored, 'answer_relevance'),
-            'correct_rate': round(sum(1 for row in scored if row['quality_label'] == 'good') / len(scored), 4)
-            if scored else 0.0,
+            'correct_rate': round(
+                sum(1 for row in scored if row['quality_label'] == 'good') / len(scored),
+                4,
+            ) if scored else 0.0,
         },
         'quality_counts': dict(Counter(row['quality_label'] for row in rows)),
         'failure_type_counts': dict(Counter(row['failure_type'] for row in rows)),
-        'retrieval_failure_type_counts': dict(Counter(row['retrieval_failure_type'] for row in rows)),
+        'retrieval_failure_type_counts': dict(
+            Counter(row['retrieval_failure_type'] for row in rows)
+        ),
         'bad_cases': [row for row in rows if row['quality_label'] != 'good'],
         'routing_failures': routing_failures,
         'execution_failures': execution_failures,
-        'checks': {'ready': not routing_failures and not execution_failures,
-                   'errors': routing_failures + execution_failures},
+        'checks': {
+            'ready': not routing_failures and not execution_failures,
+            'errors': routing_failures + execution_failures,
+        },
         'rows': rows,
     }
-
-
-def _mapping(value: object, name: str) -> Mapping[str, Any]:
-    if not isinstance(value, Mapping):
-        raise ValueError(f'{name} must be a mapping')
-    return value
 
 
 def _avg(rows: list[Mapping[str, Any]], key: str) -> float:
