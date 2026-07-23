@@ -1789,6 +1789,12 @@ type marketListOpenAPIResponse struct {
 	Total    int32                       `json:"total"`
 }
 
+type marketDeleteOpenAPIResponse struct {
+	Deleted       bool   `json:"deleted"`
+	MarketItemID  string `json:"market_item_id"`
+	SourceSkillID string `json:"source_skill_id"`
+}
+
 type skillDeleteOpenAPIResponse struct {
 	Deleted bool `json:"deleted"`
 }
@@ -3110,6 +3116,14 @@ func registeredCoreOperations() []openAPIOperation {
 			Responses:   map[int]openAPIResponse{200: resp("Edited market skill", marketItemOpenAPIResponse{})},
 		},
 		{
+			Method:     "DELETE",
+			Path:       "/admin/skill-market/{market_item_id}",
+			Summary:    "Permanently delete market skill item",
+			Tags:       []string{"skill-market"},
+			PathParams: marketItemPathParams{},
+			Responses:  map[int]openAPIResponse{200: resp("Deleted market skill", marketDeleteOpenAPIResponse{})},
+		},
+		{
 			Method:     "POST",
 			Path:       "/admin/skill-market/{market_item_id}:offline",
 			Summary:    "Unpublish market skill item",
@@ -3133,6 +3147,14 @@ func registeredCoreOperations() []openAPIOperation {
 			PathParams:  marketItemPathParams{},
 			RequestBody: jsonBodyOf(marketEditOpenAPIRequest{}, true),
 			Responses:   map[int]openAPIResponse{200: resp("Edited market skill", marketItemOpenAPIResponse{})},
+		},
+		{
+			Method:     "DELETE",
+			Path:       "/skill-market/admin/items/{market_item_id}",
+			Summary:    "Permanently delete market skill item",
+			Tags:       []string{"skill-market"},
+			PathParams: marketItemPathParams{},
+			Responses:  map[int]openAPIResponse{200: resp("Deleted market skill", marketDeleteOpenAPIResponse{})},
 		},
 		{
 			Method:     "POST",
