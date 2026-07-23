@@ -41,13 +41,16 @@ def qaplan_plan(ctx: Any, inputs: Mapping[str, object]) -> dict[str, object]:
     if len(generated_ids) != auto_case_count:
         raise ValueError('auto_case_count must match generated assignments')
     if auto_case_count == 0:
+        zero_quotas = dict.fromkeys(LANE_NAMES, 0)
         return {'qaplan_plan': {'source': {'kb_ids': kb_ids}, 'items': [], 'stats': {
             'target_case_count': target_case_count, 'import_case_count': import_case_count,
-            'auto_case_count': 0, 'planned_case_count': 0, 'lane_summaries': []},
-            'params': {'lane_ratios': {}, 'resolved_lane_quotas': {}, 'lane_order': list(LANE_NAMES)}}}
+            'auto_case_count': 0, 'planned_case_count': 0, 'lane_summaries': [
+                {'lane': lane, 'allocated_case_count': 0, 'eligible_topic_count': 0}
+                for lane in LANE_NAMES
+            ]},
+            'params': {'lane_ratios': {}, 'resolved_lane_quotas': zero_quotas, 'lane_order': list(LANE_NAMES)}}}
 
-    ratios = _lane_ratios(inputs.get('qaplan_plan_params'))
-    quotas = _allocate_quotas(auto_case_count, ratios)
+    ratios, quotas = _lane_allocation(inputs.get('qaplan_plan_params'), auto_case_count)
     chunks = _chunk_map(inputs.get('chunk'))
     clusters = _clusters(inputs.get('topic_discovery_manifest'), chunks)
 
@@ -55,35 +58,24 @@ def qaplan_plan(ctx: Any, inputs: Mapping[str, object]) -> dict[str, object]:
     lane_summaries: list[dict[str, object]] = []
     for lane, cluster_type, question_type, difficulty in LANES:
         quota = quotas[lane]
-        if quota == 0:
-            lane_summaries.append({
-                'lane': lane,
-                'allocated_case_count': 0,
-                'candidate_cluster_count': 0,
-                'topic_capacity': 0,
-                'selected_cluster_count': 0,
-            })
-            continue
-
         reference_count = REFERENCE_COUNTS[difficulty]
         candidates = [
             cluster
             for cluster in clusters
             if cluster['cluster_type'] == cluster_type and cluster['chunk_count'] >= reference_count
         ]
-        capacity = sum(len(cluster['topics']) for cluster in candidates)
-        if capacity < quota:
-            raise ValueError(f'{lane} quota {quota} exceeds topic capacity {capacity}')
-
-        selected = _select_topics(candidates, quota)
-        selected_clusters = {cluster['cluster_id'] for cluster, _, _ in selected}
+        eligible_topic_count = sum(len(cluster['topics']) for cluster in candidates)
         lane_summaries.append({
             'lane': lane,
             'allocated_case_count': quota,
-            'candidate_cluster_count': len(candidates),
-            'topic_capacity': capacity,
-            'selected_cluster_count': len(selected_clusters),
+            'eligible_topic_count': eligible_topic_count,
         })
+        if eligible_topic_count < quota:
+            raise ValueError(f'{lane} quota {quota} exceeds eligible topics {eligible_topic_count}')
+        if quota == 0:
+            continue
+
+        selected = _select_topics(candidates, quota)
 
         for cluster, topic, selection_round in selected:
             references = _references(cluster, reference_count, chunks)
@@ -176,10 +168,46 @@ def qaplan_spec(ctx: Any, inputs: Mapping[str, object]) -> dict[str, object]:
 def qaplan_manifest(ctx: Any, inputs: Mapping[str, object]) -> dict[str, object]:
     plan = _mapping(inputs.get('qaplan_plan'), 'qaplan_plan')
     stats = _mapping(plan.get('stats'), 'qaplan_plan.stats')
+    plan_target_count = _positive_int(stats.get('target_case_count'), 'qaplan_plan.stats.target_case_count')
+    plan_import_count = _non_negative_int(stats.get('import_case_count'), 'qaplan_plan.stats.import_case_count')
+    plan_auto_count = _non_negative_int(stats.get('auto_case_count'), 'qaplan_plan.stats.auto_case_count')
     planned_case_count = _non_negative_int(stats.get('planned_case_count'), 'qaplan_plan.stats.planned_case_count')
+    raw_lane_summaries = stats.get('lane_summaries')
+    if not isinstance(raw_lane_summaries, list) or len(raw_lane_summaries) != len(LANES):
+        raise ValueError('qaplan_plan.stats.lane_summaries must contain the six lanes')
+
     imported = _mapping(inputs.get('import_cases_manifest'), 'import_cases_manifest')
     allocation = _mapping(_mapping(imported.get('stats'), 'import_cases_manifest.stats').get('case_allocation'), 'case_allocation')
     target_count = _positive_int(allocation.get('target_case_count'), 'target_case_count')
+    import_count = _non_negative_int(allocation.get('import_case_count'), 'import_case_count')
+    auto_count = _non_negative_int(allocation.get('auto_case_count'), 'auto_case_count')
+    if target_count != import_count + auto_count:
+        raise ValueError('target_case_count must equal imported and automatic case counts')
+    if (plan_target_count, plan_import_count, plan_auto_count) != (target_count, import_count, auto_count):
+        raise ValueError('qaplan_plan stats must match case allocation')
+    if planned_case_count != auto_count:
+        raise ValueError('planned_case_count must match auto_case_count')
+
+    lane_summaries: list[dict[str, object]] = []
+    for expected, raw in zip(LANES, raw_lane_summaries, strict=True):
+        lane, _, question_type, difficulty = expected
+        summary = _mapping(raw, 'qaplan_plan.stats.lane_summaries[]')
+        if summary.get('lane') != lane:
+            raise ValueError('qaplan lane summaries must follow the six-lane order')
+        allocated = _non_negative_int(summary.get('allocated_case_count'), 'allocated_case_count')
+        eligible = _non_negative_int(summary.get('eligible_topic_count'), 'eligible_topic_count')
+        if allocated > eligible:
+            raise ValueError('allocated_case_count cannot exceed eligible_topic_count')
+        lane_summaries.append({
+            'lane': lane,
+            'question_type': question_type,
+            'difficulty': difficulty,
+            'allocated_case_count': allocated,
+            'eligible_topic_count': eligible,
+        })
+    if sum(summary['allocated_case_count'] for summary in lane_summaries) != planned_case_count:
+        raise ValueError('lane allocated case counts must match planned_case_count')
+
     assignments = _mapping(allocation.get('assignments'), 'assignments')
     specs = inputs.get('qaplan_specs')
     if not isinstance(specs, tuple) or len(specs) != target_count:
@@ -202,7 +230,15 @@ def qaplan_manifest(ctx: Any, inputs: Mapping[str, object]) -> dict[str, object]
             generated_ids.add(case_id)
     if len(generated_ids) != planned_case_count:
         raise ValueError('generated qaplan spec count must match planned_case_count')
-    return {'qaplan_manifest': {'case_count': len(spec_ids)}}
+    return {'qaplan_manifest': {
+        'stats': {
+            'target_case_count': target_count,
+            'import_case_count': import_count,
+            'auto_case_count': auto_count,
+            'planned_case_count': planned_case_count,
+        },
+        'lane_summaries': lane_summaries,
+    }}
 
 
 def _case_ids(ctx: Any, operation: str) -> tuple[str, ...]:
@@ -248,6 +284,26 @@ def _lane_ratios(value: object) -> dict[str, object]:
     if total <= 0:
         raise ValueError('lane_ratios must contain a positive value')
     return ratios
+
+
+def _lane_allocation(value: object, auto_case_count: int) -> tuple[dict[str, object], dict[str, int]]:
+    params = _mapping(value if value is not None else {}, 'qaplan_plan_params')
+    if 'lane_case_counts' not in params:
+        ratios = _lane_ratios(params)
+        return ratios, _allocate_quotas(auto_case_count, ratios)
+
+    raw = _mapping(params.get('lane_case_counts'), 'lane_case_counts')
+    if set(raw) != set(LANE_NAMES):
+        raise ValueError('lane_case_counts must contain exactly the six lanes')
+    counts: dict[str, int] = {}
+    for lane in LANE_NAMES:
+        value = raw[lane]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError('lane_case_counts values must be non-negative integers')
+        counts[lane] = value
+    if sum(counts.values()) != auto_case_count:
+        raise ValueError('lane_case_counts must sum to auto_case_count')
+    return {}, counts
 
 
 def _allocate_quotas(target_case_count: int, ratios: Mapping[str, object]) -> dict[str, int]:

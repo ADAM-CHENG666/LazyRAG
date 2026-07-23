@@ -1,4 +1,4 @@
-# STEP2 可视化目标契约；materializer 与测试尚未同步实现新增统计和 source_cluster_id。
+# STEP2 默认总览的已实现契约；保持输出精简，并提供 Topic 统计与可编辑来源定位。
 operation:
   op_id: dataset.topic_discovery_manifest
   flow: dataset

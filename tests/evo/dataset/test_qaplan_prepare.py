@@ -56,7 +56,7 @@ def _large_capacity_clusters(topic_count):
     ]
 
 
-def _inputs(*, target_case_count=6, clusters=None, chunks=None, lane_ratios=None):
+def _inputs(*, target_case_count=6, clusters=None, chunks=None, lane_ratios=None, lane_case_counts=None):
     entity_chunks = ['entity-1', 'entity-2', 'entity-3']
     embedding_chunks = ['embedding-1', 'embedding-2', 'embedding-3']
     return {
@@ -82,7 +82,10 @@ def _inputs(*, target_case_count=6, clusters=None, chunks=None, lane_ratios=None
         'chunk': chunks if chunks is not None else tuple(
             _chunk(chunk_id) for chunk_id in [*entity_chunks, *embedding_chunks]
         ),
-        'qaplan_plan_params': {'lane_ratios': lane_ratios} if lane_ratios is not None else {},
+        'qaplan_plan_params': {
+            **({'lane_ratios': lane_ratios} if lane_ratios is not None else {}),
+            **({'lane_case_counts': lane_case_counts} if lane_case_counts is not None else {}),
+        },
     }
 
 
@@ -125,6 +128,43 @@ def test_qaplan_plan_bypasses_topic_planning_when_every_case_is_imported():
     assert payload['items'] == []
     assert payload['stats']['planned_case_count'] == 0
     assert payload['stats']['import_case_count'] == 2
+    assert payload['stats']['lane_summaries'] == [
+        {'lane': lane, 'allocated_case_count': 0, 'eligible_topic_count': 0}
+        for lane in LANES
+    ]
+    assert payload['params']['resolved_lane_quotas'] == dict.fromkeys(LANES, 0)
+
+
+def test_qaplan_plan_uses_explicit_integer_lane_case_counts_before_ratios():
+    counts = {
+        'entity_precision_easy': 3,
+        'entity_precision_medium': 0,
+        'entity_precision_hard': 0,
+        'embedding_reasoning_easy': 0,
+        'embedding_reasoning_medium': 0,
+        'embedding_reasoning_hard': 3,
+    }
+    payload = _plan(
+        lane_case_counts=counts,
+        lane_ratios={
+            'entity_precision_easy': 0,
+            'entity_precision_medium': 1,
+            'entity_precision_hard': 0,
+            'embedding_reasoning_easy': 1,
+            'embedding_reasoning_medium': 0,
+            'embedding_reasoning_hard': 0,
+        },
+    )
+
+    assert payload['params']['resolved_lane_quotas'] == counts
+    assert [item['lane'] for item in payload['items']] == [
+        'entity_precision_easy',
+        'entity_precision_easy',
+        'entity_precision_easy',
+        'embedding_reasoning_hard',
+        'embedding_reasoning_hard',
+        'embedding_reasoning_hard',
+    ]
 
 
 def test_qaplan_plan_normalizes_ratios_and_uses_largest_remainder_with_lane_order_tie_break():
@@ -193,9 +233,28 @@ def test_qaplan_plan_reports_lane_summary_for_user_visible_distribution():
         {
             'lane': lane,
             'allocated_case_count': 1,
-            'candidate_cluster_count': 1,
-            'topic_capacity': 3,
-            'selected_cluster_count': 1,
+            'eligible_topic_count': 3,
+        }
+        for lane in LANES
+    ]
+
+
+def test_qaplan_plan_reports_eligible_topics_even_when_lane_quota_is_zero():
+    counts = {
+        'entity_precision_easy': 1,
+        'entity_precision_medium': 0,
+        'entity_precision_hard': 0,
+        'embedding_reasoning_easy': 0,
+        'embedding_reasoning_medium': 0,
+        'embedding_reasoning_hard': 0,
+    }
+    payload = _plan(target_case_count=1, lane_case_counts=counts)
+
+    assert payload['stats']['lane_summaries'] == [
+        {
+            'lane': lane,
+            'allocated_case_count': counts[lane],
+            'eligible_topic_count': 3,
         }
         for lane in LANES
     ]
@@ -219,11 +278,52 @@ def test_qaplan_plan_rejects_invalid_lane_ratios(lane_ratios, match):
         _plan(lane_ratios=lane_ratios)
 
 
-def test_qaplan_plan_rejects_insufficient_lane_topic_capacity():
-    with pytest.raises(ValueError, match='entity_precision_hard.*quota.*capacity'):
+@pytest.mark.parametrize(
+    ('lane_case_counts', 'match'),
+    [
+        (
+            {
+                'entity_precision_easy': 1,
+                'entity_precision_medium': 0,
+                'entity_precision_hard': 0,
+                'embedding_reasoning_easy': 0,
+                'embedding_reasoning_medium': 0,
+            },
+            'lane_case_counts.*six lanes',
+        ),
+        (
+            {
+                **dict.fromkeys(LANES, 0),
+                'entity_precision_easy': True,
+            },
+            'lane_case_counts.*non-negative integers',
+        ),
+        (
+            {
+                **dict.fromkeys(LANES, 0),
+                'entity_precision_easy': -1,
+            },
+            'lane_case_counts.*non-negative integers',
+        ),
+        (
+            {
+                **dict.fromkeys(LANES, 0),
+                'entity_precision_easy': 1,
+            },
+            'lane_case_counts.*auto_case_count',
+        ),
+    ],
+)
+def test_qaplan_plan_rejects_invalid_explicit_lane_case_counts(lane_case_counts, match):
+    with pytest.raises(ValueError, match=match):
+        _plan(target_case_count=2, lane_case_counts=lane_case_counts)
+
+
+def test_qaplan_plan_rejects_insufficient_eligible_topics():
+    with pytest.raises(ValueError, match='entity_precision_hard.*quota.*eligible topics'):
         _plan(
             target_case_count=1,
-            lane_ratios={
+            lane_case_counts={
                 'entity_precision_easy': 0,
                 'entity_precision_medium': 0,
                 'entity_precision_hard': 1,

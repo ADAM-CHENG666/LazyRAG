@@ -1,3 +1,4 @@
+# STEP4 计划页的已实现契约；支持显式六路整数配额和面向 Topic 的精简摘要。
 operation:
   op_id: dataset.qaplan_plan
   flow: dataset
@@ -155,7 +156,53 @@ input_payload:
           default: {}
   qaplan_plan_params:
     fields:
+      lane_case_counts:
+        # 面向用户的六路整数配额。提供时必须完整包含六路，优先于 lane_ratios。
+        # 六路之和必须等于 import_cases_manifest 中的 auto_case_count；
+        # 每路值必须小于或等于该路 eligible_topic_count。
+        type: object
+        required: false
+        fields:
+          entity_precision_easy:
+            # 精确检索·简单 Case 数；每个 Case 使用 1 个参考 Chunk。
+            type: integer
+            required: true
+            validation:
+              - non_negative_integer
+          entity_precision_medium:
+            # 精确检索·中等 Case 数；每个 Case 使用 2 个参考 Chunk。
+            type: integer
+            required: true
+            validation:
+              - non_negative_integer
+          entity_precision_hard:
+            # 精确检索·困难 Case 数；每个 Case 使用 3 个参考 Chunk。
+            type: integer
+            required: true
+            validation:
+              - non_negative_integer
+          embedding_reasoning_easy:
+            # 综合推理·简单 Case 数；每个 Case 使用 1 个参考 Chunk。
+            type: integer
+            required: true
+            validation:
+              - non_negative_integer
+          embedding_reasoning_medium:
+            # 综合推理·中等 Case 数；每个 Case 使用 2 个参考 Chunk。
+            type: integer
+            required: true
+            validation:
+              - non_negative_integer
+          embedding_reasoning_hard:
+            # 综合推理·困难 Case 数；每个 Case 使用 3 个参考 Chunk。
+            type: integer
+            required: true
+            validation:
+              - non_negative_integer
       lane_ratios:
+        # 内部默认与兼容配置。仅当 lane_case_counts 未提供时使用，
+        # materializer 通过最大余数法把相对权重换算为六路整数配额。
+        # 前端不直接向非技术用户展示该字段。
         type: object
         required: false
         default:
@@ -294,17 +341,12 @@ output_payload:
                 # 六路中的固定 lane 标识。
                 lane:
                   type: string
-                # 根据 lane_ratios 和 target_case_count 换算出的整数 case 数。
+                # 显式 lane_case_counts 或兼容 ratio 模式解析出的最终整数 Case 数。
                 allocated_case_count:
                   type: integer
-                # 同时满足该 lane 来源类型和难度门槛的 cluster 数。
-                candidate_cluster_count:
-                  type: integer
-                # 可用于该 lane 的 cluster-topic 总数，也是该 lane 最大可生成 case 数。
-                topic_capacity:
-                  type: integer
-                # 实际选中并至少生成一个 case 的不同 cluster 数，用于观察来源多样性。
-                selected_cluster_count:
+                # 满足该路题型与难度条件的 Topic 数，也是该路最多可支持的 Case 数。
+                # 统计单位始终是 Topic；即使 allocated_case_count=0 也必须计算真实值。
+                eligible_topic_count:
                   type: integer
       params:
         type: object
@@ -314,6 +356,7 @@ output_payload:
             type: object
             value_type: number
           # 由最大余数法换算得到的六路整数配额，便于准确复现本次 plan。
+          # 当显式提供 lane_case_counts 时，本字段原样记录校验后的整数配额。
           resolved_lane_quotas:
             type: object
             value_type: integer
@@ -324,13 +367,15 @@ output_payload:
 execution_flow:
   - 读取 import_cases_manifest，校验 stats.case_allocation.target_case_count 等于 flow 的 runtime case 分区总数，且 assignments 覆盖每个稳定 case id 一次。
   - 仅将 mode=generated 的 stable case id 作为 qaplan 目标；其数量必须等于 auto_case_count，并保留 runtime case 分区顺序。
-  - 当 auto_case_count=0 时，返回 items=[]、所有 lane 配额为 0 的合法空计划；不得读取 cluster 或触发容量不足错误。
-  - 读取并归一化 qaplan_plan_params.lane_ratios；默认六路均为 1，所有 ratio 必须非负且总和大于 0。
-  - 按固定 lane 顺序使用最大余数法，将 auto_case_count 换算为六路整数配额；先分配各路向下取整值，再按小数余数从大到小补齐，余数相同时按固定 lane 顺序补齐。
+  - 当 auto_case_count=0 时，返回 items=[] 和固定六路的零值摘要；不得读取 cluster 或触发可用 Topic 不足错误。
+  - 当 qaplan_plan_params.lane_case_counts 存在时，校验六路均为非负整数、总和等于 auto_case_count，并直接作为整数配额。
+  - 当 lane_case_counts 不存在时，读取 lane_ratios 作为内部默认与兼容配置；默认六路均为 1，所有 ratio 必须非负且总和大于 0。
+  - ratio 模式按固定 lane 顺序使用最大余数法换算整数配额；先分配向下取整值，再按小数余数从大到小补齐，余数相同时按固定 lane 顺序补齐。
   - 汇总可用 chunk 并校验 manifest；通过 chunk_id 原样补齐选中引用的 kb_id、doc_id 与完整 text，不分析或转换正文。
-  - 逐 lane 按来源类型和累积难度筛选 cluster，校验 topic_capacity 不小于该 lane 整数配额；按 manifest 原始 cluster 顺序和 topic 轮次选取 cluster-topic。
+  - 六路始终按来源类型和难度门槛计算 eligible_topic_count，统计单位为符合条件的 Topic；不得因当前配额为 0 而跳过统计。
+  - 校验 eligible_topic_count 不小于该 lane 整数配额；按 manifest 原始 cluster 顺序和 topic 轮次选取 (cluster_id, topic)。
   - 每个计划项按难度引用 cluster.chunk_ids 原始顺序前 1、2 或 3 个 chunk，按 lane 块顺序生成稳定 plan_item_id，并依次绑定一个 generated assignment 的 case_id。
-  - 生成 source.kb_ids、items、含 target/imported/auto/planned 数量的 stats、lane_ratios、resolved_lane_quotas 和 lane_order；返回 {"qaplan_plan": payload}。
+  - 生成 source.kb_ids、items、含 target/imported/auto/planned 数量及六路摘要的 stats、resolved_lane_quotas 和 lane_order；返回 {"qaplan_plan": payload}。
 
 tests:
   plan_construction:
@@ -339,6 +384,9 @@ tests:
       # 空参数时六路均使用默认 ratio=1，并按 target_case_count 平均分配整数 case 数。
       # 例子：target_case_count=6 时，六路各获得 1 个 case。
       - default_equal_lane_ratios
+      # 显式 lane_case_counts 完整指定六路整数配额，并优先于兼容用 lane_ratios。
+      # 六路之和必须等于 auto_case_count。
+      - explicit_lane_case_counts
       # 比例只应用于自动生成的剩余 case；导入 case 不参与配额，也不按其类型或难度补偿。
       - lane_ratios_apply_only_to_generated_cases
       # lane_ratios 表示相对权重，不要求和为 1 或 100；相同比例缩放必须得到相同整数配额。
@@ -378,20 +426,20 @@ tests:
       - target_case_count_source_and_runtime_partition_match
       # auto_case_count=0 时空 topic manifest 合法；非零时仍保留现有容量不足失败语义。
       - imported_only_empty_plan_bypass
-      # ratio 为 0 的 lane 获得 0 个 case，不参与候选容量校验。
-      # 例子：embedding_reasoning_hard=0 且没有 embedding hard cluster 时，其他 lane 仍可成功。
-      - zero_ratio_lane_skipped
+      # 配额为 0 的 lane 仍计算真实 eligible_topic_count，供用户后续调整配额。
+      # 例子：embedding_reasoning_hard=0 但存在 4 个合法 Topic 时，摘要仍输出 eligible_topic_count=4。
+      - zero_quota_lane_reports_eligible_topics
       # 所有 lane ratio 之和必须大于 0；全为 0 时无法把 target_case_count 分配到任何 lane，应直接失败。
       - zero_total_ratio_error
       # easy、medium、hard 分别接受 chunk_count>=1、>=2、>=3 的 cluster，且是累积而非互斥分类。
       # 例子：chunk_count=3 的 entity cluster 同时可用于 entity_precision_easy、medium、hard。
       - cumulative_difficulty_thresholds
-      # 每一路容量是候选 cluster 的 topic 总数，而不是 cluster 总数或 chunk 数。
-      # 例子：两个候选 cluster 分别有 2 和 3 个 topic 时，该 lane 容量为 5。
-      - lane_capacity_is_sum_of_topics
-      # 任一非零整数配额 lane 的容量不足时整个 operation 失败，并在错误中包含 lane、resolved quota 和 available capacity。
+      # 每一路可支持数是所有合法候选中的 Topic 总数，不以 Cluster 数或 Chunk 数作为统计单位。
+      # 例子：两个候选分别有 2 和 3 个 Topic 时，eligible_topic_count=5。
+      - eligible_count_is_sum_of_topics
+      # 任一整数配额超过 eligible_topic_count 时整个 operation 失败，并在错误中包含 lane、配额和可用 Topic 数。
       # 例子：medium lane 配额为 3 但符合 chunk_count>=2 的 topics 总数仅为 2 时直接失败。
-      - insufficient_lane_capacity_error
+      - insufficient_eligible_topics_error
   reference_materialization:
     # 参考资料装配：验证全局侧如何通过 chunk_id 将选中的引用补全为可直接生成 QA 的完整正文材料；不做正文语义处理。
     cases:
@@ -412,8 +460,8 @@ tests:
     cases:
       # target_case_count 来自 source_config，planned_case_count 等于 items 数量；成功时二者相等。
       - target_and_planned_case_counts
-      # 每个 lane_summary 如实反映最大余数法分配结果、候选 cluster 数、topic 容量和实际选中 cluster 数。
-      # 例子：allocated_case_count=3、topic_capacity=2 时不会产出成功 qaplan；容量足够时 selected_cluster_count 不大于 allocated_case_count。
+      # 每个 lane_summary 只记录计划 Case 数和可用 Topic 数。
+      # 例子：allocated_case_count=3、eligible_topic_count=5 时页面可显示还可增加 2 条。
       - lane_summary_stats
       # manifest 的 cluster_id 必须唯一，topics/chunk_ids 必须是合法非空字符串列表，chunk_count 必须等于 chunk_ids 数量。
       - manifest_contract
@@ -429,6 +477,8 @@ tests:
       # 六路 ratio 只能是非负数，且至少一路为正数。
       # 例子：easy=-1、medium=true、六路均为 0 时都应直接失败；medium=0.5 是允许的。
       - lane_ratio_validation_error
+      # 显式六路 Case 数必须完整、均为非负整数、总和等于 auto_case_count，且不超过各路可用 Topic 数。
+      - lane_case_counts_validation_error
       # materializer 返回结构固定为 {"qaplan_plan": payload}，不混入额外 output key。
       - return_keys_match_outputs
   runtime_wiring:

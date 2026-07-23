@@ -1,3 +1,4 @@
+# STEP4 可视化目标契约；本 Artifact 是只读派生结果，不作为页面修改入口。
 operation:
   op_id: dataset.qaplan_spec
   flow: dataset
@@ -38,10 +39,26 @@ input_payload:
             case_id:
               type: string
               required: true
+            plan_item_id:
+              # 自动计划项的稳定追踪 ID。
+              type: string
+              required: true
+            lane:
+              # 六路内部标识；页面使用 question_type + difficulty 展示业务名称。
+              type: string
+              required: true
             question_type:
               type: string
               required: true
             difficulty:
+              type: string
+              required: true
+            cluster_id:
+              # 当前 Topic 所属 Cluster 的内部定位 ID，不向用户展示。
+              type: string
+              required: true
+            cluster_type:
+              # 必须与 lane 的题型来源一致。
               type: string
               required: true
             topic:
@@ -49,6 +66,10 @@ input_payload:
               required: true
             references:
               type: array
+              required: true
+            selection_round:
+              # 自动分配时的 Topic 轮次追踪信息，不作为用户控件。
+              type: integer
               required: true
       stats:
         type: object
@@ -116,17 +137,46 @@ output_payload:
           kb_ids:
             type: list[string]
       instruction:
+        # 根据题型生成的后续 QA 生成约束；页面默认不展示或编辑。
         type: string
         required: false
       topic:
+        # 当前 Case 的选题名称。
         type: string
         required: false
       qaplan:
         type: object
         required: false
+        fields:
+          plan_item_id:
+            type: string
+          lane:
+            type: string
+          cluster_id:
+            # 内部选题定位；用户重选 Topic 时由 qaplan_plan 重新派生。
+            type: string
+          cluster_type:
+            type: string
+            enum:
+              - entity
+              - embedding
+          selection_round:
+            type: integer
       references:
+        # Topic 所属 Cluster 自动确定的参考材料；用户只读。
         type: array
         required: false
+        item:
+          type: object
+          fields:
+            kb_id:
+              type: string
+            chunk_id:
+              type: string
+            doc_id:
+              type: string
+            text:
+              type: string
 
 execution_flow:
   - 读取当前 qaplan_spec 输出分区的稳定 case id，并从 import_cases_manifest.stats.case_allocation.assignments 查找唯一 assignment；缺失、未知 mode 或 assignment 与 runtime 分区不一致时直接失败。

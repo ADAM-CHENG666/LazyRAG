@@ -1,8 +1,9 @@
+# STEP4 默认总览的已实现契约；只输出数量摘要与固定六路摘要。
 operation:
   op_id: dataset.qaplan_manifest
   flow: dataset
   stage: qaplan
-  description: 汇总全局 QA plan 与全部 case 分区的 qaplan spec，作为 QA 计划阶段的完成凭证。
+  description: 汇总全局 QA plan 与全部 case 分区的 qaplan spec，输出 STEP4 默认总览并作为完成凭证。
 
 fixed_op:
   inputs:
@@ -45,6 +46,21 @@ input_payload:
           auto_case_count:
             type: integer
             required: true
+          lane_summaries:
+            type: array
+            required: true
+            item:
+              type: object
+              fields:
+                lane:
+                  type: string
+                  required: true
+                allocated_case_count:
+                  type: integer
+                  required: true
+                eligible_topic_count:
+                  type: integer
+                  required: true
   import_cases_manifest:
     fields:
       stats:
@@ -56,6 +72,12 @@ input_payload:
             required: true
             fields:
               target_case_count:
+                type: integer
+                required: true
+              import_case_count:
+                type: integer
+                required: true
+              auto_case_count:
                 type: integer
                 required: true
               assignments:
@@ -81,21 +103,77 @@ output_payload:
   qaplan_manifest:
     json_compatible: true
     fields:
-      case_count:
-        type: integer
+      stats:
+        # 默认页的 Case 数量摘要；不复制 qaplan_plan.items。
+        type: object
+        fields:
+          target_case_count:
+            # 本次 Dataset 的目标 Case 总数。
+            type: integer
+          import_case_count:
+            # 已导入并旁路 qaplan 的完整 Case 数。
+            type: integer
+          auto_case_count:
+            # 需要自动生成且参与六路分配的 Case 数。
+            type: integer
+          planned_case_count:
+            # 已形成选题计划的自动 Case 数；成功时等于 auto_case_count。
+            type: integer
+      lane_summaries:
+        # 六路默认总览，顺序固定；统计单位只使用 Case 和 Topic。
+        type: array
+        item:
+          type: object
+          fields:
+            lane:
+              # 内部稳定 lane 标识。
+              type: string
+              enum:
+                - entity_precision_easy
+                - entity_precision_medium
+                - entity_precision_hard
+                - embedding_reasoning_easy
+                - embedding_reasoning_medium
+                - embedding_reasoning_hard
+            question_type:
+              # 页面展示为“精确检索题”或“综合推理题”。
+              type: string
+              enum:
+                - precision
+                - reasoning
+            difficulty:
+              # 页面展示为“简单 / 中等 / 困难”。
+              type: string
+              enum:
+                - easy
+                - medium
+                - hard
+            allocated_case_count:
+              # 当前分配给该路的 Case 数。
+              type: integer
+            eligible_topic_count:
+              # 满足该路题型和难度条件的 Topic 数，也是该路最多可支持的 Case 数。
+              # 即使 allocated_case_count=0 也必须输出真实值。
+              type: integer
 
 execution_flow:
   - 等待 all_to_unpartitioned 的全部 qaplan_spec 分区完成。
   - 校验 qaplan_plan 的 planned_case_count 等于 auto_case_count 与 items 数量，且 qaplan_specs 数量等于 import_cases_manifest.stats.case_allocation.target_case_count；拒绝重复或空的 spec id。
   - 校验每个 imported assignment 对应 imported qaplan_spec，每个 generated assignment 对应 generated qaplan_spec。
-  - 仅输出 case_count，作为 dataset.qaplan 阶段的最小完成凭证。
+  - 从 import_cases_manifest.stats.case_allocation 汇总 target_case_count、import_case_count 和 auto_case_count，并读取 qaplan_plan.stats.planned_case_count。
+  - 从 qaplan_plan.stats.lane_summaries 复制固定六路的 lane、allocated_case_count 和 eligible_topic_count，并补充 question_type 与 difficulty。
+  - 当 auto_case_count=0 时仍输出固定六路，allocated_case_count 与 eligible_topic_count 均为 0。
+  - 不复制 qaplan_plan.items、references、instruction 或导入 Case 详情。
+  - 返回 {"qaplan_manifest": payload}，同时作为 STEP4 完成凭证和默认总览数据源。
 
 tests:
   manifest_completion:
-    # manifest 只负责收口 plan 与全部 qaplan spec，不重复保存计划内容。
+    # manifest 收口 plan 与全部 qaplan spec，并输出默认页所需的轻量摘要。
     cases:
-      # 全部 spec 到齐且 id 唯一时，输出稳定的 case_count。
+      # 全部 spec 到齐且 id 唯一时，输出数量摘要和固定六路摘要。
       - success
+      # 六路仅输出计划 Case 数与可用 Topic 数，不复制 Cluster 统计或计划详情。
+      - overview_summary
       # 自动计划数、全部静态 spec 数、assignment mode 或 spec id 不合法时必须失败，避免提前声明阶段完成。
       - incomplete_or_invalid_specs_error
       # 返回结构固定为单一 qaplan_manifest output。

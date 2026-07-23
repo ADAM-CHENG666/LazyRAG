@@ -5,6 +5,16 @@ import pytest
 from evo.operations.dataset.qaplan import qaplan_manifest, qaplan_spec
 
 
+LANES = (
+    ('entity_precision_easy', 'precision', 'easy'),
+    ('entity_precision_medium', 'precision', 'medium'),
+    ('entity_precision_hard', 'precision', 'hard'),
+    ('embedding_reasoning_easy', 'reasoning', 'easy'),
+    ('embedding_reasoning_medium', 'reasoning', 'medium'),
+    ('embedding_reasoning_hard', 'reasoning', 'hard'),
+)
+
+
 def _reference(index):
     return {
         'kb_id': 'kb-1',
@@ -32,6 +42,10 @@ def _item(index, *, question_type='precision', difficulty='easy', topic='service
 
 
 def _qaplan(items):
+    lane_counts = {
+        lane: sum(item['lane'] == lane for item in items)
+        for lane, _, _ in LANES
+    }
     return {
         'source': {'kb_ids': ['kb-1']},
         'items': items,
@@ -40,6 +54,14 @@ def _qaplan(items):
             'import_case_count': 0,
             'auto_case_count': len(items),
             'planned_case_count': len(items),
+            'lane_summaries': [
+                {
+                    'lane': lane,
+                    'allocated_case_count': lane_counts[lane],
+                    'eligible_topic_count': max(lane_counts[lane], 3) if items else 0,
+                }
+                for lane, _, _ in LANES
+            ],
         },
         'params': {},
     }
@@ -53,9 +75,11 @@ def _context(case_id, case_count):
 
 
 def _import_manifest(assignments, details=()):
+    import_case_count = sum(assignment.get('mode') == 'imported' for assignment in assignments.values())
+    auto_case_count = len(assignments) - import_case_count
     return {'stats': {'case_allocation': {
-        'target_case_count': len(assignments), 'import_case_count': 0,
-        'auto_case_count': len(assignments), 'assignments': assignments,
+        'target_case_count': len(assignments), 'import_case_count': import_case_count,
+        'auto_case_count': auto_case_count, 'assignments': assignments,
     }}, 'details': list(details)}
 
 
@@ -186,18 +210,36 @@ def test_qaplan_spec_rejects_invalid_instruction_or_reference_inputs(item, match
         })
 
 
-def test_qaplan_manifest_is_the_minimal_completion_marker_for_all_specs():
-    # The manifest deliberately records only completion count; qaplan_plan and
-    # the partitioned specs remain the authoritative planning artifacts.
+def test_qaplan_manifest_returns_lightweight_overview_for_all_specs():
+    plan = _qaplan([_item(1), _item(2)])
     result = qaplan_manifest(None, {
-        'qaplan_plan': _qaplan([_item(1), _item(2)]),
+        'qaplan_plan': plan,
         'import_cases_manifest': _import_manifest({
             'case_0001': {'mode': 'generated'}, 'case_0002': {'mode': 'generated'},
         }),
         'qaplan_specs': ({'id': 'case_0001', 'mode': 'generated'}, {'id': 'case_0002', 'mode': 'generated'}),
     })
 
-    assert result == {'qaplan_manifest': {'case_count': 2}}
+    assert result == {'qaplan_manifest': {
+        'stats': {
+            'target_case_count': 2,
+            'import_case_count': 0,
+            'auto_case_count': 2,
+            'planned_case_count': 2,
+        },
+        'lane_summaries': [
+            {
+                'lane': lane,
+                'question_type': question_type,
+                'difficulty': difficulty,
+                'allocated_case_count': summary['allocated_case_count'],
+                'eligible_topic_count': summary['eligible_topic_count'],
+            }
+            for (lane, question_type, difficulty), summary in zip(
+                LANES, plan['stats']['lane_summaries'], strict=True,
+            )
+        ],
+    }}
 
 
 def test_qaplan_manifest_accepts_a_fully_imported_dataset_without_plan_items():
@@ -218,7 +260,24 @@ def test_qaplan_manifest_accepts_a_fully_imported_dataset_without_plan_items():
         ),
     })
 
-    assert result == {'qaplan_manifest': {'case_count': 2}}
+    assert result == {'qaplan_manifest': {
+        'stats': {
+            'target_case_count': 2,
+            'import_case_count': 2,
+            'auto_case_count': 0,
+            'planned_case_count': 0,
+        },
+        'lane_summaries': [
+            {
+                'lane': lane,
+                'question_type': question_type,
+                'difficulty': difficulty,
+                'allocated_case_count': 0,
+                'eligible_topic_count': 0,
+            }
+            for lane, question_type, difficulty in LANES
+        ],
+    }}
 
 
 @pytest.mark.parametrize(
