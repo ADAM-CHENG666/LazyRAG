@@ -44,6 +44,7 @@ def test_create_subagent_snapshots_parent_attachment_context(monkeypatch):
         'user_id': 'user-1',
         'conversation_id': 'conversation-1',
     }
+    assert emitted[0][1]['params']['_thinking_depth'] == 'medium'
 
 
 def test_runner_restores_attachment_context_for_ordinary_subagent():
