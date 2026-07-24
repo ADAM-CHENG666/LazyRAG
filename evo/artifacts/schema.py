@@ -79,19 +79,20 @@ def _dataset_case_errors(payload: dict[str, Any]) -> list[str]:
 
 def _selected_docs_errors(payload: dict[str, Any]) -> list[str]:
     errors = []
-    allowed_top_level = {'kb_ids', 'docs', 'stats', 'params'}
+    allowed_top_level = {'kb_ids', 'docs', 'excluded_docs', 'stats', 'params'}
     for key in sorted(set(payload) - allowed_top_level):
         errors.append(f'unsupported top-level field: {key}')
     allowed_doc_fields = {'kb_id', 'doc_id', 'filename', 'file_type', 'status'}
-    for doc in payload.get('docs') or []:
-        if not isinstance(doc, dict):
-            errors.append('docs must contain only objects')
-            continue
-        for key in sorted(set(doc) - allowed_doc_fields):
-            errors.append(f'unsupported doc field: {key}')
-        for key in ('kb_id', 'doc_id', 'filename', 'file_type', 'status'):
-            if key not in doc or not isinstance(doc.get(key), str):
-                errors.append(f'doc.{key} must be str')
+    for field in ('docs', 'excluded_docs'):
+        for doc in payload.get(field) or []:
+            if not isinstance(doc, dict):
+                errors.append(f'{field} must contain only objects')
+                continue
+            for key in sorted(set(doc) - allowed_doc_fields):
+                errors.append(f'unsupported {field} field: {key}')
+            for key in ('kb_id', 'doc_id', 'filename', 'file_type', 'status'):
+                if key not in doc or not isinstance(doc.get(key), str):
+                    errors.append(f'{field}.{key} must be str')
     return errors
 
 
@@ -383,8 +384,8 @@ SCHEMAS: dict[str, ArtifactSchema] = {
                                            nonempty=('snapshot_id', 'source_units'),
                                            types={'snapshot_id': str, 'source_units': list}),
     'SelectedDocs': ArtifactSchema(
-        required=('kb_ids', 'docs', 'stats', 'params'), nonempty=('kb_ids', 'docs'),
-        types={'kb_ids': list, 'docs': list, 'stats': dict, 'params': dict},
+        required=('kb_ids', 'docs', 'excluded_docs', 'stats', 'params'), nonempty=('kb_ids',),
+        types={'kb_ids': list, 'docs': list, 'excluded_docs': list, 'stats': dict, 'params': dict},
         validate=_selected_docs_errors,
     ),
     'DatasetChunk': ArtifactSchema(

@@ -11,10 +11,15 @@ from .kb_client import KnowledgeBaseClient
 @dataclass(frozen=True)
 class SelectDocsParams:
     kb_ids: list[str]
+    excluded_docs: list[dict[str, str]]
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> 'SelectDocsParams':
-        raw_ids = data.get('kb_ids')
+    def from_dict(
+        cls,
+        source_config: Mapping[str, Any],
+        select_docs_params: Mapping[str, Any] | None = None,
+    ) -> 'SelectDocsParams':
+        raw_ids = source_config.get('kb_ids')
         if not isinstance(raw_ids, list) or not raw_ids:
             raise ValueError('kb_ids must be a non-empty list')
         if not all(isinstance(value, str) for value in raw_ids):
@@ -22,12 +27,31 @@ class SelectDocsParams:
         kb_ids = [validate_id(value.strip(), 'kb_id') for value in raw_ids]
         if len(set(kb_ids)) != len(kb_ids):
             raise ValueError('kb_ids must be unique')
-        if 'max_docs' in data:
+        if 'max_docs' in source_config:
             raise ValueError('max_docs is not supported')
-        return cls(kb_ids=kb_ids)
+        params = select_docs_params or {}
+        raw_excluded = params.get('excluded_docs', [])
+        if not isinstance(raw_excluded, list):
+            raise ValueError('excluded_docs must be a list')
+        excluded_docs: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for index, item in enumerate(raw_excluded):
+            if not isinstance(item, Mapping):
+                raise ValueError(f'excluded_docs[{index}] must be a mapping')
+            try:
+                kb_id = validate_id(str(item.get('kb_id') or '').strip(), 'excluded_docs.kb_id')
+                doc_id = validate_id(str(item.get('doc_id') or '').strip(), 'excluded_docs.doc_id')
+            except ValueError as exc:
+                raise ValueError(f'excluded_docs[{index}] contains an invalid reference') from exc
+            key = (kb_id, doc_id)
+            if key in seen:
+                raise ValueError('excluded_docs must contain unique (kb_id, doc_id) references')
+            seen.add(key)
+            excluded_docs.append({'kb_id': kb_id, 'doc_id': doc_id})
+        return cls(kb_ids=kb_ids, excluded_docs=excluded_docs)
 
     def to_dict(self) -> dict[str, Any]:
-        return {'kb_ids': list(self.kb_ids)}
+        return {'kb_ids': list(self.kb_ids), 'excluded_docs': [dict(item) for item in self.excluded_docs]}
 
 
 def select_docs(
@@ -38,42 +62,46 @@ def select_docs(
     source_config = inputs.get('source_config')
     if not isinstance(source_config, Mapping):
         raise ValueError('source_config must be a mapping')
-    params = SelectDocsParams.from_dict(source_config)
+    raw_select_params = inputs.get('select_docs_params', {})
+    if not isinstance(raw_select_params, Mapping):
+        raise ValueError('select_docs_params must be a mapping')
+    params = SelectDocsParams.from_dict(source_config, raw_select_params)
     allocation = _allocation(inputs.get('import_cases_manifest'))
     auto_case_count = allocation['auto_case_count']
     if auto_case_count == 0:
-        return {'selected_docs': _payload(params, [], {}, auto_case_count)}
+        return {'selected_docs': _payload(params, [], [], 0)}
 
     client = kb_client or KnowledgeBaseClient()
     rows_by_kb = {kb_id: list(client.list_documents(kb_id)) for kb_id in params.kb_ids}
     if not any(rows_by_kb.values()):
         raise ValueError('dataset.select_docs discovered no documents')
-    docs = [
+    discovered = [
         {'kb_id': kb_id, **_doc_payload(row)}
         for kb_id in params.kb_ids
         for row in rows_by_kb[kb_id]
     ]
-    return {'selected_docs': _payload(
-        params, docs,
-        {kb_id: len(rows) for kb_id, rows in rows_by_kb.items()},
-        auto_case_count,
-    )}
+    excluded_keys = {(item['kb_id'], item['doc_id']) for item in params.excluded_docs}
+    docs = [doc for doc in discovered if (doc['kb_id'], doc['doc_id']) not in excluded_keys]
+    excluded_docs = [doc for doc in discovered if (doc['kb_id'], doc['doc_id']) in excluded_keys]
+    return {'selected_docs': _payload(params, docs, excluded_docs, len(discovered))}
 
 
 def _payload(
     params: SelectDocsParams,
     docs: list[dict[str, Any]],
-    discovered_by_kb: dict[str, int],
-    auto_case_count: int,
+    excluded_docs: list[dict[str, Any]],
+    discovered_count: int,
 ) -> dict[str, Any]:
     return {
         'kb_ids': list(params.kb_ids),
         'docs': docs,
+        'excluded_docs': excluded_docs,
         'stats': {
-            'discovered_by_kb': discovered_by_kb,
-            'discovered': len(docs),
+            'discovered_count': discovered_count,
+            'selected_count': len(docs),
+            'excluded_count': len(excluded_docs),
         },
-        'params': {**params.to_dict(), 'auto_case_count': auto_case_count},
+        'params': params.to_dict(),
     }
 
 

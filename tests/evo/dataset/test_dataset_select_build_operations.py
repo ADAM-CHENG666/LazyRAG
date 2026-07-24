@@ -20,6 +20,7 @@ DEFAULT_ALLOWED_TYPES = ['text', 'paragraph', 'table', 'formula', 'equation', 'u
 DEFAULT_BUILD_PARAMS = {
     'groups': ['block'],
     'allowed_types': DEFAULT_ALLOWED_TYPES,
+    'excluded_chunks': [],
     'max_scan_docs_per_kb': 10_000,
     'max_scan_chunks': 100_000,
 }
@@ -38,23 +39,32 @@ class FakeDiscoveryClient:
 class FakeCandidateClient:
     """Storage-level fake: count first, then fetch only quota-selected payloads."""
 
-    def __init__(self, *, counts_by_kb=None, chunks=None):
+    def __init__(self, *, counts_by_kb=None, chunks=None, groups_by_kb=None):
         self.counts_by_kb = counts_by_kb or {}
         self.chunks = chunks or {}
+        self.groups_by_kb = groups_by_kb or {}
         self.count_calls = []
         self.fetch_calls = []
 
-    def count_valid_chunks(self, kb_id, doc_ids, groups, allowed_types, max_scan_chunks):
+    def list_groups(self, kb_id):
+        return list(self.groups_by_kb.get(kb_id, []))
+
+    def count_valid_chunks(
+        self, kb_id, doc_ids, groups, allowed_types, max_scan_chunks, *, excluded_chunk_ids=None,
+    ):
         self.count_calls.append({
             'kb_id': kb_id,
             'doc_ids': list(doc_ids),
             'groups': list(groups),
             'allowed_types': list(allowed_types),
             'max_scan_chunks': max_scan_chunks,
+            'excluded_chunk_ids': set(excluded_chunk_ids or ()),
         })
         return self.counts_by_kb[kb_id]
 
-    def fetch_valid_chunks(self, kb_id, doc_id, group, allowed_types, limit, *, order_by):
+    def fetch_valid_chunks(
+        self, kb_id, doc_id, group, allowed_types, limit, *, order_by, excluded_chunk_ids=None,
+    ):
         self.fetch_calls.append({
             'kb_id': kb_id,
             'doc_id': doc_id,
@@ -62,8 +72,10 @@ class FakeCandidateClient:
             'allowed_types': list(allowed_types),
             'limit': limit,
             'order_by': order_by,
+            'excluded_chunk_ids': set(excluded_chunk_ids or ()),
         })
-        values = list(self.chunks.get((kb_id, doc_id, group), []))
+        excluded = set(excluded_chunk_ids or ())
+        values = [item for item in self.chunks.get((kb_id, doc_id, group), []) if item.uid not in excluded]
         values.sort(key=lambda item: hashlib.sha256(item.uid.encode()).hexdigest())
         return values[:limit]
 
@@ -96,15 +108,19 @@ def selected_docs(docs_by_kb):
     return {
         'kb_ids': list(docs_by_kb),
         'docs': docs,
+        'excluded_docs': [],
         'stats': {
-            'discovered_by_kb': {kb_id: len(items) for kb_id, items in docs_by_kb.items()},
-            'discovered': len(docs),
+            'discovered_count': len(docs),
+            'selected_count': len(docs),
+            'excluded_count': 0,
         },
-        'params': {'kb_ids': list(docs_by_kb), 'auto_case_count': 2},
+        'params': {'kb_ids': list(docs_by_kb), 'excluded_docs': []},
     }
 
 
-def count_result(capacities, *, scanned_count=None, filtered=None, invalid=None):
+def count_result(
+    capacities, *, scanned_count=None, filtered=None, invalid=None, manual=None, observed_types=None,
+):
     effective_count = sum(sum(docs.values()) for docs in capacities.values())
     return {
         'scanned_count': effective_count if scanned_count is None else scanned_count,
@@ -112,6 +128,8 @@ def count_result(capacities, *, scanned_count=None, filtered=None, invalid=None)
         'capacities': capacities,
         'filtered_count_by_type': filtered or {},
         'invalid_count_by_reason': invalid or {},
+        'manual_exclusions': manual or [],
+        'observed_types': observed_types or ['text'],
     }
 
 
@@ -156,10 +174,12 @@ def test_select_docs_enumerates_all_docs_in_stable_kb_and_document_order():
 
     assert [item['doc_id'] for item in output['docs']] == ['a-1', 'a-2', 'b-1', 'b-2', 'b-3']
     assert output['stats'] == {
-        'discovered_by_kb': {'kb-a': 2, 'kb-b': 3},
-        'discovered': 5,
+        'discovered_count': 5,
+        'selected_count': 5,
+        'excluded_count': 0,
     }
-    assert output['params'] == {'kb_ids': ['kb-a', 'kb-b'], 'auto_case_count': 3}
+    assert output['excluded_docs'] == []
+    assert output['params'] == {'kb_ids': ['kb-a', 'kb-b'], 'excluded_docs': []}
     assert client.list_calls == ['kb-a', 'kb-b']
 
 
@@ -200,8 +220,9 @@ def test_select_docs_skips_kb_access_when_every_case_is_imported():
     assert output == {
         'kb_ids': ['kb-a', 'kb-b'],
         'docs': [],
-        'stats': {'discovered_by_kb': {}, 'discovered': 0},
-        'params': {'kb_ids': ['kb-a', 'kb-b'], 'auto_case_count': 0},
+        'excluded_docs': [],
+        'stats': {'discovered_count': 0, 'selected_count': 0, 'excluded_count': 0},
+        'params': {'kb_ids': ['kb-a', 'kb-b'], 'excluded_docs': []},
     }
 
 
@@ -231,6 +252,67 @@ def test_select_docs_rejects_invalid_contract(inputs, match):
         select_docs(None, inputs, FakeDiscoveryClient({'kb-1': [{'doc_id': 'doc-1'}]}))
 
 
+def test_select_docs_applies_exclusions_and_keeps_unmatched_refs_dormant():
+    client = FakeDiscoveryClient({'kb-a': [
+        {'doc_id': 'doc-1', 'filename': 'one.pdf', 'upload_status': 'ready'},
+        {'doc_id': 'doc-2', 'filename': 'two.pdf', 'upload_status': 'ready'},
+        {'doc_id': 'doc-3', 'filename': 'three.pdf', 'upload_status': 'ready'},
+    ]})
+    excluded = [
+        {'kb_id': 'kb-a', 'doc_id': 'doc-2'},
+        {'kb_id': 'kb-a', 'doc_id': 'not-in-current-snapshot'},
+    ]
+
+    output = select_docs(None, {
+        'source_config': {'kb_ids': ['kb-a']},
+        'select_docs_params': {'excluded_docs': excluded},
+        'import_cases_manifest': import_manifest(target=2),
+    }, client)['selected_docs']
+
+    assert [item['doc_id'] for item in output['docs']] == ['doc-1', 'doc-3']
+    assert [item['doc_id'] for item in output['excluded_docs']] == ['doc-2']
+    assert output['stats'] == {'discovered_count': 3, 'selected_count': 2, 'excluded_count': 1}
+    assert output['params'] == {'kb_ids': ['kb-a'], 'excluded_docs': excluded}
+
+
+def test_select_docs_all_documents_excluded_returns_a_valid_empty_selection():
+    client = FakeDiscoveryClient({'kb-a': [
+        {'doc_id': 'doc-1', 'filename': 'one.pdf'},
+        {'doc_id': 'doc-2', 'filename': 'two.pdf'},
+    ]})
+
+    output = select_docs(None, {
+        'source_config': {'kb_ids': ['kb-a']},
+        'select_docs_params': {'excluded_docs': [
+            {'kb_id': 'kb-a', 'doc_id': 'doc-1'},
+            {'kb_id': 'kb-a', 'doc_id': 'doc-2'},
+        ]},
+        'import_cases_manifest': import_manifest(target=2),
+    }, client)['selected_docs']
+
+    assert output['docs'] == []
+    assert len(output['excluded_docs']) == 2
+    assert output['stats'] == {'discovered_count': 2, 'selected_count': 0, 'excluded_count': 2}
+    validate_artifact_payload('SelectedDocs', output)
+
+
+@pytest.mark.parametrize('excluded_docs', [
+    [{'kb_id': '', 'doc_id': 'doc-1'}],
+    [{'kb_id': 'kb-a', 'doc_id': ' '}],
+    [
+        {'kb_id': 'kb-a', 'doc_id': 'doc-1'},
+        {'kb_id': 'kb-a', 'doc_id': 'doc-1'},
+    ],
+])
+def test_select_docs_rejects_invalid_or_duplicate_exclusion_refs(excluded_docs):
+    with pytest.raises(ValueError, match='excluded_docs'):
+        select_docs(None, {
+            'source_config': {'kb_ids': ['kb-a']},
+            'select_docs_params': {'excluded_docs': excluded_docs},
+            'import_cases_manifest': import_manifest(target=2),
+        }, FakeDiscoveryClient({'kb-a': [{'doc_id': 'doc-1'}]}))
+
+
 def test_build_chunks_params_include_resolved_scan_safety_limits():
     assert BuildChunksParams.from_dict({'groups': ['block']}).to_dict() == DEFAULT_BUILD_PARAMS
     assert BuildChunksParams.from_dict({
@@ -241,6 +323,7 @@ def test_build_chunks_params_include_resolved_scan_safety_limits():
     }).to_dict() == {
         'groups': ['block', 'line'],
         'allowed_types': ['table', 'unknown'],
+        'excluded_chunks': [],
         'max_scan_docs_per_kb': 25,
         'max_scan_chunks': 500,
     }
@@ -262,10 +345,30 @@ def test_build_chunks_params_reject_invalid_scan_safety_limits(field, value):
     ({'groups': ['block', 'block']}, 'groups'),
     ({'groups': ['block'], 'allowed_types': 'text'}, 'allowed_types'),
     ({'groups': ['block'], 'allowed_types': None}, 'allowed_types'),
+    ({'groups': ['block'], 'allowed_types': ['text', ' TEXT ']}, 'allowed_types'),
 ])
 def test_build_chunks_params_reject_implicit_list_compatibility(params, match):
     with pytest.raises(ValueError, match=match):
         BuildChunksParams.from_dict(params)
+
+
+def test_build_chunks_params_resolve_and_validate_excluded_chunk_refs():
+    resolved = BuildChunksParams.from_dict({
+        'groups': ['block'],
+        'excluded_chunks': [{'kb_id': ' kb-a ', 'doc_id': ' doc-1 ', 'chunk_id': ' chunk-1 '}],
+    }).to_dict()
+
+    assert resolved['excluded_chunks'] == [
+        {'kb_id': 'kb-a', 'doc_id': 'doc-1', 'chunk_id': 'chunk-1'},
+    ]
+    with pytest.raises(ValueError, match='excluded_chunks'):
+        BuildChunksParams.from_dict({
+            'groups': ['block'],
+            'excluded_chunks': [
+                {'kb_id': 'kb-a', 'doc_id': 'doc-1', 'chunk_id': 'chunk-1'},
+                {'kb_id': 'kb-a', 'doc_id': 'doc-2', 'chunk_id': 'chunk-1'},
+            ],
+        })
 
 
 def test_build_chunk_candidates_uses_complete_effective_capacity_before_allocation():
@@ -285,16 +388,20 @@ def test_build_chunk_candidates_uses_complete_effective_capacity_before_allocati
 
     output = candidate_payload(selected, client, target=2)
 
-    assert output['selection_stats']['target'] == {
+    assert output['summary'] == {
         'candidate_limit': 3,
+        'scanned_doc_count': 2,
+        'scanned_chunk_count': 7,
+        'effective_count': 3,
         'selected_count': 3,
+        'unselected_effective_count': 0,
         'shortfall_count': 0,
     }
-    assert output['selection_stats']['scan'] == {'doc_count': 2, 'chunk_count': 7}
-    assert output['selection_stats']['eligibility'] == {
-        'effective_count': 3,
-        'filtered_count_by_type': {'heading': 2},
-        'invalid_count_by_reason': {'empty_text': 1, 'missing_embedding': 1},
+    assert output['invalid_counts'] == {
+        'filtered_by_type': 2,
+        'empty_text': 1,
+        'missing_embedding': 1,
+        'invalid_embedding': 0,
     }
     assert [call['limit'] for call in client.fetch_calls] == [2, 1]
 
@@ -317,12 +424,11 @@ def test_build_chunk_candidates_allocates_group_then_kb_then_doc_with_largest_re
     )
 
     output = candidate_payload(selected, client, target=7)  # candidate_limit = ceil(7 * 1.5) = 11
-    block = output['selection_stats']['allocation']['groups'][0]
-
-    assert (block['effective_count'], block['quota'], block['selected_count']) == (12, 11, 11)
-    assert [(kb['kb_id'], kb['quota']) for kb in block['knowledge_bases']] == [('kb-a', 7), ('kb-b', 4)]
-    assert [(doc['doc_id'], doc['quota']) for doc in block['knowledge_bases'][0]['documents']] == [
-        ('a-1', 4), ('a-2', 3),
+    assert output['groups'] == [{'group': 'block', 'effective_count': 12, 'selected_count': 11}]
+    assert [(doc['kb_id'], doc['doc_id'], doc['selected_count']) for doc in output['documents']] == [
+        ('kb-a', 'a-1', 4),
+        ('kb-a', 'a-2', 3),
+        ('kb-b', 'b-1', 4),
     ]
 
 
@@ -342,11 +448,10 @@ def test_build_chunk_candidates_uses_global_group_priority_before_fallback():
     )
 
     output = candidate_payload(selected, client, target=4, params={'groups': ['block', 'line']})
-    groups = output['selection_stats']['allocation']['groups']
-
-    assert [(item['group'], item['quota']) for item in groups] == [('block', 3), ('line', 3)]
-    assert [(kb['kb_id'], kb['quota']) for kb in groups[1]['knowledge_bases']] == [('kb-a', 2), ('kb-b', 1)]
-    assert output['selection_stats']['allocation']['fallback_used'] is True
+    assert output['groups'] == [
+        {'group': 'block', 'effective_count': 3, 'selected_count': 3},
+        {'group': 'line', 'effective_count': 20, 'selected_count': 3},
+    ]
     assert [chunk['group'] for chunk in output['chunks']] == ['block', 'block', 'block', 'line', 'line', 'line']
 
 
@@ -378,11 +483,9 @@ def test_build_chunk_candidates_returns_shortfall_without_failing():
     output = candidate_payload(selected, client, target=4)
 
     assert len(output['chunks']) == 2
-    assert output['selection_stats']['target'] == {
-        'candidate_limit': 6,
-        'selected_count': 2,
-        'shortfall_count': 4,
-    }
+    assert output['summary']['candidate_limit'] == 6
+    assert output['summary']['selected_count'] == 2
+    assert output['summary']['shortfall_count'] == 4
 
 
 @pytest.mark.parametrize('params, counts, match', [
@@ -411,16 +514,25 @@ def test_all_imported_cases_skip_candidate_scan_and_return_structured_zero_stats
 
     assert output == {
         'chunks': [],
-        'selection_stats': {
-            'target': {'candidate_limit': 0, 'selected_count': 0, 'shortfall_count': 0},
-            'scan': {'doc_count': 0, 'chunk_count': 0},
-            'eligibility': {
-                'effective_count': 0,
-                'filtered_count_by_type': {},
-                'invalid_count_by_reason': {},
-            },
-            'allocation': {'fallback_used': False, 'groups': []},
+        'summary': {
+            'candidate_limit': 0,
+            'scanned_doc_count': 0,
+            'scanned_chunk_count': 0,
+            'effective_count': 0,
+            'selected_count': 0,
+            'unselected_effective_count': 0,
+            'shortfall_count': 0,
         },
+        'invalid_counts': {
+            'filtered_by_type': 0,
+            'empty_text': 0,
+            'missing_embedding': 0,
+            'invalid_embedding': 0,
+        },
+        'manual_exclusions': {'chunk_count': 0, 'chunks': []},
+        'filter_options': {'available_groups': ['block'], 'available_types': DEFAULT_ALLOWED_TYPES},
+        'groups': [],
+        'documents': [],
         'params': DEFAULT_BUILD_PARAMS,
     }
 
@@ -434,10 +546,12 @@ def test_build_chunk_candidates_output_contract_contains_complete_payload_and_re
 
     output = candidate_payload(selected, client, target=1)
 
-    assert set(output) == {'chunks', 'selection_stats', 'params'}
-    assert set(output['selection_stats']) == {'target', 'scan', 'eligibility', 'allocation'}
+    assert set(output) == {
+        'chunks', 'summary', 'invalid_counts', 'manual_exclusions',
+        'filter_options', 'groups', 'documents', 'params',
+    }
     assert set(output['chunks'][0]) == {
-        'available', 'kb_id', 'chunk_id', 'doc_id', 'filename', 'group', 'type',
+        'kb_id', 'chunk_id', 'doc_id', 'filename', 'group', 'type',
         'text', 'embedding', 'metadata',
     }
     assert output['params'] == DEFAULT_BUILD_PARAMS
@@ -457,10 +571,99 @@ def test_build_chunk_candidates_rejects_duplicate_global_chunk_id():
         candidate_payload(selected, client, target=2)
 
 
+def test_build_chunk_candidates_excludes_manual_refs_before_selection_and_invalid_counts():
+    selected = selected_docs({'kb-a': [{'doc_id': 'a-1', 'filename': 'a.pdf'}]})
+    client = FakeCandidateClient(
+        counts_by_kb={'kb-a': count_result(
+            {'block': {'a-1': 1}},
+            scanned_count=3,
+            invalid={'empty_text': 1},
+            manual=[{
+                'kb_id': 'kb-a',
+                'doc_id': 'a-1',
+                'chunk_id': 'exclude-me',
+                'group': 'block',
+                'type': 'text',
+            }],
+        )},
+        chunks={('kb-a', 'a-1', 'block'): [
+            node('keep-me', doc_id='a-1'),
+            node('exclude-me', doc_id='a-1', number=2),
+        ]},
+    )
+
+    output = candidate_payload(selected, client, target=1, params={
+        'groups': ['block'],
+        'excluded_chunks': [{'kb_id': 'kb-a', 'doc_id': 'a-1', 'chunk_id': 'exclude-me'}],
+    })
+
+    assert [item['chunk_id'] for item in output['chunks']] == ['keep-me']
+    assert output['manual_exclusions']['chunk_count'] == 1
+    assert [item['chunk_id'] for item in output['manual_exclusions']['chunks']] == ['exclude-me']
+    assert output['invalid_counts'] == {
+        'filtered_by_type': 0,
+        'empty_text': 1,
+        'missing_embedding': 0,
+        'invalid_embedding': 0,
+    }
+    assert output['summary']['scanned_chunk_count'] == (
+        output['manual_exclusions']['chunk_count']
+        + sum(output['invalid_counts'].values())
+        + output['summary']['effective_count']
+    )
+
+
+def test_build_chunk_candidates_zero_effective_capacity_fails_when_auto_generation_is_required():
+    selected = selected_docs({'kb-a': [{'doc_id': 'a-1'}]})
+    client = FakeCandidateClient(counts_by_kb={
+        'kb-a': count_result(
+            {'block': {'a-1': 0}},
+            scanned_count=2,
+            invalid={'empty_text': 1, 'missing_embedding': 1},
+        ),
+    })
+
+    with pytest.raises(ValueError, match='effective|valid chunk|capacity'):
+        candidate_payload(selected, client, target=1)
+
+
+def test_build_chunk_candidates_uses_flat_review_contract_and_reconcilable_summaries():
+    selected = selected_docs({'kb-a': [{'doc_id': 'a-1', 'filename': 'a.pdf', 'file_type': 'pdf'}]})
+    client = FakeCandidateClient(
+        counts_by_kb={'kb-a': count_result({'block': {'a-1': 2}}, scanned_count=4, filtered={'heading': 1},
+                                           invalid={'missing_embedding': 1}, observed_types=['text', 'heading'])},
+        chunks={('kb-a', 'a-1', 'block'): [
+            node('chunk-1', doc_id='a-1'),
+            node('chunk-2', doc_id='a-1', number=2),
+        ]},
+        groups_by_kb={'kb-a': ['block', 'line']},
+    )
+
+    output = candidate_payload(selected, client, target=1)
+
+    assert set(output) == {
+        'chunks', 'summary', 'invalid_counts', 'manual_exclusions',
+        'filter_options', 'groups', 'documents', 'params',
+    }
+    assert output['summary'] == {
+        'candidate_limit': 2,
+        'scanned_doc_count': 1,
+        'scanned_chunk_count': 4,
+        'effective_count': 2,
+        'selected_count': 2,
+        'unselected_effective_count': 0,
+        'shortfall_count': 0,
+    }
+    assert sum(item['effective_count'] for item in output['groups']) == output['summary']['effective_count']
+    assert sum(item['selected_count'] for item in output['documents']) == output['summary']['selected_count']
+    assert output['filter_options']['available_groups'] == ['block', 'line']
+    assert output['filter_options']['available_types'][:2] == ['text', 'heading']
+    assert 'available' not in output['chunks'][0]
+
+
 def test_build_chunks_maps_candidates_and_uses_placeholders_for_shortfall():
     candidates = {
         'chunks': [{
-            'available': True,
             'kb_id': 'kb-a',
             'chunk_id': 'chunk-1',
             'doc_id': 'a-1',
@@ -471,7 +674,6 @@ def test_build_chunks_maps_candidates_and_uses_placeholders_for_shortfall():
             'embedding': {'model': 'default', 'vector': [1.0]},
             'metadata': {},
         }],
-        'selection_stats': {},
         'params': DEFAULT_BUILD_PARAMS,
     }
 
@@ -481,61 +683,229 @@ def test_build_chunks_maps_candidates_and_uses_placeholders_for_shortfall():
     assert placeholder['chunk_id'] == 'unavailable:chunk_0002'
 
 
-def test_build_chunks_manifest_preserves_structured_candidate_audit_and_source_coverage():
-    selection_stats = {
-        'target': {'candidate_limit': 3, 'selected_count': 2, 'shortfall_count': 1},
-        'scan': {'doc_count': 2, 'chunk_count': 7},
-        'eligibility': {
-            'effective_count': 2,
-            'filtered_count_by_type': {'heading': 2},
-            'invalid_count_by_reason': {'empty_text': 1},
-        },
-        'allocation': {
-            'fallback_used': True,
-            'groups': [{'group': 'block', 'effective_count': 2, 'quota': 2, 'selected_count': 2,
-                        'knowledge_bases': []}],
-        },
+def test_build_chunks_adds_available_flag_to_real_candidates_without_mutating_source_fields():
+    candidate = {
+        'kb_id': 'kb-a',
+        'chunk_id': 'chunk-1',
+        'doc_id': 'a-1',
+        'filename': 'a.pdf',
+        'group': 'block',
+        'type': 'text',
+        'text': 'one',
+        'embedding': {'model': 'default', 'vector': [1.0]},
+        'metadata': {'page': 1},
     }
-    chunks = (
-        {'available': True, 'kb_id': 'kb-a', 'chunk_id': 'chunk-1', 'doc_id': 'a-1', 'filename': 'a.pdf',
-         'group': 'block', 'type': 'text', 'text': 'one', 'embedding': {}, 'metadata': {}},
-        {'available': True, 'kb_id': 'kb-a', 'chunk_id': 'chunk-2', 'doc_id': 'a-1', 'filename': 'a.pdf',
-         'group': 'block', 'type': 'table', 'text': 'two', 'embedding': {}, 'metadata': {}},
-        {'available': False, 'chunk_id': 'unavailable:chunk_0003', 'doc_id': '__unavailable__', 'filename': '',
-         'group': 'block', 'type': 'placeholder', 'text': 'Unavailable chunk placeholder.',
-         'embedding': {}, 'metadata': {}},
+    candidates = {
+        'chunks': [candidate],
+        'summary': {},
+        'invalid_counts': {},
+        'manual_exclusions': {'chunk_count': 0, 'chunks': []},
+        'filter_options': {'available_groups': ['block'], 'available_types': ['text']},
+        'groups': [],
+        'documents': [],
+        'params': {**DEFAULT_BUILD_PARAMS, 'excluded_chunks': []},
+    }
+
+    output = build_chunks(chunk_ctx('chunk_0001'), {'build_chunk_candidates': candidates})['chunk']
+
+    assert output == {'available': True, **candidate}
+
+
+def _step1_manifest_contract_inputs():
+    selected = {
+        'kb_ids': ['kb-a'],
+        'docs': [{'kb_id': 'kb-a', 'doc_id': 'a-1', 'filename': 'a.pdf', 'file_type': 'pdf', 'status': 'ready'}],
+        'excluded_docs': [{'kb_id': 'kb-a', 'doc_id': 'a-2', 'filename': 'hidden.pdf',
+                           'file_type': 'pdf', 'status': 'ready'}],
+        'stats': {'discovered_count': 2, 'selected_count': 1, 'excluded_count': 1},
+        'params': {'kb_ids': ['kb-a'], 'excluded_docs': [{'kb_id': 'kb-a', 'doc_id': 'a-2'}]},
+    }
+    candidate_chunks = [
+        {'kb_id': 'kb-a', 'chunk_id': f'chunk-{index}', 'doc_id': 'a-1', 'filename': 'a.pdf',
+         'group': 'block', 'type': 'text', 'text': f'text {index}', 'embedding': {'default': [1.0]},
+         'metadata': {'page': index}}
+        for index in (1, 2)
+    ]
+    candidates = {
+        'chunks': candidate_chunks,
+        'summary': {
+            'candidate_limit': 2,
+            'scanned_doc_count': 1,
+            'scanned_chunk_count': 5,
+            'effective_count': 2,
+            'selected_count': 2,
+            'unselected_effective_count': 0,
+            'shortfall_count': 0,
+        },
+        'invalid_counts': {
+            'filtered_by_type': 1,
+            'empty_text': 1,
+            'missing_embedding': 0,
+            'invalid_embedding': 0,
+        },
+        'manual_exclusions': {
+            'chunk_count': 1,
+            'chunks': [{'kb_id': 'kb-a', 'doc_id': 'a-1', 'chunk_id': 'hidden-chunk',
+                        'filename': 'a.pdf', 'group': 'block', 'type': 'text'}],
+        },
+        'filter_options': {'available_groups': ['block', 'line'], 'available_types': ['text', 'table']},
+        'groups': [{'group': 'block', 'effective_count': 2, 'selected_count': 2}],
+        'documents': [{
+            'kb_id': 'kb-a', 'doc_id': 'a-1', 'filename': 'a.pdf', 'file_type': 'pdf',
+            'effective_count': 2, 'selected_count': 2,
+            'groups': [{'group': 'block', 'effective_count': 2, 'selected_count': 2}],
+        }],
+        'params': {**DEFAULT_BUILD_PARAMS, 'excluded_chunks': [
+            {'kb_id': 'kb-a', 'doc_id': 'a-1', 'chunk_id': 'hidden-chunk'},
+        ]},
+    }
+    chunks = tuple({'available': True, **item} for item in candidate_chunks)
+    return {
+        'selected_docs': selected,
+        'import_cases_manifest': {
+            'source': {'csv_path': '/private/data/cases.csv'},
+            'stats': {'case_allocation': {
+                'target_case_count': 2,
+                'import_case_count': 1,
+                'auto_case_count': 1,
+                'assignments': {},
+            }},
+        },
+        'build_chunk_candidates': candidates,
+        'chunk': chunks,
+    }
+
+
+def test_build_chunks_manifest_is_single_lightweight_reconcilable_homepage_contract():
+    inputs = _step1_manifest_contract_inputs()
+
+    output = build_chunks_manifest(manifest_ctx(('chunk_0001', 'chunk_0002')), inputs)['build_chunks_manifest']
+
+    assert set(output) == {
+        'source', 'summary', 'filter_options', 'groups', 'documents', 'chunks', 'params', 'warnings',
+    }
+    assert output['source'] == {
+        'kb_ids': ['kb-a'],
+        'csv_present': True,
+        'case_counts': {'target': 2, 'imported': 1, 'automatic': 1},
+    }
+    assert 'csv_path' not in output['source']
+    assert output['summary']['document_counts'] == {'discovered': 2, 'scanned': 1, 'excluded': 1}
+    assert output['summary']['chunk_counts'] == {
+        'scanned': 5,
+        'effective': 2,
+        'selected': 2,
+        'unselected_effective': 0,
+        'candidate_target': 2,
+        'shortfall': 0,
+    }
+    assert output['summary']['manual_exclusions'] == {'document_count': 1, 'chunk_count': 1}
+    assert output['summary']['slots'] == {'total': 2, 'available': 2, 'placeholder': 0}
+    assert all('text' not in item and 'embedding' not in item and 'metadata' not in item for item in output['chunks'])
+    assert output['params'] == {'groups': ['block'], 'allowed_types': DEFAULT_ALLOWED_TYPES}
+    assert output['warnings'] == []
+
+
+def test_build_chunks_manifest_rejects_available_slot_and_selected_count_mismatch():
+    inputs = _step1_manifest_contract_inputs()
+    inputs['chunk'] = (
+        inputs['chunk'][0],
+        {
+            'available': False,
+            'chunk_id': 'unavailable:chunk_0002',
+            'doc_id': '__unavailable__',
+            'filename': '',
+            'group': 'block',
+            'type': 'placeholder',
+        },
     )
 
-    output = build_chunks_manifest(manifest_ctx(('chunk_0001', 'chunk_0002', 'chunk_0003')), {
-        'selected_docs': selected_docs({'kb-a': [{'doc_id': 'a-1', 'filename': 'a.pdf'}]}),
-        'import_cases_manifest': import_manifest(target=2),
+    with pytest.raises(ValueError, match='available|selected'):
+        build_chunks_manifest(manifest_ctx(('chunk_0001', 'chunk_0002')), inputs)
+
+
+def test_build_chunks_manifest_warns_only_for_positive_capacity_shortfall():
+    inputs = _step1_manifest_contract_inputs()
+    inputs['build_chunk_candidates']['summary'].update({
+        'selected_count': 1,
+        'unselected_effective_count': 1,
+        'shortfall_count': 1,
+    })
+    inputs['chunk'] = (
+        inputs['chunk'][0],
+        {
+            'available': False,
+            'chunk_id': 'unavailable:chunk_0002',
+            'doc_id': '__unavailable__',
+            'filename': '',
+            'group': 'block',
+            'type': 'placeholder',
+        },
+    )
+
+    output = build_chunks_manifest(
+        manifest_ctx(('chunk_0001', 'chunk_0002')), inputs,
+    )['build_chunks_manifest']
+
+    assert output['warnings'] == ['chunk candidate capacity is short by 1; selected 1 of 2']
+
+
+def test_build_chunks_manifest_all_imported_run_keeps_placeholder_index_without_warning():
+    placeholder = {
+        'available': False,
+        'chunk_id': 'unavailable:chunk_0001',
+        'doc_id': '__unavailable__',
+        'filename': '',
+        'group': 'block',
+        'type': 'placeholder',
+    }
+    inputs = {
+        'selected_docs': {
+            'kb_ids': ['kb-a'],
+            'docs': [],
+            'excluded_docs': [],
+            'stats': {'discovered_count': 0, 'selected_count': 0, 'excluded_count': 0},
+            'params': {'kb_ids': ['kb-a'], 'excluded_docs': []},
+        },
+        'import_cases_manifest': {
+            'source': {'csv_path': '/private/data/cases.csv'},
+            'stats': {'case_allocation': {
+                'target_case_count': 2,
+                'import_case_count': 2,
+                'auto_case_count': 0,
+                'assignments': {},
+            }},
+        },
         'build_chunk_candidates': {
-            'chunks': list(chunks[:2]),
-            'selection_stats': selection_stats,
+            'chunks': [],
+            'summary': {
+                'candidate_limit': 0,
+                'scanned_doc_count': 0,
+                'scanned_chunk_count': 0,
+                'effective_count': 0,
+                'selected_count': 0,
+                'unselected_effective_count': 0,
+                'shortfall_count': 0,
+            },
+            'invalid_counts': {
+                'filtered_by_type': 0,
+                'empty_text': 0,
+                'missing_embedding': 0,
+                'invalid_embedding': 0,
+            },
+            'manual_exclusions': {'chunk_count': 0, 'chunks': []},
+            'filter_options': {'available_groups': ['block'], 'available_types': DEFAULT_ALLOWED_TYPES},
+            'groups': [],
+            'documents': [],
             'params': DEFAULT_BUILD_PARAMS,
         },
-        'chunk': chunks,
-    })['build_chunks_manifest']
+        'chunk': (placeholder, {**placeholder, 'chunk_id': 'unavailable:chunk_0002'}),
+    }
 
-    assert output['stats']['auto_case_count'] == 2
-    assert output['stats']['slots'] == {
-        'total_count': 3,
-        'available_count': 2,
-        'placeholder_count': 1,
-    }
-    assert output['stats']['candidate_selection'] == selection_stats
-    assert output['stats']['source_coverage'] == {
-        'doc_count': 1,
-        'group_counts': {'block': 2},
-        'documents': [{
-            'doc_id': 'a-1',
-            'filename': 'a.pdf',
-            'total_count': 2,
-            'group_counts': {'block': 2},
-        }],
-    }
-    assert output['stats']['warnings'] == [
-        'chunk build produced 2 chunks, below target 3; continuing',
-        'fallback group sampling was used',
-    ]
-    assert output['params'] == DEFAULT_BUILD_PARAMS
+    output = build_chunks_manifest(
+        manifest_ctx(('chunk_0001', 'chunk_0002')), inputs,
+    )['build_chunks_manifest']
+
+    assert output['summary']['slots'] == {'total': 2, 'available': 0, 'placeholder': 2}
+    assert output['source']['case_counts'] == {'target': 2, 'imported': 2, 'automatic': 0}
+    assert output['warnings'] == []

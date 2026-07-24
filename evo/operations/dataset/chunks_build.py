@@ -22,6 +22,7 @@ CHUNK_PARTITION_PATTERN = re.compile(r'^chunk_\d{4,}$')
 class BuildChunksParams:
     groups: list[str]
     allowed_types: list[str]
+    excluded_chunks: list[dict[str, str]]
     max_scan_docs_per_kb: int
     max_scan_chunks: int
 
@@ -35,9 +36,11 @@ class BuildChunksParams:
             if 'allowed_types' in data
             else list(DEFAULT_ALLOWED_TYPES)
         )
+        excluded_chunks = _excluded_chunks(data.get('excluded_chunks', []))
         return cls(
             groups=groups,
             allowed_types=allowed_types,
+            excluded_chunks=excluded_chunks,
             max_scan_docs_per_kb=_positive_int(
                 data.get('max_scan_docs_per_kb', DEFAULT_MAX_SCAN_DOCS_PER_KB), 'max_scan_docs_per_kb',
             ),
@@ -50,6 +53,7 @@ class BuildChunksParams:
         return {
             'groups': list(self.groups),
             'allowed_types': list(self.allowed_types),
+            'excluded_chunks': [dict(item) for item in self.excluded_chunks],
             'max_scan_docs_per_kb': self.max_scan_docs_per_kb,
             'max_scan_chunks': self.max_scan_chunks,
         }
@@ -67,11 +71,7 @@ def build_chunk_candidates(
     auto_case_count = _non_negative_int(case_allocation.get('auto_case_count'), 'auto_case_count')
     candidate_limit = (auto_case_count * 3 + 1) // 2
     if candidate_limit == 0:
-        return {'build_chunk_candidates': {
-            'chunks': [],
-            'selection_stats': _empty_selection_stats(),
-            'params': params.to_dict(),
-        }}
+        return {'build_chunk_candidates': _empty_candidate_payload(params)}
     docs = _docs(selected)
     kb_ids = _string_list(selected.get('kb_ids'), 'selected_docs.kb_ids')
     docs_by_kb = {kb_id: [doc for doc in docs if str(doc.get('kb_id') or '') == kb_id] for kb_id in kb_ids}
@@ -82,6 +82,10 @@ def build_chunk_candidates(
             )
 
     client = kb_client or KnowledgeBaseClient()
+    excluded_by_kb = {
+        kb_id: {item['chunk_id'] for item in params.excluded_chunks if item['kb_id'] == kb_id}
+        for kb_id in kb_ids
+    }
     counts = {
         kb_id: client.count_valid_chunks(
             kb_id,
@@ -89,6 +93,7 @@ def build_chunk_candidates(
             params.groups,
             params.allowed_types,
             params.max_scan_chunks,
+            excluded_chunk_ids=excluded_by_kb[kb_id],
         )
         for kb_id in kb_ids
     }
@@ -96,27 +101,50 @@ def build_chunk_candidates(
     if scanned_count > params.max_scan_chunks:
         raise ValueError(f'max_scan_chunks exceeded: {scanned_count} > {params.max_scan_chunks}')
 
-    chunks, allocation_stats = _allocate_candidates(
-        client, docs_by_kb, kb_ids, counts, params, candidate_limit,
-    )
     effective_count = sum(_non_negative_int(item.get('effective_count'), 'effective_count') for item in counts.values())
-    selection_stats = {
-        'target': {
-            'candidate_limit': candidate_limit,
-            'selected_count': len(chunks),
-            'shortfall_count': max(candidate_limit - len(chunks), 0),
-        },
-        'scan': {'doc_count': len(docs), 'chunk_count': scanned_count},
-        'eligibility': {
-            'effective_count': effective_count,
-            'filtered_count_by_type': _sum_count_maps(counts.values(), 'filtered_count_by_type'),
-            'invalid_count_by_reason': _sum_count_maps(counts.values(), 'invalid_count_by_reason'),
-        },
-        'allocation': allocation_stats,
+    if effective_count == 0:
+        raise ValueError('dataset.build_chunk_candidates effective capacity is zero')
+    invalid_reasons = _sum_count_maps(counts.values(), 'invalid_count_by_reason')
+    invalid_counts = {
+        'filtered_by_type': sum(_sum_count_maps(counts.values(), 'filtered_count_by_type').values()),
+        'empty_text': invalid_reasons.get('empty_text', 0),
+        'missing_embedding': invalid_reasons.get('missing_embedding', 0),
+        'invalid_embedding': invalid_reasons.get('invalid_embedding', 0),
+    }
+    manual_chunks = _manual_exclusions(counts, docs, params.excluded_chunks)
+    if scanned_count != len(manual_chunks) + sum(invalid_counts.values()) + effective_count:
+        raise ValueError('scanned chunk counts do not reconcile')
+
+    chunks, allocation_stats = _allocate_candidates(
+        client, docs_by_kb, kb_ids, counts, params, candidate_limit, excluded_by_kb,
+    )
+    summary = {
+        'candidate_limit': candidate_limit,
+        'scanned_doc_count': len(docs),
+        'scanned_chunk_count': scanned_count,
+        'effective_count': effective_count,
+        'selected_count': len(chunks),
+        'unselected_effective_count': effective_count - len(chunks),
+        'shortfall_count': max(candidate_limit - len(chunks), 0),
     }
     return {'build_chunk_candidates': {
         'chunks': chunks,
-        'selection_stats': selection_stats,
+        'summary': summary,
+        'invalid_counts': invalid_counts,
+        'manual_exclusions': {'chunk_count': len(manual_chunks), 'chunks': manual_chunks},
+        'filter_options': {
+            'available_groups': _available_groups(client, kb_ids, params.groups),
+            'available_types': _available_types(counts, params.allowed_types),
+        },
+        'groups': [
+            {
+                'group': item['group'],
+                'effective_count': item['effective_count'],
+                'selected_count': item['selected_count'],
+            }
+            for item in allocation_stats['groups']
+        ],
+        'documents': _document_summaries(docs, allocation_stats['groups']),
         'params': params.to_dict(),
     }}
 
@@ -131,7 +159,7 @@ def build_chunks(
     partition = _output_partition(ctx, 'chunk')
     index = _slot_index(partition)
     payload = (
-        dict(chunks[index])
+        {'available': True, **dict(chunks[index])}
         if index < len(chunks)
         else unavailable_chunk_payload(partition, params.groups[0])
     )
@@ -141,6 +169,7 @@ def build_chunks(
 def build_chunks_manifest(ctx: Any, inputs: Mapping[str, object]) -> Mapping[str, object]:
     selected = _mapping(inputs.get('selected_docs'), 'selected_docs')
     allocation = _case_allocation(inputs.get('import_cases_manifest'))
+    import_manifest = _mapping(inputs.get('import_cases_manifest'), 'import_cases_manifest')
     candidates = _mapping(inputs.get('build_chunk_candidates'), 'build_chunk_candidates')
     params = BuildChunksParams.from_dict(_mapping(candidates.get('params'), 'build_chunk_candidates.params'))
     chunks = _chunk_tuple(inputs.get('chunk'))
@@ -148,16 +177,74 @@ def build_chunks_manifest(ctx: Any, inputs: Mapping[str, object]) -> Mapping[str
     if len(partitions) != len(chunks):
         raise ValueError('dataset.build_chunks_manifest runtime partitions do not match chunk tuple')
 
-    selection_stats = normalize_selection_stats(
-        _mapping(candidates.get('selection_stats'), 'build_chunk_candidates.selection_stats')
-    )
-    fallback_used = bool(_mapping(selection_stats['allocation'], 'selection_stats.allocation').get('fallback_used'))
-    warnings = build_warnings(sum(1 for chunk in chunks if chunk.get('available')), len(partitions), fallback_used)
-    return {
-        'build_chunks_manifest': built_chunks_payload(
-            ctx, selected, chunks, partitions, allocation['auto_case_count'], warnings, params, selection_stats,
-        )
+    summary = _candidate_summary(candidates)
+    invalid_counts = _four_counts(candidates.get('invalid_counts'), 'build_chunk_candidates.invalid_counts')
+    manual = _mapping(candidates.get('manual_exclusions'), 'build_chunk_candidates.manual_exclusions')
+    manual_chunk_count = _non_negative_int(manual.get('chunk_count'), 'manual_exclusions.chunk_count')
+    _validate_candidate_counts(summary, invalid_counts, manual_chunk_count)
+
+    manifest_chunks = [_manifest_chunk(partition, chunk) for partition, chunk in zip(partitions, chunks, strict=True)]
+    available_count = sum(1 for chunk in manifest_chunks if chunk['available'])
+    if available_count != summary['selected_count']:
+        raise ValueError('available slot count does not match selected chunk count')
+    selected_stats = _mapping(selected.get('stats'), 'selected_docs.stats')
+    document_counts = {
+        'discovered': _non_negative_int(selected_stats.get('discovered_count'), 'discovered_count'),
+        'scanned': _non_negative_int(selected_stats.get('selected_count'), 'selected_count'),
+        'excluded': _non_negative_int(selected_stats.get('excluded_count'), 'excluded_count'),
     }
+    if document_counts['discovered'] != document_counts['scanned'] + document_counts['excluded']:
+        raise ValueError('selected document counts do not reconcile')
+    source = _mapping(import_manifest.get('source'), 'import_cases_manifest.source')
+    warnings = []
+    if (
+        allocation['auto_case_count'] > 0
+        and summary['effective_count'] > 0
+        and summary['shortfall_count'] > 0
+    ):
+        warnings.append(
+            f"chunk candidate capacity is short by {summary['shortfall_count']}; "
+            f"selected {summary['selected_count']} of {summary['candidate_limit']}"
+        )
+    payload = {
+        'source': {
+            'kb_ids': list(selected.get('kb_ids') or []),
+            'csv_present': bool(str(source.get('csv_path') or '').strip()),
+            'case_counts': {
+                'target': _non_negative_int(allocation.get('target_case_count'), 'target_case_count'),
+                'imported': _non_negative_int(allocation.get('import_case_count'), 'import_case_count'),
+                'automatic': _non_negative_int(allocation.get('auto_case_count'), 'auto_case_count'),
+            },
+        },
+        'summary': {
+            'document_counts': document_counts,
+            'chunk_counts': {
+                'scanned': summary['scanned_chunk_count'],
+                'effective': summary['effective_count'],
+                'selected': summary['selected_count'],
+                'unselected_effective': summary['unselected_effective_count'],
+                'candidate_target': summary['candidate_limit'],
+                'shortfall': summary['shortfall_count'],
+            },
+            'invalid_counts': invalid_counts,
+            'manual_exclusions': {
+                'document_count': document_counts['excluded'],
+                'chunk_count': manual_chunk_count,
+            },
+            'slots': {
+                'total': len(manifest_chunks),
+                'available': available_count,
+                'placeholder': len(manifest_chunks) - available_count,
+            },
+        },
+        'filter_options': json_value(_mapping(candidates.get('filter_options'), 'build_chunk_candidates.filter_options')),
+        'groups': json_value(_list_of_mappings(candidates.get('groups'), 'build_chunk_candidates.groups')),
+        'documents': json_value(_list_of_mappings(candidates.get('documents'), 'build_chunk_candidates.documents')),
+        'chunks': manifest_chunks,
+        'params': {'groups': list(params.groups), 'allowed_types': list(params.allowed_types)},
+        'warnings': warnings,
+    }
+    return {'build_chunks_manifest': payload}
 
 
 def _allocate_candidates(
@@ -167,6 +254,7 @@ def _allocate_candidates(
     counts: dict[str, Mapping[str, Any]],
     params: BuildChunksParams,
     candidate_limit: int,
+    excluded_by_kb: dict[str, set[str]],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     chunks: list[dict[str, Any]] = []
     group_stats = []
@@ -196,6 +284,7 @@ def _allocate_candidates(
                 quota = doc_quotas[doc_id]
                 nodes = client.fetch_valid_chunks(
                     kb_id, doc_id, group, params.allowed_types, quota, order_by='stable_chunk_id_hash',
+                    excluded_chunk_ids=excluded_by_kb[kb_id],
                 ) if quota else []
                 nodes = sorted(nodes, key=lambda node: (getattr(node, 'number', 0), str(getattr(node, 'uid', ''))))
                 for node in nodes:
@@ -238,64 +327,9 @@ def _allocate_candidates(
     }
 
 
-def built_chunks_payload(
-    ctx: Any,
-    selected: Mapping[str, Any],
-    chunks: tuple[Mapping[str, Any], ...],
-    partitions: tuple[str, ...],
-    auto_case_count: int,
-    warnings: list[str],
-    params: BuildChunksParams,
-    selection_stats: dict[str, Any],
-) -> dict[str, Any]:
-    manifest_chunks = [
-        {
-            'available': bool(chunk.get('available')),
-            'kb_id': str(chunk.get('kb_id') or ''),
-            'chunk_id': str(chunk.get('chunk_id') or ''),
-            'doc_id': str(chunk.get('doc_id') or ''),
-            'filename': str(chunk.get('filename') or ''),
-            'group': str(chunk.get('group') or ''),
-            'type': str(chunk.get('type') or ''),
-            'partition': partition,
-        }
-        for partition, chunk in zip(partitions, chunks, strict=True)
-    ]
-    coverage = chunk_stats(manifest_chunks)
-    stats = {
-        'auto_case_count': auto_case_count,
-        'slots': {
-            'total_count': len(manifest_chunks),
-            'available_count': sum(1 for chunk in manifest_chunks if chunk['available']),
-            'placeholder_count': sum(1 for chunk in manifest_chunks if not chunk['available']),
-        },
-        'candidate_selection': selection_stats,
-        'source_coverage': coverage,
-        'warnings': list(warnings),
-    }
-    source = {'kb_ids': list(selected.get('kb_ids') or [])}
-    selected_ref = selected_docs_ref(ctx)
-    if selected_ref:
-        source['selected_docs_ref'] = selected_ref
-    return {
-        'source': source,
-        'chunks': manifest_chunks,
-        'stats': stats,
-        'params': params.to_dict(),
-    }
-
-
-def selected_docs_ref(ctx: Any) -> str:
-    for ref in getattr(ctx, 'input_ref_by_key', {}).values():
-        if getattr(getattr(ref, 'key', None), 'artifact_id', '') == C.DATASET_SELECTED_DOCS:
-            return f'{ref.key.artifact_id}@v{ref.version}'
-    return ''
-
-
 def chunk_payload(node: Any, kb_id: str, doc_id: str, group: str, doc: dict[str, Any]) -> dict[str, Any]:
     chunk = chunk_from_docnode(node, kb_id=kb_id, doc_id=doc_id, group=group, doc=doc)
     return {
-        'available': True,
         'kb_id': kb_id,
         'chunk_id': chunk.chunk_id,
         'doc_id': chunk.source.doc_id,
@@ -356,52 +390,209 @@ def _sum_count_maps(results: Any, key: str) -> dict[str, int]:
     return dict(counts)
 
 
-def _empty_selection_stats() -> dict[str, Any]:
+def _empty_candidate_payload(params: BuildChunksParams) -> dict[str, Any]:
     return {
-        'target': {'candidate_limit': 0, 'selected_count': 0, 'shortfall_count': 0},
-        'scan': {'doc_count': 0, 'chunk_count': 0},
-        'eligibility': {
+        'chunks': [],
+        'summary': {
+            'candidate_limit': 0,
+            'scanned_doc_count': 0,
+            'scanned_chunk_count': 0,
             'effective_count': 0,
-            'filtered_count_by_type': {},
-            'invalid_count_by_reason': {},
+            'selected_count': 0,
+            'unselected_effective_count': 0,
+            'shortfall_count': 0,
         },
-        'allocation': {'fallback_used': False, 'groups': []},
+        'invalid_counts': {
+            'filtered_by_type': 0,
+            'empty_text': 0,
+            'missing_embedding': 0,
+            'invalid_embedding': 0,
+        },
+        'manual_exclusions': {'chunk_count': 0, 'chunks': []},
+        'filter_options': {
+            'available_groups': list(params.groups),
+            'available_types': list(params.allowed_types),
+        },
+        'groups': [],
+        'documents': [],
+        'params': params.to_dict(),
     }
 
 
-def build_warnings(chunk_count: int, target: int, fallback_used: bool) -> list[str]:
-    warnings = []
-    if chunk_count < target:
-        warnings.append(f'chunk build produced {chunk_count} chunks, below target {target}; continuing')
-    if fallback_used:
-        warnings.append('fallback group sampling was used')
-    return warnings
+def _excluded_chunks(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        raise ValueError('excluded_chunks must be a list')
+    result: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for index, item in enumerate(value):
+        if not isinstance(item, Mapping):
+            raise ValueError(f'excluded_chunks[{index}] must be a mapping')
+        try:
+            normalized = {
+                key: validate_id(str(item.get(key) or '').strip(), f'excluded_chunks.{key}')
+                for key in ('kb_id', 'doc_id', 'chunk_id')
+            }
+        except ValueError as exc:
+            raise ValueError(f'excluded_chunks[{index}] contains an invalid reference') from exc
+        key = (normalized['kb_id'], normalized['chunk_id'])
+        if key in seen:
+            raise ValueError('excluded_chunks must contain unique (kb_id, chunk_id) references')
+        seen.add(key)
+        result.append(normalized)
+    return result
 
 
-def chunk_stats(chunks: list[dict[str, Any]]) -> dict[str, Any]:
-    available_chunks = [chunk for chunk in chunks if chunk.get('available')]
-    group_counts = Counter(str(chunk.get('group') or '') for chunk in available_chunks)
-    doc_groups: dict[str, Counter] = {}
-    filenames: dict[str, str] = {}
-    for chunk in available_chunks:
-        doc_id = str(chunk.get('doc_id') or '')
-        doc_groups.setdefault(doc_id, Counter())[str(chunk.get('group') or '')] += 1
-        filenames.setdefault(doc_id, str(chunk.get('filename') or ''))
+def _manual_exclusions(
+    counts: Mapping[str, Mapping[str, Any]],
+    docs: list[Mapping[str, Any]],
+    configured: list[Mapping[str, str]],
+) -> list[dict[str, str]]:
+    docs_by_key = {
+        (str(doc.get('kb_id') or ''), str(doc.get('doc_id') or '')): doc
+        for doc in docs
+    }
+    result = []
+    seen: set[tuple[str, str]] = set()
+    configured_docs = {
+        (item['kb_id'], item['chunk_id']): item['doc_id']
+        for item in configured
+    }
+    for kb_id, count in counts.items():
+        values = count.get('manual_exclusions', [])
+        if not isinstance(values, list):
+            raise ValueError('count_valid_chunks.manual_exclusions must be a list')
+        for item in values:
+            value = _mapping(item, 'count_valid_chunks.manual_exclusions[]')
+            chunk_id = str(value.get('chunk_id') or '')
+            key = (kb_id, chunk_id)
+            if key in seen:
+                raise ValueError(f'duplicate chunk_id: {chunk_id}')
+            seen.add(key)
+            doc_id = str(value.get('doc_id') or '')
+            if expected_doc_id := configured_docs.get(key):
+                if doc_id != expected_doc_id:
+                    raise ValueError(
+                        f'excluded chunk doc_id mismatch: {chunk_id} expected {expected_doc_id}, got {doc_id}'
+                    )
+            doc = docs_by_key.get((kb_id, doc_id), {})
+            result.append({
+                'kb_id': kb_id,
+                'doc_id': doc_id,
+                'chunk_id': chunk_id,
+                'filename': str(doc.get('filename') or ''),
+                'group': str(value.get('group') or ''),
+                'type': normalized_type(value.get('type')),
+            })
+    return result
+
+
+def _available_groups(client: Any, kb_ids: list[str], configured: list[str]) -> list[str]:
+    values: list[str] = []
+    list_groups = getattr(client, 'list_groups', None)
+    if callable(list_groups):
+        for kb_id in kb_ids:
+            groups = list_groups(kb_id)
+            if not isinstance(groups, list):
+                raise ValueError('list_groups must return a list')
+            values.extend(str(group).strip() for group in groups if str(group).strip())
+    return list(dict.fromkeys([*values, *configured]))
+
+
+def _available_types(counts: Mapping[str, Mapping[str, Any]], configured: list[str]) -> list[str]:
+    observed = []
+    for count in counts.values():
+        values = count.get('observed_types', [])
+        if not isinstance(values, list):
+            raise ValueError('count_valid_chunks.observed_types must be a list')
+        observed.extend(normalized_type(value) for value in values)
+    return list(dict.fromkeys([*observed, *configured]))
+
+
+def _document_summaries(
+    docs: list[Mapping[str, Any]],
+    group_stats: list[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    by_key: dict[tuple[str, str, str], tuple[int, int]] = {}
+    group_order = [str(group.get('group') or '') for group in group_stats]
+    for group in group_stats:
+        group_name = str(group.get('group') or '')
+        for kb in group.get('knowledge_bases', []):
+            kb_value = _mapping(kb, 'allocation.knowledge_bases[]')
+            kb_id = str(kb_value.get('kb_id') or '')
+            for doc in kb_value.get('documents', []):
+                doc_value = _mapping(doc, 'allocation.documents[]')
+                by_key[(kb_id, str(doc_value.get('doc_id') or ''), group_name)] = (
+                    _non_negative_int(doc_value.get('effective_count'), 'effective_count'),
+                    _non_negative_int(doc_value.get('selected_count'), 'selected_count'),
+                )
+    result = []
+    for doc in docs:
+        kb_id = str(doc.get('kb_id') or '')
+        doc_id = str(doc.get('doc_id') or '')
+        groups = [
+            {'group': group, 'effective_count': counts[0], 'selected_count': counts[1]}
+            for group in group_order
+            if (counts := by_key.get((kb_id, doc_id, group), (0, 0))) != (0, 0)
+        ]
+        result.append({
+            'kb_id': kb_id,
+            'doc_id': doc_id,
+            'filename': str(doc.get('filename') or ''),
+            'file_type': str(doc.get('file_type') or ''),
+            'effective_count': sum(item['effective_count'] for item in groups),
+            'selected_count': sum(item['selected_count'] for item in groups),
+            'groups': groups,
+        })
+    return result
+
+
+def _candidate_summary(candidates: Mapping[str, Any]) -> dict[str, int]:
+    value = _mapping(candidates.get('summary'), 'build_chunk_candidates.summary')
+    keys = (
+        'candidate_limit', 'scanned_doc_count', 'scanned_chunk_count', 'effective_count',
+        'selected_count', 'unselected_effective_count', 'shortfall_count',
+    )
+    return {key: _non_negative_int(value.get(key), f'summary.{key}') for key in keys}
+
+
+def _four_counts(value: object, name: str) -> dict[str, int]:
+    counts = _mapping(value, name)
     return {
-        'doc_count': len(doc_groups),
-        'group_counts': dict(group_counts),
-        'documents': [
-            {'doc_id': doc_id, 'filename': filenames.get(doc_id, ''),
-             'total_count': sum(groups.values()), 'group_counts': dict(groups)}
-            for doc_id, groups in sorted(doc_groups.items())
-        ],
+        key: _non_negative_int(counts.get(key), f'{name}.{key}')
+        for key in ('filtered_by_type', 'empty_text', 'missing_embedding', 'invalid_embedding')
     }
 
 
-def normalize_selection_stats(value: Mapping[str, Any]) -> dict[str, Any]:
-    for key in ('target', 'scan', 'eligibility', 'allocation'):
-        _mapping(value.get(key), f'selection_stats.{key}')
-    return json_value(value)
+def _validate_candidate_counts(
+    summary: Mapping[str, int],
+    invalid_counts: Mapping[str, int],
+    manual_chunk_count: int,
+) -> None:
+    if summary['selected_count'] + summary['unselected_effective_count'] != summary['effective_count']:
+        raise ValueError('selected and unselected effective chunk counts do not reconcile')
+    if summary['selected_count'] + summary['shortfall_count'] != summary['candidate_limit']:
+        raise ValueError('selected and shortfall chunk counts do not reconcile')
+    if summary['scanned_chunk_count'] != manual_chunk_count + sum(invalid_counts.values()) + summary['effective_count']:
+        raise ValueError('scanned chunk counts do not reconcile')
+
+
+def _manifest_chunk(partition: str, chunk: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        'available': bool(chunk.get('available')),
+        'kb_id': str(chunk.get('kb_id') or ''),
+        'chunk_id': str(chunk.get('chunk_id') or ''),
+        'doc_id': str(chunk.get('doc_id') or ''),
+        'filename': str(chunk.get('filename') or ''),
+        'group': str(chunk.get('group') or ''),
+        'type': str(chunk.get('type') or ''),
+        'partition': partition,
+    }
+
+
+def _list_of_mappings(value: object, name: str) -> list[Mapping[str, Any]]:
+    if not isinstance(value, list):
+        raise ValueError(f'{name} must be a list')
+    return [_mapping(item, f'{name}[]') for item in value]
 
 
 def json_value(value: Any) -> Any:
@@ -420,7 +611,9 @@ def normalized_types(value: Any) -> list[str]:
     normalized = [normalized_type(item) for item in value]
     if any(not item for item in normalized):
         raise ValueError('allowed_types must not contain empty values')
-    return list(dict.fromkeys(normalized))
+    if len(set(normalized)) != len(normalized):
+        raise ValueError('allowed_types must contain unique values')
+    return normalized
 
 
 def normalized_type(value: Any) -> str:
@@ -430,9 +623,11 @@ def normalized_type(value: Any) -> str:
 
 def _docs(selected: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     docs = selected.get('docs')
-    if not isinstance(docs, list) or not docs:
-        raise ValueError('selected_docs.docs must be a non-empty list')
-    return [doc for doc in docs if isinstance(doc, Mapping)]
+    if not isinstance(docs, list):
+        raise ValueError('selected_docs.docs must be a list')
+    if not all(isinstance(doc, Mapping) for doc in docs):
+        raise ValueError('selected_docs.docs must contain only mappings')
+    return list(docs)
 
 
 def _mapping(value: object, name: str) -> Mapping[str, Any]:

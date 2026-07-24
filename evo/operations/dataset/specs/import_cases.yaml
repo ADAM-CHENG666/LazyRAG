@@ -1,3 +1,4 @@
+# STEP1 CSV 导入契约：完整行级详情按需读取；默认页只消费最终 STEP1 Manifest 中的数量摘要。
 operation:
   op_id: dataset.import_cases
   flow: dataset
@@ -66,7 +67,7 @@ output_payload:
         type: object
         fields:
           csv_reading:
-            # CSV 的整体读取结果；loaded 只统计实际占用 case 分区的行。
+            # CSV 的整体读取结果，直接支撑“数据源设置”抽屉；无需前端遍历 details 计数。
             type: object
             fields:
               total_row_count:
@@ -74,6 +75,10 @@ output_payload:
               valid_row_count:
                 type: integer
               loaded_row_count:
+                type: integer
+              invalid_row_count:
+                type: integer
+              truncated_row_count:
                 type: integer
           case_allocation:
             # 静态总数 = import_case_count + auto_case_count。
@@ -166,7 +171,8 @@ execution_flow:
   - 对通过引用复核的行，派生 reference_chunk_ids、reference_doc_ids 与 source_preparation.kb_ids；question 按 trim、压缩空白、忽略大小写进行去重，后出现的重复行同样标记 invalid。
   - 按源文件顺序压缩全部合法行，选取前 min(合法行数, target_case_count) 行；选中行标记 loaded，超过目标的合法行标记 truncated。
   - 将 loaded 行依次固定写入 case_0001 至 case_00NN 的 stats.case_allocation.assignments，mode=imported；对应 detail.case.id 必须等于该 runtime case id；剩余稳定分区写入 mode=generated。
-  - 汇总 stats.csv_reading 的总/有效/实际加载行数，以及 stats.case_allocation 的目标/导入/自动 case 数和 assignments；后续 operation 只消费该 manifest，不重新读取或重新分配 CSV。
+  - 汇总 stats.csv_reading 的总/有效/加载/无效/截断行数，以及 stats.case_allocation 的目标/导入/自动 Case 数和 assignments；后续 operation 只消费该 manifest，不重新读取或重新分配 CSV。
+  - 要求 total_row_count = valid_row_count + invalid_row_count，valid_row_count = loaded_row_count + truncated_row_count，target_case_count = import_case_count + auto_case_count。
   - 返回 {"import_cases_manifest": payload}。
 
 tests:
@@ -193,9 +199,9 @@ tests:
     cases:
       # 合法行按源顺序压缩，前 target_case_count 行导入到连续 runtime case 分区。
       - assigns_selected_rows_to_stable_case_partitions
-      # 合法行超过目标时只截取前 N 行，并记录截断统计而不报错。
+      # 合法行超过目标时只截取前 N 行，并令 truncated_count=valid_count-selected_count，不报错。
       - truncates_valid_rows_with_manifest_stats
-      # 无效行不占用 case 分区；不足部分全部由 generated assignments 补齐。
+      # 无效行不占用 case 分区；invalid_count 等于 invalid_details 数量，不足部分全部由 generated assignments 补齐。
       - invalid_details_do_not_consume_capacity
-      # manifest 保存 CSV 指纹、行级错误、派生溯源字段和 auto chunk 目标，不保存原始 CSV 内容。
+      # manifest 保存 CSV 指纹、行级错误、派生溯源字段和 auto chunk 目标，不保存原始 CSV 内容；所有计数可相互对账。
       - records_reproducible_audit_metadata

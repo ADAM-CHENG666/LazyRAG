@@ -208,7 +208,37 @@ def test_count_valid_chunks_returns_group_doc_capacity_and_aggregate_filter_stat
         'capacities': {'block': {'doc-1': 1}},
         'filtered_count_by_type': {'heading': 1},
         'invalid_count_by_reason': {'empty_text': 1, 'missing_embedding': 1},
+        'manual_exclusions': [],
+        'observed_types': ['text', 'heading'],
     }
+
+
+def test_count_valid_chunks_classifies_manual_exclusions_before_content_and_embedding_validation():
+    document = FakeDocument({
+        ('doc-1', 'block', 0): ([
+            node('keep'),
+            node('excluded-empty', text=' ', embedding={}),
+        ], 2),
+    })
+
+    result = KnowledgeBaseClient(document=document).count_valid_chunks(
+        'kb-1',
+        ['doc-1'],
+        ['block'],
+        ['text'],
+        max_scan_chunks=10,
+        excluded_chunk_ids={'excluded-empty'},
+    )
+
+    assert result['effective_count'] == 1
+    assert result['invalid_count_by_reason'] == {}
+    assert result['manual_exclusions'] == [{
+        'kb_id': 'kb-1',
+        'doc_id': 'doc-1',
+        'chunk_id': 'excluded-empty',
+        'group': 'block',
+        'type': 'text',
+    }]
 
 
 def test_count_valid_chunks_rejects_scan_limit_without_returning_partial_capacity():
@@ -233,6 +263,23 @@ def test_fetch_valid_chunks_selects_by_stable_chunk_id_hash_and_hydrates_only_se
     expected = sorted(values, key=lambda item: hashlib.sha256(item.uid.encode()).hexdigest())[:3]
 
     assert [item.uid for item in selected] == [item.uid for item in expected]
+
+
+def test_fetch_valid_chunks_never_returns_manually_excluded_ids():
+    values = [node('keep'), node('exclude')]
+    client = KnowledgeBaseClient(document=FakeDocument({('doc-1', 'block', 0): (values, 2)}))
+
+    selected = client.fetch_valid_chunks(
+        'kb-1',
+        'doc-1',
+        'block',
+        ['text'],
+        2,
+        order_by='stable_chunk_id_hash',
+        excluded_chunk_ids={'exclude'},
+    )
+
+    assert [item.uid for item in selected] == ['keep']
 
 
 def test_iter_chunks_empty_doc_ids_yields_nothing_and_does_not_read_document():

@@ -65,11 +65,19 @@ def import_cases(ctx: Any, inputs: Mapping[str, object], kb_client: KnowledgeBas
 
 def _manifest(path: str, digest: str, size: int, target: int, details: list[dict[str, object]], valid: list[dict[str, object]]) -> dict[str, object]:
     loaded = [item for item in details if item['load_status'] == 'loaded']
+    invalid = [item for item in details if item['load_status'] == 'invalid']
+    truncated = [item for item in details if item['load_status'] == 'truncated']
     assignments = {item['case_id']: {'mode': 'imported', 'source_row_number': item['source_row_number']} for item in loaded}
     assignments |= {f'case_{i:04d}': {'mode': 'generated'} for i in range(len(loaded) + 1, target + 1)}
     return {
         'source': {'csv_path': path, 'csv_sha256': digest, 'csv_size_bytes': size} if path else {'csv_path': ''},
-        'stats': {'csv_reading': {'total_row_count': len(details), 'valid_row_count': len(valid), 'loaded_row_count': len(loaded)},
+        'stats': {'csv_reading': {
+                      'total_row_count': len(details),
+                      'valid_row_count': len(valid),
+                      'loaded_row_count': len(loaded),
+                      'invalid_row_count': len(invalid),
+                      'truncated_row_count': len(truncated),
+                  },
                   'case_allocation': {'target_case_count': target, 'import_case_count': len(loaded),
                                       'auto_case_count': target - len(loaded), 'assignments': assignments}},
         'details': details,

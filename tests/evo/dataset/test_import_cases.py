@@ -82,7 +82,13 @@ def test_absent_csv_creates_all_generated_assignments_without_kb_access():
     assert result == {
         'source': {'csv_path': ''},
         'stats': {
-            'csv_reading': {'total_row_count': 0, 'valid_row_count': 0, 'loaded_row_count': 0},
+            'csv_reading': {
+                'total_row_count': 0,
+                'valid_row_count': 0,
+                'loaded_row_count': 0,
+                'invalid_row_count': 0,
+                'truncated_row_count': 0,
+            },
             'case_allocation': {
                 'target_case_count': 3,
                 'import_case_count': 0,
@@ -210,7 +216,11 @@ def test_truncates_valid_rows_with_manifest_stats(tmp_path):
 
     result = _manifest(source)
     assert result['stats']['csv_reading'] == {
-        'total_row_count': 3, 'valid_row_count': 3, 'loaded_row_count': 2,
+        'total_row_count': 3,
+        'valid_row_count': 3,
+        'loaded_row_count': 2,
+        'invalid_row_count': 0,
+        'truncated_row_count': 1,
     }
     assert [detail['load_status'] for detail in result['details']] == ['loaded', 'loaded', 'truncated']
     assert 'case' not in result['details'][2]
@@ -253,3 +263,26 @@ def test_records_reproducible_audit_metadata_without_raw_csv_blob(tmp_path):
     assert detail['case']['reference_doc_ids'] == ['doc-a']
     assert detail['case']['source_preparation'] == {'kb_ids': ['kb-a']}
     assert 'csv_content' not in result['source']
+
+
+def test_csv_reading_counts_reconcile_loaded_invalid_and_truncated_rows(tmp_path):
+    """The review manifest must explain every CSV row with mutually reconcilable counts."""
+    source = _write_csv(tmp_path, [
+        _row(question='Loaded 1'),
+        _row(question='Invalid', reference_context=json.dumps([{'chunk_id': 'missing', 'text': 'Evidence'}])),
+        _row(question='Loaded 2', reference_context=json.dumps([{'chunk_id': 'chunk-2', 'text': 'Evidence 2'}])),
+        _row(question='Truncated'),
+    ])
+
+    result = _manifest(source, target=2)
+    counts = result['stats']['csv_reading']
+
+    assert counts == {
+        'total_row_count': 4,
+        'valid_row_count': 3,
+        'loaded_row_count': 2,
+        'invalid_row_count': 1,
+        'truncated_row_count': 1,
+    }
+    assert counts['total_row_count'] == counts['valid_row_count'] + counts['invalid_row_count']
+    assert counts['valid_row_count'] == counts['loaded_row_count'] + counts['truncated_row_count']
