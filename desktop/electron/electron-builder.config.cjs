@@ -4,6 +4,9 @@ const path = require("node:path");
 const util = require("node:util");
 
 const execFile = util.promisify(childProcess.execFile);
+const delay = (milliseconds) => new Promise((resolve) => {
+  setTimeout(resolve, milliseconds);
+});
 
 const runtimeStage = process.env.LAZYMIND_DESKTOP_RUNTIME_STAGE;
 if (!runtimeStage) {
@@ -56,10 +59,17 @@ function collectRuntimeMachOBinaries(root) {
         continue;
       }
 
-      const descriptor = fs.openSync(absolutePath, "r");
       const magic = Buffer.allocUnsafe(4);
-      const bytesRead = fs.readSync(descriptor, magic, 0, magic.length, 0);
-      fs.closeSync(descriptor);
+      let descriptor;
+      let bytesRead;
+      try {
+        descriptor = fs.openSync(absolutePath, "r");
+        bytesRead = fs.readSync(descriptor, magic, 0, magic.length, 0);
+      } finally {
+        if (descriptor !== undefined) {
+          fs.closeSync(descriptor);
+        }
+      }
       if (bytesRead === magic.length && MACH_O_MAGICS.has(magic.readUInt32BE(0))) {
         binaries.push(absolutePath);
       }
@@ -67,6 +77,24 @@ function collectRuntimeMachOBinaries(root) {
   }
 
   return binaries.sort();
+}
+
+async function codesignWithRetry(args, binary) {
+  const maximumAttempts = 3;
+  for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
+    try {
+      await execFile("/usr/bin/codesign", args);
+      return;
+    } catch (error) {
+      if (attempt === maximumAttempts) {
+        throw error;
+      }
+      console.warn(
+        `codesign attempt ${attempt}/${maximumAttempts} failed for ${binary}; retrying`,
+      );
+      await delay(attempt * 1000);
+    }
+  }
 }
 
 async function signEmbeddedRuntime(context) {
@@ -117,7 +145,7 @@ async function signEmbeddedRuntime(context) {
         args.push("--keychain", keychainFile);
       }
       args.push(binary);
-      await execFile("/usr/bin/codesign", args);
+      await codesignWithRetry(args, binary);
     }
   });
   await Promise.all(workers);
