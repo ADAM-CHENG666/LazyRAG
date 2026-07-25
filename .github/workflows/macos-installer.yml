@@ -17,6 +17,7 @@ concurrency:
 
 env:
   CI: "true"
+  NODE_OPTIONS: --max-old-space-size=4096
   MIRROR_PROFILE: intl
   NPM_CONFIG_REGISTRY: https://registry.npmjs.org
   GOPROXY: https://proxy.golang.org,direct
