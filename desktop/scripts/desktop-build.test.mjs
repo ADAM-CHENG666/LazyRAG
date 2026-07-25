@@ -126,6 +126,7 @@ test("Windows installer verifies and force-cleans processes left by warmup", () 
 
 test("macOS distribution build requires Developer ID signing and notarizes the final DMG", () => {
   const source = readFileSync(darwinBuildScript, "utf8");
+  const builderSource = readFileSync(electronBuilderConfig, "utf8");
   const packageJson = JSON.parse(readFileSync(electronPackage, "utf8"));
   assert.match(source, /PACKAGE_KIND=.*zip/);
   assert.match(source, /SIGNING_MODE=.*adhoc/);
@@ -136,6 +137,13 @@ test("macOS distribution build requires Developer ID signing and notarizes the f
   assert.match(source, /Authority=Developer ID Application:/);
   assert.match(source, /verify_runtime_code_signatures "\$\{APP_PATH\}\/Contents\/Resources\/runtime"/);
   assert.match(packageJson.scripts["dist:mac:arm64"], /--publish never$/);
+  assert.match(builderSource, /afterPack:\s*signAndStageEmbeddedRuntime/);
+  assert.match(builderSource, /afterSign:\s*restoreRuntimeAndFinalizeSignature/);
+  assert.match(builderSource, /fs\.renameSync\(runtimeRoot, stagedRuntime\)/);
+  assert.match(builderSource, /fs\.renameSync\(staged\.stagedRuntime, staged\.runtimeRoot\)/);
+  assert.match(builderSource, /notarytool[\s\S]*submit[\s\S]*notarizationArchive/);
+  assert.match(builderSource, /notarize:\s*false/);
+  assert.doesNotMatch(builderSource, /signIgnore:/);
   for (const privatePath of ["/.env", "/.lazymind-local", "/data", "/volumes", "/local/config.env"]) {
     assert.match(source, new RegExp(`--exclude "${privatePath.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}"`));
   }
