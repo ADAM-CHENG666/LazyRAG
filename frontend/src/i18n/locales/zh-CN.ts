@@ -2066,7 +2066,8 @@ const zhCN = {
     dataSourceTypeLocalDesc: "支持选择多个本地路径并进行连接测试",
     dataSourceTypeFeishuDesc: "需先设置 App ID / App Secret，再通过 OAuth 连接",
     dataSourceTypeNotion: "Notion",
-    dataSourceTypeNotionDesc: "连接 Notion 页面或数据库，按授权范围同步并供 Chat 读取。",
+    dataSourceTypeNotionDesc:
+      "连接 Notion 页面或数据库；需按 HTTPS 回调教程配置 OAuth Redirect URI。",
     dataSourceTypeGoogleDrive: "Google Drive",
     dataSourceGoogleDriveSetupHint:
       "授权 Google Drive 账号，用于 Chat 在线搜索，不会导入知识库。",
@@ -2112,7 +2113,7 @@ const zhCN = {
     dataSourceNotionCredentialModalTitle: "配置 Notion OAuth 应用",
     dataSourceNotionCredentialSaveAndSelect: "保存并授权 Notion",
     dataSourceNotionCredentialHint:
-      "请前往 Notion Developers 创建 Public Integration，获取 OAuth Client ID 和 Client Secret；Redirect URI 需配置为 /oauth/notion/data-source/callback。",
+      "请先查看 Notion 接入教程，在 Notion Developers 创建 Public Integration，获取 OAuth Client ID 和 Client Secret，并将教程页展示的完整 HTTPS Redirect URI 配置到 Notion。",
     dataSourceNotionCredentialSaved: "Notion OAuth 凭证已保存",
     dataSourceNotionCredentialReset: "Notion OAuth 凭证已重置",
     dataSourceNotionResetCredentialAction: "重设凭据",
@@ -2140,7 +2141,7 @@ const zhCN = {
     dataSourceNotionTargetTypeDatabase: "数据库",
     dataSourceNotionTargetLabel: "Notion 页面或数据库",
     dataSourceNotionSetupGuideHint:
-      "：查看详细的 Notion OAuth 配置步骤、所需凭证和 Redirect URI 说明。",
+      "：查看详细的 Notion OAuth 配置步骤、所需凭证和 HTTPS Redirect URI 配置说明。",
     dataSourceDatabaseTitle: "外部数据库",
     dataSourceDatabaseSubtitle: "配置用于聊天只读查询的 MySQL 和 PostgreSQL 数据库连接。",
     dataSourceDatabaseSectionTitle: "数据库",
@@ -2383,11 +2384,11 @@ const zhCN = {
       backManagement: "返回数据源管理",
       title: "数据源管理-新建数据源-Notion",
       subtitle:
-        "在 Notion Developers 创建 Public Integration，获取 OAuth 凭证并配置 Redirect URI，然后在 LazyMind 中完成 Notion 数据源授权。",
+        "在 Notion Developers 创建 Public Integration，获取 OAuth 凭证并配置 HTTPS Redirect URI，然后在 LazyMind 中完成 Notion 数据源授权。",
       summaryAria: "Notion 接入流程概览",
       summaryTitle: "准备流程",
       openDevelopers: "打开 Notion Developers",
-      callbackUrl: "回调地址：{{uri}}",
+      callbackUrl: "当前页面生成的回调地址：{{uri}}",
       steps: {
         openDevelopersTitle: "进入 Notion 开发者网站",
         openDevelopersDesc:
@@ -2410,9 +2411,9 @@ const zhCN = {
           "Client Secret：Integration 的密钥，需要保密，仅在创建时可完整查看。",
         redirectTitle: "配置 Redirect URI",
         redirectDesc:
-          "在 Integration 设置的「Redirect URIs」区域，添加 LazyMind 的 OAuth 回调地址。这个地址必须是系统实际使用的回调 URL，否则授权完成后会报错。",
+          "Notion 要求 Redirect URI 使用 HTTPS。请从 HTTPS 域名或 HTTPS 隧道访问 LazyMind，然后在 Integration 设置的「Redirect URIs」区域添加本页展示的完整回调地址。",
         redirectProductionHint:
-          "生产环境请使用当前部署域名的 HTTPS 回调地址；本地开发使用页面上显示的 localhost 或 127.0.0.1 地址。Redirect URI 必须与当前浏览器 origin 及系统实际回调完全一致。",
+          "如果当前地址以 http://localhost 或 http://127.0.0.1 开头，仅可用于本地页面预览，不能直接登记到 Notion。请先通过 HTTPS 公网域名或 HTTPS 隧道访问 LazyMind，再复制新的 https://.../oauth/notion/data-source/callback。Redirect URI 必须与当前浏览器 origin 及系统实际回调完全一致。",
         capabilitiesTitle: "配置 Integration 权限 (Capabilities)",
         capabilitiesDesc:
           "在 Integration 设置中，根据需要勾选以下能力：Read content（读取页面/数据库内容）、Read comments（读取评论）等。LazyMind 至少需要 Read content 权限才能读取 Notion 内容。",

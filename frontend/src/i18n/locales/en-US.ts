@@ -2110,7 +2110,7 @@ const enUS = {
     dataSourceTypeFeishuDesc: "Set App ID / App Secret first, then connect via OAuth",
     dataSourceTypeNotion: "Notion",
     dataSourceTypeNotionDesc:
-      "Connect Notion pages or databases, sync by authorization scope and serve chat.",
+      "Connect Notion pages or databases; configure the OAuth Redirect URI with the HTTPS setup guide.",
     dataSourceTypeGoogleDrive: "Google Drive",
     dataSourceGoogleDriveSetupHint:
       "Authorize a Google Drive account for online chat search. Files are not imported into a knowledge base.",
@@ -2161,7 +2161,7 @@ const enUS = {
     dataSourceNotionCredentialModalTitle: "Configure Notion OAuth App",
     dataSourceNotionCredentialSaveAndSelect: "Save and Authorize Notion",
     dataSourceNotionCredentialHint:
-      "Go to Notion Developers to create a Public Integration, get OAuth Client ID and Client Secret; the Redirect URI must be set to /oauth/notion/data-source/callback.",
+      "View the Notion setup guide first. Create a Public Integration in Notion Developers, get the OAuth Client ID and Client Secret, and register the complete HTTPS Redirect URI shown in the guide.",
     dataSourceNotionCredentialSaved: "Notion OAuth credentials saved",
     dataSourceNotionCredentialReset: "Notion OAuth credentials disconnected",
     dataSourceNotionResetCredentialAction: "Reset credentials",
@@ -2190,7 +2190,7 @@ const enUS = {
     dataSourceNotionTargetTypeDatabase: "Database",
     dataSourceNotionTargetLabel: "Notion page or database",
     dataSourceNotionSetupGuideHint:
-      ": View detailed Notion OAuth setup steps, required credentials, and Redirect URI instructions.",
+      ": View detailed Notion OAuth setup steps, required credentials, and HTTPS Redirect URI instructions.",
     dataSourceDatabaseTitle: "External Database",
     dataSourceDatabaseSubtitle:
       "Configure MySQL and PostgreSQL database connections for read-only chat queries.",
@@ -2450,11 +2450,11 @@ const enUS = {
       backManagement: "Back to Data Source Management",
       title: "Data Source Management - New Data Source - Notion",
       subtitle:
-        "Create a Public Integration in Notion Developers, get OAuth credentials, configure the Redirect URI, then complete Notion data source authorization in LazyMind.",
+        "Create a Public Integration in Notion Developers, get OAuth credentials, configure the HTTPS Redirect URI, then complete Notion data source authorization in LazyMind.",
       summaryAria: "Notion setup process overview",
       summaryTitle: "Setup Flow",
       openDevelopers: "Open Notion Developers",
-      callbackUrl: "Callback URL: {{uri}}",
+      callbackUrl: "Callback URL generated from the current page: {{uri}}",
       steps: {
         openDevelopersTitle: "Open Notion Developers",
         openDevelopersDesc:
@@ -2478,9 +2478,9 @@ const enUS = {
           "Client Secret: the integration secret. Keep it private; it can only be fully viewed when created.",
         redirectTitle: "Configure Redirect URI",
         redirectDesc:
-          "In the Redirect URIs section of integration settings, add LazyMind's OAuth callback URL. It must match the callback URL used by the system, otherwise authorization fails after redirect.",
+          "Notion requires Redirect URIs to use HTTPS. Access LazyMind from an HTTPS domain or HTTPS tunnel, then add the complete callback URL shown on this page in the Redirect URIs section of the integration settings.",
         redirectProductionHint:
-          "Use the current deployment domain over HTTPS in production. For local development, use the localhost or 127.0.0.1 URL shown on this page. The Redirect URI must exactly match the browser origin and the callback used by the system.",
+          "If the current URL starts with http://localhost or http://127.0.0.1, it is only useful for local page preview and should not be registered in Notion. First access LazyMind through a public HTTPS domain or HTTPS tunnel, then copy the new https://.../oauth/notion/data-source/callback URL. The Redirect URI must exactly match the browser origin and the callback used by the system.",
         capabilitiesTitle: "Configure Integration Capabilities",
         capabilitiesDesc:
           "In integration settings, select the required capabilities such as Read content and Read comments. LazyMind needs at least Read content to read Notion content.",
