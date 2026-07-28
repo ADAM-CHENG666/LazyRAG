@@ -434,6 +434,10 @@ const enUS = {
       googleDriveConfigTitle: "Configure Google Drive OAuth",
       googleDriveAuthorize: "Save and Authorize",
       googleDriveConfigHint: "Enable the Drive API in Google Cloud Console and add this exact address to the OAuth Web client's authorized redirect URIs: {{callbackUrl}}",
+      googleDriveRedirectReadyTitle: "OAuth callback URL is ready",
+      googleDriveInvalidRedirectTitle: "The current address cannot be used for Google OAuth",
+      googleDriveInvalidRedirectHint:
+        "Google will reject {{callbackUrl}}. HTTP is allowed only for localhost, 127.0.0.1, or ::1. Other environments require HTTPS on a public domain and cannot use a raw IP address. Reopen LazyMind through a local loopback URL or an HTTPS domain/tunnel.",
       googleDriveSetupGuideAction: "Setup Guide",
       googleDriveClientIdRequired: "Enter the OAuth Client ID",
       googleDriveClientSecretRequired: "Enter the OAuth Client Secret",
@@ -2123,6 +2127,10 @@ const enUS = {
     dataSourceGoogleDriveCallbackLabel: "Current OAuth callback URL",
     dataSourceGoogleDriveHttpsHint:
       "Register the exact URL above in the Google OAuth Web client. Use HTTPS in production; localhost or 127.0.0.1 may use HTTP under Google's local development rules.",
+    dataSourceGoogleDriveInvalidCallbackTitle:
+      "Google will reject the current address",
+    dataSourceGoogleDriveInvalidCallbackHint:
+      "Google OAuth Web clients do not accept HTTP private-network addresses or raw-IP redirects. For same-machine testing, open LazyMind through http://localhost or http://127.0.0.1. For LAN, remote, or production access, configure a public HTTPS domain or HTTPS tunnel and reopen this page from that address.",
     dataSourceTypeDatabase: "External Database",
     dataSourceTypeDatabaseDesc:
       "Connect MySQL or PostgreSQL with a read-only account for direct chat queries.",
@@ -2390,7 +2398,9 @@ const enUS = {
       openDriveApi: "Open Google Drive API",
       openCredentials: "Open Credentials",
       openAudience: "Open Google Auth Platform Audience",
+      openRedirectRules: "View Google's Redirect URI rules",
       callbackUrl: "Authorized redirect URI: {{uri}}",
+      unsupportedCallbackUrl: "The current address cannot be registered as a Google OAuth callback: {{uri}}",
       steps: {
         openConsoleTitle: "Create or select a Google Cloud project",
         openConsoleDesc:
@@ -2423,6 +2433,10 @@ const enUS = {
           "If you open LazyMind with 127.0.0.1 or a deployment domain instead of localhost, replace the origin in the callback URL with that same browser origin.",
         redirectHttpsHint:
           "Use HTTPS for production domains. Local development may use an exactly registered http://localhost or http://127.0.0.1 URL in a Google Web OAuth client. Scheme, host, port, and path must all match.",
+        redirectUnsupportedHint:
+          "Google permits HTTP only for localhost, 127.0.0.1, or ::1. Other callbacks must use HTTPS with a public top-level domain, and cannot use 10.x, 172.16-31.x, 192.168.x, or any other raw IP address.",
+        redirectRecoveryHint:
+          "If the browser and LazyMind run on the same machine, reopen the system through http://localhost or http://127.0.0.1. For LAN or remote access, configure a public HTTPS domain or an HTTPS tunnel such as Cloudflare Tunnel or ngrok, then open LazyMind from the new address. This page will generate the matching callback URI automatically.",
         copyCredentialsTitle: "Copy Client ID and Client Secret",
         copyCredentialsDesc:
           "After the Web client is created, copy the OAuth Client ID and Client Secret. Keep the secret private.",

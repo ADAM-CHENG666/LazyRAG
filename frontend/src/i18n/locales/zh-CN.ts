@@ -403,6 +403,10 @@ const zhCN = {
       googleDriveConfigTitle: "配置 Google Drive OAuth",
       googleDriveAuthorize: "保存并授权",
       googleDriveConfigHint: "在 Google Cloud Console 启用 Drive API，并将以下地址完整加入 OAuth Web 客户端的授权重定向 URI：{{callbackUrl}}",
+      googleDriveRedirectReadyTitle: "OAuth 回调地址可用",
+      googleDriveInvalidRedirectTitle: "当前访问地址不能用于 Google OAuth",
+      googleDriveInvalidRedirectHint:
+        "Google 不接受 {{callbackUrl}}。HTTP 仅允许 localhost、127.0.0.1 或 ::1；其他环境必须使用带公共域名的 HTTPS，且不能使用原始 IP 地址。请通过本机回环地址或 HTTPS 域名/隧道重新打开 LazyMind。",
       googleDriveSetupGuideAction: "接入教程",
       googleDriveClientIdRequired: "请输入 OAuth Client ID",
       googleDriveClientSecretRequired: "请输入 OAuth Client Secret",
@@ -2080,6 +2084,10 @@ const zhCN = {
     dataSourceGoogleDriveCallbackLabel: "当前 OAuth 回调地址",
     dataSourceGoogleDriveHttpsHint:
       "请将上方地址完整登记到 Google OAuth Web 客户端。生产部署使用 HTTPS；本地 localhost 或 127.0.0.1 可按 Google 本地开发规则使用 HTTP。",
+    dataSourceGoogleDriveInvalidCallbackTitle:
+      "当前地址会被 Google 拒绝",
+    dataSourceGoogleDriveInvalidCallbackHint:
+      "Google OAuth Web 客户端不允许 HTTP 内网地址或原始 IP 回调。本机测试请通过 http://localhost 或 http://127.0.0.1 打开 LazyMind；局域网、远程或生产部署请先配置 HTTPS 公共域名或 HTTPS 隧道，再从该地址重新打开本页。",
     dataSourceTypeDatabase: "外部数据库",
     dataSourceTypeDatabaseDesc: "通过只读账号连接 MySQL 或 PostgreSQL，供聊天直接查询。",
     dataSourceTypeStepIntro: "当前支持本地文件 / 本地目录、飞书、Notion、Google Drive 和外部数据库接入，请选择后进入连接配置。",
@@ -2324,7 +2332,9 @@ const zhCN = {
       openDriveApi: "打开 Google Drive API",
       openCredentials: "打开凭据页面",
       openAudience: "打开 Google Auth Platform Audience",
+      openRedirectRules: "查看 Google Redirect URI 规则",
       callbackUrl: "授权重定向 URI：{{uri}}",
+      unsupportedCallbackUrl: "当前地址不能登记为 Google OAuth 回调：{{uri}}",
       steps: {
         openConsoleTitle: "创建或选择 Google Cloud 项目",
         openConsoleDesc:
@@ -2357,6 +2367,10 @@ const zhCN = {
           "如果你用 127.0.0.1 或部署域名打开 LazyMind，而不是 localhost，请把回调地址中的 origin 替换成同一个浏览器 origin。",
         redirectHttpsHint:
           "生产域名应使用 HTTPS；本地开发可使用 Google Web OAuth 客户端中精确登记的 http://localhost 或 http://127.0.0.1 地址。协议、主机、端口和路径必须完全一致。",
+        redirectUnsupportedHint:
+          "Google 仅允许 localhost、127.0.0.1 或 ::1 使用 HTTP；其他回调必须使用带公共顶级域名的 HTTPS，并且不能使用 10.x、172.16-31.x、192.168.x 或其他原始 IP 地址。",
+        redirectRecoveryHint:
+          "如果浏览器和 LazyMind 在同一台机器上，请改用 http://localhost 或 http://127.0.0.1 打开系统；如果通过局域网或远程访问，请配置 HTTPS 公共域名或 Cloudflare Tunnel/ngrok 等 HTTPS 隧道，再从新地址打开系统。页面会自动生成对应的回调 URI。",
         copyCredentialsTitle: "复制 Client ID 和 Client Secret",
         copyCredentialsDesc:
           "Web 客户端创建完成后，复制 OAuth Client ID 和 Client Secret。Client Secret 需要保密。",
