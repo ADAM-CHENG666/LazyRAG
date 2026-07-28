@@ -2338,15 +2338,27 @@ const zhCN = {
       steps: {
         openConsoleTitle: "创建或选择 Google Cloud 项目",
         openConsoleDesc:
-          "登录 Google Cloud Console，创建一个新项目，或选择已有项目来保存 LazyMind 使用的 OAuth 配置。",
+          "登录 Google Cloud Console，创建一个新项目，或选择已有项目来保存 LazyMind 使用的 OAuth 配置。没有现成项目时，点击项目下拉框，再点击“新建项目”。",
+        openConsoleProjectName:
+          "项目名称可填写 LazyMind OAuth；组织/位置没有要求时保持默认即可。",
+        openConsoleProjectId:
+          "项目 ID 可保持 Google 自动生成；创建后确认页面顶部项目选择器仍选中这个项目。",
         enableApiTitle: "启用 Google Drive API",
         enableApiDesc:
           "在 API 和服务中，为当前项目启用 Google Drive API。LazyMind 会调用 Google Drive 官方 API 完成 search、find 和 read。",
+        enableApiSearch:
+          "如果没有直接打开到 Drive API 页面，进入“API 和服务 > 库”，搜索 Google Drive API，打开后点击“启用”。",
+        enableApiConfirmProject:
+          "启用前再次确认右上角/顶部项目是刚才创建或选择的项目，避免把 API 开到别的项目里。",
         consentTitle: "配置 OAuth 同意屏幕",
         consentDesc:
           "进入 Google Auth Platform 的 Audience，确认当前项目和 OAuth 客户端所属项目一致，再配置应用受众和测试用户。",
         consentUserType:
           "个人 Google 账号请选择 External；如果是 Google Workspace 且只允许组织内成员使用，可以选择 Internal。",
+        consentAppInfo:
+          "应用名称可填写 LazyMind；用户支持邮箱选择当前登录邮箱；Logo、主页、隐私政策、服务条款在测试阶段可先留空或按页面要求跳过。",
+        consentContact:
+          "开发者联系邮箱填写当前登录邮箱。发布状态保持 Testing，不需要提交 Google 验证即可让测试用户授权。",
         consentTestUsers:
           "如果应用处于 Testing 状态，在 Test users 中点击 Add users，添加实际登录 Google Drive 的邮箱并保存；等待约一分钟后再授权，否则 Google 会返回 access_denied。",
         consentRetry:
@@ -2360,6 +2372,8 @@ const zhCN = {
           "Application type 必须选择 Web application。",
         credentialsName:
           "建议命名为 LazyMind Google Drive，方便后续在 Google Cloud 和 LazyMind 中识别。",
+        credentialsJavaScriptOrigins:
+          "Authorized JavaScript origins 可以留空；LazyMind 只需要配置 Authorized redirect URIs。",
         redirectTitle: "添加 LazyMind 回调地址",
         redirectDesc:
           "在 Authorized redirect URIs 中添加 LazyMind 前端实际使用的 OAuth 回调地址，必须和浏览器打开的系统地址一致。",
@@ -2371,9 +2385,13 @@ const zhCN = {
           "Google 仅允许 localhost、127.0.0.1 或 ::1 使用 HTTP；其他回调必须使用带公共顶级域名的 HTTPS，并且不能使用 10.x、172.16-31.x、192.168.x 或其他原始 IP 地址。",
         redirectRecoveryHint:
           "如果浏览器和 LazyMind 在同一台机器上，请改用 http://localhost 或 http://127.0.0.1 打开系统；如果通过局域网或远程访问，请配置 HTTPS 公共域名或 Cloudflare Tunnel/ngrok 等 HTTPS 隧道，再从新地址打开系统。页面会自动生成对应的回调 URI。",
+        redirectQuickTunnelHint:
+          "使用 Cloudflare Quick Tunnel 时，先运行 cloudflared tunnel --url http://localhost:8090，然后从生成的 https://*.trycloudflare.com 打开 LazyMind，并把本页展示的 https://*.trycloudflare.com/oauth/googledrive/data-source/callback 填到 Authorized redirect URIs。",
         copyCredentialsTitle: "复制 Client ID 和 Client Secret",
         copyCredentialsDesc:
           "Web 客户端创建完成后，复制 OAuth Client ID 和 Client Secret。Client Secret 需要保密。",
+        copyPopup:
+          "点击 Create 后，Google 会弹出创建结果；先复制 Client ID 和 Client Secret，再关闭弹窗。关闭后也可以在 Credentials 页面重新打开这个 Web client 查看。",
         copyClientId:
           "Client ID 对应 LazyMind 弹窗中的 OAuth Client ID 字段。",
         copyClientSecret:
