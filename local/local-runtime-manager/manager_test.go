@@ -21,6 +21,20 @@ func defaultProfileValue() string {
 	return ""
 }
 
+func installFakeUVOnPath(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	name := "uv"
+	if runtime.GOOS == "windows" {
+		name = "uv.exe"
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("fake uv"), 0o755); err != nil {
+		t.Fatalf("write fake uv: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("UV", "uv")
+}
+
 func TestMain(m *testing.M) {
 	home, err := os.MkdirTemp("", "lazymind-runtime-manager-home-*")
 	if err != nil {
@@ -845,10 +859,34 @@ func TestRuntimeConfigMovesRouterPortPoolWhenDefaultRangeUnavailable(t *testing.
 	}
 }
 
+func TestRuntimeConfigMovesFrontendPortWhenPreferredPortIsServing(t *testing.T) {
+	repo := t.TempDir()
+	writeComposeFixture(t, repo)
+	listeners := occupyPortsOn(t, "127.0.0.1", defaultFrontendPort)
+	defer func() {
+		for _, ln := range listeners {
+			_ = ln.Close()
+		}
+	}()
+	t.Setenv(frontendPortEnvVar, strconv.Itoa(defaultFrontendPort))
+	t.Setenv(localPortsPinnedEnvVar, "false")
+
+	cfg, _, err := NewRuntimeConfig("", repo)
+	if err != nil {
+		t.Fatalf("runtime config: %v", err)
+	}
+	if cfg.FrontendPort == defaultFrontendPort {
+		t.Fatalf("frontend port did not move from occupied preferred port %d", defaultFrontendPort)
+	}
+}
+
 func TestKillStaleRuntimeProcessesStopsScannerOrphan(t *testing.T) {
 	repo := t.TempDir()
 	writeComposeFixture(t, repo)
-	cfg, paths, err := NewRuntimeConfig("", repo)
+	cfg, paths, err := NewRuntimeConfigWithOptions(RuntimeConfigOptions{
+		RepoRoot:    repo,
+		RuntimeRoot: filepath.Join(t.TempDir(), "runtime"),
+	})
 	if err != nil {
 		t.Fatalf("runtime config: %v", err)
 	}
@@ -859,11 +897,16 @@ func TestKillStaleRuntimeProcessesStopsScannerOrphan(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Skipf("sleep command unavailable: %v", err)
 	}
+	waitDone := make(chan struct{})
+	go func() {
+		_, _ = cmd.Process.Wait()
+		close(waitDone)
+	}()
 	defer func() {
 		if processAlive(cmd.Process.Pid) {
 			_ = cmd.Process.Kill()
 		}
-		_, _ = cmd.Process.Wait()
+		<-waitDone
 	}()
 	manager := NewRuntimeManager(&fakeRunner{t: t}, filepath.Join(paths.BinDir, "local-runtime-manager"))
 	manager.processScanner = func(paths RuntimePaths) ([]LocalProcessRecord, error) {
@@ -877,7 +920,7 @@ func TestKillStaleRuntimeProcessesStopsScannerOrphan(t *testing.T) {
 	if err := manager.killStaleRuntimeProcesses(context.Background(), cfg, paths); err != nil {
 		t.Fatalf("kill stale: %v", err)
 	}
-	_, _ = cmd.Process.Wait()
+	<-waitDone
 	if processAlive(cmd.Process.Pid) {
 		t.Fatalf("expected orphan process %d to stop", cmd.Process.Pid)
 	}
