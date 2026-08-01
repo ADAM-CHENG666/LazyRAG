@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const scriptsDir = path.dirname(fileURLToPath(import.meta.url));
 const manifestScript = path.join(scriptsDir, "write-runtime-manifest.mjs");
@@ -89,7 +89,7 @@ test("generates a multi-resolution Windows ICO from the macOS icon", () => {
 });
 
 test("normalizes compact Windows release tags to standard SemVer", async () => {
-  const { normalizeReleaseTag } = await import(releaseVersionScript);
+  const { normalizeReleaseTag } = await import(pathToFileURL(releaseVersionScript).href);
   assert.deepEqual(normalizeReleaseTag("v1.2.3a2"), {
     releaseTag: "v1.2.3a2",
     packageVersion: "1.2.3-alpha.2",
@@ -172,6 +172,12 @@ test("Windows CI treats branches as non-tags without leaking git probe failures"
   assert.doesNotMatch(source, /git submodule update --init --recursive/);
   assert.match(source, /resolve-release-version\.mjs/);
   assert.match(source, /windows-2022[\s\S]*windows-2025/);
+  assert.match(source, /artifact_name:\s*\$\{\{ steps\.package\.outputs\.artifact_name \}\}/);
+  assert.match(source, /"artifact_name=\$outputName"/);
+  assert.match(
+    source,
+    /name:\s*\$\{\{ needs\.build-windows-installer\.outputs\.artifact_name \}\}/,
+  );
   assert.match(source, /Start-Process -FilePath \$installer\[0\]\.FullName -ArgumentList "\/S" -Wait/);
   assert.match(source, /DisplayVersion -ne \$env:EXPECTED_VERSION/);
   assert.match(source, /Start-Process -FilePath \$uninstaller -ArgumentList "\/S" -Wait/);
@@ -179,7 +185,20 @@ test("Windows CI treats branches as non-tags without leaking git probe failures"
 
 test("Windows NSIS installer uses electron-builder's default LZMA payload", () => {
   const source = readFileSync(electronBuilderConfig, "utf8");
+  const packageJson = JSON.parse(readFileSync(electronPackage, "utf8"));
+  const buildScript = readFileSync(path.join(scriptsDir, "build-windows-x64.ps1"), "utf8");
+  const workflow = readFileSync(windowsWorkflow, "utf8");
   assert.doesNotMatch(source, /useZip\s*:/);
+  assert.match(packageJson.scripts["pack:win:x64"], /--publish never$/);
+  assert.match(packageJson.scripts["pack:win:x64:installer"], /--publish never$/);
+  assert.match(buildScript, /function Invoke-WindowsPackagingWithRetry/);
+  assert.match(buildScript, /function Invoke-NativeWithRetry/);
+  assert.match(buildScript, /maximumAttempts = 3/);
+  assert.match(buildScript, /ELECTRON_CACHE/);
+  assert.match(buildScript, /ELECTRON_BUILDER_CACHE/);
+  assert.match(workflow, /Cache Electron and electron-builder downloads/);
+  assert.match(workflow, /Submodule checkout attempt \$attempt\/3 failed/);
+  assert.match(workflow, /pnpm activation attempt \$attempt\/3 failed/);
 });
 
 test("macOS distribution build signs packages while CI owns notarization sequencing", () => {

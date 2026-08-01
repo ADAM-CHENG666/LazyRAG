@@ -33,6 +33,7 @@ jobs:
     timeout-minutes: 120
     outputs:
       package_version: ${{ steps.version.outputs.package_version }}
+      artifact_name: ${{ steps.package.outputs.artifact_name }}
       installer_sha256: ${{ steps.package.outputs.installer_sha256 }}
 
     steps:
@@ -82,7 +83,19 @@ jobs:
       - name: Initialize development submodules
         if: steps.release.outputs.is_tag != 'true'
         shell: pwsh
-        run: git submodule update --init algorithm/lazyllm
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            try {
+              git submodule update --init algorithm/lazyllm
+              break
+            } catch {
+              if ($attempt -eq 3) { throw }
+              Write-Warning "Submodule checkout attempt $attempt/3 failed; retrying in $($attempt * 5) seconds."
+              Start-Sleep -Seconds ($attempt * 5)
+            }
+          }
 
       - name: Normalize Electron pnpm workspace
         shell: pwsh
@@ -134,8 +147,27 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
 
           corepack enable
-          corepack prepare pnpm@10.0.0 --activate
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            try {
+              corepack prepare pnpm@10.0.0 --activate
+              break
+            } catch {
+              if ($attempt -eq 3) { throw }
+              Write-Warning "pnpm activation attempt $attempt/3 failed; retrying in $($attempt * 5) seconds."
+              Start-Sleep -Seconds ($attempt * 5)
+            }
+          }
           pnpm --version
+
+      - name: Cache Electron and electron-builder downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            desktop/cache/electron
+            desktop/cache/electron-builder
+          key: windows-x64-electron-${{ hashFiles('desktop/electron/pnpm-lock.yaml') }}
+          restore-keys: |
+            windows-x64-electron-
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -245,6 +277,7 @@ jobs:
           $hash = Get-FileHash -LiteralPath $outputPath -Algorithm SHA256
           $signature = Get-AuthenticodeSignature -LiteralPath $outputPath
           "installer_path=$outputPath" | Add-Content -LiteralPath $env:GITHUB_OUTPUT
+          "artifact_name=$outputName" | Add-Content -LiteralPath $env:GITHUB_OUTPUT
           "installer_sha256=$($hash.Hash.ToLowerInvariant())" | Add-Content -LiteralPath $env:GITHUB_OUTPUT
 
           @"
@@ -305,7 +338,7 @@ jobs:
       - name: Download the exact installer built above
         uses: actions/download-artifact@v8
         with:
-          name: lazymind-windows-x64-installer
+          name: ${{ needs.build-windows-installer.outputs.artifact_name }}
           path: installer-under-test
 
       - name: Install, verify, and uninstall
