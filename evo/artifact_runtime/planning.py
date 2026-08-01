@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -8,6 +9,7 @@ from typing import TypeAlias
 import networkx as nx
 
 from .artifact import (
+    RUN_CONFIGURATION_ARTIFACT_ID,
     ArtifactCommit,
     ArtifactKey,
     ArtifactRecord,
@@ -15,46 +17,54 @@ from .artifact import (
     ArtifactSnapshot,
     PartitionGuard,
     PartitionSet,
+    _drop_stale,
+    failure_key,
+    intervention_key,
+    intervention_operation_id,
+    is_failure_key,
+    is_intervention_key,
     merge_refs,
 )
-from .errors import DefinitionError, PlanningError
-from .operation import BoundAggregate, BoundInput, Operation, OperationInvocation, OperationSpec
-from .state import ArtifactRetryRequest
+from .errors import DefinitionError, PlanningError, _tuple_of
+from .operation import (
+    BoundAggregate,
+    BoundInput,
+    Operation,
+    OperationInvocation,
+    OperationSpec,
+    _bound_refs,
+)
+from .state import (
+    ArtifactRetryRequest,
+    AttemptSnapshot,
+    CaseFailure,
+    InterventionSnapshot,
+    InvocationSnapshot,
+    RunStatus,
+    RuntimeErrorInfo,
+    RuntimeProgress,
+    RuntimeSnapshot,
+)
 
 
 @dataclass(frozen=True)
 class PlanReady:
     view: ArtifactSnapshot
     invocations: tuple[OperationInvocation, ...]
-
-    def __post_init__(self) -> None:
-        invocations = tuple(self.invocations)
-        if not invocations:
-            raise DefinitionError('ready plan requires at least one invocation')
-        if not all(isinstance(invocation, OperationInvocation) for invocation in invocations):
-            raise TypeError('ready plan must contain OperationInvocation values')
-        object.__setattr__(self, 'invocations', invocations)
+    failure_refs: tuple[ArtifactRef, ...] = ()
 
 
 @dataclass(frozen=True)
 class PlanAwaiting:
     view: ArtifactSnapshot
     artifact_keys: tuple[ArtifactKey, ...]
-
-    def __post_init__(self) -> None:
-        keys = tuple(self.artifact_keys)
-        if not keys:
-            raise DefinitionError('awaiting plan requires at least one artifact key')
-        if not all(isinstance(key, ArtifactKey) for key in keys):
-            raise TypeError('awaiting plan must contain ArtifactKey values')
-        if len(set(keys)) != len(keys):
-            raise DefinitionError('awaiting artifact keys must be unique')
-        object.__setattr__(self, 'artifact_keys', keys)
+    failure_refs: tuple[ArtifactRef, ...] = ()
 
 
 @dataclass(frozen=True)
 class PlanComplete:
     view: ArtifactSnapshot
+    failure_refs: tuple[ArtifactRef, ...] = ()
 
 
 PlanningResult: TypeAlias = PlanReady | PlanAwaiting | PlanComplete
@@ -76,17 +86,9 @@ class RuntimeDefinition:
         if not terminals:
             raise DefinitionError('runtime definition requires at least one terminal artifact')
         object.__setattr__(self, 'operations', operations)
-        object.__setattr__(self, 'artifact_modes', MappingProxyType(dict(self.artifact_modes)))
-        object.__setattr__(
-            self,
-            'partition_set_by_artifact',
-            MappingProxyType(dict(self.partition_set_by_artifact)),
-        )
-        object.__setattr__(
-            self,
-            'producer_by_artifact',
-            MappingProxyType(dict(self.producer_by_artifact)),
-        )
+        for name in ('artifact_modes', 'partition_set_by_artifact', 'producer_by_artifact'):
+            value = MappingProxyType(dict(getattr(self, name)))
+            object.__setattr__(self, name, value)
         object.__setattr__(self, 'terminal_artifact_ids', terminals)
 
     @property
@@ -126,14 +128,13 @@ class RuntimeDefinition:
 
             set_key = ArtifactKey.scalar(self.partition_set_by_artifact[artifact_id])
             current_commit_set = partition_sets.get(set_key)
-            if current_commit_set is not None:
-                if write.key.partition_key not in current_commit_set:
-                    raise DefinitionError(
-                        f'{write.key} is not present in the committed PartitionSet'
-                    )
-                continue
-            guard = PartitionGuard(set_key, write.key.partition_key)
-            if guard not in guards:
+            if (current_commit_set is not None
+                    and write.key.partition_key not in current_commit_set):
+                raise DefinitionError(
+                    f'{write.key} is not present in the committed PartitionSet'
+                )
+            if (current_commit_set is None
+                    and PartitionGuard(set_key, write.key.partition_key) not in guards):
                 raise DefinitionError(f'{write.key} requires partition membership protection')
 
 
@@ -143,21 +144,14 @@ def compile_operations(operations: Sequence[Operation]) -> RuntimeDefinition:
         raise DefinitionError('at least one operation is required')
 
     by_id: dict[str, Operation] = {}
-    artifact_modes: dict[str, str] = {}
+    artifact_modes: dict[str, str] = {RUN_CONFIGURATION_ARTIFACT_ID: 'scalar'}
     producer_by_artifact: dict[str, Operation] = {}
     partition_set_by_artifact: dict[str, str] = {}
 
-    def declare_mode(artifact_id: str, mode: str) -> None:
-        previous = artifact_modes.setdefault(artifact_id, mode)
-        if previous != mode:
-            raise DefinitionError(f'artifact {artifact_id} is used as both {previous} and {mode}')
-
-    def assign_partitions(artifact_id: str, partition_set_id: str) -> None:
-        previous = partition_set_by_artifact.setdefault(artifact_id, partition_set_id)
-        if previous != partition_set_id:
-            raise DefinitionError(
-                f'partitioned artifact {artifact_id} uses both {previous} and {partition_set_id}'
-            )
+    def assign(target: dict[str, str], key: str, value: str, label: str) -> None:
+        previous = target.setdefault(key, value)
+        if previous != value:
+            raise DefinitionError(f'{label} uses both {previous} and {value}')
 
     for operation in declared:
         spec = getattr(operation, 'spec', None)
@@ -169,18 +163,24 @@ def compile_operations(operations: Sequence[Operation]) -> RuntimeDefinition:
 
         for binding in spec.inputs.values():
             mode = 'scalar' if binding.mode == 'one' else 'partitioned'
-            declare_mode(binding.artifact_id, mode)
+            assign(artifact_modes, binding.artifact_id, mode, f'artifact {binding.artifact_id}')
             if binding.mode in {'each', 'all'}:
-                declare_mode(binding.partition_set_id, 'scalar')
-                assign_partitions(binding.artifact_id, binding.partition_set_id)
+                assign(artifact_modes, binding.partition_set_id, 'scalar',
+                       f'artifact {binding.partition_set_id}')
+                assign(partition_set_by_artifact, binding.artifact_id,
+                       binding.partition_set_id, f'partitioned artifact {binding.artifact_id}')
 
         if spec.driver_input is not None:
             for binding in spec.inputs.values():
                 if binding.mode == 'keyed':
-                    assign_partitions(binding.artifact_id, spec.partition_set_id)
+                    assign(partition_set_by_artifact, binding.artifact_id,
+                           spec.partition_set_id, f'partitioned artifact {binding.artifact_id}')
 
         for output in spec.outputs.values():
-            declare_mode(output.artifact_id, output.mode)
+            if output.artifact_id == RUN_CONFIGURATION_ARTIFACT_ID:
+                raise DefinitionError('run configuration is an external runtime input')
+            assign(artifact_modes, output.artifact_id, output.mode,
+                   f'artifact {output.artifact_id}')
             previous = producer_by_artifact.get(output.artifact_id)
             if previous is not None:
                 raise DefinitionError(
@@ -190,8 +190,10 @@ def compile_operations(operations: Sequence[Operation]) -> RuntimeDefinition:
             producer_by_artifact[output.artifact_id] = operation
             if output.mode == 'partitioned':
                 partition_set_id = output.partition_set_id or spec.partition_set_id
-                declare_mode(partition_set_id, 'scalar')
-                assign_partitions(output.artifact_id, partition_set_id)
+                assign(artifact_modes, partition_set_id, 'scalar',
+                       f'artifact {partition_set_id}')
+                assign(partition_set_by_artifact, output.artifact_id,
+                       partition_set_id, f'partitioned artifact {output.artifact_id}')
 
     graph = nx.DiGraph()
     graph.add_nodes_from(by_id)
@@ -244,19 +246,25 @@ def compile_operations(operations: Sequence[Operation]) -> RuntimeDefinition:
 
 
 def plan_next(definition: RuntimeDefinition, artifacts: ArtifactSnapshot,
-              retries: Iterable[ArtifactRetryRequest] = ()
-              ) -> PlanningResult:
+              retries: Iterable[ArtifactRetryRequest] = ()) -> PlanningResult:
     if not isinstance(definition, RuntimeDefinition):
         raise TypeError('definition must be RuntimeDefinition')
     if not isinstance(artifacts, ArtifactSnapshot):
         raise TypeError('artifacts must be ArtifactSnapshot')
-    pending = tuple(retries)
-    if not all(isinstance(request, ArtifactRetryRequest) for request in pending):
-        raise TypeError('retries must contain ArtifactRetryRequest values')
+    pending = _tuple_of(
+        retries, ArtifactRetryRequest, 'retries must contain ArtifactRetryRequest values'
+    )
     if any(request.status != 'pending' for request in pending):
         raise DefinitionError('planner retries must be pending')
 
-    effective = _operation_effective_records(definition, artifacts)
+    effective = dict(artifacts.effective_records())
+    changed = True
+    while changed:
+        changed = _remove_inactive_partitions(definition, artifacts, effective)
+        changed |= _drop_stale(effective)
+        partition_sets = _effective_partition_sets(artifacts, effective)
+        for operation in definition.operations:
+            changed |= _validate_outputs(operation, effective, partition_sets)
     partition_sets = _effective_partition_sets(artifacts, effective)
     view = ArtifactSnapshot(effective, partition_sets)
     planner = _DemandPlanner(definition, artifacts, view)
@@ -281,18 +289,25 @@ def plan_next(definition: RuntimeDefinition, artifacts: ArtifactSnapshot,
             satisfied &= planner.require_family(artifact_id)
 
     invocations = planner.ready_invocations()
+    failures = merge_refs(
+        planner.failure_refs(),
+        (
+            record.ref
+            for key, record in view.records.items()
+            if is_failure_key(key) and record.producer.startswith('runtime:failure:')
+        ),
+    )
     if invocations:
-        return PlanReady(view, invocations)
+        return PlanReady(view, invocations, failures)
     if planner.awaiting:
-        return PlanAwaiting(view, tuple(sorted(planner.awaiting)))
+        return PlanAwaiting(view, tuple(sorted(planner.awaiting)), failures)
     if satisfied:
-        return PlanComplete(view)
+        return PlanComplete(view, failures)
     raise PlanningError('terminal artifact demand cannot be resolved')
 
 
 def obsolete_retries(definition: RuntimeDefinition, artifacts: ArtifactSnapshot,
-                     retries: Iterable[ArtifactRetryRequest]
-                     ) -> tuple[ArtifactRetryRequest, ...]:
+                     retries: Iterable[ArtifactRetryRequest]) -> tuple[ArtifactRetryRequest, ...]:
     requests = tuple(retries)
     view = plan_next(definition, artifacts).view
     return tuple(
@@ -306,13 +321,12 @@ def obsolete_retries(definition: RuntimeDefinition, artifacts: ArtifactSnapshot,
 
 
 class _DemandPlanner:
-    def __init__(self, definition: RuntimeDefinition, artifacts: ArtifactSnapshot,
-                 view: ArtifactSnapshot
-                 ) -> None:
+    def __init__(self, definition: RuntimeDefinition, artifacts: ArtifactSnapshot, view: ArtifactSnapshot) -> None:
         self.definition = definition
         self.artifacts = artifacts
         self.view = view
         self.awaiting: set[ArtifactKey] = set()
+        self.failed: dict[ArtifactKey, tuple[ArtifactRef, ...]] = {}
         self._visited: set[tuple[str, str]] = set()
         self._ready: dict[tuple[str, str], OperationInvocation] = {}
         self._operation_order = {
@@ -326,12 +340,7 @@ class _DemandPlanner:
             raise PlanningError(
                 f'retry base is no longer effective: {request.artifact_key}'
             )
-        operation = self.definition.producer_by_artifact.get(request.artifact_key.artifact_id)
-        if operation is None:
-            raise PlanningError(f'retry target has no producer: {request.artifact_key}')
-        partition_key = request.artifact_key.partition_key if operation.spec.driver_input else ''
-        self._require_invocation(operation, partition_key, request.request_id)
-        return False
+        return self.require_key(request.artifact_key, request.request_id)
 
     def require_family(self, artifact_id: str) -> bool:
         if self.definition.artifact_modes[artifact_id] == 'scalar':
@@ -348,37 +357,48 @@ class _DemandPlanner:
             satisfied &= self.require_key(ArtifactKey.partition(artifact_id, partition_key))
         return satisfied
 
-    def require_key(self, key: ArtifactKey) -> bool:
-        if key in self.view.records:
+    def require_key(self, artifact_key: ArtifactKey, retry_request_id: str = '') -> bool:
+        if not retry_request_id and (
+            artifact_key in self.view.records or artifact_key in self.failed
+        ):
             return True
-        operation = self.definition.producer_by_artifact.get(key.artifact_id)
+        operation = self.definition.producer_by_artifact.get(artifact_key.artifact_id)
         if operation is None:
-            self.awaiting.add(key)
+            self.awaiting.add(artifact_key)
             return False
-        partition_key = key.partition_key if operation.spec.driver_input else ''
-        self._require_invocation(operation, partition_key)
-        return False
-
-    def _require_invocation(self, operation: Operation, partition_key: str,
-                            retry_request_id: str = ''
-                            ) -> None:
+        partition_key = artifact_key.partition_key if operation.spec.driver_input else ''
         identity = (operation.spec.op_id, partition_key)
         previous = self._ready.get(identity)
         if previous is not None:
             if retry_request_id and previous.retry_request_id != retry_request_id:
                 raise PlanningError('one invocation cannot satisfy multiple retry requests')
-            return
+            return False
         if identity in self._visited:
-            return
+            return artifact_key in self.failed
         self._visited.add(identity)
+
+        output_keys = tuple(
+            output.key_for(partition_key)
+            for output in operation.spec.outputs.values()
+            if output.mode == 'scalar' or partition_key
+        )
+        direct_failures = merge_refs(
+            record.ref
+            for output_key in output_keys
+            if (record := self.view.records.get(failure_key(output_key))) is not None
+            and record.producer.startswith('runtime:failure:')
+        )
+        if direct_failures:
+            self.failed.update(dict.fromkeys(output_keys, direct_failures))
+            return True
 
         if operation.spec.driver_input is not None:
             set_key = ArtifactKey.scalar(operation.spec.partition_set_id)
             if not self.require_key(set_key):
-                return
+                return False
             partitions = self.view.partition_sets.get(set_key)
             if partitions is None or partition_key not in partitions:
-                return
+                return False
 
         input_keys = _input_keys(
             operation,
@@ -386,25 +406,38 @@ class _DemandPlanner:
             None if not partition_key else partition_key,
         )
         if input_keys is None:
-            return
-        for keys in input_keys.values():
-            for key in keys:
-                self.require_key(key)
+            return False
+        for input_artifact_keys in input_keys.values():
+            for input_artifact_key in input_artifact_keys:
+                self.require_key(input_artifact_key)
+        blocking_failures = [
+            ref
+            for name, keys in input_keys.items()
+            for key in (keys[:1] if operation.spec.inputs[name].mode == 'all' else keys)
+            for ref in self.failed.get(key, ())
+        ]
+        if blocking_failures:
+            failures = merge_refs(blocking_failures)
+            self.failed.update(dict.fromkeys(output_keys, failures))
+            return True
         inputs = _bind_inputs(
             operation,
             self.view.records,
             self.view.partition_sets,
             None if not partition_key else partition_key,
+            self.failed,
         )
         if inputs is None:
-            return
+            return False
         self._ready[identity] = OperationInvocation(
             operation,
             inputs,
             _expected_heads(operation, partition_key, self.artifacts),
             partition_key,
             retry_request_id,
+            _intervention_ref(operation, partition_key, self.view.records),
         )
+        return False
 
     def ready_invocations(self) -> tuple[OperationInvocation, ...]:
         def order(invocation: OperationInvocation) -> tuple[int, int, str]:
@@ -418,28 +451,37 @@ class _DemandPlanner:
 
         return tuple(sorted(self._ready.values(), key=order))
 
-
-def _operation_effective_records(definition: RuntimeDefinition, artifacts: ArtifactSnapshot
-                                 ) -> dict[ArtifactKey, ArtifactRecord]:
-    effective = dict(artifacts.effective_records())
-    changed = True
-    while changed:
-        changed = _remove_inactive_partitions(definition, artifacts, effective)
-        partition_sets = _effective_partition_sets(artifacts, effective)
-        for operation in definition.operations:
-            if operation.spec.driver_input is None:
-                changed |= _validate_batch_outputs(operation, effective, partition_sets)
-            else:
-                changed |= _validate_partitioned_outputs(operation, effective, partition_sets)
-    return effective
+    def failure_refs(self) -> tuple[ArtifactRef, ...]:
+        return merge_refs(*self.failed.values())
 
 
 def _remove_inactive_partitions(definition: RuntimeDefinition, artifacts: ArtifactSnapshot,
-                                effective: dict[ArtifactKey, ArtifactRecord]
-                                ) -> bool:
+                                effective: dict[ArtifactKey, ArtifactRecord]) -> bool:
     changed = False
     partition_sets = _effective_partition_sets(artifacts, effective)
     for key in tuple(effective):
+        if is_intervention_key(key):
+            operation_id = intervention_operation_id(key)
+            operation = next(
+                (
+                    item for item in definition.operations
+                    if item.spec.op_id == operation_id
+                ),
+                None,
+            )
+            if operation is None:
+                del effective[key]
+                changed = True
+                continue
+            if not key.partition_key:
+                continue
+            partitions = partition_sets.get(
+                ArtifactKey.scalar(operation.spec.partition_set_id)
+            )
+            if partitions is None or key.partition_key not in partitions:
+                del effective[key]
+                changed = True
+            continue
         if not key.partition_key:
             continue
         partition_set_id = definition.partition_set_by_artifact.get(key.artifact_id)
@@ -452,75 +494,56 @@ def _remove_inactive_partitions(definition: RuntimeDefinition, artifacts: Artifa
     return changed
 
 
-def _validate_batch_outputs(operation: Operation, effective: dict[ArtifactKey, ArtifactRecord],
-                            partition_sets: Mapping[ArtifactKey, PartitionSet]
-                            ) -> bool:
-    inputs = _bind_inputs(operation, effective, partition_sets, None)
-    expected_inputs = None if inputs is None else _lineage_refs(inputs)
-    changed = False
-    for output in operation.spec.outputs.values():
-        records = (
-            ((ArtifactKey.scalar(output.artifact_id), effective.get(ArtifactKey.scalar(output.artifact_id))),)
-            if output.mode == 'scalar'
-            else tuple(
-                (key, record)
-                for key, record in effective.items()
-                if key.artifact_id == output.artifact_id
-            )
-        )
-        for key, record in records:
-            if record is None or not record.producer.startswith('operation:'):
-                continue
-            if (
-                expected_inputs is None
-                or record.producer != f'operation:{operation.spec.op_id}'
-                or record.input_refs != expected_inputs
-            ):
-                del effective[key]
-                changed = True
-    return changed
-
-
-def _validate_partitioned_outputs(operation: Operation,
-                                  effective: dict[ArtifactKey, ArtifactRecord],
-                                  partition_sets: Mapping[ArtifactKey, PartitionSet]
-                                  ) -> bool:
+def _validate_outputs(operation: Operation, effective: dict[ArtifactKey, ArtifactRecord],
+                      partition_sets: Mapping[ArtifactKey, PartitionSet]) -> bool:
     partition_keys = _partition_keys(operation, partition_sets)
-    active_keys = set(() if partition_keys is None else partition_keys)
     changed = False
-    for output in operation.spec.outputs.values():
+    if operation.spec.driver_input is not None:
+        active_keys = set(partition_keys or ())
+        output_ids = {output.artifact_id for output in operation.spec.outputs.values()}
         for key, record in tuple(effective.items()):
-            if (
-                key.artifact_id == output.artifact_id
-                and key.partition_key not in active_keys
-                and record.producer == f'operation:{operation.spec.op_id}'
-            ):
+            if (key.artifact_id in output_ids and key.partition_key not in active_keys
+                    and record.producer == f'operation:{operation.spec.op_id}'):
                 del effective[key]
                 changed = True
-
-    if partition_keys is None:
-        return changed
-    for partition_key in partition_keys:
+        if partition_keys is None:
+            return changed
+    invocation_keys: tuple[str | None, ...] = (
+        tuple(partition_keys) if operation.spec.driver_input is not None else (None,)
+    )
+    for partition_key in invocation_keys:
         inputs = _bind_inputs(operation, effective, partition_sets, partition_key)
-        expected_inputs = None if inputs is None else _lineage_refs(inputs)
+        expected_inputs = None if inputs is None else _bound_refs(
+            inputs,
+            lineage=True,
+            intervention_ref=_intervention_ref(operation, partition_key or '', effective),
+        )
         for output in operation.spec.outputs.values():
-            key = ArtifactKey.partition(output.artifact_id, partition_key)
-            record = effective.get(key)
-            if record is None or not record.producer.startswith('operation:'):
-                continue
-            if (
-                expected_inputs is None
-                or record.producer != f'operation:{operation.spec.op_id}'
-                or record.input_refs != expected_inputs
-            ):
-                del effective[key]
-                changed = True
+            keys = (
+                (ArtifactKey.partition(output.artifact_id, partition_key),)
+                if partition_key is not None
+                else (ArtifactKey.scalar(output.artifact_id),)
+                if output.mode == 'scalar'
+                else tuple(key for key in effective if key.artifact_id == output.artifact_id)
+            )
+            for key in keys:
+                record = effective.get(key)
+                if record is None or not record.producer.startswith('operation:'):
+                    continue
+                if expected_inputs is None and any(
+                    is_failure_key(ref.key) for ref in record.input_refs
+                ):
+                    continue
+                if (expected_inputs is None
+                        or record.producer != f'operation:{operation.spec.op_id}'
+                        or record.input_refs != expected_inputs):
+                    del effective[key]
+                    changed = True
     return changed
 
 
 def _effective_partition_sets(artifacts: ArtifactSnapshot,
-                              effective: Mapping[ArtifactKey, ArtifactRecord]
-                              ) -> dict[ArtifactKey, PartitionSet]:
+                              effective: Mapping[ArtifactKey, ArtifactRecord]) -> dict[ArtifactKey, PartitionSet]:
     return {
         key: partitions
         for key, partitions in artifacts.partition_sets.items()
@@ -529,8 +552,7 @@ def _effective_partition_sets(artifacts: ArtifactSnapshot,
 
 
 def _expected_heads(operation: Operation, partition_key: str,
-                    artifacts: ArtifactSnapshot
-                    ) -> dict[ArtifactKey, ArtifactRef | None]:
+                    artifacts: ArtifactSnapshot) -> dict[ArtifactKey, ArtifactRef | None]:
     expected: dict[ArtifactKey, ArtifactRef | None] = {}
     for output in operation.spec.outputs.values():
         if output.mode == 'partitioned' and not partition_key:
@@ -546,9 +568,7 @@ def _expected_heads(operation: Operation, partition_key: str,
     return expected
 
 
-def _partition_keys(operation: Operation,
-                    partition_sets: Mapping[ArtifactKey, PartitionSet]
-                    ) -> tuple[str, ...] | None:
+def _partition_keys(operation: Operation, partition_sets: Mapping[ArtifactKey, PartitionSet]) -> tuple[str, ...] | None:
     if operation.spec.driver_input is None:
         return ()
     partitions = partition_sets.get(ArtifactKey.scalar(operation.spec.partition_set_id))
@@ -556,30 +576,45 @@ def _partition_keys(operation: Operation,
 
 
 def _bind_inputs(operation: Operation, effective: Mapping[ArtifactKey, ArtifactRecord],
-                 partition_sets: Mapping[ArtifactKey, PartitionSet], partition_key: str | None
-                 ) -> dict[str, BoundInput] | None:
+                 partition_sets: Mapping[ArtifactKey, PartitionSet], partition_key: str | None,
+                 failures: Mapping[ArtifactKey, tuple[ArtifactRef, ...]] | None = None) -> dict[str, BoundInput] | None:
     keys_by_input = _input_keys(operation, partition_sets, partition_key)
     if keys_by_input is None:
         return None
+    failed = {} if failures is None else failures
     inputs: dict[str, BoundInput] = {}
     for name, binding in operation.spec.inputs.items():
         keys = keys_by_input[name]
-        records = tuple(effective.get(key) for key in keys)
-        if any(record is None for record in records):
-            return None
         if binding.mode == 'all':
-            inputs[name] = BoundAggregate(records[0].ref, tuple(
-                record.ref for record in records[1:]
-            ))
-        else:
-            inputs[name] = records[0].ref
+            partition_set = effective.get(keys[0])
+            if partition_set is None:
+                return None
+            members: list[ArtifactRef] = []
+            failure_refs: list[ArtifactRef] = []
+            for key in keys[1:]:
+                record = effective.get(key)
+                if record is not None:
+                    members.append(record.ref)
+                    continue
+                current_failures = failed.get(key)
+                if current_failures is None:
+                    return None
+                failure_refs.extend(current_failures)
+            inputs[name] = BoundAggregate(
+                partition_set.ref,
+                tuple(members),
+                merge_refs(failure_refs),
+            )
+            continue
+        record = effective.get(keys[0])
+        if record is None:
+            return None
+        inputs[name] = record.ref
     return inputs
 
 
-def _input_keys(operation: Operation,
-                partition_sets: Mapping[ArtifactKey, PartitionSet],
-                partition_key: str | None
-                ) -> dict[str, tuple[ArtifactKey, ...]] | None:
+def _input_keys(operation: Operation, partition_sets: Mapping[ArtifactKey, PartitionSet],
+                partition_key: str | None) -> dict[str, tuple[ArtifactKey, ...]] | None:
     keys: dict[str, tuple[ArtifactKey, ...]] = {}
     for name, binding in operation.spec.inputs.items():
         if binding.mode == 'one':
@@ -599,18 +634,173 @@ def _input_keys(operation: Operation,
     return keys
 
 
-def _lineage_refs(inputs: Mapping[str, BoundInput]) -> tuple[ArtifactRef, ...]:
-    refs: list[ArtifactRef] = []
-    for value in inputs.values():
-        if isinstance(value, ArtifactRef):
-            refs.append(value)
+def _intervention_ref(operation: Operation, partition_key: str,
+                      records: Mapping[ArtifactKey, ArtifactRecord]) -> ArtifactRef | None:
+    record = records.get(intervention_key(
+        operation.spec.op_id,
+        partition_key if operation.spec.driver_input is not None else '',
+    ))
+    return None if record is None else record.ref
+
+
+def project_progress(definition: RuntimeDefinition, view: ArtifactSnapshot, attempts: Iterable[AttemptSnapshot],
+                     failures: Iterable[CaseFailure]) -> RuntimeProgress:
+    attempt_values = tuple(attempts)
+    failure_values = tuple(failures)
+    latest_attempts: dict[tuple[str, str], AttemptSnapshot] = {}
+    for attempt in sorted(attempt_values, key=lambda item: item.created_at):
+        latest_attempts[(attempt.operation_id, attempt.partition_key)] = attempt
+    active = {
+        (attempt.operation_id, attempt.partition_key)
+        for attempt in attempt_values
+        if attempt.status in {'scheduled', 'running', 'cancelling'}
+    }
+    failed = {
+        (failure.operation_id, failure.case_id)
+        for failure in failure_values
+    }
+
+    statuses: list[tuple[str, str, str]] = []
+    case_operations: dict[str, list[str]] = {
+        case_id: []
+        for partitions in view.partition_sets.values()
+        for case_id in partitions.keys
+    }
+    for operation in definition.operations:
+        partitions = _partition_keys(operation, view.partition_sets)
+        if partitions is None:
+            continue
+        invocation_partitions = ('',) if operation.spec.driver_input is None else partitions
+        for partition_key in invocation_partitions:
+            identity = (operation.spec.op_id, partition_key)
+            if identity in active:
+                status = 'running'
+            elif _outputs_complete(operation, partition_key, view):
+                status = 'completed'
+            elif identity in failed or (
+                (latest := latest_attempts.get(identity)) is not None
+                and latest.status == 'failed'
+            ):
+                status = 'failed'
+            else:
+                status = 'pending'
+            statuses.append((operation.spec.op_id, partition_key, status))
+            if partition_key:
+                case_operations.setdefault(partition_key, []).append(status)
+
+    counts = Counter(status for _, _, status in statuses)
+    case_counts: Counter[str] = Counter()
+    failed_cases = {failure.case_id for failure in failure_values}
+    for case_id, operation_statuses in case_operations.items():
+        if case_id in failed_cases:
+            case_status = 'failed'
+        elif 'running' in operation_statuses:
+            case_status = 'running'
+        elif operation_statuses and all(
+            status == 'completed' for status in operation_statuses
+        ):
+            case_status = 'completed'
         else:
-            refs.append(value.partition_set_ref)
-            refs.extend(value.member_refs)
-    return merge_refs(refs)
+            case_status = 'pending'
+        case_counts[case_status] += 1
+
+    total = len(statuses)
+    terminal = counts['completed'] + counts['failed']
+    return RuntimeProgress(
+        total,
+        counts['completed'],
+        counts['running'],
+        counts['failed'],
+        counts['pending'],
+        0.0 if not total else round(terminal * 100 / total, 2),
+        len(case_operations),
+        case_counts['completed'],
+        case_counts['running'],
+        case_counts['failed'],
+        case_counts['pending'],
+    )
+
+
+def project_runtime_snapshot(run_id: str, status: RunStatus, error: RuntimeErrorInfo | None,
+                             definition: RuntimeDefinition, decision: PlanningResult,
+                             attempts: Iterable[AttemptSnapshot], failures: Iterable[CaseFailure],
+                             interventions: Iterable[InterventionSnapshot], *,
+                             active_attempts: Iterable[AttemptSnapshot] | None = None) -> RuntimeSnapshot:
+    attempt_values = tuple(attempts)
+    failure_values = tuple(failures)
+    active = tuple(
+        active_attempts
+        if active_attempts is not None
+        else (
+            attempt
+            for attempt in attempt_values
+            if attempt.status in {'scheduled', 'running', 'cancelling'}
+        )
+    )
+    terminal = status in {'cancelled', 'failed', 'completed'}
+    active_ids = {attempt.invocation_id for attempt in active}
+    ready_count = 0
+    awaiting: tuple[ArtifactKey, ...] = ()
+    if not terminal and isinstance(decision, PlanReady):
+        ready_count = sum(
+            invocation.invocation_id not in active_ids
+            for invocation in decision.invocations
+        )
+    elif not terminal and isinstance(decision, PlanAwaiting):
+        awaiting = decision.artifact_keys
+
+    view = decision.view
+    return RuntimeSnapshot(
+        run_id,
+        status,
+        tuple(
+            InvocationSnapshot(
+                attempt.invocation_id,
+                attempt.operation_id,
+                attempt.partition_key,
+            )
+            for attempt in active
+            if not terminal and attempt.status in {'scheduled', 'running'}
+        ),
+        ready_count,
+        {
+            key: record.ref
+            for key, record in view.records.items()
+            if not is_failure_key(key) and not is_intervention_key(key)
+        },
+        view.partition_sets,
+        error,
+        active,
+        awaiting,
+        failure_values,
+        tuple(interventions),
+        project_progress(definition, view, attempt_values, failure_values),
+    )
+
+
+def _outputs_complete(operation: Operation, partition_key: str, view: ArtifactSnapshot) -> bool:
+    for output in operation.spec.outputs.values():
+        if operation.spec.driver_input is not None:
+            if output.key_for(partition_key) not in view.records:
+                return False
+            continue
+        if output.mode == 'scalar':
+            if ArtifactKey.scalar(output.artifact_id) not in view.records:
+                return False
+            continue
+        partitions = view.partition_sets.get(
+            ArtifactKey.scalar(output.partition_set_id)
+        )
+        if partitions is None or any(
+            ArtifactKey.partition(output.artifact_id, case_id) not in view.records
+            for case_id in partitions.keys
+        ):
+            return False
+    return True
 
 
 __all__ = [
     'PlanAwaiting', 'PlanComplete', 'PlanReady', 'PlanningResult', 'RuntimeDefinition',
-    'compile_operations', 'obsolete_retries', 'plan_next',
+    'compile_operations', 'obsolete_retries', 'plan_next', 'project_progress',
+    'project_runtime_snapshot',
 ]

@@ -2,41 +2,66 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections import Counter
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass
+from functools import partial
 from typing import Literal
 
-from .artifact import ArtifactCommit, ArtifactKey, ArtifactRef, ArtifactSnapshot
-from .errors import DefinitionError, OperationExecutionError
+from .artifact import (
+    ArtifactCommit,
+    ArtifactDraft,
+    ArtifactKey,
+    ArtifactRecord,
+    ArtifactRef,
+    ArtifactSnapshot,
+    failure_key,
+    intervention_key,
+    is_failure_key,
+    is_intervention_key,
+)
+from .errors import (
+    DefinitionError,
+    OperationExecutionError,
+    OperationTimeoutError,
+    _as_exception,
+    _integer,
+    _positive_number,
+    _text,
+)
 from .execution import ExecutionCleanupError, ExecutionHandle, start_execution
-from .operation import OperationContext, OperationInvocation, OperationResult
+from .operation import Operation, OperationContext, OperationInvocation, OperationResult
 from .planning import (
-    PlanAwaiting,
     PlanComplete,
     PlanReady,
     PlanningResult,
     RuntimeDefinition,
     obsolete_retries,
     plan_next,
+    project_runtime_snapshot,
 )
 from .state import (
     ArtifactRetryRequest,
     AttemptSnapshot,
-    InvocationSnapshot,
+    CaseFailure,
+    InterventionBundle,
+    InterventionSnapshot,
     ProgressUpdate,
     RunStatus,
     RuntimeErrorInfo,
     RuntimeSnapshot,
+    UserIntervention,
 )
 from .store import ArtifactStore
-from .utils import _as_exception, _positive_int, _positive_number, _text
 
 
 _CONTROL_PRIORITY = 0
-_COMPLETION_PRIORITY = 2
-_PROGRESS_PRIORITY = 2
+_COMPLETION_PRIORITY = -1
+_PROGRESS_PRIORITY = -2
 _PROGRESS_CAPACITY = 256
+_EDITABLE_STATUSES = frozenset({'created', 'paused', 'completed', 'running'})
 
 
 class _TerminationFailure(ExceptionGroup):
@@ -44,24 +69,10 @@ class _TerminationFailure(ExceptionGroup):
 
 
 @dataclass(frozen=True, slots=True)
-class _Command:
-    kind: Literal['start', 'pause', 'resume', 'retry', 'cancel', 'release', 'close']
+class _Request:
+    action: Callable[[], Awaitable[None]]
     reply: asyncio.Future[RuntimeSnapshot]
-    retry_keys: tuple[ArtifactKey, ...] = ()
-    request_id: str = ''
-
-
-@dataclass(frozen=True, slots=True)
-class _CommitCommand:
-    commit: ArtifactCommit
-    reply: asyncio.Future[RuntimeSnapshot]
-
-
-@dataclass(frozen=True, slots=True)
-class _RetryArtifactCommand:
-    artifact_key: ArtifactKey
-    request_id: str
-    reply: asyncio.Future[RuntimeSnapshot]
+    flush_failure: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,19 +96,18 @@ class _ActiveExecution:
     waiter: asyncio.Task[None]
 
 
-_Event = _Command | _CommitCommand | _RetryArtifactCommand | _ExecutionProgress | _ExecutionDone
+_Event = _Request | _ExecutionProgress | _ExecutionDone
 
 
 class RunSession:
-    def __init__(self, run_id: str, definition: RuntimeDefinition, store: ArtifactStore, *,
-                 max_concurrency: int, terminate_timeout: float
-                 ) -> None:
+    def __init__(self, run_id: str, definition: RuntimeDefinition, store: ArtifactStore, *, max_concurrency: int,
+                 terminate_timeout: float) -> None:
         _text(run_id, 'run_id')
         if not isinstance(definition, RuntimeDefinition):
             raise TypeError('definition must be RuntimeDefinition')
         if not isinstance(store, ArtifactStore):
             raise TypeError('store must be ArtifactStore')
-        _positive_int(max_concurrency, 'max_concurrency')
+        _integer(max_concurrency, 'max_concurrency', minimum=1)
         _positive_number(terminate_timeout, 'terminate_timeout')
 
         self.run_id = run_id
@@ -122,6 +132,9 @@ class RunSession:
         self._retries: tuple[ArtifactRetryRequest, ...] = ()
         self._decision: PlanningResult | None = None
         self._active: dict[str, _ActiveExecution] = {}
+        self._case_failures: tuple[CaseFailure, ...] = ()
+        self._interventions: tuple[InterventionSnapshot, ...] = ()
+        self._attempts: tuple[AttemptSnapshot, ...] = ()
         self._snapshot = RuntimeSnapshot(run_id)
 
     async def serve(self) -> None:
@@ -143,9 +156,27 @@ class RunSession:
                 _, _, event = await self._events.get()
                 try:
                     try:
-                        await self._handle_event(event)
+                        if isinstance(event, _Request):
+                            await self._handle_request(event)
+                        elif isinstance(event, _ExecutionProgress):
+                            execution = self._active.get(event.attempt_id)
+                            if execution is not None and execution.attempt.status == 'running':
+                                try:
+                                    await self._store.append_progress(self.run_id, event.attempt_id, event.update)
+                                except Exception as exc:
+                                    await self._fail_running(exc)
+                        else:
+                            await self._handle_done(event)
                     except Exception as exc:
-                        await self._handle_internal_error(exc)
+                        if self._status == 'failed':
+                            try:
+                                await self._flush_failure()
+                            except Exception:
+                                pass
+                            await self._terminate_failed_siblings()
+                            await self._publish()
+                        else:
+                            await self._fail_running(exc)
                 finally:
                     if isinstance(event, _ExecutionProgress):
                         self._progress_slots.release()
@@ -158,7 +189,14 @@ class RunSession:
             raise
         finally:
             self._closed = True
-            await self._finish_pending_events()
+            error = RuntimeError('run session is closed')
+            while not self._events.empty():
+                _, _, event = self._events.get_nowait()
+                if isinstance(event, _Request) and not event.reply.done():
+                    event.reply.set_exception(error)
+                if isinstance(event, _ExecutionProgress):
+                    self._progress_slots.release()
+                self._events.task_done()
             await self._notify()
 
     async def wait_ready(self) -> None:
@@ -167,56 +205,65 @@ class RunSession:
             raise self._initialization_error
 
     async def start(self) -> RuntimeSnapshot:
-        return await self._request('start')
+        return await self._request(self._enter_running, 'created', flush_failure=True)
 
     async def pause(self) -> RuntimeSnapshot:
-        return await self._request('pause')
+        return await self._request(self._pause, flush_failure=True)
 
     async def resume(self) -> RuntimeSnapshot:
-        return await self._request('resume')
+        return await self._request(self._enter_running, 'paused', flush_failure=True)
 
-    async def retry(self, artifact_keys: tuple[ArtifactKey, ...] = (),
-                    request_id: str = ''
-                    ) -> RuntimeSnapshot:
-        if not all(isinstance(key, ArtifactKey) for key in artifact_keys):
-            raise TypeError('retry artifact_keys must contain ArtifactKey values')
-        if artifact_keys:
-            _text(request_id, 'retry request_id')
+    async def retry(self, artifact_keys: tuple[ArtifactKey, ...] = (), request_id: str = '', *,
+                    rerun: bool = False) -> RuntimeSnapshot:
         return await self._request(
-            'retry',
-            retry_keys=artifact_keys,
-            request_id=request_id,
+            self._retry,
+            artifact_keys,
+            request_id,
+            rerun,
+            flush_failure=True,
         )
 
     async def cancel(self) -> RuntimeSnapshot:
-        return await self._request('cancel')
+        return await self._request(self._cancel, flush_failure=True)
 
     async def release(self) -> RuntimeSnapshot:
-        return await self._request('release')
+        return await self._request(self._release, flush_failure=True)
 
     async def close(self) -> RuntimeSnapshot:
         if self._closed:
             return self._snapshot
-        return await self._request('close')
+        return await self._request(self._close, flush_failure=True)
 
     async def commit(self, commit: ArtifactCommit) -> RuntimeSnapshot:
-        if not isinstance(commit, ArtifactCommit):
-            raise TypeError('commit must be ArtifactCommit')
-        reply = self._reply()
-        await self._enqueue(_CommitCommand(commit, reply), _CONTROL_PRIORITY)
-        return await reply
+        return await self._request(self._commit_artifacts, commit)
 
-    async def retry_artifact(self, artifact_key: ArtifactKey, request_id: str
-                             ) -> RuntimeSnapshot:
-        if not isinstance(artifact_key, ArtifactKey):
-            raise TypeError('artifact_key must be ArtifactKey')
-        _text(request_id, 'retry request_id')
-        reply = self._reply()
-        await self._enqueue(
-            _RetryArtifactCommand(artifact_key, request_id, reply),
-            _CONTROL_PRIORITY,
+    async def retry_artifact(self, artifact_key: ArtifactKey, request_id: str) -> RuntimeSnapshot:
+        return await self._request(
+            self._request_artifact_retry,
+            artifact_key,
+            request_id,
         )
-        return await reply
+
+    async def retry_case(self, case_id: str, request_id: str) -> RuntimeSnapshot:
+        return await self._request(self._retry_case, case_id, request_id)
+
+    async def submit_intervention(self, intervention_id: str, target_key: ArtifactKey, target_ref: ArtifactRef | None,
+                                  message: str, field: str, quote: str, start: int | None,
+                                  end: int | None) -> RuntimeSnapshot:
+        return await self._request(
+            self._submit_intervention,
+            intervention_id,
+            target_key,
+            target_ref,
+            message,
+            field,
+            quote,
+            start,
+            end,
+        )
+
+    async def submit_attempt_result(self, attempt_id: str, result: OperationResult) -> RuntimeSnapshot:
+        return await self._request(self._submit_attempt_result, attempt_id, result)
 
     def snapshot(self) -> RuntimeSnapshot:
         if not self._ready.is_set():
@@ -225,9 +272,7 @@ class RunSession:
             raise self._initialization_error
         return self._snapshot
 
-    async def wait_for_status(self, statuses: str | tuple[str, ...], *,
-                              timeout: float = 10.0
-                              ) -> RuntimeSnapshot:
+    async def wait_for_status(self, statuses: str | tuple[str, ...], *, timeout: float = 10.0) -> RuntimeSnapshot:
         expected = (statuses,) if isinstance(statuses, str) else tuple(statuses)
         if not expected:
             raise DefinitionError('statuses must not be empty')
@@ -266,7 +311,9 @@ class RunSession:
         self._error = state.error
         self._artifacts = artifacts
         self._retries = retries
+        self._attempts = attempts
         self._decision = plan_next(self._definition, self._artifacts, self._retries)
+        await self._refresh_snapshot_data()
 
         if self._status == 'completed' and not isinstance(self._decision, PlanComplete):
             await self._persist_status('paused')
@@ -275,58 +322,49 @@ class RunSession:
         else:
             await self._publish()
 
-    async def _request(self, kind: Literal[
-        'start', 'pause', 'resume', 'retry', 'cancel', 'release', 'close'
-    ], *, retry_keys: tuple[ArtifactKey, ...] = (),
-        request_id: str = ''
-    ) -> RuntimeSnapshot:
-        reply = self._reply()
+    async def _refresh_snapshot_data(self, *, include_failures: bool = True) -> None:
+        if self._decision is None:
+            self._case_failures = ()
+            self._interventions = ()
+            return
+        self._attempts = await self._store.attempts(self.run_id)
+        if include_failures:
+            self._case_failures = await _load_case_failures(
+                self._store,
+                self.run_id,
+                self._decision.failure_refs,
+            )
+        self._interventions = await _load_interventions(
+            self._store,
+            self.run_id,
+            self._decision.view.records,
+            self._attempts,
+        )
+
+    async def _request(self, action: Callable[..., Awaitable[None]], /, *args: object,
+                       flush_failure: bool = False) -> RuntimeSnapshot:
+        if self._closed or self._stopping:
+            raise RuntimeError('run session is closed')
+        reply: asyncio.Future[RuntimeSnapshot] = asyncio.get_running_loop().create_future()
         await self._enqueue(
-            _Command(kind, reply, retry_keys, request_id),
+            _Request(partial(action, *args), reply, flush_failure),
             _CONTROL_PRIORITY,
         )
         return await reply
-
-    def _reply(self) -> asyncio.Future[RuntimeSnapshot]:
-        if self._closed or self._stopping:
-            raise RuntimeError('run session is closed')
-        return asyncio.get_running_loop().create_future()
 
     async def _enqueue(self, event: _Event, priority: int) -> None:
         if self._closed or self._stopping:
             raise RuntimeError('run session is closed')
         await self._events.put((priority, next(self._event_sequence), event))
 
-    async def _handle_event(self, event: _Event) -> None:
-        if isinstance(event, _Command):
-            await self._handle_command(event)
-        elif isinstance(event, _CommitCommand):
-            await self._handle_commit(event)
-        elif isinstance(event, _RetryArtifactCommand):
-            await self._handle_retry_artifact(event)
-        elif isinstance(event, _ExecutionProgress):
-            await self._handle_progress(event)
-        else:
-            await self._handle_done(event)
-
-    async def _handle_command(self, command: _Command) -> None:
-        actions: dict[str, Callable[[], Awaitable[None]]] = {
-            'start': self._start,
-            'pause': self._pause,
-            'resume': self._resume,
-            'cancel': self._cancel,
-            'release': self._release,
-            'close': self._close,
-        }
+    async def _handle_request(self, request: _Request) -> None:
         try:
-            await self._flush_failure()
-            if command.kind == 'retry':
-                await self._retry(command.retry_keys, command.request_id)
-            else:
-                await actions[command.kind]()
+            if request.flush_failure:
+                await self._flush_failure()
+            await request.action()
         except Exception as exc:
             reply_error: Exception = exc
-            if self._failure_pending is not None:
+            if request.flush_failure and self._failure_pending is not None:
                 try:
                     await self._flush_failure()
                 except Exception as persistence_error:
@@ -334,36 +372,11 @@ class RunSession:
                         'command and failure persistence both failed',
                         [exc, persistence_error],
                     )
-            if not command.reply.done():
-                command.reply.set_exception(reply_error)
+            if not request.reply.done():
+                request.reply.set_exception(reply_error)
         else:
-            if not command.reply.done():
-                command.reply.set_result(self._snapshot)
-
-    async def _handle_commit(self, command: _CommitCommand) -> None:
-        try:
-            await self._commit_artifacts(command.commit)
-        except Exception as exc:
-            if not command.reply.done():
-                command.reply.set_exception(exc)
-        else:
-            if not command.reply.done():
-                command.reply.set_result(self._snapshot)
-
-    async def _handle_retry_artifact(self, command: _RetryArtifactCommand) -> None:
-        try:
-            await self._request_artifact_retry(command.artifact_key, command.request_id)
-        except Exception as exc:
-            if not command.reply.done():
-                command.reply.set_exception(exc)
-        else:
-            if not command.reply.done():
-                command.reply.set_result(self._snapshot)
-
-    async def _start(self) -> None:
-        if self._status != 'created':
-            raise DefinitionError(f'cannot start run from {self._status}')
-        await self._enter_running()
+            if not request.reply.done():
+                request.reply.set_result(self._snapshot)
 
     async def _pause(self) -> None:
         if self._status == 'paused':
@@ -376,24 +389,30 @@ class RunSession:
         self._status = 'paused'
         await self._publish()
 
-    async def _resume(self) -> None:
-        if self._status != 'paused':
-            raise DefinitionError(f'cannot resume run from {self._status}')
-        await self._enter_running()
-
-    async def _retry(self, artifact_keys: tuple[ArtifactKey, ...] = (),
-                     request_id: str = ''
-                     ) -> None:
-        if self._status != 'failed':
-            raise DefinitionError(f'cannot retry run from {self._status}')
-        if self._active:
-            await self._terminate(tuple(self._active.values()))
+    async def _retry(self, artifact_keys: tuple[ArtifactKey, ...] = (), request_id: str = '',
+                     rerun: bool = False) -> None:
+        if rerun:
+            if self._status not in _EDITABLE_STATUSES:
+                raise DefinitionError(f'cannot rerun artifacts from {self._status}')
+            if not artifact_keys:
+                raise DefinitionError('artifact rerun requires at least one artifact')
+        else:
+            if self._status != 'failed':
+                raise DefinitionError(f'cannot retry run from {self._status}')
+            if self._active:
+                await self._terminate(tuple(self._active.values()))
+        previous_status = self._status
         if artifact_keys:
-            await self._replace_artifact_retries(
-                artifact_keys,
-                request_id,
+            entries = await self._retry_entries(artifact_keys, request_id)
+            await self._store.replace_pending_retries(
+                self.run_id,
+                entries,
             )
-        await self._enter_running()
+        if rerun:
+            await self._refresh_plan()
+            await self._continue_after_change(previous_status, cancel_invalidated=True)
+        else:
+            await self._enter_running()
 
     async def _cancel(self) -> None:
         if self._status == 'cancelled':
@@ -427,13 +446,16 @@ class RunSession:
         await self._publish()
         self._stopping = True
 
-    async def _enter_running(self) -> None:
+    async def _enter_running(self, expected: RunStatus | None = None) -> None:
+        if expected is not None and self._status != expected:
+            action = 'start' if expected == 'created' else 'resume'
+            raise DefinitionError(f'cannot {action} run from {self._status}')
         await self._refresh_plan()
         await self._persist_status('running')
         await self._schedule()
 
     async def _commit_artifacts(self, commit: ArtifactCommit) -> None:
-        if self._status not in {'created', 'paused', 'completed', 'running'}:
+        if self._status not in _EDITABLE_STATUSES:
             raise DefinitionError(f'cannot commit artifact from {self._status}')
         self._definition.validate_commit(commit)
         previous_status = self._status
@@ -442,11 +464,26 @@ class RunSession:
             raise DefinitionError('artifact commit precondition is stale')
 
         await self._refresh_plan()
-        try:
-            await self._cancel_invalidated()
-        except _TerminationFailure:
-            await self._publish()
-            return
+        await self._continue_after_change(previous_status, cancel_invalidated=True)
+
+    async def _continue_after_change(self, previous_status: RunStatus, *, cancel_invalidated: bool = False) -> None:
+        if cancel_invalidated:
+            try:
+                if self._decision is not None:
+                    targets = tuple(
+                        execution
+                        for execution in self._active.values()
+                        if not execution.invocation.is_current(
+                            self._artifacts.records,
+                            self._decision.view.records,
+                            self._decision.view.partition_sets,
+                        )
+                    )
+                    if targets:
+                        await self._terminate(targets)
+            except _TerminationFailure:
+                await self._publish()
+                return
         if previous_status == 'completed' and not isinstance(self._decision, PlanComplete):
             await self._persist_status('running')
             await self._schedule()
@@ -456,7 +493,7 @@ class RunSession:
             await self._publish()
 
     async def _request_artifact_retry(self, key: ArtifactKey, request_id: str) -> None:
-        if self._status not in {'created', 'paused', 'completed', 'running'}:
+        if self._status not in _EDITABLE_STATUSES:
             raise DefinitionError(f'cannot retry artifact from {self._status}')
         operation = self._definition.producer_by_artifact.get(key.artifact_id)
         if operation is None:
@@ -481,31 +518,268 @@ class RunSession:
         await self._refresh_plan()
         if request.status != 'pending':
             await self._publish()
-        elif self._status == 'completed':
-            await self._persist_status('running')
-            await self._schedule()
-        elif self._status == 'running':
-            await self._schedule()
         else:
+            await self._continue_after_change(self._status)
+
+    async def _retry_case(self, case_id: str, request_id: str) -> None:
+        if self._status not in {'paused', 'completed', 'running'}:
+            raise DefinitionError(f'cannot retry case from {self._status}')
+        decision = await self._require_decision('case retry')
+
+        active_failure_refs = set(decision.failure_refs)
+        failures = tuple(
+            record
+            for key, record in decision.view.records.items()
+            if (
+                is_failure_key(key)
+                and key.partition_key == case_id
+                and record.ref in active_failure_refs
+                and record.producer.startswith('runtime:failure:')
+            )
+        )
+        if not failures:
+            raise DefinitionError(f'case has no active failure: {case_id}')
+
+        writes = tuple(
+            ArtifactDraft(
+                record.ref.key,
+                {
+                    'case_id': case_id,
+                    'request_id': request_id,
+                    'failure_ref': record.ref,
+                },
+                record.input_refs,
+            )
+            for record in failures
+        )
+        result = await self._store.commit(
+            self.run_id,
+            ArtifactCommit(
+                f'case-retry:{request_id}',
+                f'runtime:retry:{request_id}',
+                writes,
+                {record.ref.key: record.ref for record in failures},
+            ),
+        )
+        if result.status == 'stale':
+            raise DefinitionError('case failure changed before retry was applied')
+
+        previous_status = self._status
+        await self._refresh_plan()
+        await self._continue_after_change(previous_status)
+
+    async def _submit_intervention(self, intervention_id: str, target_key: ArtifactKey, target_ref: ArtifactRef | None,
+                                   message: str, field: str, quote: str, start: int | None, end: int | None) -> None:
+        if self._status not in _EDITABLE_STATUSES:
+            raise DefinitionError(f'cannot submit intervention from {self._status}')
+        decision = await self._require_decision('intervention')
+
+        existing = next(
+            (
+                item.intervention
+                for item in self._interventions
+                if item.intervention.intervention_id == intervention_id
+            ),
+            None,
+        )
+        if existing is not None:
+            if not (
+                existing.target_key == target_key
+                and (target_ref is None or existing.target_ref == target_ref)
+                and existing.message == message
+                and existing.field == field
+                and existing.quote == quote
+                and existing.start == start
+                and existing.end == end
+            ):
+                raise DefinitionError('intervention_id already identifies different content')
             await self._publish()
+            return
 
-    async def _replace_artifact_retries(
-        self,
-        artifact_keys: tuple[ArtifactKey, ...],
-        request_id: str,
-    ) -> tuple[ArtifactRetryRequest, ...]:
-        entries = await self._retry_entries(artifact_keys, request_id)
-        return await self._store.replace_pending_retries(self.run_id, entries)
+        operation, invocation_partition, target_ref = self._intervention_target(
+            decision,
+            target_key,
+            target_ref,
+        )
+        commit = await self._intervention_commit(
+            decision,
+            intervention_id,
+            operation,
+            invocation_partition,
+            target_key,
+            target_ref,
+            message,
+            field,
+            quote,
+            start,
+            end,
+        )
+        result = await self._store.commit(self.run_id, commit)
+        if result.status == 'stale':
+            raise DefinitionError('intervention target changed before it was saved')
 
-    async def _retry_entries(
-        self,
-        artifact_keys: tuple[ArtifactKey, ...],
-        request_id: str,
-    ) -> tuple[tuple[str, ArtifactKey, ArtifactRef], ...]:
-        if self._decision is None:
-            await self._refresh_plan()
-        if self._decision is None:
-            raise RuntimeError('retry planning state is unavailable')
+        previous_status = self._status
+        await self._refresh_plan()
+        await self._continue_after_change(previous_status, cancel_invalidated=True)
+
+    def _intervention_target(self, decision: PlanningResult, target_key: ArtifactKey,
+                             target_ref: ArtifactRef | None) -> tuple[Operation, str, ArtifactRef | None]:
+        if is_failure_key(target_key) or is_intervention_key(target_key):
+            raise DefinitionError('intervention target must be a workflow artifact')
+        operation = self._definition.producer_by_artifact.get(
+            target_key.artifact_id
+        )
+        if operation is None:
+            raise DefinitionError(
+                f'intervention target has no producer operation: {target_key}'
+            )
+        mode = self._definition.artifact_modes[target_key.artifact_id]
+        if (mode == 'partitioned') != bool(target_key.partition_key):
+            raise DefinitionError(
+                f'intervention target requires a {mode} artifact key'
+            )
+        invocation_partition = (
+            target_key.partition_key
+            if operation.spec.driver_input is not None
+            else ''
+        )
+        if operation.spec.driver_input is not None:
+            partitions = decision.view.partition_sets.get(
+                ArtifactKey.scalar(operation.spec.partition_set_id)
+            )
+            if (
+                partitions is None
+                or invocation_partition not in partitions
+            ):
+                raise DefinitionError(
+                    f'intervention case is not active: {invocation_partition}'
+                )
+
+        current_target = decision.view.records.get(target_key)
+        if target_ref is not None and (
+            current_target is None or current_target.ref != target_ref
+        ):
+            raise DefinitionError('intervention target version is no longer effective')
+        target_ref = (
+            target_ref
+            if target_ref is not None
+            else None if current_target is None else current_target.ref
+        )
+        return operation, invocation_partition, target_ref
+
+    async def _intervention_commit(self, decision: PlanningResult, intervention_id: str, operation: Operation,
+                                   invocation_partition: str, target_key: ArtifactKey, target_ref: ArtifactRef | None,
+                                   message: str, field: str, quote: str, start: int | None,
+                                   end: int | None) -> ArtifactCommit:
+        marker_key = intervention_key(operation.spec.op_id, invocation_partition)
+        marker_record = decision.view.records.get(marker_key)
+        previous = ()
+        if marker_record is not None:
+            bundle = await self._store.read(self.run_id, marker_record.ref)
+            if not isinstance(bundle, InterventionBundle):
+                raise DefinitionError(
+                    'intervention artifact must contain InterventionBundle'
+                )
+            previous = bundle.interventions
+        introduced_version = 1 if marker_record is None else marker_record.ref.version + 1
+        intervention = UserIntervention(
+            intervention_id,
+            operation.spec.op_id,
+            target_key,
+            target_ref,
+            message,
+            field,
+            quote,
+            start,
+            end,
+            time.time(),
+            introduced_version,
+        )
+        writes: list[ArtifactDraft] = [ArtifactDraft(
+            marker_key,
+            InterventionBundle(
+                operation.spec.op_id,
+                invocation_partition,
+                (*previous, intervention),
+            ),
+        )]
+        expected_heads: dict[ArtifactKey, ArtifactRef | None] = {
+            marker_key: None if marker_record is None else marker_record.ref,
+        }
+        for failure in self._case_failures:
+            if failure.operation_id != operation.spec.op_id:
+                continue
+            if invocation_partition and failure.case_id != invocation_partition:
+                continue
+            for output_key in failure.output_keys:
+                key = failure_key(output_key)
+                record = decision.view.records.get(key)
+                if record is None or not record.producer.startswith('runtime:failure:'):
+                    continue
+                writes.append(ArtifactDraft(
+                    key,
+                    {
+                        'case_id': failure.case_id,
+                        'intervention_id': intervention.intervention_id,
+                        'failure_ref': record.ref,
+                    },
+                    record.input_refs,
+                ))
+                expected_heads[key] = record.ref
+        return ArtifactCommit(
+            f'intervention:{intervention_id}',
+            f'runtime:intervention:{intervention_id}',
+            tuple(writes),
+            expected_heads,
+        )
+
+    async def _submit_attempt_result(self, attempt_id: str, result: OperationResult) -> None:
+        execution = self._active.get(attempt_id)
+        if execution is None:
+            attempts = await self._store.attempts(self.run_id)
+            attempt = next(
+                (item for item in attempts if item.attempt_id == attempt_id),
+                None,
+            )
+            if attempt is None:
+                raise DefinitionError(f'attempt not found: {attempt_id}')
+            if attempt.status == 'succeeded':
+                await self._publish()
+                return
+            raise DefinitionError(
+                f'attempt {attempt_id} no longer accepts results: {attempt.status}'
+            )
+        if execution.attempt.status != 'running':
+            raise DefinitionError(
+                f'attempt {attempt_id} no longer accepts results: '
+                f'{execution.attempt.status}'
+            )
+
+        commit = execution.invocation.artifact_commit(result)
+        self._definition.validate_commit(commit)
+        committed = await self._store.commit(
+            self.run_id,
+            commit,
+            attempt_id=attempt_id,
+        )
+        try:
+            await execution.handle.terminate()
+            await asyncio.gather(execution.waiter, return_exceptions=True)
+        except Exception as exc:
+            await self._fail_run(exc)
+            await self._publish()
+            raise
+        finally:
+            self._active.pop(attempt_id, None)
+
+        await self._refresh_plan()
+        await self._schedule()
+        if committed.status != 'ok':
+            raise DefinitionError(f'attempt {attempt_id} result is stale')
+
+    async def _retry_entries(self, artifact_keys: tuple[ArtifactKey, ...],
+                             request_id: str) -> tuple[tuple[str, ArtifactKey, ArtifactRef], ...]:
+        decision = await self._require_decision('retry')
 
         entries: list[tuple[str, ArtifactKey, ArtifactRef]] = []
         seen: set[tuple[str, str]] = set()
@@ -513,21 +787,26 @@ class RunSession:
             operation = self._definition.producer_by_artifact.get(key.artifact_id)
             if operation is None:
                 raise DefinitionError(f'artifact has no producer operation: {key}')
-            current = self._decision.view.records.get(key)
+            current = decision.view.records.get(key)
             if current is None:
                 raise DefinitionError(f'artifact is not currently effective: {key}')
             invocation = self._retry_invocation(key)
             if invocation in seen:
                 raise DefinitionError('one invocation cannot have multiple retry targets')
             seen.add(invocation)
-            child_id = ':'.join((
-                request_id,
-                key.artifact_id,
-                key.partition_key or '_',
-                str(current.ref.version),
-            ))
+            child_id = (
+                f'{request_id}:{key.artifact_id}:'
+                f'{key.partition_key or "_"}:{current.ref.version}'
+            )
             entries.append((child_id, key, current.ref))
         return tuple(entries)
+
+    async def _require_decision(self, purpose: str) -> PlanningResult:
+        if self._decision is None:
+            await self._refresh_plan()
+        if self._decision is None:
+            raise RuntimeError(f'{purpose} planning state is unavailable')
+        return self._decision
 
     def _retry_invocation(self, key: ArtifactKey) -> tuple[str, str]:
         operation = self._definition.producer_by_artifact.get(key.artifact_id)
@@ -556,6 +835,7 @@ class RunSession:
                     if request.request_id not in obsolete_ids
                 )
         self._decision = plan_next(self._definition, self._artifacts, self._retries)
+        await self._refresh_snapshot_data()
 
     async def _schedule(self) -> None:
         if self._status != 'running':
@@ -569,44 +849,43 @@ class RunSession:
                 await self._persist_status('completed')
             await self._publish()
             return
-        if isinstance(self._decision, PlanAwaiting):
+        if not isinstance(self._decision, PlanReady):
             await self._publish()
             return
 
-        active_invocations = {
-            execution.invocation.invocation_id
-            for execution in self._active.values()
-        }
-        per_operation: dict[str, int] = {}
-        for execution in self._active.values():
-            operation_id = execution.invocation.operation.spec.op_id
-            per_operation[operation_id] = per_operation.get(operation_id, 0) + 1
-
-        for invocation in self._decision.invocations:
-            if len(self._active) >= self._max_concurrency:
-                break
-            if invocation.invocation_id in active_invocations:
-                continue
-            operation_id = invocation.operation.spec.op_id
-            if per_operation.get(operation_id, 0) >= invocation.operation.spec.max_concurrency:
-                continue
+        for invocation in self._launch_candidates(self._decision):
             await self._launch(invocation)
-            active_invocations.add(invocation.invocation_id)
-            per_operation[operation_id] = per_operation.get(operation_id, 0) + 1
             if self._status == 'failed':
                 break
         await self._publish()
 
+    def _launch_candidates(self, decision: PlanReady) -> Iterator[OperationInvocation]:
+        active_invocations = {
+            execution.invocation.invocation_id
+            for execution in self._active.values()
+        }
+        per_operation = Counter(
+            execution.invocation.operation.spec.op_id
+            for execution in self._active.values()
+        )
+        remaining = self._max_concurrency - len(self._active)
+        for invocation in decision.invocations:
+            operation_id = invocation.operation.spec.op_id
+            if remaining <= 0:
+                return
+            if invocation.invocation_id in active_invocations:
+                continue
+            if per_operation[operation_id] >= invocation.operation.spec.max_concurrency:
+                continue
+            yield invocation
+            remaining -= 1
+            active_invocations.add(invocation.invocation_id)
+            per_operation[operation_id] += 1
+
     async def _launch(self, invocation: OperationInvocation) -> None:
         try:
             values = await self._store.read_many(self.run_id, invocation.value_refs())
-        except Exception as exc:
-            await self._fail_run(exc)
-            await self._terminate_failed_siblings()
-            return
-
-        attempt_id = uuid.uuid4().hex
-        try:
+            attempt_id = uuid.uuid4().hex
             attempt = await self._store.create_attempt(
                 self.run_id,
                 attempt_id,
@@ -614,7 +893,7 @@ class RunSession:
                 invocation.operation.spec.op_id,
                 invocation.partition_key,
                 invocation.lineage_refs(),
-                tuple(key for key in invocation.output_keys.values() if key is not None),
+                tuple(invocation.expected_heads),
                 retry_request_id=invocation.retry_request_id,
             )
         except Exception as exc:
@@ -632,6 +911,7 @@ class RunSession:
                 invocation.invocation_id,
                 invocation.partition_key,
                 self._reporter(attempt_id),
+                invocation.bind_interventions(values),
             )
             handle = await start_execution(
                 invocation,
@@ -641,11 +921,14 @@ class RunSession:
             )
         except Exception as exc:
             await self._fail_attempt(attempt, exc)
-            await self._terminate_failed_siblings()
+            if attempt.partition_key:
+                await self._refresh_plan()
+            else:
+                await self._terminate_failed_siblings()
             return
 
         waiter = asyncio.create_task(
-            self._wait_execution(attempt_id, handle),
+            self._wait_execution(attempt_id, handle, invocation.operation.spec.timeout),
             name=f'artifact-attempt:{attempt_id}',
         )
         self._active[attempt_id] = _ActiveExecution(invocation, attempt, handle, waiter)
@@ -663,14 +946,22 @@ class RunSession:
                 raise
         return report
 
-    async def _wait_execution(self, attempt_id: str, handle: ExecutionHandle) -> None:
+    async def _wait_execution(self, attempt_id: str, handle: ExecutionHandle, timeout: float | None) -> None:
         result = None
         error = None
         try:
-            result = await handle.wait()
-        except asyncio.CancelledError as exc:
-            error = exc
-        except Exception as exc:
+            async with asyncio.timeout(timeout):
+                result = await handle.wait()
+        except TimeoutError:
+            try:
+                await handle.terminate()
+            except Exception as exc:
+                error = exc
+            else:
+                error = OperationTimeoutError(
+                    f'operation exceeded its {timeout:g}s timeout'
+                )
+        except (asyncio.CancelledError, Exception) as exc:
             error = exc
         try:
             await self._enqueue(
@@ -679,15 +970,6 @@ class RunSession:
             )
         except RuntimeError:
             return
-
-    async def _handle_progress(self, event: _ExecutionProgress) -> None:
-        execution = self._active.get(event.attempt_id)
-        if execution is None or execution.attempt.status != 'running':
-            return
-        try:
-            await self._store.append_progress(self.run_id, event.attempt_id, event.update)
-        except Exception as exc:
-            await self._fail_running(exc)
 
     async def _handle_done(self, event: _ExecutionDone) -> None:
         execution = self._active.get(event.attempt_id)
@@ -701,13 +983,13 @@ class RunSession:
             else:
                 error = _as_exception(event.error)
             execution.attempt = await self._fail_attempt(execution.attempt, error)
-            if not (
-                isinstance(event.error, ExecutionCleanupError)
+            cleanup_error = (
+                event.error
+                if isinstance(event.error, ExecutionCleanupError)
                 and event.error.cleanup_pending
-            ):
-                self._active.pop(event.attempt_id, None)
-            await self._terminate_failed_siblings()
-            await self._publish()
+                else None
+            )
+            await self._complete_failed_execution(execution, cleanup_error)
             return
 
         try:
@@ -722,19 +1004,69 @@ class RunSession:
             )
         except Exception as exc:
             execution.attempt = await self._fail_attempt(execution.attempt, exc)
-            self._active.pop(event.attempt_id, None)
-            await self._terminate_failed_siblings()
-            await self._publish()
+            await self._complete_failed_execution(execution, None)
             return
 
         self._active.pop(event.attempt_id, None)
         await self._refresh_plan()
         await self._schedule()
 
-    async def _fail_attempt(self, attempt: AttemptSnapshot,
-                            error: Exception
-                            ) -> AttemptSnapshot:
+    async def _complete_failed_execution(self, execution: _ActiveExecution,
+                                         cleanup_error: ExecutionCleanupError | None) -> None:
+        if cleanup_error is not None:
+            await self._fail_run(cleanup_error)
+            await self._terminate_failed_siblings()
+            await self._publish()
+            return
+        self._active.pop(execution.attempt.attempt_id, None)
+        if execution.attempt.partition_key:
+            await self._refresh_plan()
+            await self._schedule()
+        else:
+            await self._terminate_failed_siblings()
+            await self._publish()
+
+    async def _fail_attempt(self, attempt: AttemptSnapshot, error: Exception) -> AttemptSnapshot:
         info = RuntimeErrorInfo(type(error).__name__, str(error) or type(error).__name__)
+        if attempt.partition_key:
+            failed = await self._store.set_attempt_status(
+                self.run_id,
+                attempt.attempt_id,
+                'failed',
+                error=info,
+            )
+            failure = CaseFailure(
+                failed.attempt_id,
+                failed.invocation_id,
+                failed.operation_id,
+                failed.partition_key,
+                info,
+                failed.input_refs,
+                failed.output_keys,
+                failed.finished_at if failed.finished_at is not None else time.time(),
+            )
+            failure_heads = {
+                key: await self._store.head(self.run_id, key)
+                for key in (failure_key(output) for output in failed.output_keys)
+            }
+            result = await self._store.commit(
+                self.run_id,
+                ArtifactCommit(
+                    f'case-failure:{failed.attempt_id}',
+                    f'runtime:failure:{failed.attempt_id}',
+                    tuple(
+                        ArtifactDraft(key, failure, failed.input_refs)
+                        for key in failure_heads
+                    ),
+                    {
+                        key: None if head is None else head.ref
+                        for key, head in failure_heads.items()
+                    },
+                ),
+            )
+            if result.status == 'stale':
+                raise RuntimeError('case failure changed before it could be recorded')
+            return failed
         failed = await self._store.fail_attempt_and_run(self.run_id, attempt.attempt_id, info)
         self._status = 'failed'
         self._error = info
@@ -760,27 +1092,10 @@ class RunSession:
             await self._fail_run(error)
         except Exception as exc:
             persistence_error = exc
-        try:
-            await self._terminate(tuple(self._active.values()))
-        except _TerminationFailure:
-            pass
+        await self._terminate_failed_siblings()
         await self._publish()
         if persistence_error is not None:
             raise persistence_error
-
-    async def _handle_internal_error(self, error: Exception) -> None:
-        if self._status == 'failed':
-            try:
-                await self._flush_failure()
-            except Exception:
-                pass
-            try:
-                await self._terminate(tuple(self._active.values()))
-            except _TerminationFailure:
-                pass
-            await self._publish()
-            return
-        await self._fail_running(error)
 
     async def _terminate_failed_siblings(self) -> None:
         siblings = tuple(self._active.values())
@@ -791,28 +1106,8 @@ class RunSession:
         except _TerminationFailure:
             return
 
-    async def _cancel_invalidated(self) -> None:
-        if self._decision is None:
-            return
-        targets = tuple(
-            execution
-            for execution in self._active.values()
-            if not execution.invocation.is_current(
-                self._artifacts.records,
-                self._decision.view.records,
-                self._decision.view.partition_sets,
-            )
-        )
-        if targets:
-            await self._terminate(targets)
-
-    async def _terminate(
-        self,
-        executions: tuple[_ActiveExecution, ...],
-        *,
-        final: Literal['paused', 'cancelled', 'interrupted'] | None = None,
-    ) -> None:
-        failures: list[Exception] = []
+    async def _terminate(self, executions: tuple[_ActiveExecution, ...], *,
+                         final: Literal['paused', 'cancelled', 'interrupted'] | None = None) -> None:
         for execution in executions:
             if execution.attempt.status in {'scheduled', 'running'}:
                 try:
@@ -823,38 +1118,17 @@ class RunSession:
                     )
                 except Exception:
                     pass
-
-        results = await asyncio.gather(
-            *(execution.handle.terminate() for execution in executions),
-            return_exceptions=True,
-        )
-        for execution, result in zip(executions, results, strict=True):
-            if isinstance(result, BaseException):
-                failures.append(_as_exception(result))
-                continue
-            await asyncio.gather(execution.waiter, return_exceptions=True)
-            try:
-                if execution.attempt.status != 'failed':
-                    execution.attempt = await self._store.set_attempt_status(
-                        self.run_id,
-                        execution.attempt.attempt_id,
-                        (
-                            'interrupted'
-                            if final == 'interrupted'
-                            else 'cancelled'
-                        ),
-                    )
-            except Exception as exc:
-                failures.append(exc)
-                continue
-            self._active.pop(execution.attempt.attempt_id, None)
-
+        results = await asyncio.gather(*(
+            self._terminate_execution(execution, final)
+            for execution in executions
+        ))
+        failures = [error for error in results if error is not None]
         if not failures:
             try:
                 if final in {'paused', 'interrupted'}:
-                    await self._store.finish_pause(self.run_id)
+                    await self._store.finish_stopping(self.run_id, 'paused')
                 elif final == 'cancelled':
-                    await self._store.finish_cancel(self.run_id)
+                    await self._store.finish_stopping(self.run_id, 'cancelled')
             except Exception as exc:
                 failures.append(exc)
         if failures:
@@ -873,6 +1147,27 @@ class RunSession:
             await self._publish()
             raise failure
 
+    async def _terminate_execution(self, execution: _ActiveExecution,
+                                   final: Literal['paused', 'cancelled', 'interrupted'] | None) -> Exception | None:
+        try:
+            await execution.handle.terminate()
+        except asyncio.CancelledError as error:
+            return _as_exception(error)
+        except Exception as error:
+            return error
+        await asyncio.gather(execution.waiter, return_exceptions=True)
+        try:
+            if execution.attempt.status != 'failed':
+                execution.attempt = await self._store.set_attempt_status(
+                    self.run_id,
+                    execution.attempt.attempt_id,
+                    'interrupted' if final == 'interrupted' else 'cancelled',
+                )
+        except Exception as error:
+            return error
+        self._active.pop(execution.attempt.attempt_id, None)
+        return None
+
     async def _persist_status(self, status: RunStatus) -> None:
         if status == 'failed':
             raise ValueError('failed status must be persisted through _fail_run')
@@ -882,50 +1177,27 @@ class RunSession:
         self._failure_pending = None
 
     async def _publish(self) -> None:
-        view = self._artifacts if self._decision is None else self._decision.view
-        running = ()
-        if self._status not in {'cancelled', 'failed', 'completed'}:
-            running = tuple(
-                InvocationSnapshot(
-                    execution.invocation.invocation_id,
-                    execution.invocation.operation.spec.op_id,
-                    execution.invocation.partition_key,
-                )
-                for execution in self._active.values()
-                if execution.attempt.status in {'scheduled', 'running'}
-            )
-        ready_count = 0
-        awaiting: tuple[ArtifactKey, ...] = ()
-        if (
-            isinstance(self._decision, PlanReady)
-            and self._status not in {'cancelled', 'failed', 'completed'}
-        ):
-            active_ids = {execution.invocation.invocation_id for execution in self._active.values()}
-            ready_count = sum(
-                invocation.invocation_id not in active_ids
-                for invocation in self._decision.invocations
-            )
-        elif isinstance(self._decision, PlanAwaiting):
-            awaiting = self._decision.artifact_keys
-
-        self._snapshot = RuntimeSnapshot(
+        await self._refresh_snapshot_data(include_failures=False)
+        if self._decision is None:
+            raise RuntimeError('runtime snapshot requires a planning decision')
+        self._snapshot = project_runtime_snapshot(
             self.run_id,
             self._status,
-            running,
-            ready_count,
-            {key: record.ref for key, record in view.records.items()},
-            view.partition_sets,
             self._error,
-            tuple(execution.attempt for execution in self._active.values()),
-            awaiting,
+            self._definition,
+            self._decision,
+            self._attempts,
+            self._case_failures,
+            self._interventions,
+            active_attempts=(
+                execution.attempt for execution in self._active.values()
+            ),
         )
         await self._notify()
 
     def _settled(self) -> bool:
         if self._snapshot.status in {'created', 'paused', 'cancelled', 'failed', 'completed'}:
-            if self._snapshot.active_attempts:
-                return False
-            return True
+            return not self._snapshot.active_attempts
         return (
             self._snapshot.status == 'running'
             and not self._snapshot.running
@@ -937,16 +1209,84 @@ class RunSession:
         async with self._condition:
             self._condition.notify_all()
 
-    async def _finish_pending_events(self) -> None:
-        error = RuntimeError('run session is closed')
-        while not self._events.empty():
-            _, _, event = self._events.get_nowait()
-            if isinstance(event, (_Command, _CommitCommand, _RetryArtifactCommand)):
-                if not event.reply.done():
-                    event.reply.set_exception(error)
-            if isinstance(event, _ExecutionProgress):
-                self._progress_slots.release()
-            self._events.task_done()
+
+def _project_interventions(records: tuple[ArtifactRecord, ...], values: Mapping[ArtifactRef, object],
+                           attempts: tuple[AttemptSnapshot, ...]) -> tuple[InterventionSnapshot, ...]:
+    snapshots: list[InterventionSnapshot] = []
+    for record in records:
+        bundle = values[record.ref]
+        if not isinstance(bundle, InterventionBundle):
+            raise DefinitionError('intervention artifact must contain InterventionBundle')
+        for intervention in bundle.interventions:
+            adopted = tuple(
+                attempt
+                for attempt in attempts
+                if any(
+                    ref.key == record.ref.key
+                    and ref.version >= intervention.introduced_version
+                    for ref in attempt.input_refs
+                )
+            )
+            terminal = tuple(
+                attempt
+                for attempt in adopted
+                if attempt.status in {
+                    'cancelled', 'succeeded', 'failed', 'interrupted', 'discarded',
+                }
+            )
+            status = (
+                'consumed'
+                if terminal
+                else 'processing' if adopted else 'pending'
+            )
+            snapshots.append(InterventionSnapshot(
+                intervention,
+                status,
+                tuple(
+                    attempt.attempt_id
+                    for attempt in sorted(adopted, key=lambda item: item.created_at)
+                ),
+            ))
+    return tuple(sorted(
+        snapshots,
+        key=lambda item: (
+            item.intervention.created_at,
+            item.intervention.intervention_id,
+        ),
+    ))
+
+
+async def _load_case_failures(store: ArtifactStore, run_id: str,
+                              refs: tuple[ArtifactRef, ...]) -> tuple[CaseFailure, ...]:
+    values = await store.read_many(run_id, refs)
+    failures: dict[str, CaseFailure] = {}
+    for ref in refs:
+        failure = values[ref]
+        if not isinstance(failure, CaseFailure):
+            raise DefinitionError('failure artifact must contain CaseFailure')
+        failures.setdefault(failure.attempt_id, failure)
+    return tuple(sorted(
+        failures.values(),
+        key=lambda failure: (
+            failure.case_id,
+            failure.operation_id,
+            failure.attempt_id,
+        ),
+    ))
+
+
+async def _load_interventions(store: ArtifactStore, run_id: str, records: Mapping[ArtifactKey, ArtifactRecord],
+                              attempts: tuple[AttemptSnapshot, ...]) -> tuple[InterventionSnapshot, ...]:
+    intervention_records = tuple(
+        record
+        for key, record in records.items()
+        if is_intervention_key(key)
+    )
+    values = await store.read_many(
+        run_id,
+        (record.ref for record in intervention_records),
+    )
+    return _project_interventions(intervention_records, values, attempts)
 
 
 __all__ = ['RunSession']

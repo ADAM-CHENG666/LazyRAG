@@ -73,7 +73,6 @@ class EvoService:
         service = cls(root, definition, flow)
         await asyncio.to_thread(service.router.reconcile_unpublished)
         await asyncio.to_thread(service.router.reconcile_published)
-        await service._restore_auto_threads()
         return service
 
     async def create_thread(self, request: ThreadCreate | Mapping[str, Any]
@@ -178,6 +177,8 @@ class EvoService:
                     raise ServiceError(409, 'thread has not been started')
                 if snapshot.status in {'cancelled', 'failed'}:
                     raise ServiceError(409, f'cannot continue thread from {snapshot.status}')
+                if snapshot.status == 'paused':
+                    await self.flow.resume(thread_id)
                 self._ensure_auto_task(thread_id)
                 return _accepted(thread_id, request.command_id, 'continue')
 
@@ -208,11 +209,10 @@ class EvoService:
         )
 
         async def action() -> dict[str, str]:
-            await self.flow.retry(
-                thread_id,
-                stage=request.stage,
-                request_id=command_id,
-            )
+            if request.stage:
+                await self.flow.rerun_stage(thread_id, request.stage, request_id=command_id)
+            else:
+                await self.flow.retry_stage(thread_id, request_id=command_id)
             if await self._thread_mode(thread_id) == 'auto':
                 self._ensure_auto_task(thread_id)
             return _accepted(thread_id, command_id, 'retry')
@@ -225,6 +225,7 @@ class EvoService:
         request = _control_request(request)
 
         async def action() -> dict[str, str]:
+            await self._stop_auto_task(thread_id)
             snapshot = await self.flow.snapshot(thread_id)
             if snapshot.status != 'paused':
                 await self.flow.pause(thread_id)
@@ -270,6 +271,8 @@ class EvoService:
         )
         if mode == 'auto' and snapshot.status not in _AUTO_STOPPED:
             self._ensure_auto_task(thread_id)
+        elif mode != 'auto':
+            await self._stop_auto_task(thread_id)
         return result
 
     async def message_history(self, thread_id: str, page_size: int,
@@ -335,15 +338,6 @@ class EvoService:
     async def _thread_mode(self, thread_id: str) -> str:
         return str((await self._run_config(thread_id)).get('mode') or '')
 
-    async def _restore_auto_threads(self) -> None:
-        for thread_id in await self.flow.run_ids():
-            snapshot, mode = await asyncio.gather(
-                self.flow.snapshot(thread_id),
-                self._thread_mode(thread_id),
-            )
-            if mode == 'auto' and snapshot.status not in _AUTO_STOPPED:
-                self._ensure_auto_task(thread_id)
-
     def _ensure_auto_task(self, thread_id: str) -> None:
         if self._closing:
             return
@@ -370,8 +364,7 @@ class EvoService:
                 if snapshot.status in _AUTO_STOPPED:
                     return
                 if snapshot.status == 'paused':
-                    await self.flow.resume(thread_id)
-                    continue
+                    return
                 if snapshot.status == 'awaiting_approval':
                     pending = snapshot.pending_approval
                     if pending is None:

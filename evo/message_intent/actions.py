@@ -130,11 +130,9 @@ class ActionExecutor:
         if action.command == 'resume':
             return await self.flow.resume(self.thread_id)
         if action.command == 'retry':
-            return await self.flow.retry(
-                self.thread_id,
-                stage=action.stage,
-                request_id=command_id,
-            )
+            if action.stage:
+                return await self.flow.rerun_stage(self.thread_id, action.stage, request_id=command_id)
+            return await self.flow.retry_stage(self.thread_id, request_id=command_id)
         return await self.flow.cancel(self.thread_id)
 
     async def _execute_query(self, action: QueryAction) -> object:

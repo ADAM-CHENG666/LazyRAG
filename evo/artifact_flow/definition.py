@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
-from evo.artifact_runtime import ArtifactKey, Operation, OperationSpec
+from evo.artifact_runtime import ArtifactKey, DefinitionError, Operation, OperationSpec
 
 
 @dataclass(frozen=True)
@@ -141,19 +141,29 @@ class FlowDefinition:
     def stage_index_for_operation(self, operation_id: str) -> int | None:
         return self._stage_by_operation_id.get(operation_id)
 
+    def stage_index(self, stage: str) -> int:
+        index = next((index for index, item in enumerate(self.stages) if item.name == stage), None)
+        if index is None:
+            raise DefinitionError(f'unknown flow stage: {stage}')
+        return index
+
+    def stage_operations(self, stage_index: int) -> tuple[Operation, ...]:
+        if not isinstance(stage_index, int) or stage_index not in range(len(self.stages)):
+            raise ValueError(f'unknown flow stage index: {stage_index}')
+        return tuple(
+            operation
+            for operation in self.operations
+            if self._stage_by_operation_id[operation.spec.op_id] == stage_index
+        )
+
     def stage_entry_operations(self, stage_index: int) -> tuple[Operation, ...]:
-        if (
-            not isinstance(stage_index, int)
-            or stage_index < 0
-            or stage_index >= len(self.stages)
-        ):
+        if not isinstance(stage_index, int) or stage_index not in range(len(self.stages)):
             raise ValueError(f'unknown flow stage index: {stage_index}')
         return self._entry_operations_by_stage[stage_index]
 
 
 def _stage_ownership(operations: tuple[Operation, ...],
-                     stages: tuple[FlowStage, ...]
-                     ) -> tuple[dict[str, int], dict[str, int]]:
+                     stages: tuple[FlowStage, ...]) -> tuple[dict[str, int], dict[str, int]]:
     producers = {
         output.artifact_id: operation
         for operation in operations
@@ -197,11 +207,8 @@ def _stage_ownership(operations: tuple[Operation, ...],
     return artifact_stages, operation_stages
 
 
-def _stage_entry_operations(
-    operations: tuple[Operation, ...],
-    stages: tuple[FlowStage, ...],
-    operation_stages: Mapping[str, int],
-) -> tuple[tuple[Operation, ...], ...]:
+def _stage_entry_operations(operations: tuple[Operation, ...], stages: tuple[FlowStage, ...],
+                            operation_stages: Mapping[str, int]) -> tuple[tuple[Operation, ...], ...]:
     producers = {
         output.artifact_id: operation
         for operation in operations
@@ -234,10 +241,8 @@ def _stage_entry_operations(
     return tuple(tuple(stage_entries) for stage_entries in entries)
 
 
-def _validate_stage_results(stages: tuple[FlowStage, ...],
-                            producers: Mapping[str, Operation],
-                            operation_stages: Mapping[str, int]
-                            ) -> None:
+def _validate_stage_results(stages: tuple[FlowStage, ...], producers: Mapping[str, Operation],
+                            operation_stages: Mapping[str, int]) -> None:
     for stage_index, stage in enumerate(stages):
         producer = producers[stage.result_key.artifact_id]
         if operation_stages.get(producer.spec.op_id) != stage_index:
@@ -253,11 +258,8 @@ def _validate_stage_results(stages: tuple[FlowStage, ...],
             )
 
 
-def _validate_approval_gates(operations: tuple[Operation, ...],
-                             stages: tuple[FlowStage, ...],
-                             producers: Mapping[str, Operation],
-                             operation_stages: Mapping[str, int]
-                             ) -> None:
+def _validate_approval_gates(operations: tuple[Operation, ...], stages: tuple[FlowStage, ...],
+                             producers: Mapping[str, Operation], operation_stages: Mapping[str, int]) -> None:
     for operation in operations:
         stage_index = operation_stages.get(operation.spec.op_id)
         if stage_index is None or stage_index == 0:
@@ -272,9 +274,7 @@ def _validate_approval_gates(operations: tuple[Operation, ...],
             )
 
 
-def _depends_on(operation: Operation, artifact_id: str,
-                producers: Mapping[str, Operation]
-                ) -> bool:
+def _depends_on(operation: Operation, artifact_id: str, producers: Mapping[str, Operation]) -> bool:
     pending = [
         dependency
         for binding in operation.spec.inputs.values()
