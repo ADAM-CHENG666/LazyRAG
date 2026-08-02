@@ -3,17 +3,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, cast
 
-from evo.artifact_runtime import ArtifactKey, ArtifactRef, RuntimeSnapshot
 from evo.artifact_runtime import (
+    ArtifactKey,
     ArtifactRecord,
+    ArtifactRef,
     ArtifactRetryRequest,
     AttemptSnapshot,
     CaseFailure,
     CaseSnapshot,
     OperationDefinitionSnapshot,
-    ProgressEvent,
+    RecordedOperationEvent,
     RunHistory,
+    RuntimeErrorInfo,
     RuntimeProgress,
+    RuntimeSnapshot,
 )
 
 
@@ -43,6 +46,16 @@ StageStatus = Literal[
 
 
 @dataclass(frozen=True)
+class ArtifactUpdate:
+    target_ref: ArtifactRef
+    value: object
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.target_ref, ArtifactRef):
+            raise TypeError('artifact update target_ref must be ArtifactRef')
+
+
+@dataclass(frozen=True)
 class StageProgress:
     stage: str
     result_key: ArtifactKey
@@ -53,6 +66,7 @@ class StageProgress:
     operation_ids: tuple[str, ...] = ()
     progress: RuntimeProgress = RuntimeProgress()
     failures: tuple[CaseFailure, ...] = ()
+    error: RuntimeErrorInfo | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.stage, str) or not self.stage.strip():
@@ -82,6 +96,8 @@ class StageProgress:
         failures = tuple(self.failures)
         if not all(isinstance(failure, CaseFailure) for failure in failures):
             raise TypeError('failures must contain CaseFailure values')
+        if self.error is not None and not isinstance(self.error, RuntimeErrorInfo):
+            raise TypeError('error must be RuntimeErrorInfo or None')
         object.__setattr__(self, 'operation_ids', operation_ids)
         object.__setattr__(self, 'failures', failures)
 
@@ -91,15 +107,7 @@ class StageProgress:
 
     @property
     def approved(self) -> bool:
-        return self.status == 'completed' and self.has_approval
-
-    @property
-    def has_result(self) -> bool:
-        return self.result_ref is not None
-
-    @property
-    def has_approval(self) -> bool:
-        return self.approval_key is None or self.approval_ref is not None
+        return self.status == 'completed' and self.approval_key is not None and self.approval_ref is not None
 
 
 @dataclass(frozen=True)
@@ -108,10 +116,9 @@ class StageSnapshot:
     operations: tuple[OperationDefinitionSnapshot, ...] = ()
     attempts: tuple[AttemptSnapshot, ...] = ()
     artifacts: tuple[ArtifactRecord, ...] = ()
-    progress_events: tuple[ProgressEvent, ...] = ()
+    operation_events: tuple[RecordedOperationEvent, ...] = ()
     retries: tuple[ArtifactRetryRequest, ...] = ()
-    results: tuple[ArtifactRecord, ...] = ()
-    approvals: tuple[ArtifactRecord, ...] = ()
+    versions: tuple[tuple[ArtifactRecord, ArtifactRecord | None], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -119,6 +126,10 @@ class FlowCaseSnapshot:
     runtime: CaseSnapshot
     stages: tuple[str, ...]
     current_stage: str
+    artifacts: tuple[ArtifactRecord, ...] = ()
+    attempts: tuple[AttemptSnapshot, ...] = ()
+    operation_events: tuple[RecordedOperationEvent, ...] = ()
+    retries: tuple[ArtifactRetryRequest, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -132,6 +143,8 @@ class FlowRunHistory:
 class FlowSnapshot:
     runtime: RuntimeSnapshot
     stages: tuple[StageProgress, ...]
+    progress: RuntimeProgress
+    failures: tuple[CaseFailure, ...]
 
     def __post_init__(self) -> None:
         if not isinstance(self.runtime, RuntimeSnapshot):
@@ -141,7 +154,13 @@ class FlowSnapshot:
             raise TypeError('stages must contain StageProgress values')
         if len({stage.stage for stage in stages}) != len(stages):
             raise ValueError('stage progress names must be unique')
+        if not isinstance(self.progress, RuntimeProgress):
+            raise TypeError('progress must be RuntimeProgress')
+        failures = tuple(self.failures)
+        if not all(isinstance(failure, CaseFailure) for failure in failures):
+            raise TypeError('failures must contain CaseFailure values')
         object.__setattr__(self, 'stages', stages)
+        object.__setattr__(self, 'failures', failures)
 
     @property
     def run_id(self) -> str:
@@ -151,24 +170,18 @@ class FlowSnapshot:
     def status(self) -> FlowStatus:
         if self.runtime.status == 'created':
             return 'idle'
-        if self.current_progress.status == 'failed':
-            return 'failed'
-        if (
-            self.runtime.status == 'completed'
-            and self.current_progress.status == 'running'
-        ):
+        if self.runtime.status in {'pausing', 'paused', 'cancelling', 'cancelled'}:
+            return cast(FlowStatus, self.runtime.status)
+        if self.current_progress.status in {'failed', 'awaiting_approval'}:
+            return cast(FlowStatus, self.current_progress.status)
+        if all(stage.status == 'completed' for stage in self.stages):
+            return 'completed'
+        if self.runtime.status == 'completed':
             return 'running'
-        if (
-            self.runtime.status == 'running'
-            and self.pending_approval is not None
-        ):
-            return 'awaiting_approval'
         return cast(FlowStatus, self.runtime.status)
 
     @property
     def pending_approval(self) -> StageProgress | None:
-        if self.runtime.status not in {'running', 'paused'}:
-            return None
         return next((stage for stage in self.stages if stage.status == 'awaiting_approval'), None)
 
     @property
@@ -177,13 +190,10 @@ class FlowSnapshot:
 
     @property
     def current_progress(self) -> StageProgress:
-        return next(
-            (stage for stage in self.stages if stage.status != 'completed'),
-            self.stages[-1],
-        )
+        return next((stage for stage in self.stages if stage.status != 'completed'), self.stages[-1])
 
 
 __all__ = [
-    'FlowCaseSnapshot', 'FlowRunHistory', 'FlowSnapshot', 'FlowStatus',
+    'ArtifactUpdate', 'FlowCaseSnapshot', 'FlowRunHistory', 'FlowSnapshot', 'FlowStatus',
     'StageProgress', 'StageSnapshot', 'StageStatus',
 ]

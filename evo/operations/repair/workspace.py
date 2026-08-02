@@ -10,6 +10,8 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
+from evo.operations.public_contracts import clean_text as _text
+
 ALGORITHM_APP = Path('algorithm/lazymind/chat/app.py')
 SOURCE_IGNORE_PATTERNS = (
     '.git',
@@ -171,7 +173,3 @@ def _ignored_source_path(path: Path) -> bool:
         for part in path.parts
         for pattern in SOURCE_IGNORE_PATTERNS
     )
-
-
-def _text(value: Any) -> str:
-    return str(value or '').strip()

@@ -87,14 +87,6 @@ def build_code_index(root: Path, domain_roots: tuple[str, ...] = DOMAIN_ROOTS) -
     return CodeIndex(root=str(base), files=files)
 
 
-def symbol_at(index: CodeIndex, path: str, qualname: str) -> CodeSymbol | None:
-    normalized = _clean_relpath(path)
-    for symbol in index.symbols:
-        if symbol.path == normalized and symbol.qualname == qualname:
-            return symbol
-    return None
-
-
 def _python_files(root: Path, domain_roots: tuple[str, ...]) -> tuple[Path, ...]:
     files: list[Path] = []
     for rel_root in domain_roots:
@@ -133,11 +125,10 @@ def _symbols(path: str, domain: str, tree: ast.AST, source: str) -> list[CodeSym
             self.generic_visit(node)
             self.stack.pop()
 
-        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
             self._visit_function(node)
 
-        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-            self._visit_function(node)
+        visit_AsyncFunctionDef = visit_FunctionDef
 
         def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
             qualname = '.'.join([*self.stack, node.name])
@@ -151,8 +142,8 @@ def _symbols(path: str, domain: str, tree: ast.AST, source: str) -> list[CodeSym
     return symbols
 
 
-def _symbol(path: str, domain: str, kind: str, qualname: str, node: ast.AST,
-            args: tuple[str, ...], source: str) -> CodeSymbol:
+def _symbol(path: str, domain: str, kind: str, qualname: str, node: ast.AST, args: tuple[str, ...], source: str
+            ) -> CodeSymbol:
     calls, exceptions, identifiers, literals, node_kinds = set(), set(), set(), set(), set()
     for child in ast.walk(node):
         node_kinds.add(child.__class__.__name__)

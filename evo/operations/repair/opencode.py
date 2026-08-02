@@ -10,6 +10,8 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
+from evo.artifact_runtime import record_event
+
 PERMISSIONS = {
     **dict.fromkeys(('read', 'grep', 'glob', 'list', 'edit', 'write'), 'allow'),
     **dict.fromkeys(('bash', 'question', 'plan_enter', 'plan_exit', 'todowrite', 'task'), 'deny'),
@@ -53,17 +55,9 @@ class OpenCodeRunResult(NamedTuple):
     finish_reason: str
 
 
-def run_opencode_streaming(
-    *,
-    workdir: str,
-    prompt: str,
-    artifact_dir: Path,
-    session_id: str = '',
-    config: dict[str, str] | None = None,
-    timeout_s: int = 900,
-    trace: Any | None = None,
-    attempt: int | None = None,
-) -> OpenCodeRunResult:
+def run_opencode_streaming(*, workdir: str, prompt: str, artifact_dir: Path, session_id: str = '',
+                           config: dict[str, str] | None = None, timeout_s: int = 900, attempt: int | None = None
+                           ) -> OpenCodeRunResult:
     started = time.time()
     settings, secrets = _opencode_settings(config or {}), _secrets(config or {})
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -72,8 +66,8 @@ def run_opencode_streaming(
     events_path = artifact_dir / 'events.jsonl'
     config_path: Path | None = None
 
-    def result(returncode: int, session: str, error: dict[str, Any] | None,
-               finish_reason: str = '') -> OpenCodeRunResult:
+    def result(returncode: int, session: str, error: dict[str, Any] | None, finish_reason: str = ''
+               ) -> OpenCodeRunResult:
         return OpenCodeRunResult(returncode, session, error, finish_reason)
 
     try:
@@ -89,8 +83,7 @@ def run_opencode_streaming(
             clean = _clean(event, secrets)
             events_log.write(json.dumps(clean, ensure_ascii=False) + '\n')
             events_log.flush()
-            if trace is not None:
-                _emit_trace(trace, attempt, clean)
+            _record_opencode_event(attempt, clean)
             return clean
 
         def write_stdout(line: str) -> None:
@@ -169,8 +162,8 @@ def run_opencode_streaming(
 
 
 def _read_line(line: str, write_stdout: Callable[[str], None], record: Callable[[dict[str, Any]], dict[str, Any]],
-               session: str, error: dict[str, Any] | None, finish_reason: str,
-               secrets: list[str]) -> tuple[str, dict[str, Any] | None, str]:
+               session: str, error: dict[str, Any] | None, finish_reason: str, secrets: list[str]
+               ) -> tuple[str, dict[str, Any] | None, str]:
     if not line:
         return session, error, finish_reason
     write_stdout(line)
@@ -254,7 +247,7 @@ def _compact(event: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _emit_trace(trace: Any, attempt: int | None, event: dict[str, Any]) -> None:
+def _record_opencode_event(attempt: int | None, event: dict[str, Any]) -> None:
     compact = _compact(event)
     raw_type, tool = compact['event_type'], compact['tool']
     if raw_type in {'step_start', 'step_finish'}:
@@ -263,13 +256,20 @@ def _emit_trace(trace: Any, attempt: int | None, event: dict[str, Any]) -> None:
     if not event_type and raw_type in {'text', 'stdout'}:
         event_type = 'opencode.code' if 'diff --git' in compact['summary'] else 'opencode.message'
     event_type = event_type or 'opencode.message'
-    trace.emit(
+    raw_status = compact['status']
+    status = (
+        'failed' if event_type == 'opencode.error' or raw_status in {'error', 'failed'}
+        else 'completed' if raw_status in {'completed', 'done', 'success', 'succeeded'}
+        else 'started' if raw_status in {'started', 'starting'}
+        else 'running'
+    )
+    record_event(
         event_type,
-        status='failed' if event_type == 'opencode.error' else compact['status'] or 'running',
+        status=status,
         source='opencode',
         attempt=attempt,
         message=compact['summary'] or compact['command'] or raw_type,
-        payload={
+        data={
             'execution_type': compact['execution_type'],
             'tool': tool,
             'paths': compact['file_paths'],

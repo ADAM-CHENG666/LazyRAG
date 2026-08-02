@@ -6,14 +6,15 @@ from pathlib import Path
 from statistics import fmean
 from typing import Any
 
+from evo.artifact_runtime import record_event
 from evo.operations.abtest.candidate import async_candidate_rag_answer, candidate_service, discard_candidate
 from evo.operations.abtest.comparison import GOODCASE_MAX_OVERALL_DROP, compare_eval_detail_for_repair
 from evo.operations.analysis.summary import build_analysis_from_answers
 from evo.operations.eval.judge import judge_case
 from evo.operations.eval.summary import build_eval_detail_summary
+from evo.operations.public_contracts import clean_text as _text
 
 from .errors import EXTERNAL_CHAT_FAILURE_TYPES
-from .trace import safe_emit
 
 PUBLIC_SERVICE_KEYS = {
     'status',
@@ -28,16 +29,9 @@ BADCASE_MIN_OVERALL_GAIN = 0.10
 
 
 async def validate_candidate_patch(
-    root: Path,
-    diff: str,
-    plan: Mapping[str, Any],
-    cases: Mapping[str, Mapping[str, Any]],
-    baseline_judges: Mapping[str, Mapping[str, Any]],
-    eval_policy: Mapping[str, Any],
-    candidate_config: Mapping[str, Any],
-    ctx: Any,
-    trace: Any | None = None,
-    attempt: int | None = None,
+    root: Path, diff: str, plan: Mapping[str, Any], cases: Mapping[str, Mapping[str, Any]],
+    baseline_judges: Mapping[str, Mapping[str, Any]], eval_policy: Mapping[str, Any],
+    candidate_config: Mapping[str, Any], ctx: Any, attempt: int | None = None,
 ) -> dict[str, Any]:
     objective = plan.get('objective') if isinstance(plan.get('objective'), Mapping) else {}
     required = [_text(item) for item in objective.get('validation_case_ids') or [] if _text(item)]
@@ -56,17 +50,17 @@ async def validate_candidate_patch(
     if not selected:
         return {'status': 'rejected', 'accepted': False, 'reason': 'no_validation_cases'}
     patch = {'status': 'verified', 'workspace_ref': str(root), 'diff': diff}
-    safe_emit(
-        trace, 'candidate.service_started', status='started', attempt=attempt,
-        payload={'case_count': len(selected)},
+    record_event(
+        'candidate.service_started', status='started', attempt=attempt,
+        data={'case_count': len(selected)},
     )
     service: Mapping[str, Any] | None = None
     try:
         service = candidate_service(candidate_config, patch, ctx, temporary=True)
     except Exception as exc:
-        safe_emit(
-            trace, 'candidate.service_failed', status='failed', attempt=attempt,
-            payload={'error_type': type(exc).__name__},
+        record_event(
+            'candidate.service_failed', status='failed', attempt=attempt,
+            data={'error_type': type(exc).__name__},
         )
         raise
     try:
@@ -79,28 +73,28 @@ async def validate_candidate_patch(
             if key in health
         }
         if service.get('status') != 'ready':
-            safe_emit(
-                trace, 'candidate.service_failed', status='failed', attempt=attempt,
-                payload={'reason': 'candidate_service_failed', 'service': public_service},
+            record_event(
+                'candidate.service_failed', status='failed', attempt=attempt,
+                data={'reason': 'candidate_service_failed', 'service': public_service},
             )
             return {'status': 'candidate_service_failed', 'accepted': False, 'reason': 'candidate_service_failed',
                     'service': public_service, 'case_ids': list(selected)}
-        safe_emit(trace, 'candidate.service_ready', status='completed', attempt=attempt,
-                  payload={'service': public_service})
+        record_event('candidate.service_ready', status='completed', attempt=attempt,
+                     data={'service': public_service})
         answers, judges, early_stop_reason = {}, {}, ''
         for case_id, case in selected.items():
-            safe_emit(trace, 'candidate.case_started', status='started', attempt=attempt, payload={'case_id': case_id})
+            record_event('candidate.case_started', status='started', attempt=attempt, case_id=case_id)
             try:
                 answer = await async_candidate_rag_answer(case, service)
                 answers[case_id] = answer
                 judges[case_id] = judge_case(case, answer, eval_policy)
             except Exception as exc:
-                safe_emit(
-                    trace, 'candidate.case_completed', status='failed', attempt=attempt,
-                    payload={'case_id': case_id, 'error_type': type(exc).__name__},
+                record_event(
+                    'candidate.case_completed', status='failed', attempt=attempt,
+                    data={'case_id': case_id, 'error_type': type(exc).__name__},
                 )
                 raise
-            safe_emit(trace, 'candidate.case_completed', status='completed', attempt=attempt, payload={
+            record_event('candidate.case_completed', status='completed', attempt=attempt, data={
                 'case_id': case_id,
                 'answer_status': answer.get('status'),
                 'trace_id': answer.get('trace_id'),
@@ -135,12 +129,15 @@ async def validate_candidate_patch(
         candidate_summary = build_eval_detail_summary(tuple(judges[case_id] for case_id in judges))
         candidate_summary = candidate_summary | {'id': 'repair.candidate_eval_summary'}
         comparison = compare_eval_detail_for_repair(baseline_summary, candidate_summary)
-        safe_emit(trace, 'candidate.eval_summary_completed', status='completed', attempt=attempt, payload={
+        record_event('candidate.eval_summary_completed', status='completed', attempt=attempt, data={
             'case_count': len(selected),
             'evaluated_case_count': len(judges),
             'early_stop_reason': early_stop_reason,
             'execution_failure_count': len(candidate_summary.get('execution_failures') or []),
-            'metrics': candidate_summary.get('metrics') if isinstance(candidate_summary.get('metrics'), Mapping) else {},
+            'metrics': (
+                candidate_summary.get('metrics')
+                if isinstance(candidate_summary.get('metrics'), Mapping) else {}
+            ),
             'comparison_status': comparison.get('status'),
             'comparison_verdict': comparison.get('verdict'),
         })
@@ -162,15 +159,15 @@ async def validate_candidate_patch(
                 'early_stop_reason': early_stop_reason,
             }
         try:
-            safe_emit(
-                trace, 'analysis.candidate_started', status='started', attempt=attempt,
-                payload={'case_count': len(selected)},
+            record_event(
+                'analysis.candidate_started', status='started', attempt=attempt,
+                data={'case_count': len(selected)},
             )
             analysis = build_analysis_from_answers(selected, answers, judges) | {'id': 'repair.candidate_analysis'}
         except Exception as exc:
-            safe_emit(
-                trace, 'analysis.candidate_completed', status='failed', attempt=attempt,
-                payload={'error_type': type(exc).__name__},
+            record_event(
+                'analysis.candidate_completed', status='failed', attempt=attempt,
+                data={'error_type': type(exc).__name__},
             )
             return {
                 'status': 'rejected',
@@ -180,11 +177,11 @@ async def validate_candidate_patch(
                 'candidate_analysis_error': str(exc),
             }
         delta = _analysis_delta_from(plan, comparison, analysis, candidate_summary)
-        safe_emit(
-            trace, 'analysis.candidate_completed', status='completed', attempt=attempt,
-            payload={'row_count': len(analysis.get('rows') or [])},
+        record_event(
+            'analysis.candidate_completed', status='completed', attempt=attempt,
+            data={'row_count': len(analysis.get('rows') or [])},
         )
-        safe_emit(trace, 'analysis.delta_completed', status='completed', attempt=attempt, payload={
+        record_event('analysis.delta_completed', status='completed', attempt=attempt, data={
             key: delta.get(key)
             for key in ('target_group_status', 'target_remaining_badcase_count',
                         'target_remaining_delta', 'target_badcase_count', 'new_group_count',
@@ -200,27 +197,18 @@ async def validate_candidate_patch(
             'analysis_delta': delta,
         }
     finally:
-        _cleanup_candidate_service(service, trace=trace, attempt=attempt)
+        _cleanup_candidate_service(service, attempt=attempt)
 
 
-def _cleanup_candidate_service(
-    service: Mapping[str, Any] | None,
-    *,
-    trace: Any | None = None,
-    attempt: int | None = None,
-) -> dict[str, Any]:
+def _cleanup_candidate_service(service: Mapping[str, Any] | None, *, attempt: int | None = None) -> dict[str, Any]:
     result = discard_candidate(service, delete_workspace=False)
     if result['status'] in {'completed', 'failed'}:
-        safe_emit(trace, 'candidate.service_stopped', status=result['status'], attempt=attempt, payload=result)
+        record_event('candidate.service_stopped', status=result['status'], attempt=attempt, data=result)
     return result
 
 
-def _analysis_delta_from(
-    plan: Mapping[str, Any],
-    comparison: Mapping[str, Any],
-    analysis: Mapping[str, Any],
-    candidate_summary: Mapping[str, Any],
-) -> dict[str, Any]:
+def _analysis_delta_from(plan: Mapping[str, Any], comparison: Mapping[str, Any], analysis: Mapping[str, Any],
+                         candidate_summary: Mapping[str, Any]) -> dict[str, Any]:
     selected = plan.get('selected_group') if isinstance(plan.get('selected_group'), Mapping) else {}
     target = set((plan.get('objective') or {}).get('target_cases') or [])
     baseline_target_count = len(set(selected.get('case_ids') or []) & target) or len(target)
@@ -287,11 +275,8 @@ def _analysis_delta_from(
     }
 
 
-def _candidate_gate(
-    comparison: Mapping[str, Any],
-    candidate_summary: Mapping[str, Any],
-    delta: Mapping[str, Any],
-) -> tuple[bool, str]:
+def _candidate_gate(comparison: Mapping[str, Any], candidate_summary: Mapping[str, Any], delta: Mapping[str, Any]
+                    ) -> tuple[bool, str]:
     if comparison.get('status') != 'completed':
         return False, _text(comparison.get('verdict')) or 'comparison_not_completed'
     if candidate_summary.get('execution_failures'):
@@ -388,7 +373,3 @@ def _float(value: Any) -> float:
         return float(value or 0.0)
     except (TypeError, ValueError):
         return 0.0
-
-
-def _text(value: Any) -> str:
-    return str(value or '').strip()

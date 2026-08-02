@@ -11,11 +11,7 @@ from .router_ledger import RouterAlgorithmLedger
 THREAD_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}')
 
 
-def delete_managed_workspace(
-    row: Mapping[str, Any],
-    ledger: RouterAlgorithmLedger,
-    managed_repair_root: Path,
-) -> str:
+def delete_managed_workspace(row: Mapping[str, Any], ledger: RouterAlgorithmLedger, managed_repair_root: Path) -> str:
     root = managed_repair_root.resolve()
     workspace = _managed_workspace(row, root)
     if workspace is None:

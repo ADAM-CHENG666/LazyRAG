@@ -1,7 +1,5 @@
 from .schemas import (
-    ArtifactAction,
     CaseAction,
-    ConfigPatchAction,
     ConfirmationAction,
     FlowAction,
     MessageHistoryResponse,
@@ -15,8 +13,7 @@ from .turn import MessageIntent, run_turn
 
 
 __all__ = [
-    'ArtifactAction', 'CaseAction', 'ConfigPatchAction', 'ConfirmationAction',
-    'FlowAction', 'MessageConflictError', 'MessageHistoryResponse',
+    'CaseAction', 'ConfirmationAction', 'FlowAction', 'MessageConflictError', 'MessageHistoryResponse',
     'MessageInProgressError', 'MessageIntent', 'MessageRequest',
     'MessageTurnResult', 'QueryAction', 'TurnPlan', 'run_turn',
 ]

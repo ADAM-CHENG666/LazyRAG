@@ -1,6 +1,7 @@
 from .definition import FlowDefinition, FlowStage
 from .flow import ArtifactFlow
 from .state import (
+    ArtifactUpdate,
     FlowCaseSnapshot,
     FlowRunHistory,
     FlowSnapshot,
@@ -12,7 +13,7 @@ from .state import (
 
 
 __all__ = [
-    'ArtifactFlow', 'FlowCaseSnapshot', 'FlowDefinition', 'FlowRunHistory',
+    'ArtifactFlow', 'ArtifactUpdate', 'FlowCaseSnapshot', 'FlowDefinition', 'FlowRunHistory',
     'FlowSnapshot', 'FlowStage', 'FlowStatus', 'StageProgress', 'StageSnapshot',
     'StageStatus',
 ]

@@ -52,8 +52,8 @@ def _positive_number(value: object, name: str) -> None:
         raise DefinitionError(f'{name} must be finite and positive')
 
 
-def _tuple_of(values: Iterable[object], expected_type: type[_T], message: str, *,
-              nonempty: bool = False) -> tuple[_T, ...]:
+def _tuple_of(values: Iterable[object], expected_type: type[_T], message: str, *, nonempty: bool = False
+              ) -> tuple[_T, ...]:
     items = tuple(values)
     if (nonempty and not items) or not all(isinstance(item, expected_type) for item in items):
         raise TypeError(message)

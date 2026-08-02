@@ -11,8 +11,8 @@ from typing import Any
 from uuid import uuid4
 
 from evo import artifacts as A
+from evo.operations.public_contracts import clean_text as _text
 from evo.operations.eval.answer import (
-    answer_case,
     async_answer_case,
     case_kb_id,
     failed_rag_answer,
@@ -57,14 +57,8 @@ SAFE_ID = re.compile(r'[^A-Za-z0-9_.-]+')
 ALGORITHM_ID = re.compile(r'evo_[A-Za-z0-9][A-Za-z0-9_.-]{0,59}')
 
 
-def candidate_service(
-    config: Mapping[str, Any],
-    patch: Mapping[str, Any],
-    ctx: Any | None = None,
-    workspace: Mapping[str, Any] | None = None,
-    *,
-    temporary: bool = False,
-) -> dict[str, Any]:
+def candidate_service(config: Mapping[str, Any], patch: Mapping[str, Any], ctx: Any | None = None,
+                      workspace: Mapping[str, Any] | None = None, *, temporary: bool = False) -> dict[str, Any]:
     patch = _candidate_patch(patch, workspace or {})
     base = {'candidate_config': dict(config), 'patch_status': _text(patch.get('status'))}
     if _text(patch.get('status')) not in PATCH_STATUSES:
@@ -144,11 +138,7 @@ def candidate_service(
         return base | _failed(algorithm_id, router_chat_url, admin_url, code_path, type(exc).__name__, str(exc))
 
 
-def discard_candidate(
-    service: Mapping[str, Any] | None,
-    *,
-    delete_workspace: bool = True,
-) -> dict[str, Any]:
+def discard_candidate(service: Mapping[str, Any] | None, *, delete_workspace: bool = True) -> dict[str, Any]:
     if not service or service.get('cleanup_allowed') is not True:
         return {'status': 'not_applicable', 'reason': 'candidate_not_owned'}
     algorithm_id = _text(service.get('algorithm_id'))
@@ -217,14 +207,7 @@ def finalize_candidate(service: Mapping[str, Any], comparison: Mapping[str, Any]
         raise
 
 
-def candidate_rag_answer(case: Mapping[str, Any], service: Mapping[str, Any]) -> dict[str, Any]:
-    failure, target_config = _candidate_answer_target(case, service)
-    return failure if failure is not None else answer_case(case, target_config)
-
-
-async def async_candidate_rag_answer(case: Mapping[str, Any],
-                                     service: Mapping[str, Any]
-                                     ) -> dict[str, Any]:
+async def async_candidate_rag_answer(case: Mapping[str, Any], service: Mapping[str, Any]) -> dict[str, Any]:
     failure, target_config = _candidate_answer_target(case, service)
     return failure if failure is not None else await async_answer_case(
         case,
@@ -232,8 +215,7 @@ async def async_candidate_rag_answer(case: Mapping[str, Any],
     )
 
 
-def _candidate_answer_target(case: Mapping[str, Any],
-                             service: Mapping[str, Any]
+def _candidate_answer_target(case: Mapping[str, Any], service: Mapping[str, Any]
                              ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     config = service.get('candidate_config') if isinstance(service.get('candidate_config'), Mapping) else {}
     target_config = dict(config) | {
@@ -259,10 +241,6 @@ def _candidate_answer_target(case: Mapping[str, Any],
     ), target_config
 
 
-def stop_candidate(service: Mapping[str, Any] | None) -> dict[str, Any]:
-    return discard_candidate(service)
-
-
 def _candidate_patch(patch: Mapping[str, Any], workspace: Mapping[str, Any]) -> dict[str, Any]:
     diff = patch.get('diff')
     return {
@@ -272,12 +250,7 @@ def _candidate_patch(patch: Mapping[str, Any], workspace: Mapping[str, Any]) -> 
     }
 
 
-def _algorithm_id(
-    config: Mapping[str, Any],
-    patch: Mapping[str, Any],
-    run_id: str,
-    temporary: bool,
-) -> str:
+def _algorithm_id(config: Mapping[str, Any], patch: Mapping[str, Any], run_id: str, temporary: bool) -> str:
     explicit = _text(config.get('algorithm_id'))
     if explicit and not temporary:
         if ALGORITHM_ID.fullmatch(explicit) is None:
@@ -326,14 +299,8 @@ def _max_retries(config: Mapping[str, Any]) -> str:
     return value if value.isdigit() and int(value) > 0 else DEFAULT_MAX_RETRIES
 
 
-def _failed(
-    algorithm_id: str,
-    router_chat_url: str,
-    router_admin_url: str,
-    code_path: str,
-    error_type: str,
-    message: str,
-) -> dict[str, Any]:
+def _failed(algorithm_id: str, router_chat_url: str, router_admin_url: str, code_path: str, error_type: str,
+            message: str) -> dict[str, Any]:
     return {
         'status': 'failed',
         'service_kind': 'router_algorithm',
@@ -345,11 +312,7 @@ def _failed(
     }
 
 
-def _owns_unpublished(
-    ledger: RouterAlgorithmLedger | None,
-    algorithm_id: str,
-    thread_id: str,
-) -> bool:
+def _owns_unpublished(ledger: RouterAlgorithmLedger | None, algorithm_id: str, thread_id: str) -> bool:
     row = ledger.get_algorithm(algorithm_id) if ledger is not None and algorithm_id else None
     return bool(
         row
@@ -367,10 +330,6 @@ def _required(value: Mapping[str, Any], key: str) -> str:
 
 def _safe_id(value: str, fallback: str) -> str:
     return SAFE_ID.sub('_', value).strip('._-') or fallback
-
-
-def _text(value: object) -> str:
-    return str(value or '').strip()
 
 
 def _int_between(value: object, default: int, low: int, high: int) -> int:

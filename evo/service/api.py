@@ -20,8 +20,14 @@ from evo.message_intent import (
 from .contracts import (
     AbStrategyBody,
     AlgorithmActionBody,
+    ArtifactUpdateBody,
+    AutomaticUpdateBody,
+    CaseRerunBody,
+    CaseStructureBody,
     CommandRequest,
+    ConfigurationUpdateBody,
     ControlRequest,
+    ExternalResultBody,
     MessageBody,
     RegisterAlgorithmBody,
     RetryRequest,
@@ -79,11 +85,8 @@ def create_app(root: str | Path | None = None) -> FastAPI:
         return await _service(app).create_thread(payload)
 
     @app.get('/threads')
-    async def list_threads(
-        page_size: Annotated[int, Query(ge=1, le=200)] = 10,
-        page_token: str = '',
-        status: str = '',
-    ) -> dict[str, Any]:
+    async def list_threads(page_size: Annotated[int, Query(ge=1, le=200)] = 10, page_token: str = '', status: str = ''
+                           ) -> dict[str, Any]:
         return await _service(app).list_threads(page_size, page_token, status)
 
     @app.get('/threads/{thread_id}')
@@ -95,40 +98,77 @@ def create_app(root: str | Path | None = None) -> FastAPI:
         return await _service(app).delete_thread(thread_id)
 
     @app.post('/threads/{thread_id}/start')
-    async def start_thread(thread_id: str,
-                           payload: CommandRequest
-                           ) -> dict[str, str]:
+    async def start_thread(thread_id: str, payload: CommandRequest) -> dict[str, str]:
         return await _service(app).start(thread_id, payload)
 
     @app.post('/threads/{thread_id}/continue')
-    async def continue_thread(thread_id: str,
-                              payload: CommandRequest
-                              ) -> dict[str, str]:
+    async def continue_thread(thread_id: str, payload: CommandRequest) -> dict[str, str]:
         return await _service(app).continue_thread(thread_id, payload)
 
     @app.post('/threads/{thread_id}/retry')
-    async def retry_thread(thread_id: str,
-                           payload: RetryRequest
-                           ) -> dict[str, str]:
+    async def retry_thread(thread_id: str, payload: RetryRequest) -> dict[str, str]:
         return await _service(app).retry(thread_id, payload)
 
+    @app.post('/threads/{thread_id}/stages/{stage}/rerun')
+    async def rerun_stage(thread_id: str, stage: str, payload: ControlRequest) -> dict[str, str]:
+        return await _service(app).rerun_stage(thread_id, stage, payload)
+
+    @app.post('/threads/{thread_id}/cases/{case_id}/rerun')
+    async def rerun_case(thread_id: str, case_id: str, payload: CaseRerunBody) -> dict[str, str]:
+        return await _service(app).rerun_case(thread_id, case_id, payload)
+
+    @app.post('/threads/{thread_id}/cases/{case_id}/retry')
+    async def retry_case(thread_id: str, case_id: str, payload: ControlRequest) -> dict[str, str]:
+        return await _service(app).retry_case(thread_id, case_id, payload)
+
+    @app.post('/threads/{thread_id}/attempts/{attempt_id}/result')
+    async def submit_external_result(thread_id: str, attempt_id: str, payload: ExternalResultBody) -> dict[str, str]:
+        return await _service(app).submit_external_result(thread_id, attempt_id, payload)
+
     @app.post('/threads/{thread_id}/pause')
-    async def pause_thread(thread_id: str,
-                           payload: ControlRequest
-                           ) -> dict[str, str]:
+    async def pause_thread(thread_id: str, payload: ControlRequest) -> dict[str, str]:
         return await _service(app).pause(thread_id, payload)
 
     @app.post('/threads/{thread_id}/resume')
-    async def resume_thread(thread_id: str,
-                            payload: ControlRequest
-                            ) -> dict[str, str]:
+    async def resume_thread(thread_id: str, payload: ControlRequest) -> dict[str, str]:
         return await _service(app).resume(thread_id, payload)
 
     @app.post('/threads/{thread_id}/cancel')
-    async def cancel_thread(thread_id: str,
-                            payload: ControlRequest
-                            ) -> dict[str, str]:
+    async def cancel_thread(thread_id: str, payload: ControlRequest) -> dict[str, str]:
         return await _service(app).cancel(thread_id, payload)
+
+    @app.put('/threads/{thread_id}/artifacts')
+    async def update_artifacts(thread_id: str, payload: ArtifactUpdateBody) -> dict[str, Any]:
+        return await _service(app).update_artifacts(thread_id, payload)
+
+    @app.get('/threads/{thread_id}/artifacts/{artifact_id}')
+    async def get_artifact(thread_id: str, artifact_id: str, partition_key: str = '',
+                           version: Annotated[int | None, Query(ge=1)] = None) -> dict[str, Any]:
+        return await _service(app).projections.artifact(thread_id, artifact_id, partition_key, version)
+
+    @app.get('/threads/{thread_id}/artifacts/{artifact_id}/history')
+    async def get_artifact_history(thread_id: str, artifact_id: str, partition_key: str = '') -> dict[str, Any]:
+        return await _service(app).projections.artifact_history(thread_id, artifact_id, partition_key)
+
+    @app.put('/threads/{thread_id}/configuration')
+    async def update_configuration(thread_id: str, payload: ConfigurationUpdateBody) -> dict[str, Any]:
+        return await _service(app).update_configuration(thread_id, payload)
+
+    @app.put('/threads/{thread_id}/automatic')
+    async def set_automatic(thread_id: str, payload: AutomaticUpdateBody) -> dict[str, Any]:
+        return await _service(app).set_automatic(thread_id, payload)
+
+    @app.put('/threads/{thread_id}/cases')
+    async def update_cases(thread_id: str, payload: CaseStructureBody) -> dict[str, Any]:
+        return await _service(app).update_cases(thread_id, payload)
+
+    @app.get('/threads/{thread_id}/stages/{stage}')
+    async def stage_snapshot(thread_id: str, stage: str) -> dict[str, Any]:
+        return await _service(app).projections.stage_snapshot(thread_id, stage)
+
+    @app.get('/threads/{thread_id}/cases/{case_id}')
+    async def case_snapshot(thread_id: str, case_id: str) -> dict[str, Any]:
+        return await _service(app).projections.case_snapshot(thread_id, case_id)
 
     @app.get('/threads/{thread_id}/gates')
     async def gates(thread_id: str) -> dict[str, Any]:
@@ -156,28 +196,21 @@ def create_app(root: str | Path | None = None) -> FastAPI:
         )
 
     @app.get('/threads/{thread_id}/gates/{step}/versions/{version}')
-    async def gate_content(thread_id: str, step: str,
-                           version: int
-                           ) -> dict[str, Any]:
+    async def gate_content(thread_id: str, step: str, version: int) -> dict[str, Any]:
         return await _service(app).projections.gate_content(thread_id, step, version)
 
     @app.get('/threads/{thread_id}/events:stream')
-    async def event_stream(thread_id: str, request: Request,
-                           step_id: str = ''
-                           ) -> Response:
+    async def event_stream(thread_id: str, request: Request, step_id: str = '') -> Response:
         _query_keys(request, {'step_id'})
         return await execution_stream(
             _service(app).projections,
             thread_id,
             step_id,
             request,
-            trace=False,
         )
 
     @app.get('/threads/{thread_id}/event-trace:stream')
-    async def event_trace_stream(thread_id: str, request: Request,
-                                 step_id: str = ''
-                                 ) -> Response:
+    async def event_trace_stream(thread_id: str, request: Request, step_id: str = '') -> Response:
         _query_keys(request, {'step_id'})
         if not step_id:
             raise ServiceError(422, 'step_id is required')
@@ -186,18 +219,11 @@ def create_app(root: str | Path | None = None) -> FastAPI:
             thread_id,
             step_id,
             request,
-            trace=True,
         )
 
     @app.get('/threads/{thread_id}/gates/abtest/versions/{version}/case-details')
-    async def abtest_case_details(
-        thread_id: str,
-        version: int,
-        page_size: Annotated[int, Query(ge=1, le=200)] = 50,
-        page_token: str = '',
-        keyword: str = '',
-        outcome: str = '',
-    ) -> dict[str, Any]:
+    async def abtest_case_details(thread_id: str, version: int, page_size: Annotated[int, Query(ge=1, le=200)] = 50,
+                                  page_token: str = '', keyword: str = '', outcome: str = '') -> dict[str, Any]:
         return await _service(app).projections.abtest_case_details(
             thread_id, version, page_size, page_token, keyword, outcome,
         )
@@ -207,19 +233,13 @@ def create_app(root: str | Path | None = None) -> FastAPI:
         return await _service(app).projections.trace_detail(thread_id, trace_id)
 
     @app.get('/threads/{thread_id}/results/traces:compare')
-    async def trace_compare(
-        thread_id: str,
-        a: Annotated[str, Query(min_length=1)],
-        b: Annotated[str, Query(min_length=1)],
-    ) -> dict[str, Any]:
+    async def trace_compare(thread_id: str, a: Annotated[str, Query(min_length=1)],
+                            b: Annotated[str, Query(min_length=1)]) -> dict[str, Any]:
         return await _service(app).projections.trace_compare(thread_id, a, b)
 
     @app.get('/threads/{thread_id}/messages')
-    async def message_history(
-        thread_id: str,
-        page_size: Annotated[int, Query(ge=1, le=200)] = 50,
-        page_token: str = '',
-    ) -> dict[str, Any]:
+    async def message_history(thread_id: str, page_size: Annotated[int, Query(ge=1, le=200)] = 50, page_token: str = ''
+                              ) -> dict[str, Any]:
         return await _service(app).message_history(
             thread_id,
             page_size,
@@ -227,9 +247,7 @@ def create_app(root: str | Path | None = None) -> FastAPI:
         )
 
     @app.post('/threads/{thread_id}/messages')
-    async def messages(thread_id: str, payload: MessageBody,
-                       request: Request
-                       ) -> Any:
+    async def messages(thread_id: str, payload: MessageBody, request: Request) -> Any:
         text = payload.message_text()
         if not text.strip():
             raise ServiceError(422, 'text or content is required')
@@ -253,12 +271,8 @@ def create_app(root: str | Path | None = None) -> FastAPI:
         return public
 
     @app.get('/candidates')
-    async def candidates(
-        thread_id: str = '',
-        status: str = '',
-        page_size: Annotated[int, Query(ge=1, le=200)] = 20,
-        page_token: str = '',
-    ) -> dict[str, Any]:
+    async def candidates(thread_id: str = '', status: str = '', page_size: Annotated[int, Query(ge=1, le=200)] = 20,
+                         page_token: str = '') -> dict[str, Any]:
         return await _service(app).projections.candidates(
             thread_id,
             status,
@@ -289,9 +303,7 @@ def create_app(root: str | Path | None = None) -> FastAPI:
         return await _service(app).router.register(payload)
 
     @app.post('/router/algorithms/{algorithm_id}/action')
-    async def algorithm_action(algorithm_id: str,
-                               payload: AlgorithmActionBody
-                               ) -> dict[str, Any]:
+    async def algorithm_action(algorithm_id: str, payload: AlgorithmActionBody) -> dict[str, Any]:
         return await _service(app).router.action(algorithm_id, payload)
 
     @app.delete('/router/algorithms/{algorithm_id}')

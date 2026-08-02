@@ -4,7 +4,6 @@ import asyncio
 import json
 import uuid
 from collections.abc import Mapping
-from datetime import datetime, timezone
 from typing import Any
 
 from evo import artifacts as A
@@ -15,32 +14,26 @@ from evo.artifact_runtime import (
     ArtifactRef,
     AttemptSnapshot,
     PartitionSet,
-    ProgressEvent,
+    RecordedOperationEvent,
 )
-from evo.operations.repair.trace import RepairTraceStore
 
 from .contracts import ServiceError
 from .public import public_thread_state, public_value
 
 
 class ProjectionService:
-    def __init__(self, flow: Any, definition: FlowDefinition,
-                 repair_traces: RepairTraceStore
-                 ) -> None:
+    def __init__(self, flow: Any, definition: FlowDefinition) -> None:
         self.flow = flow
         self.definition = definition
-        self.repair_traces = repair_traces
 
     async def gates(self, thread_id: str) -> dict[str, Any]:
-        snapshot = await self.flow.snapshot(thread_id)
-        histories = await asyncio.gather(*(
-            self.flow.history(thread_id, stage.result_key)
-            for stage in self.definition.stages
-        ))
+        history = await self.flow.run_history(thread_id)
+        snapshot = history.snapshot
         gates = []
-        for stage, history in zip(self.definition.stages, histories, strict=True):
+        for stage in self.definition.stages:
+            records = tuple(record for record in history.runtime.artifacts if record.ref.key == stage.result_key)
             effective = snapshot.runtime.completed_artifacts.get(stage.result_key)
-            versions = [record.ref.version for record in history]
+            versions = [record.ref.version for record in records]
             gates.append({
                 'step': stage.name,
                 'artifact_id': stage.result_key.artifact_id,
@@ -50,9 +43,43 @@ class ProjectionService:
             })
         return {'thread_id': thread_id, 'gates': gates}
 
-    async def gate_content(self, thread_id: str, stage: str,
-                           version: int
-                           ) -> dict[str, Any]:
+    async def stage_snapshot(self, thread_id: str, stage: str) -> dict[str, Any]:
+        if stage not in A.STEPS:
+            raise ServiceError(422, f'stage must be one of: {", ".join(A.STEPS)}')
+        return {'thread_id': thread_id, 'stage': stage, 'snapshot': public_value(
+            await self.flow.stage_snapshot(thread_id, stage),
+        )}
+
+    async def case_snapshot(self, thread_id: str, case_id: str) -> dict[str, Any]:
+        return {'thread_id': thread_id, 'case_id': case_id, 'snapshot': public_value(
+            await self.flow.case_snapshot(thread_id, case_id),
+        )}
+
+    async def artifact(self, thread_id: str, artifact_id: str, partition_key: str = '',
+                       version: int | None = None) -> dict[str, Any]:
+        key = ArtifactKey(artifact_id, partition_key)
+        record = (
+            await self.flow.head(thread_id, key)
+            if version is None
+            else await self.flow.record(thread_id, ArtifactRef(key, version))
+        )
+        if record is None:
+            raise ServiceError(404, 'artifact version not found')
+        return {
+            'thread_id': thread_id,
+            'record': public_value(record),
+            'value': public_value(await self.flow.read(thread_id, record.ref)),
+        }
+
+    async def artifact_history(self, thread_id: str, artifact_id: str, partition_key: str = '') -> dict[str, Any]:
+        records = await self.flow.history(thread_id, ArtifactKey(artifact_id, partition_key))
+        return {
+            'thread_id': thread_id,
+            'items': public_value(records),
+            'total_size': len(records),
+        }
+
+    async def gate_content(self, thread_id: str, stage: str, version: int) -> dict[str, Any]:
         ref = await self._gate_ref(thread_id, stage, version)
         return {
             'thread_id': thread_id,
@@ -61,9 +88,7 @@ class ProjectionService:
             'content': public_value(await self.flow.read(thread_id, ref)),
         }
 
-    async def gate_download(self, thread_id: str, stage: str,
-                            version: int
-                            ) -> tuple[str, bytes]:
+    async def gate_download(self, thread_id: str, stage: str, version: int) -> tuple[str, bytes]:
         content = (await self.gate_content(thread_id, stage, version))['content']
         return (
             f'{stage}-v{version}.json',
@@ -76,7 +101,7 @@ class ProjectionService:
         )
 
     async def steps(self, thread_id: str) -> dict[str, Any]:
-        _, _, _, items = await _execution_projection(
+        _, _, pages = await _execution_projection(
             self.flow,
             self.definition,
             thread_id,
@@ -84,16 +109,14 @@ class ProjectionService:
         return {
             'thread_id': thread_id,
             'active_step_id': next(
-                (item['step_id'] for item in items if item['active']),
+                (item['step_id'] for item in pages if item['active']),
                 '',
             ),
-            'items': [_public_step(item) for item in items],
-            'total_size': len(items),
+            'items': [_public_step(item) for item in pages],
+            'total_size': len(pages),
         }
 
-    async def events(self, thread_id: str, step_id: str = '',
-                     after_event_id: str = ''
-                     ) -> dict[str, Any]:
+    async def events(self, thread_id: str, step_id: str = '', after_event_id: str = '') -> dict[str, Any]:
         return await execution_events(
             self.flow,
             self.definition,
@@ -102,67 +125,8 @@ class ProjectionService:
             after_event_id=after_event_id,
         )
 
-    async def event_trace(self, thread_id: str, step_id: str,
-                          after_event_id: str = ''
-                          ) -> dict[str, Any]:
-        snapshot, attempts, _, pages = await _execution_projection(
-            self.flow,
-            self.definition,
-            thread_id,
-        )
-        page = _resolve_step(snapshot, pages, step_id)
-        if page['stage'] == 'repair':
-            execution = _repair_execution(attempts, page)
-            trace_scope = await _repair_trace_scope(self.flow, thread_id, page)
-            cursor = _repair_trace_cursor(thread_id, after_event_id)
-            last_sequence = 0
-            if cursor:
-                last_sequence = await asyncio.to_thread(
-                    self.repair_traces.last_seq,
-                    thread_id,
-                )
-                if cursor > last_sequence:
-                    raise ServiceError(422, 'unknown event_id for event scope')
-            rows = (
-                []
-                if cursor and cursor == last_sequence
-                else await asyncio.to_thread(
-                    self.repair_traces.read_since,
-                    thread_id,
-                    cursor,
-                )
-            )
-            rows = _repair_trace_rows(rows, page, trace_scope)
-            execution_id = '' if execution is None else execution.attempt_id
-            terminal = _step_terminal(page)
-            return {
-                'thread_id': thread_id,
-                'step_id': step_id,
-                'execution_id': execution_id,
-                'items': [
-                    _repair_trace_event(thread_id, step_id, execution_id, row)
-                    for row in rows
-                ],
-                'terminal': terminal,
-                'reason': (
-                    _stream_end_reason(snapshot, page)
-                    if terminal
-                    else ''
-                ),
-                **public_thread_state(snapshot),
-            }
-
-        result = await self.events(thread_id, step_id, after_event_id)
-        result['items'] = [
-            item for item in result['items']
-            if item.get('detail') or item.get('message')
-        ]
-        return result
-
-    async def abtest_case_details(self, thread_id: str, version: int,
-                                  page_size: int, page_token: str,
-                                  keyword: str = '', outcome: str = ''
-                                  ) -> dict[str, Any]:
+    async def abtest_case_details(self, thread_id: str, version: int, page_size: int, page_token: str,
+                                  keyword: str = '', outcome: str = '') -> dict[str, Any]:
         value = (await self.gate_content(thread_id, 'abtest', version))['content']
         data = value if isinstance(value, Mapping) else {}
         summary = data.get('summary') if isinstance(data.get('summary'), Mapping) else {}
@@ -180,18 +144,14 @@ class ProjectionService:
         value = await asyncio.to_thread(build_trace_detail_view, trace_id)
         return public_value(value)
 
-    async def trace_compare(self, thread_id: str, left: str,
-                            right: str
-                            ) -> dict[str, Any]:
+    async def trace_compare(self, thread_id: str, left: str, right: str) -> dict[str, Any]:
         await self.flow.snapshot(thread_id)
         from evo.traces import build_trace_compare_view
 
         value = await asyncio.to_thread(build_trace_compare_view, left, right)
         return public_value(value)
 
-    async def candidates(self, thread_id: str, status: str,
-                         page_size: int, page_token: str
-                         ) -> dict[str, Any]:
+    async def candidates(self, thread_id: str, status: str, page_size: int, page_token: str) -> dict[str, Any]:
         if thread_id and not await self.flow.has_run(thread_id):
             raise ServiceError(404, f'thread not found: {thread_id}')
         run_ids = (thread_id,) if thread_id else await self.flow.run_ids()
@@ -230,9 +190,7 @@ class ProjectionService:
         value = await self.flow.read(thread_id, ref)
         return _candidate(thread_id, stage, ref, value, detail=True)
 
-    async def _gate_ref(self, thread_id: str, stage: str,
-                        version: int
-                        ) -> ArtifactRef:
+    async def _gate_ref(self, thread_id: str, stage: str, version: int) -> ArtifactRef:
         if stage not in A.ROOTS:
             raise ServiceError(422, f'step must be one of: {", ".join(A.STEPS)}')
         if version < 1:
@@ -273,9 +231,7 @@ def _comparison_rows(value: Mapping[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
-def _candidate(thread_id: str, stage: str, ref: ArtifactRef,
-               value: object, *, detail: bool = False
-               ) -> dict[str, Any]:
+def _candidate(thread_id: str, stage: str, ref: ArtifactRef, value: object, *, detail: bool = False) -> dict[str, Any]:
     data = value if isinstance(value, Mapping) else {}
     row = {
         'candidate_id': f'{thread_id}:{ref.key.artifact_id}@v{ref.version}',
@@ -308,9 +264,7 @@ def _rows(value: object) -> list[dict[str, Any]]:
     return [dict(row) for row in value] if isinstance(value, list) else []
 
 
-def _filter(rows: list[dict[str, Any]], keyword: str,
-            fields: tuple[str, ...]
-            ) -> list[dict[str, Any]]:
+def _filter(rows: list[dict[str, Any]], keyword: str, fields: tuple[str, ...]) -> list[dict[str, Any]]:
     keyword = keyword.strip().lower()
     return rows if not keyword else [
         row for row in rows
@@ -342,11 +296,9 @@ _STEP_ID_NAMESPACE = uuid.uuid5(
 )
 
 
-async def execution_events(flow: Any, definition: FlowDefinition,
-                           run_id: str, *, step_id: str = '',
-                           after_event_id: str = ''
-                           ) -> dict[str, Any]:
-    snapshot, _, items, pages = await _execution_projection(
+async def execution_events(flow: Any, definition: FlowDefinition, run_id: str, *, step_id: str = '',
+                           after_event_id: str = '') -> dict[str, Any]:
+    snapshot, items, pages = await _execution_projection(
         flow,
         definition,
         run_id,
@@ -369,50 +321,25 @@ async def execution_events(flow: Any, definition: FlowDefinition,
 
 
 async def _execution_projection(
-    flow: Any,
-    definition: FlowDefinition,
-    run_id: str,
-) -> tuple[
-    FlowSnapshot,
-    tuple[AttemptSnapshot, ...],
-    list[dict[str, Any]],
-    list[dict[str, Any]],
-]:
-    if not await flow.has_run(run_id):
-        raise ServiceError(404, f'thread not found: {run_id}')
-
-    snapshot, attempts, progress = await asyncio.gather(
-        flow.snapshot(run_id),
-        flow.attempts(run_id),
-        flow.progress_events(run_id),
-    )
-    result_rows = await asyncio.gather(*(
-        flow.history(run_id, item.result_key)
-        for item in definition.stages
-    ))
-    approval_stages = tuple(
-        item for item in definition.stages if item.approval_key is not None
-    )
-    approval_rows = await asyncio.gather(*(
-        flow.history(run_id, item.approval_key)
-        for item in approval_stages
-    ))
-    results = dict(zip(
-        (item.name for item in definition.stages),
-        result_rows,
-        strict=True,
-    ))
-    approvals = {item.name: () for item in definition.stages}
-    approvals.update(zip(
-        (item.name for item in approval_stages),
-        approval_rows,
-        strict=True,
-    ))
+    flow: Any, definition: FlowDefinition, run_id: str,
+) -> tuple[FlowSnapshot, list[dict[str, Any]], list[dict[str, Any]],]:
+    history = await flow.run_history(run_id)
+    snapshot = history.snapshot
+    attempts = history.runtime.attempts
+    operation_events = history.runtime.operation_events
+    results = {
+        stage.name: tuple(record for record in history.runtime.artifacts if record.ref.key == stage.result_key)
+        for stage in definition.stages
+    }
+    approvals = {
+        stage.name: tuple(record for record in history.runtime.artifacts if record.ref.key == stage.approval_key)
+        for stage in definition.stages
+    }
 
     items = flow_events(
         snapshot,
         attempts,
-        progress,
+        operation_events,
         results,
         approvals,
         await _historical_partition_sets(flow, run_id, attempts),
@@ -420,21 +347,17 @@ async def _execution_projection(
     )
     pages = _step_pages(snapshot, items)
     _link_execution_pages(snapshot, items, pages)
-    return snapshot, attempts, items, pages
+    return snapshot, items, pages
 
 
-def flow_events(snapshot: FlowSnapshot,
-                attempts: tuple[AttemptSnapshot, ...],
-                progress: tuple[ProgressEvent, ...],
-                results: Mapping[str, tuple[ArtifactRecord, ...]],
-                approvals: Mapping[str, tuple[ArtifactRecord, ...]],
-                partition_sets: Mapping[ArtifactRef, PartitionSet],
-                definition: FlowDefinition
-                ) -> list[dict[str, Any]]:
+def flow_events(snapshot: FlowSnapshot, attempts: tuple[AttemptSnapshot, ...],
+                operation_events: tuple[RecordedOperationEvent, ...], results: Mapping[str, tuple[ArtifactRecord, ...]],
+                approvals: Mapping[str, tuple[ArtifactRecord, ...]], partition_sets: Mapping[ArtifactRef, PartitionSet],
+                definition: FlowDefinition) -> list[dict[str, Any]]:
     rows: list[tuple[float, int, str, dict[str, Any]]] = []
-    progress_by_attempt: dict[str, list[ProgressEvent]] = {}
-    for event in progress:
-        progress_by_attempt.setdefault(event.attempt_id, []).append(event)
+    events_by_attempt: dict[str, list[RecordedOperationEvent]] = {}
+    for event in operation_events:
+        events_by_attempt.setdefault(event.attempt_id, []).append(event)
     completions: dict[ArtifactKey, list[AttemptSnapshot]] = {}
 
     for attempt in sorted(attempts, key=lambda item: (item.created_at, item.attempt_id)):
@@ -465,7 +388,7 @@ def flow_events(snapshot: FlowSnapshot,
             },
         ))
         for event in sorted(
-            progress_by_attempt.get(attempt.attempt_id, ()),
+            events_by_attempt.get(attempt.attempt_id, ()),
             key=lambda item: item.sequence,
         ):
             rows.append((
@@ -474,19 +397,18 @@ def flow_events(snapshot: FlowSnapshot,
                 f'{attempt.attempt_id}:{event.sequence}',
                 {
                     **base,
-                    'event_id': (
-                        f'{snapshot.run_id}:{attempt.attempt_id}:'
-                        f'progress:{event.sequence}'
-                    ),
-                    'event_type': event.update.phase,
-                    'status': 'running',
+                    'event_id': f'{snapshot.run_id}:operation-event:{event.sequence}',
+                    'event_type': event.event.event_type,
+                    'level': event.event.level,
                     'timestamp': event.created_at,
-                    'message': event.update.message,
-                    'progress': {
-                        'current': event.update.current,
-                        'total': event.update.total,
-                    },
-                    'detail': public_value(event.update.detail),
+                    'message': event.event.message,
+                    'data': public_value(event.event.data),
+                    **({'status': event.event.status} if event.event.status is not None else {}),
+                    **(
+                        {'progress': {'current': event.event.current, 'total': event.event.total}}
+                        if event.event.current is not None or event.event.total is not None
+                        else {}
+                    ),
                 },
             ))
         if attempt.status not in _TERMINAL_ATTEMPTS:
@@ -514,9 +436,16 @@ def flow_events(snapshot: FlowSnapshot,
             for key in attempt.output_keys:
                 completions.setdefault(key, []).append(attempt)
 
+    result_attempts: dict[ArtifactRef, AttemptSnapshot | None] = {}
+    result_counts: dict[ArtifactKey, int] = {}
     for stage, records in results.items():
         for index, record in enumerate(records):
-            attempt = _matching_attempt(completions, record, index)
+            attempt = None
+            if record.producer.startswith('operation:'):
+                result_index = result_counts.get(record.ref.key, 0)
+                attempt = _matching_attempt(completions, record, result_index)
+                result_counts[record.ref.key] = result_index + 1
+            result_attempts[record.ref] = attempt
             timestamp = _attempt_time(attempt, index)
             rows.append((
                 timestamp,
@@ -537,12 +466,13 @@ def flow_events(snapshot: FlowSnapshot,
             ))
 
     for stage, records in approvals.items():
-        stage_results = results.get(stage, ())
+        stage_results = {record.ref: record for record in results.get(stage, ())}
         for index, record in enumerate(records):
-            result = stage_results[index] if index < len(stage_results) else None
-            attempt = (
-                None if result is None else _matching_attempt(completions, result, index)
+            result = next(
+                (stage_results[ref] for ref in record.input_refs if ref in stage_results),
+                None,
             )
+            attempt = None if result is None else result_attempts.get(result.ref)
             timestamp = _attempt_time(attempt, index)
             rows.append((
                 timestamp,
@@ -568,8 +498,6 @@ def flow_events(snapshot: FlowSnapshot,
     rows.sort(key=lambda row: (row[0], row[1], row[2]))
     items = [row[3] for row in rows]
     _assign_step_ids(snapshot.run_id, items)
-    pages = _step_pages(snapshot, items)
-    _link_execution_pages(snapshot, items, pages)
     return items
 
 
@@ -596,9 +524,7 @@ def _assign_step_ids(run_id: str, items: list[dict[str, Any]]) -> None:
             closed = True
 
 
-def _step_pages(snapshot: FlowSnapshot,
-                items: list[dict[str, Any]]
-                ) -> list[dict[str, Any]]:
+def _step_pages(snapshot: FlowSnapshot, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     pages: list[dict[str, Any]] = []
     by_id: dict[str, dict[str, Any]] = {}
     for item in items:
@@ -636,9 +562,9 @@ def _step_pages(snapshot: FlowSnapshot,
             page['status'] = 'completed'
             page['version'] = item['artifact']['version']
             page['_closed'] = True
-        elif item['status'] in {'failed', 'canceled'}:
+        elif item.get('status') in {'failed', 'canceled'}:
             page['status'] = item['status']
-        elif item['status'] == 'running':
+        elif item.get('status') == 'running':
             page['status'] = 'running'
 
     _append_current_page(snapshot, pages)
@@ -665,9 +591,7 @@ def _step_pages(snapshot: FlowSnapshot,
     return pages
 
 
-def _append_current_page(snapshot: FlowSnapshot,
-                         pages: list[dict[str, Any]]
-                         ) -> None:
+def _append_current_page(snapshot: FlowSnapshot, pages: list[dict[str, Any]]) -> None:
     if snapshot.status == 'completed':
         return
     progress = next(
@@ -710,10 +634,7 @@ def _append_current_page(snapshot: FlowSnapshot,
     })
 
 
-def _link_execution_pages(snapshot: FlowSnapshot,
-                          items: list[dict[str, Any]],
-                          pages: list[dict[str, Any]]
-                          ) -> None:
+def _link_execution_pages(snapshot: FlowSnapshot, items: list[dict[str, Any]], pages: list[dict[str, Any]]) -> None:
     for index, page in enumerate(pages):
         next_page = pages[index + 1] if index + 1 < len(pages) else None
         if next_page is not None:
@@ -759,10 +680,7 @@ def _step_id(run_id: str, stage: str, ordinal: int) -> str:
     ))
 
 
-def _resolve_step(snapshot: FlowSnapshot,
-                  pages: list[dict[str, Any]],
-                  step_id: str
-                  ) -> dict[str, Any]:
+def _resolve_step(snapshot: FlowSnapshot, pages: list[dict[str, Any]], step_id: str) -> dict[str, Any]:
     page = next((item for item in pages if item['step_id'] == step_id), None)
     if page is not None:
         return page
@@ -801,10 +719,7 @@ def _step_terminal(page: Mapping[str, Any]) -> bool:
     return bool(page['next_step_id']) or page['status'] in _TERMINAL_STEPS
 
 
-def _stream_end_reason(
-    snapshot: FlowSnapshot,
-    page: Mapping[str, Any] | None,
-) -> str:
+def _stream_end_reason(snapshot: FlowSnapshot, page: Mapping[str, Any] | None) -> str:
     if page is not None:
         page_status = str(page['status'])
         if page_status == 'completed' or page['next_step_id']:
@@ -834,181 +749,15 @@ def _stream_end_reason(
     }.get(snapshot.status, 'step_completed')
 
 
-def events_after(items: list[dict[str, Any]], event_id: str
-                 ) -> list[dict[str, Any]]:
+def events_after(items: list[dict[str, Any]], event_id: str) -> list[dict[str, Any]]:
     for index, item in enumerate(items):
         if item['event_id'] == event_id:
             return items[index + 1:]
     raise ServiceError(422, 'unknown event_id for event scope')
 
 
-_REPAIR_EXECUTION_OPERATIONS = frozenset({
-    'repair.plan',
-    'repair.candidate_workspace',
-    'repair.loop_result',
-})
-
-
-def _repair_execution(attempts: tuple[AttemptSnapshot, ...],
-                      page: Mapping[str, Any]
-                      ) -> AttemptSnapshot | None:
-    started_at = page['_started_at']
-    next_started_at = page['_next_started_at']
-    if started_at is None:
-        return None
-    return max(
-        (
-            attempt for attempt in attempts
-            if attempt.operation_id in _REPAIR_EXECUTION_OPERATIONS
-            and attempt.created_at >= started_at
-            and (
-                next_started_at is None
-                or attempt.created_at < next_started_at
-            )
-        ),
-        key=lambda attempt: (attempt.created_at, attempt.attempt_id),
-        default=None,
-    )
-
-
-async def _repair_trace_scope(flow: Any, run_id: str,
-                              page: Mapping[str, Any]
-                              ) -> tuple[int, int] | None:
-    version = page['version']
-    if version is None:
-        return None
-    root_ref = ArtifactRef(
-        ArtifactKey.scalar(A.REPAIR_VERIFIED_PATCH),
-        version,
-    )
-    record = await flow.record(run_id, root_ref)
-    if record is None:
-        return None
-    loop_ref = next(
-        (
-            ref for ref in record.input_refs
-            if ref.key.artifact_id == A.REPAIR_LOOP_RESULT
-        ),
-        None,
-    )
-    if loop_ref is None:
-        return None
-    value = await flow.read(run_id, loop_ref)
-    if not isinstance(value, Mapping):
-        return None
-    cursor = value.get('trace_cursor')
-    if not isinstance(cursor, Mapping):
-        return None
-    try:
-        start = int(cursor['seq_start'])
-        end = int(cursor['seq_end'])
-    except (KeyError, TypeError, ValueError):
-        return None
-    return (start, end) if 0 < start <= end else None
-
-
-def _repair_trace_rows(rows: list[dict[str, Any]],
-                       page: Mapping[str, Any],
-                       scope: tuple[int, int] | None
-                       ) -> list[dict[str, Any]]:
-    if scope is not None:
-        start, end = scope
-        next_started_at = page['_next_started_at']
-        scoped = [
-            row for row in rows
-            if start <= int(row.get('seq') or 0) <= end
-        ]
-        verified = next(
-            (
-                row for row in rows
-                if int(row.get('seq') or 0) > end
-                and row.get('type') == 'repair.patch_verified'
-                and (
-                    next_started_at is None
-                    or _event_time(row) < next_started_at
-                )
-            ),
-            None,
-        )
-        return scoped + ([] if verified is None else [verified])
-
-    started_at = page['_started_at']
-    next_started_at = page['_next_started_at']
-    if started_at is None:
-        return []
-    return [
-        row for row in rows
-        if _event_time(row) >= started_at
-        and (
-            next_started_at is None
-            or _event_time(row) < next_started_at
-        )
-    ]
-
-
-def _repair_trace_event(thread_id: str, step_id: str,
-                        execution_id: str, row: Mapping[str, Any]
-                        ) -> dict[str, Any]:
-    sequence = int(row['seq'])
-    payload = row.get('payload')
-    summary = dict(payload) if isinstance(payload, Mapping) else {}
-    if row.get('attempt') is not None:
-        summary.setdefault('attempt', row['attempt'])
-    if row.get('message'):
-        summary.setdefault('message', row['message'])
-    timestamp = _event_timestamp(row.get('created_at'))
-    return {
-        'thread_id': thread_id,
-        'step_id': step_id,
-        'execution_id': execution_id,
-        'stage': 'repair',
-        'event_id': _repair_trace_event_id(thread_id, sequence),
-        'event_type': str(row.get('type') or 'repair.trace'),
-        'status': str(row.get('status') or 'running'),
-        'timestamp': timestamp,
-        'created_at': timestamp,
-        'seq': sequence,
-        'trace_id': str(row.get('trace_id') or ''),
-        'materialization_key': str(row.get('materialization_key') or ''),
-        'source': str(row.get('source') or 'repair'),
-        'attempt': row.get('attempt'),
-        'message': public_value(row.get('message') or ''),
-        'payload': public_value(payload if isinstance(payload, Mapping) else {}),
-        'summary': public_value(summary),
-    }
-
-
-def _repair_trace_cursor(thread_id: str, event_id: str) -> int:
-    if not event_id:
-        return 0
-    prefix = f'{thread_id}:repair:trace:'
-    sequence = event_id.removeprefix(prefix)
-    if not event_id.startswith(prefix) or not sequence.isdigit() or int(sequence) < 1:
-        raise ServiceError(422, 'unknown event_id for event scope')
-    return int(sequence)
-
-
-def _repair_trace_event_id(thread_id: str, sequence: int) -> str:
-    return f'{thread_id}:repair:trace:{sequence}'
-
-
-def _event_timestamp(value: object) -> str:
-    try:
-        return datetime.fromtimestamp(float(value), timezone.utc).isoformat()
-    except (TypeError, ValueError, OSError):
-        return ''
-
-
-def _event_time(row: Mapping[str, Any]) -> float:
-    try:
-        return float(row.get('created_at') or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
 def attempt_case(snapshot: FlowSnapshot, attempt: AttemptSnapshot,
-                 historical: Mapping[ArtifactRef, PartitionSet] | None = None
-                 ) -> dict[str, Any] | None:
+                 historical: Mapping[ArtifactRef, PartitionSet] | None = None) -> dict[str, Any] | None:
     partition_key = attempt.partition_key
     if not partition_key:
         return None
@@ -1040,8 +789,7 @@ def attempt_case(snapshot: FlowSnapshot, attempt: AttemptSnapshot,
     }
 
 
-async def _historical_partition_sets(flow: Any, run_id: str,
-                                     attempts: tuple[AttemptSnapshot, ...]
+async def _historical_partition_sets(flow: Any, run_id: str, attempts: tuple[AttemptSnapshot, ...]
                                      ) -> Mapping[ArtifactRef, PartitionSet]:
     partition_ids = frozenset(A.PARTITION_SET_BY_ARTIFACT.values())
     refs = tuple(dict.fromkeys(
@@ -1073,8 +821,7 @@ def _terminal(snapshot: FlowSnapshot) -> bool:
     return False
 
 
-def _matching_attempt(completions: Mapping[ArtifactKey, list[AttemptSnapshot]],
-                      record: ArtifactRecord, index: int
+def _matching_attempt(completions: Mapping[ArtifactKey, list[AttemptSnapshot]], record: ArtifactRecord, index: int
                       ) -> AttemptSnapshot | None:
     attempts = completions.get(record.ref.key, ())
     return attempts[index] if index < len(attempts) else None

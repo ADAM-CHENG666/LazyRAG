@@ -9,7 +9,15 @@ from typing import Any
 
 from unidiff import PatchSet
 
-from evo.operations.public_contracts import RepairPatch, algo_id, dump_contract
+from evo.artifact_runtime import record_event
+from evo.operations.public_contracts import (
+    RepairPatch,
+    algo_id,
+    bounded_int as _int,
+    clean_text as _text,
+    dump_contract,
+    mapping_or_empty as _mapping,
+)
 from evo.repair_model import EvoModelConfigError, opencode_settings
 
 from .candidate import validate_candidate_patch
@@ -17,7 +25,6 @@ from .code_index import build_code_index
 from .localize import localize_repair
 from .opencode import run_opencode_streaming
 from .report import read_worker_report
-from .trace import safe_emit, trace_cursor
 from .validation import pre_validate
 from .workspace import (
     apply_diff,
@@ -35,15 +42,10 @@ DEFAULT_SOURCE = '/app/algorithm'
 FINAL_PATCH_STATUSES = {'validated', 'exhausted_with_patch'}
 
 
-def prepare_candidate_workspace(
-    plan: Mapping[str, Any],
-    repair_policy: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
+def prepare_candidate_workspace(plan: Mapping[str, Any], repair_policy: Mapping[str, Any] | None = None
+                                ) -> dict[str, Any]:
     policy = _runtime_policy(plan, repair_policy)
-    if (
-        plan.get('status') != 'planned'
-        and _text(policy.get('mode')) != 'auto'
-    ):
+    if plan.get('status') != 'planned':
         return {
             'status': 'failed',
             'reason': f"repair plan is not planned: {_text(plan.get('status')) or 'missing_status'}",
@@ -71,37 +73,24 @@ def prepare_candidate_workspace(
 async def run_repair_loop(workspace: Mapping[str, Any], cases: tuple[Mapping[str, Any], ...],
                           baseline_judges: tuple[Mapping[str, Any], ...], eval_policy: Mapping[str, Any],
                           candidate_config: Mapping[str, Any], repair_policy: Mapping[str, Any], ctx: Any,
-                          plan: Mapping[str, Any] | None = None,
-                          trace: Any | None = None) -> dict[str, Any]:
+                          plan: Mapping[str, Any] | None = None) -> dict[str, Any]:
     plan = plan if isinstance(plan, Mapping) else {}
     policy = _runtime_policy(plan, repair_policy)
     baseline_algo_id = next((text for judge in baseline_judges for text in (algo_id(judge),) if text), '')
     ready = _ready_workspace(workspace, plan, repair_policy)
     if ready.get('status') != 'ready':
         reason = _text(ready.get('reason')) or 'repair workspace is not ready'
-        safe_emit(trace, 'repair.loop_completed', status='failed', terminal=True, payload={'reason': reason})
-        return _result('failed', plan, workspace, [], {}, reason, baseline_algo_id,
-                       trace_cursor(trace))
+        record_event('repair.loop_completed', status='failed', terminal=True, data={'reason': reason})
+        return _result('failed', plan, workspace, [], {}, reason, baseline_algo_id)
     root = Path(str(workspace['workspace_ref'])).resolve()
-    if plan.get('status') != 'planned':
-        return _finish_auto_without_patch(
-            root,
-            plan,
-            workspace,
-            [],
-            baseline_algo_id,
-            trace,
-            'repair plan is not runnable; using unchanged workspace',
-        )
     case_map = {_text(case.get('id')): case for case in cases
                 if isinstance(case, Mapping) and _text(case.get('id'))}
     baseline_map = {_text(judge.get('case_id')): judge for judge in baseline_judges
                     if isinstance(judge, Mapping) and _text(judge.get('case_id'))}
     missing_validation = _validation_input_gap(plan, case_map, baseline_map)
     if missing_validation:
-        safe_emit(trace, 'repair.loop_completed', status='failed', terminal=True,
-                  payload={'reason': missing_validation})
-        return _result('failed', plan, workspace, [], {}, missing_validation, baseline_algo_id, trace_cursor(trace))
+        record_event('repair.loop_completed', status='failed', terminal=True, data={'reason': missing_validation})
+        return _result('failed', plan, workspace, [], {}, missing_validation, baseline_algo_id)
     index = build_code_index(root)
     localization = localize_repair(index, plan)
     llm_config = policy.get('llm_config') if isinstance(policy.get('llm_config'), Mapping) else {}
@@ -109,14 +98,14 @@ async def run_repair_loop(workspace: Mapping[str, Any], cases: tuple[Mapping[str
         opencode_config = opencode_settings(llm_config.get('evo_llm'))
     except EvoModelConfigError as exc:
         reason = exc.reason
-        safe_emit(trace, 'repair.loop_completed', status='failed', terminal=True, payload={'reason': reason})
-        return _result('failed', plan, workspace, [], {}, reason, baseline_algo_id, trace_cursor(trace))
+        record_event('repair.loop_completed', status='failed', terminal=True, data={'reason': reason})
+        return _result('failed', plan, workspace, [], {}, reason, baseline_algo_id)
     attempts, session_id = [], ''
     budget = _int(policy.get('repair_attempt_budget'), 10, 1, 20)
 
     for attempt_no in range(1, budget + 1):
-        safe_emit(trace, 'repair.attempt_started', status='started', attempt=attempt_no,
-                  payload={'budget': budget, 'localization_status': localization.get('status')})
+        record_event('repair.attempt_started', status='started', attempt=attempt_no,
+                     data={'budget': budget, 'localization_status': localization.get('status')})
         reset_workspace(root)
         artifact_dir = root / '.evo_repair_logs' / 'opencode' / f'attempt_{attempt_no}'
         task = _task_card(plan, workspace, localization, attempt_no, artifact_dir / 'worker_report.json', attempts)
@@ -128,7 +117,6 @@ async def run_repair_loop(workspace: Mapping[str, Any], cases: tuple[Mapping[str
             config=opencode_config,
             timeout_s=_int(policy.get('opencode_timeout_s') or os.getenv('LAZYMIND_EVO_CODE_TIMEOUT_S'),
                            900, 30, 7200),
-            trace=trace,
             attempt=attempt_no,
         )
         session_id = run.session_id or session_id
@@ -139,7 +127,7 @@ async def run_repair_loop(workspace: Mapping[str, Any], cases: tuple[Mapping[str
             pre = {'status': 'skipped', 'reason': 'worker_failed'}
             candidate = _rejected_candidate('worker_failed', worker_failure)
         else:
-            pre = pre_validate(root, diff_info, plan, policy, trace, attempt_no)
+            pre = pre_validate(root, diff_info, plan, policy, attempt_no)
             if pre.get('status') != 'passed':
                 candidate = _rejected_candidate(
                     'pre_validation_failed',
@@ -148,7 +136,7 @@ async def run_repair_loop(workspace: Mapping[str, Any], cases: tuple[Mapping[str
             else:
                 candidate = await validate_candidate_patch(
                     root, diff_info['diff'], plan, case_map, baseline_map,
-                    eval_policy, candidate_config, ctx, trace, attempt_no,
+                    eval_policy, candidate_config, ctx, attempt_no,
                 )
         status = 'validated' if candidate.get('accepted') is True else 'failed'
         attempt = {
@@ -169,24 +157,23 @@ async def run_repair_loop(workspace: Mapping[str, Any], cases: tuple[Mapping[str
             'diff': diff_info['diff'],
         }
         attempts.append(attempt)
-        safe_emit(trace, 'repair.attempt_completed', status='completed' if status == 'validated' else 'failed',
-                  attempt=attempt_no, payload={
-                      'status': status,
-                      'reason': candidate.get('reason'),
-                      'files_changed': diff_info['files'],
-                  })
+        record_event('repair.attempt_completed', status='completed' if status == 'validated' else 'failed',
+                     attempt=attempt_no, data={
+                         'status': status,
+                         'reason': candidate.get('reason'),
+                         'files_changed': diff_info['files'],
+                     })
         if status == 'validated':
-            safe_emit(trace, 'repair.loop_completed', status='completed', terminal=True,
-                      payload={'status': 'validated', 'attempt_count': len(attempts)})
+            record_event('repair.loop_completed', status='completed', terminal=True,
+                         data={'status': 'validated', 'attempt_count': len(attempts)})
             return _result('validated', plan, workspace, attempts, attempt, 'validated repair patch',
-                           baseline_algo_id, trace_cursor(trace))
+                           baseline_algo_id)
         if candidate.get('early_stop_reason') == 'chat_runtime_error':
             reason = 'candidate validation failed: chat_runtime_error'
-            safe_emit(trace, 'repair.loop_completed', status='failed', terminal=True,
-                      payload={'status': 'failed', 'attempt_count': len(attempts), 'reason': reason})
+            record_event('repair.loop_completed', status='failed', terminal=True,
+                         data={'status': 'failed', 'attempt_count': len(attempts), 'reason': reason})
             reset_workspace(root)
-            return _result('failed', plan, workspace, attempts, {}, reason,
-                           baseline_algo_id, trace_cursor(trace))
+            return _result('failed', plan, workspace, attempts, {}, reason, baseline_algo_id)
     fallback = _latest_prevalidated_patch(attempts)
     if fallback:
         try:
@@ -194,16 +181,16 @@ async def run_repair_loop(workspace: Mapping[str, Any], cases: tuple[Mapping[str
             apply_diff(root, str(fallback.get('diff') or ''))
         except Exception as exc:
             reason = f'exhausted patch could not be restored: {type(exc).__name__}'
-            safe_emit(trace, 'repair.loop_completed', status='failed', terminal=True,
-                      payload={'status': 'failed', 'attempt_count': len(attempts), 'reason': reason})
+            record_event('repair.loop_completed', status='failed', terminal=True,
+                         data={'status': 'failed', 'attempt_count': len(attempts), 'reason': reason})
             reset_workspace(root)
-            return _result('failed', plan, workspace, attempts, {}, reason, baseline_algo_id, trace_cursor(trace))
-        safe_emit(trace, 'repair.loop_completed', status='completed', terminal=True,
-                  payload={
-                      'status': 'exhausted_with_patch',
-                      'attempt_count': len(attempts),
-                      'fallback_attempt': fallback.get('attempt'),
-                  })
+            return _result('failed', plan, workspace, attempts, {}, reason, baseline_algo_id)
+        record_event('repair.loop_completed', status='completed', terminal=True,
+                     data={
+                         'status': 'exhausted_with_patch',
+                         'attempt_count': len(attempts),
+                         'fallback_attempt': fallback.get('attempt'),
+                     })
         return _result(
             'exhausted_with_patch',
             plan,
@@ -212,23 +199,12 @@ async def run_repair_loop(workspace: Mapping[str, Any], cases: tuple[Mapping[str
             fallback,
             'repair exhausted validation attempts; using latest pre-validated patch',
             baseline_algo_id,
-            trace_cursor(trace),
         )
-    if _text(policy.get('mode')) == 'auto':
-        return _finish_auto_without_patch(
-            root,
-            plan,
-            workspace,
-            attempts,
-            baseline_algo_id,
-            trace,
-            'repair exhausted attempts; using unchanged workspace',
-        )
-    safe_emit(trace, 'repair.loop_completed', status='failed', terminal=True,
-              payload={'status': 'failed', 'attempt_count': len(attempts)})
+    record_event('repair.loop_completed', status='failed', terminal=True,
+                 data={'status': 'failed', 'attempt_count': len(attempts)})
     reset_workspace(root)
     return _result('failed', plan, workspace, attempts, {}, 'repair exhausted attempts without a validated patch',
-                   baseline_algo_id, trace_cursor(trace))
+                   baseline_algo_id)
 
 
 def build_verified_patch(run_id: str, loop: Mapping[str, Any]) -> dict[str, Any]:
@@ -261,15 +237,12 @@ def build_verified_patch(run_id: str, loop: Mapping[str, Any]) -> dict[str, Any]
     })
 
 
-def _ready_workspace(workspace: Mapping[str, Any], plan: Mapping[str, Any],
-                     repair_policy: Mapping[str, Any]) -> dict[str, str]:
+def _ready_workspace(workspace: Mapping[str, Any], plan: Mapping[str, Any], repair_policy: Mapping[str, Any]
+                     ) -> dict[str, str]:
     policy = _runtime_policy(plan, repair_policy)
     if (
         workspace.get('status') != 'ready'
-        or (
-            plan.get('status') != 'planned'
-            and _text(policy.get('mode')) != 'auto'
-        )
+        or plan.get('status') != 'planned'
     ):
         return {'status': 'failed', 'reason': 'repair plan is not runnable'}
     objective_hash = hashlib.sha1(json.dumps(plan.get('objective') or {}, sort_keys=True).encode()).hexdigest()[:12]
@@ -292,11 +265,8 @@ def _ready_workspace(workspace: Mapping[str, Any], plan: Mapping[str, Any],
     return {'status': 'ready', 'reason': ''}
 
 
-def _validation_input_gap(
-    plan: Mapping[str, Any],
-    cases: Mapping[str, Mapping[str, Any]],
-    baseline: Mapping[str, Mapping[str, Any]],
-) -> str:
+def _validation_input_gap(plan: Mapping[str, Any], cases: Mapping[str, Mapping[str, Any]],
+                          baseline: Mapping[str, Mapping[str, Any]]) -> str:
     objective = plan.get('objective') if isinstance(plan.get('objective'), Mapping) else {}
     required = [_text(item) for item in objective.get('validation_case_ids') or [] if _text(item)]
     if not required:
@@ -310,14 +280,8 @@ def _validation_input_gap(
     return ''
 
 
-def _task_card(
-    plan: Mapping[str, Any],
-    workspace: Mapping[str, Any],
-    localization: Mapping[str, Any],
-    attempt: int,
-    report_path: Path,
-    previous_attempts: list[Mapping[str, Any]] | None = None,
-) -> dict[str, Any]:
+def _task_card(plan: Mapping[str, Any], workspace: Mapping[str, Any], localization: Mapping[str, Any], attempt: int,
+               report_path: Path, previous_attempts: list[Mapping[str, Any]] | None = None) -> dict[str, Any]:
     prior = _attempt_feedback(previous_attempts or [])
     return {
         'mode': 'lazyrag_validated_repair_v3',
@@ -422,8 +386,7 @@ def _failed_case_feedback(analysis: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def _result(status: str, plan: Mapping[str, Any], workspace: Mapping[str, Any], attempts: list[Mapping[str, Any]],
-            best: Mapping[str, Any], message: str, algo_id_value: str = '',
-            trace_cursor: Mapping[str, Any] | None = None) -> dict[str, Any]:
+            best: Mapping[str, Any], message: str, algo_id_value: str = '') -> dict[str, Any]:
     winner = best if status in FINAL_PATCH_STATUSES else {}
     candidate = winner.get('candidate_validation') if isinstance(winner.get('candidate_validation'), Mapping) else {}
     service = candidate.get('service') if isinstance(candidate.get('service'), Mapping) else {}
@@ -441,7 +404,6 @@ def _result(status: str, plan: Mapping[str, Any], workspace: Mapping[str, Any], 
         'winning_patch_diff': diff,
         'selected_group': _group_summary(plan.get('selected_group')),
         'attempts': attempts,
-        'trace_cursor': dict(trace_cursor or {}),
     }
 
 
@@ -458,38 +420,6 @@ def _latest_prevalidated_patch(attempts: list[Mapping[str, Any]]) -> Mapping[str
     return {}
 
 
-def _finish_auto_without_patch(
-    root: Path,
-    plan: Mapping[str, Any],
-    workspace: Mapping[str, Any],
-    attempts: list[Mapping[str, Any]],
-    baseline_algo_id: str,
-    trace: Any,
-    message: str,
-) -> dict[str, Any]:
-    safe_emit(
-        trace,
-        'repair.loop_completed',
-        status='completed',
-        terminal=True,
-        payload={
-            'status': 'exhausted_with_patch',
-            'attempt_count': len(attempts),
-        },
-    )
-    reset_workspace(root)
-    return _result(
-        'exhausted_with_patch',
-        plan,
-        workspace,
-        attempts,
-        {},
-        message,
-        baseline_algo_id,
-        trace_cursor(trace),
-    )
-
-
 def _worker_failure(run: Any) -> str:
     last_error = getattr(run, 'last_error', None)
     if last_error:
@@ -500,8 +430,7 @@ def _worker_failure(run: Any) -> str:
     return ''
 
 
-def _repair_worker_failure(run: Any, report: Mapping[str, Any],
-                           diff_info: Mapping[str, Any]) -> str:
+def _repair_worker_failure(run: Any, report: Mapping[str, Any], diff_info: Mapping[str, Any]) -> str:
     failure = _worker_failure(run)
     if (
         not failure
@@ -594,22 +523,6 @@ def _runtime_policy(plan: Mapping[str, Any], repair_policy: Mapping[str, Any] | 
         **{key: safe[key] for key in safe_keys if key in safe},
         **{key: raw[key] for key in runtime_keys if key in raw},
     }
-
-
-def _int(value: Any, default: int, low: int, high: int) -> int:
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        number = default
-    return max(low, min(high, number))
-
-
-def _text(value: Any) -> str:
-    return str(value or '').strip()
-
-
-def _mapping(value: Any) -> Mapping[str, Any]:
-    return value if isinstance(value, Mapping) else {}
 
 
 def _pick(value: Mapping[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:

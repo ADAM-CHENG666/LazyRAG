@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from dataclasses import fields, is_dataclass
 from typing import Any
 
 from evo.artifact_flow import FlowSnapshot
@@ -28,6 +29,8 @@ def public_value(value: object, *, key: str = '') -> object:
         return '<redacted>'
     if normalized in _PRIVATE_URL_KEYS:
         return '<redacted-url>'
+    if is_dataclass(value):
+        return public_value({field.name: getattr(value, field.name) for field in fields(value)})
     if isinstance(value, Mapping):
         return {
             str(name): public_value(item, key=str(name))
@@ -74,6 +77,24 @@ def public_thread_state(snapshot: FlowSnapshot) -> dict[str, Any]:
         'last_released_step': released[-1] if released else '',
         'retry_from_step': '' if first_incomplete is None else first_incomplete.stage,
         'last_error': '' if error is None else public_text(error.message),
+        'flow_status': snapshot.status,
+        'progress': public_value(snapshot.progress),
+        'completed_with_problems': snapshot.status == 'completed' and bool(snapshot.failures),
+        'failures': public_value(snapshot.failures),
+        'running': public_value(snapshot.runtime.running),
+        'ready_count': snapshot.runtime.ready_count,
+        'awaiting_artifacts': public_value(snapshot.runtime.awaiting_artifacts),
+        'stages': [
+            {
+                'stage': stage.stage,
+                'status': stage.status,
+                'result_ref': public_value(stage.result_ref),
+                'approval_ref': public_value(stage.approval_ref),
+                'progress': public_value(stage.progress),
+                'failures': public_value(stage.failures),
+            }
+            for stage in snapshot.stages
+        ],
     }
     if pending is None or pending.result_ref is None:
         return result
@@ -96,8 +117,7 @@ def public_thread_state(snapshot: FlowSnapshot) -> dict[str, Any]:
     return result
 
 
-def public_message_result(result: MessageTurnResult | Mapping[str, Any]
-                          ) -> dict[str, Any]:
+def public_message_result(result: MessageTurnResult | Mapping[str, Any]) -> dict[str, Any]:
     data = result.model_dump() if isinstance(result, MessageTurnResult) else dict(result)
     data['turn_decision'] = {
         'needs_confirmation': 'needs_approval',
@@ -107,9 +127,7 @@ def public_message_result(result: MessageTurnResult | Mapping[str, Any]
     return public_value(data)
 
 
-def public_message_history(
-    history: MessageHistoryResponse | Mapping[str, Any],
-) -> dict[str, Any]:
+def public_message_history(history: MessageHistoryResponse | Mapping[str, Any]) -> dict[str, Any]:
     data = history.model_dump() if isinstance(history, MessageHistoryResponse) else dict(history)
     data['items'] = [public_message_result(item) for item in data.get('items', ())]
     return public_value(data)

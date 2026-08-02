@@ -19,10 +19,7 @@ from .artifact import (
     PartitionSet,
     _drop_stale,
     failure_key,
-    intervention_key,
-    intervention_operation_id,
     is_failure_key,
-    is_intervention_key,
     merge_refs,
 )
 from .errors import DefinitionError, PlanningError, _tuple_of
@@ -38,7 +35,6 @@ from .state import (
     ArtifactRetryRequest,
     AttemptSnapshot,
     CaseFailure,
-    InterventionSnapshot,
     InvocationSnapshot,
     RunStatus,
     RuntimeErrorInfo,
@@ -245,8 +241,8 @@ def compile_operations(operations: Sequence[Operation]) -> RuntimeDefinition:
     )
 
 
-def plan_next(definition: RuntimeDefinition, artifacts: ArtifactSnapshot,
-              retries: Iterable[ArtifactRetryRequest] = ()) -> PlanningResult:
+def plan_next(definition: RuntimeDefinition, artifacts: ArtifactSnapshot, retries: Iterable[ArtifactRetryRequest] = ()
+              ) -> PlanningResult:
     if not isinstance(definition, RuntimeDefinition):
         raise TypeError('definition must be RuntimeDefinition')
     if not isinstance(artifacts, ArtifactSnapshot):
@@ -306,8 +302,8 @@ def plan_next(definition: RuntimeDefinition, artifacts: ArtifactSnapshot,
     raise PlanningError('terminal artifact demand cannot be resolved')
 
 
-def obsolete_retries(definition: RuntimeDefinition, artifacts: ArtifactSnapshot,
-                     retries: Iterable[ArtifactRetryRequest]) -> tuple[ArtifactRetryRequest, ...]:
+def obsolete_retries(definition: RuntimeDefinition, artifacts: ArtifactSnapshot, retries: Iterable[ArtifactRetryRequest]
+                     ) -> tuple[ArtifactRetryRequest, ...]:
     requests = tuple(retries)
     view = plan_next(definition, artifacts).view
     return tuple(
@@ -435,7 +431,6 @@ class _DemandPlanner:
             _expected_heads(operation, partition_key, self.artifacts),
             partition_key,
             retry_request_id,
-            _intervention_ref(operation, partition_key, self.view.records),
         )
         return False
 
@@ -460,28 +455,6 @@ def _remove_inactive_partitions(definition: RuntimeDefinition, artifacts: Artifa
     changed = False
     partition_sets = _effective_partition_sets(artifacts, effective)
     for key in tuple(effective):
-        if is_intervention_key(key):
-            operation_id = intervention_operation_id(key)
-            operation = next(
-                (
-                    item for item in definition.operations
-                    if item.spec.op_id == operation_id
-                ),
-                None,
-            )
-            if operation is None:
-                del effective[key]
-                changed = True
-                continue
-            if not key.partition_key:
-                continue
-            partitions = partition_sets.get(
-                ArtifactKey.scalar(operation.spec.partition_set_id)
-            )
-            if partitions is None or key.partition_key not in partitions:
-                del effective[key]
-                changed = True
-            continue
         if not key.partition_key:
             continue
         partition_set_id = definition.partition_set_by_artifact.get(key.artifact_id)
@@ -513,11 +486,7 @@ def _validate_outputs(operation: Operation, effective: dict[ArtifactKey, Artifac
     )
     for partition_key in invocation_keys:
         inputs = _bind_inputs(operation, effective, partition_sets, partition_key)
-        expected_inputs = None if inputs is None else _bound_refs(
-            inputs,
-            lineage=True,
-            intervention_ref=_intervention_ref(operation, partition_key or '', effective),
-        )
+        expected_inputs = None if inputs is None else _bound_refs(inputs, lineage=True)
         for output in operation.spec.outputs.values():
             keys = (
                 (ArtifactKey.partition(output.artifact_id, partition_key),)
@@ -542,8 +511,8 @@ def _validate_outputs(operation: Operation, effective: dict[ArtifactKey, Artifac
     return changed
 
 
-def _effective_partition_sets(artifacts: ArtifactSnapshot,
-                              effective: Mapping[ArtifactKey, ArtifactRecord]) -> dict[ArtifactKey, PartitionSet]:
+def _effective_partition_sets(artifacts: ArtifactSnapshot, effective: Mapping[ArtifactKey, ArtifactRecord]
+                              ) -> dict[ArtifactKey, PartitionSet]:
     return {
         key: partitions
         for key, partitions in artifacts.partition_sets.items()
@@ -551,8 +520,8 @@ def _effective_partition_sets(artifacts: ArtifactSnapshot,
     }
 
 
-def _expected_heads(operation: Operation, partition_key: str,
-                    artifacts: ArtifactSnapshot) -> dict[ArtifactKey, ArtifactRef | None]:
+def _expected_heads(operation: Operation, partition_key: str, artifacts: ArtifactSnapshot
+                    ) -> dict[ArtifactKey, ArtifactRef | None]:
     expected: dict[ArtifactKey, ArtifactRef | None] = {}
     for output in operation.spec.outputs.values():
         if output.mode == 'partitioned' and not partition_key:
@@ -613,8 +582,8 @@ def _bind_inputs(operation: Operation, effective: Mapping[ArtifactKey, ArtifactR
     return inputs
 
 
-def _input_keys(operation: Operation, partition_sets: Mapping[ArtifactKey, PartitionSet],
-                partition_key: str | None) -> dict[str, tuple[ArtifactKey, ...]] | None:
+def _input_keys(operation: Operation, partition_sets: Mapping[ArtifactKey, PartitionSet], partition_key: str | None
+                ) -> dict[str, tuple[ArtifactKey, ...]] | None:
     keys: dict[str, tuple[ArtifactKey, ...]] = {}
     for name, binding in operation.spec.inputs.items():
         if binding.mode == 'one':
@@ -632,15 +601,6 @@ def _input_keys(operation: Operation, partition_sets: Mapping[ArtifactKey, Parti
             )
             keys[name] = (set_key, *members)
     return keys
-
-
-def _intervention_ref(operation: Operation, partition_key: str,
-                      records: Mapping[ArtifactKey, ArtifactRecord]) -> ArtifactRef | None:
-    record = records.get(intervention_key(
-        operation.spec.op_id,
-        partition_key if operation.spec.driver_input is not None else '',
-    ))
-    return None if record is None else record.ref
 
 
 def project_progress(definition: RuntimeDefinition, view: ArtifactSnapshot, attempts: Iterable[AttemptSnapshot],
@@ -723,8 +683,7 @@ def project_progress(definition: RuntimeDefinition, view: ArtifactSnapshot, atte
 
 def project_runtime_snapshot(run_id: str, status: RunStatus, error: RuntimeErrorInfo | None,
                              definition: RuntimeDefinition, decision: PlanningResult,
-                             attempts: Iterable[AttemptSnapshot], failures: Iterable[CaseFailure],
-                             interventions: Iterable[InterventionSnapshot], *,
+                             attempts: Iterable[AttemptSnapshot], failures: Iterable[CaseFailure], *,
                              active_attempts: Iterable[AttemptSnapshot] | None = None) -> RuntimeSnapshot:
     attempt_values = tuple(attempts)
     failure_values = tuple(failures)
@@ -766,14 +725,13 @@ def project_runtime_snapshot(run_id: str, status: RunStatus, error: RuntimeError
         {
             key: record.ref
             for key, record in view.records.items()
-            if not is_failure_key(key) and not is_intervention_key(key)
+            if not is_failure_key(key)
         },
         view.partition_sets,
         error,
         active,
         awaiting,
         failure_values,
-        tuple(interventions),
         project_progress(definition, view, attempt_values, failure_values),
     )
 

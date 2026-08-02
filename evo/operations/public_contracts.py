@@ -98,10 +98,21 @@ class DatasetCase(Contract):
     type_rationale: StrictStr
 
 
+class FailedCase(Contract):
+    case_id: StrictStr
+    operation_id: StrictStr
+    attempt_id: StrictStr
+    error_kind: StrictStr
+    error_message: StrictStr
+
+
 class DatasetRoot(Contract):
     run_id: StrictStr
     case_num: StrictInt
     cases: list[DatasetCase]
+    failed_case_num: StrictInt = Field(ge=0)
+    failed_cases: list[FailedCase]
+    completed_with_problems: bool
 
 
 class EvalSummary(Contract):
@@ -117,6 +128,9 @@ class EvalSummary(Contract):
     failure_type_counts: dict[StrictStr, StrictInt]
     question_type_summaries: list[QuestionTypeSummary]
     cases: list[EvalCase]
+    failed_case_num: StrictInt = Field(ge=0)
+    failed_cases: list[FailedCase]
+    completed_with_problems: bool
 
 
 class EvalBody(Contract):
@@ -125,6 +139,9 @@ class EvalBody(Contract):
     good_rate: FiniteFloat = Field(ge=0.0, le=1.0)
     metrics: EvalMetrics
     cases: list[EvalCase]
+    failed_case_num: StrictInt = Field(ge=0)
+    failed_cases: list[FailedCase]
+    completed_with_problems: bool
 
 
 class RepairPatch(Contract):
@@ -150,6 +167,28 @@ class AbtestComparison(Contract):
 
 def dump_contract(model: type[BaseModel], value: Mapping[str, Any]) -> dict[str, Any]:
     return model.model_validate(value).model_dump(mode='json')
+
+
+def clean_text(value: object) -> str:
+    return str(value or '').strip()
+
+
+def mapping_or_empty(value: object) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def require_mapping(value: object, name: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f'{name} must be a mapping')
+    return value
+
+
+def bounded_int(value: object, default: int, low: int, high: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = default
+    return max(low, min(high, number))
 
 
 def algo_id(value: Mapping[str, Any]) -> str:
@@ -178,12 +217,12 @@ def case_source_label(case: Mapping[str, Any], *, csv_first: bool = False) -> st
     return ''
 
 
-def build_eval_summary_root(
-    run_id: str,
-    judges: tuple[Mapping[str, Any], ...] | list[Mapping[str, Any]],
-) -> dict[str, Any]:
+def build_eval_summary_root(run_id: str, judges: tuple[Mapping[str, Any], ...] | list[Mapping[str, Any]],
+                            failed_cases: Sequence[Mapping[str, Any]] = ()
+                            ) -> dict[str, Any]:
     cases = [_eval_case(judge) for judge in judges]
     scored = [judge for judge in judges if _is_scored(judge)]
+    failures = [dict(failure) for failure in failed_cases]
     return dump_contract(EvalSummary, {
         'run_id': str(run_id),
         'algo_id': next((text for judge in judges for text in (algo_id(judge),) if text), ''),
@@ -191,6 +230,9 @@ def build_eval_summary_root(
         'trace_coverage': _trace_coverage(cases),
         'question_type_summaries': _question_type_summaries(judges),
         'cases': cases,
+        'failed_case_num': len(failures),
+        'failed_cases': failures,
+        'completed_with_problems': bool(failures),
     })
 
 
@@ -203,7 +245,7 @@ def normalize_eval_summary(value: Mapping[str, Any]) -> dict[str, Any]:
     scored = [item for item in cases if item['failure_type'] not in UNSCORED_FAILURES]
     grouped = _case_question_type_summaries(cases)
     metrics = {
-        name: _number(value.get(f'avg_{name}'))
+        name: number_or_default(value.get(f'avg_{name}'))
         for name in METRIC_NAMES
     }
     return dump_contract(EvalSummary, {
@@ -212,13 +254,16 @@ def normalize_eval_summary(value: Mapping[str, Any]) -> dict[str, Any]:
         'case_num': len(cases),
         'scored_case_num': int(value.get('scored_case_num', len(scored))),
         'correct_rate': _rate(sum(case['metrics']['correctness'] >= 0.6 for case in scored), len(scored)),
-        'good_rate': _number(value.get('correct_rate')),
+        'good_rate': number_or_default(value.get('correct_rate')),
         'trace_coverage': _trace_coverage(cases),
         'metrics': metrics,
         'quality_counts': _counts(case['quality_label'] for case in cases),
         'failure_type_counts': _counts(case['failure_type'] for case in cases),
         'question_type_summaries': grouped,
         'cases': cases,
+        'failed_case_num': int(value.get('failed_case_num') or 0),
+        'failed_cases': list(value.get('failed_cases') or []),
+        'completed_with_problems': bool(value.get('completed_with_problems')),
     })
 
 
@@ -254,7 +299,7 @@ def _legacy_case(item: Mapping[str, Any]) -> dict[str, Any]:
         'defect': str(item.get('defect') or ''),
         'reason': str(item.get('reason') or ''),
         'trace_id': str(item.get('trace_id') or '').strip(),
-        'metrics': {name: _number(item.get(name)) for name in METRIC_NAMES},
+        'metrics': {name: number_or_default(item.get(name)) for name in METRIC_NAMES},
     }
 
 
@@ -292,10 +337,13 @@ def _case_question_type_summaries(cases: Sequence[Mapping[str, Any]]) -> list[di
             'question_type': question_type,
             'case_num': len(rows),
             'scored_case_num': len(scored),
-            'correct_rate': _rate(sum(_number(row['metrics'].get('correctness')) >= 0.6 for row in scored), len(scored)),
+            'correct_rate': _rate(
+                sum(number_or_default(row['metrics'].get('correctness')) >= 0.6 for row in scored), len(scored)
+            ),
             'good_rate': _rate(sum(row.get('quality_label') == 'good' for row in scored), len(scored)),
             'metrics': {
-                name: round(fmean(_number(row['metrics'].get(name)) for row in scored), 4) if scored else 0.0
+                name: round(fmean(number_or_default(row['metrics'].get(name)) for row in scored), 4)
+                if scored else 0.0
                 for name in METRIC_NAMES
             },
             'quality_counts': _counts(str(row.get('quality_label') or 'unknown') for row in rows),
@@ -329,7 +377,7 @@ def _is_scored(judge: Mapping[str, Any]) -> bool:
 
 def _is_correct(judge: Mapping[str, Any]) -> bool:
     policy = judge.get('eval_policy') if isinstance(judge.get('eval_policy'), Mapping) else {}
-    floor = _number(policy.get('answer_correctness_floor'), default=0.6)
+    floor = number_or_default(policy.get('answer_correctness_floor'), default=0.6)
     return _score(judge.get('answer_correctness')) >= floor
 
 
@@ -355,7 +403,7 @@ def _score(value: object) -> float:
     return round(float(value), 4)
 
 
-def _number(value: object, *, default: float = 0.0) -> float:
+def number_or_default(value: object, *, default: float = 0.0) -> float:
     try:
         return round(float(value), 4)
     except (TypeError, ValueError):

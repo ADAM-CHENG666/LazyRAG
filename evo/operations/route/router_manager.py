@@ -75,15 +75,9 @@ class RouterManager:
             timeout_s=timeout_s,
         )
 
-    def ensure_algorithm(
-        self,
-        spec: RouterAlgorithmSpec,
-        *,
-        timeout_s: float,
-        restart_unhealthy: bool = True,
-        allow_existing: bool = True,
-        allow_in_ab: bool = False,
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
+    def ensure_algorithm(self, spec: RouterAlgorithmSpec, *, timeout_s: float, restart_unhealthy: bool = True,
+                         allow_existing: bool = True, allow_in_ab: bool = False
+                         ) -> tuple[dict[str, Any], dict[str, Any]]:
         detail = self.get_algorithm(spec.id)
         if detail is None:
             registered = self.register_algorithm(spec, timeout_s=timeout_s)
@@ -128,13 +122,7 @@ class RouterManager:
         except RouterManagerError as exc:
             raise RouterManagerError('algorithm_reactivation_failed', str(exc), exc.status_code) from exc
 
-    def wait_ready(
-        self,
-        algorithm_id: str,
-        *,
-        timeout_s: float,
-        instance_count: int = 0,
-    ) -> dict[str, Any]:
+    def wait_ready(self, algorithm_id: str, *, timeout_s: float, instance_count: int = 0) -> dict[str, Any]:
         deadline = time.monotonic() + timeout_s
         last: dict[str, Any] | None = None
         while time.monotonic() <= deadline:
@@ -157,14 +145,8 @@ class RouterManager:
             raise RouterManagerError('algorithm_not_found', f'algorithm not found: {algorithm_id}', 404)
         return self.healthcheck_from_detail(detail)
 
-    def restart_algorithm(
-        self,
-        algorithm_id: str,
-        *,
-        timeout_s: float,
-        instance_count: int,
-        allow_in_ab: bool = False,
-    ) -> dict[str, Any]:
+    def restart_algorithm(self, algorithm_id: str, *, timeout_s: float, instance_count: int, allow_in_ab: bool = False
+                          ) -> dict[str, Any]:
         detail = self.get_algorithm(algorithm_id)
         if detail is None:
             raise RouterManagerError('algorithm_not_found', f'algorithm not found: {algorithm_id}', 404)
@@ -247,13 +229,7 @@ class RouterManager:
         except RouterManagerError as exc:
             raise RouterManagerError('algorithm_restart_failed', str(exc), exc.status_code) from exc
 
-    def start_algorithm(
-        self,
-        algorithm_id: str,
-        *,
-        timeout_s: float,
-        instance_count: int,
-    ) -> dict[str, Any]:
+    def start_algorithm(self, algorithm_id: str, *, timeout_s: float, instance_count: int) -> dict[str, Any]:
         detail = self.get_algorithm(algorithm_id)
         if detail is None:
             raise RouterManagerError('algorithm_not_found', f'algorithm not found: {algorithm_id}', 404)
@@ -372,14 +348,8 @@ class RouterManager:
             raise RouterManagerError('router_config_error', 'algorithm_id is required')
         return f'{self.router_admin_url}/inner/algorithm/{quote(value, safe="")}'
 
-    def _request(
-        self,
-        method: str,
-        url: str,
-        *,
-        body: Mapping[str, Any] | None = None,
-        timeout_s: float,
-    ) -> dict[str, Any]:
+    def _request(self, method: str, url: str, *, body: Mapping[str, Any] | None = None, timeout_s: float
+                 ) -> dict[str, Any]:
         try:
             with httpx.Client(timeout=httpx.Timeout(timeout_s)) as client:
                 response = client.request(method, url, json=body)

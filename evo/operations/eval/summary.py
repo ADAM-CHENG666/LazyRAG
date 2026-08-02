@@ -17,9 +17,7 @@ SCORES = (
 )
 
 
-def build_eval_detail_summary(
-    judges: tuple[Mapping[str, Any], ...] | list[Mapping[str, Any]],
-) -> dict[str, Any]:
+def build_eval_detail_summary(judges: tuple[Mapping[str, Any], ...] | list[Mapping[str, Any]]) -> dict[str, Any]:
     rows = []
     for index, judge in enumerate(judges, 1):
         if not isinstance(judge, Mapping):

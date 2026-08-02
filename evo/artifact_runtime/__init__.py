@@ -32,7 +32,8 @@ from .operation import (
     one,
     operation,
     partitioned,
-    record_progress,
+    record_event,
+    record_process,
     scalar,
 )
 from .runtime import ArtifactRuntime
@@ -43,12 +44,12 @@ from .state import (
     CaseFailure,
     CaseOperationSnapshot,
     CaseSnapshot,
-    InterventionSnapshot,
-    InterventionStatus,
+    EventLevel,
+    EventStatus,
     InvocationSnapshot,
     OperationDefinitionSnapshot,
-    ProgressEvent,
-    ProgressUpdate,
+    OperationEvent,
+    RecordedOperationEvent,
     RetryStatus,
     RunConfiguration,
     RunHistory,
@@ -56,7 +57,6 @@ from .state import (
     RuntimeErrorInfo,
     RuntimeProgress,
     RuntimeSnapshot,
-    UserIntervention,
 )
 
 
@@ -64,14 +64,12 @@ __all__ = [
     'AggregateValue', 'ArtifactCommit', 'ArtifactDraft', 'ArtifactKey', 'ArtifactRecord', 'ArtifactRef',
     'ArtifactRetryRequest', 'ArtifactRuntime', 'ArtifactRuntimeError', 'ArtifactSnapshot', 'AttemptSnapshot',
     'AttemptStatus', 'BoundAggregate', 'CaseFailure', 'CaseOperationSnapshot', 'CaseSnapshot',
-    'DefinitionError', 'InputSpec',
-    'InterventionSnapshot', 'InterventionStatus', 'InvocationSnapshot', 'Operation',
+    'DefinitionError', 'EventLevel', 'EventStatus', 'InputSpec', 'InvocationSnapshot', 'Operation',
     'OperationContext', 'OperationDefinitionSnapshot', 'OperationExecutionError',
     'OperationInvocation', 'OperationResult', 'OperationSpec', 'OperationTimeoutError', 'OutputSpec',
-    'PartitionGuard', 'PartitionSet', 'PlanningError', 'ProgressEvent', 'ProgressUpdate',
+    'OperationEvent', 'PartitionGuard', 'PartitionSet', 'PlanningError', 'RecordedOperationEvent',
     'RetryStatus', 'RUN_CONFIGURATION_ARTIFACT_ID', 'RunConfiguration', 'RunHistory',
     'RunStatus', 'RuntimeErrorInfo', 'RuntimeProgress', 'RuntimeSnapshot',
-    'UserIntervention',
     'all_items', 'each', 'keyed', 'one', 'operation', 'partitioned',
-    'record_progress', 'scalar',
+    'record_event', 'record_process', 'scalar',
 ]

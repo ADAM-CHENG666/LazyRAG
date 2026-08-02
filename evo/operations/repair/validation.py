@@ -9,8 +9,10 @@ from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from evo.artifact_runtime import record_event
+from evo.operations.public_contracts import bounded_int as _int
+
 from .code_index import DOMAIN_ROOTS
-from .trace import safe_emit
 
 DEFAULT_VERIFY = ('python -m compileall -q algorithm/lazymind/chat algorithm/lazymind/parsing',)
 PATCH_BYTE_LIMIT = 64 * 1024
@@ -22,43 +24,37 @@ FALLBACK_TEXT = re.compile(r'(?i)\b(fallback|fall\s+back|original\s+query|retry\
 RETRIEVAL_CALL = re.compile(r'(?i)(search|retrieve|retriev|rerank|kb|query|expand)')
 
 
-def pre_validate(
-    root: Path,
-    diff_info: Mapping[str, Any],
-    plan: Mapping[str, Any],
-    policy: Mapping[str, Any],
-    trace: Any | None = None,
-    attempt: int | None = None,
-) -> dict[str, Any]:
-    safe_emit(trace, 'verify.pre_validation_started', status='started', attempt=attempt)
+def pre_validate(root: Path, diff_info: Mapping[str, Any], plan: Mapping[str, Any], policy: Mapping[str, Any],
+                 attempt: int | None = None) -> dict[str, Any]:
+    record_event('verify.pre_validation_started', status='started', attempt=attempt)
     diff, files = diff_info.get('diff') or '', list(diff_info.get('files') or [])
     if not diff.strip():
-        safe_emit(
-            trace, 'verify.pre_validation_completed', status='failed', attempt=attempt,
-            payload={'reason': 'empty_diff'},
+        record_event(
+            'verify.pre_validation_completed', status='failed', attempt=attempt,
+            data={'reason': 'empty_diff'},
         )
         return {'status': 'failed', 'reason': 'empty_diff', 'diff_scope': {}, 'commands': []}
     scope = _diff_scope(files, plan)
-    safe_emit(
-        trace, 'verify.diff_scope_completed', status='completed' if scope['status'] == 'passed' else 'failed',
-        attempt=attempt, payload=scope,
+    record_event(
+        'verify.diff_scope_completed', status='completed' if scope['status'] == 'passed' else 'failed',
+        attempt=attempt, data=scope,
     )
     hardcode = _hardcode_check(diff, plan)
-    safe_emit(
-        trace, 'verify.hardcode_check_completed',
-        status='completed' if hardcode['status'] == 'passed' else 'failed', attempt=attempt, payload=hardcode,
+    record_event(
+        'verify.hardcode_check_completed',
+        status='completed' if hardcode['status'] == 'passed' else 'failed', attempt=attempt, data=hardcode,
     )
     patch_safety = _patch_safety_check(diff, policy)
     patch_policy = _patch_policy_check(root, diff, files)
-    safe_emit(
-        trace, 'verify.patch_policy_completed',
+    record_event(
+        'verify.patch_policy_completed',
         status='completed' if patch_policy['status'] == 'passed' else 'failed', attempt=attempt,
-        payload=patch_policy,
+        data=patch_policy,
     )
     behavior = _behaviorful_check(root, diff, files)
-    safe_emit(
-        trace, 'verify.behaviorful_diff_completed',
-        status='completed' if behavior['status'] == 'passed' else 'failed', attempt=attempt, payload=behavior,
+    record_event(
+        'verify.behaviorful_diff_completed',
+        status='completed' if behavior['status'] == 'passed' else 'failed', attempt=attempt, data=behavior,
     )
     if (
         scope['status'] != 'passed'
@@ -71,14 +67,14 @@ def pre_validate(
             item['reason'] for item in (scope, hardcode, patch_safety, patch_policy, behavior)
             if item['status'] != 'passed'
         )
-        safe_emit(
-            trace, 'verify.pre_validation_completed', status='failed', attempt=attempt,
-            payload={'reason': reason},
+        record_event(
+            'verify.pre_validation_completed', status='failed', attempt=attempt,
+            data={'reason': reason},
         )
         return {'status': 'failed', 'reason': reason, 'diff_scope': scope, 'hardcode_check': hardcode,
                 'patch_safety': patch_safety, 'patch_policy': patch_policy, 'behaviorful_check': behavior,
                 'commands': []}
-    commands = _verify(root, policy, trace, attempt)
+    commands = _verify(root, policy, attempt)
     status = (
         'passed'
         if scope['status'] == hardcode['status'] == commands['status'] == 'passed'
@@ -87,9 +83,9 @@ def pre_validate(
     reason = '' if status == 'passed' else next(
         item['reason'] for item in (scope, hardcode, commands) if item['status'] != 'passed'
     )
-    safe_emit(
-        trace, 'verify.pre_validation_completed', status='completed' if status == 'passed' else 'failed',
-        attempt=attempt, payload={'outcome': status, 'reason': reason},
+    record_event(
+        'verify.pre_validation_completed', status='completed' if status == 'passed' else 'failed',
+        attempt=attempt, data={'outcome': status, 'reason': reason},
     )
     return {'status': status, 'reason': reason, 'diff_scope': scope, 'hardcode_check': hardcode,
             'patch_safety': patch_safety, 'patch_policy': patch_policy, 'behaviorful_check': behavior,
@@ -238,10 +234,11 @@ def _empty_result_retry_branch(node: ast.If) -> bool:
     )
 
 
-def _contains_retrieval_call(nodes: list[ast.stmt]) -> bool:
+def _contains_retrieval_call(nodes: ast.AST | list[ast.stmt]) -> bool:
+    roots = nodes if isinstance(nodes, list) else (nodes,)
     return any(
         _retrieval_call_name(call)
-        for child in nodes
+        for child in roots
         for call in ast.walk(child)
         if isinstance(call, ast.Call)
     )
@@ -260,7 +257,7 @@ def _guarded_successor_fallbacks(tree: ast.AST) -> list[dict[str, Any]]:
                 _truthy_result_test(guard.test)
                 and not guard.orelse
                 and _guard_returns_result(guard.body)
-                and _stmt_contains_retrieval_call(successor)
+                and _contains_retrieval_call(successor)
             ):
                 signature = ast.dump(ast.Module(body=[guard, successor], type_ignores=[]), include_attributes=False)
                 hits.append({'lineno': guard.lineno, 'signature': signature})
@@ -276,24 +273,16 @@ def _guard_returns_result(nodes: list[ast.stmt]) -> bool:
     )
 
 
-def _stmt_contains_retrieval_call(node: ast.stmt) -> bool:
-    return any(_retrieval_call_name(item) for item in ast.walk(node) if isinstance(item, ast.Call))
-
-
 def _fallback_expr(node: ast.AST) -> bool:
     if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
-        return any(_expr_contains_retrieval_call(value) for value in node.values[1:])
+        return any(_contains_retrieval_call(value) for value in node.values[1:])
     if isinstance(node, ast.IfExp):
         return (
-            _empty_result_test(node.test) and _expr_contains_retrieval_call(node.body)
+            _empty_result_test(node.test) and _contains_retrieval_call(node.body)
         ) or (
-            _truthy_result_test(node.test) and _expr_contains_retrieval_call(node.orelse)
+            _truthy_result_test(node.test) and _contains_retrieval_call(node.orelse)
         )
     return False
-
-
-def _expr_contains_retrieval_call(node: ast.AST) -> bool:
-    return any(_retrieval_call_name(item) for item in ast.walk(node) if isinstance(item, ast.Call))
 
 
 def _empty_result_test(node: ast.AST) -> bool:
@@ -312,7 +301,19 @@ def _truthy_result_test(node: ast.AST) -> bool:
     if _len_call(node):
         return True
     if isinstance(node, ast.Compare) and len(node.ops) == 1:
-        return _positive_compare(node.left, node.ops[0], node.comparators[0])
+        left, op, right = node.left, node.ops[0], node.comparators[0]
+        if isinstance(op, (ast.NotEq, ast.IsNot)):
+            return (
+                (isinstance(left, (ast.Name, ast.Attribute, ast.Subscript)) or _len_call(left))
+                and _empty_literal(right)
+                or (isinstance(right, (ast.Name, ast.Attribute, ast.Subscript)) or _len_call(right))
+                and _empty_literal(left)
+            )
+        if isinstance(op, (ast.Gt, ast.GtE)):
+            return _len_call(left) and _zero_literal(right)
+        if isinstance(op, (ast.Lt, ast.LtE)):
+            return _len_call(right) and _zero_literal(left)
+        return False
     if isinstance(node, ast.BoolOp):
         return any(_truthy_result_test(value) for value in node.values)
     return False
@@ -328,19 +329,6 @@ def _empty_compare(left: ast.AST, op: ast.cmpop, right: ast.AST) -> bool:
         return _len_call(left) and _zeroish_limit(right)
     if isinstance(op, (ast.GtE, ast.Gt)):
         return _len_call(right) and _zeroish_limit(left)
-    return False
-
-
-def _positive_compare(left: ast.AST, op: ast.cmpop, right: ast.AST) -> bool:
-    if isinstance(op, (ast.NotEq, ast.IsNot)):
-        return (
-            _truthy_result_test(left) and _empty_literal(right)
-            or _truthy_result_test(right) and _empty_literal(left)
-        )
-    if isinstance(op, (ast.Gt, ast.GtE)):
-        return _len_call(left) and _zero_literal(right)
-    if isinstance(op, (ast.Lt, ast.LtE)):
-        return _len_call(right) and _zero_literal(left)
     return False
 
 
@@ -441,7 +429,10 @@ def _static_false(node: ast.AST) -> bool:
             return any(_static_false(value) for value in node.values)
         if isinstance(node.op, ast.Or):
             return all(_static_false(value) for value in node.values)
-    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'bool' and len(node.args) == 1:
+    if (
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id == 'bool' and len(node.args) == 1
+    ):
         return _static_false(node.args[0])
     return False
 
@@ -496,12 +487,7 @@ def _git_show(root: Path, path: str) -> str | None:
     return result.stdout if result.returncode == 0 else None
 
 
-def _verify(
-    root: Path,
-    policy: Mapping[str, Any],
-    trace: Any | None = None,
-    attempt: int | None = None,
-) -> dict[str, Any]:
+def _verify(root: Path, policy: Mapping[str, Any], attempt: int | None = None) -> dict[str, Any]:
     results = []
     raw_commands = policy.get('verification_commands')
     commands = (
@@ -514,7 +500,7 @@ def _verify(
         if command and command[0] == 'python':
             command[0] = sys.executable
         label = ' '.join(command[:4])
-        safe_emit(trace, 'verify.command_started', status='started', attempt=attempt, payload={'command': label})
+        record_event('verify.command_started', status='started', attempt=attempt, command=label)
         try:
             done = subprocess.run(command, cwd=str(root), capture_output=True, text=True, timeout=120, check=False)
             results.append({'command': command, 'returncode': done.returncode, 'stdout': done.stdout[-2000:],
@@ -522,14 +508,14 @@ def _verify(
         except Exception as exc:
             results.append({'command': command, 'returncode': None, 'stdout': '', 'stderr': str(exc),
                             'error_type': type(exc).__name__})
-            safe_emit(
-                trace, 'verify.command_completed', status='failed', attempt=attempt,
-                payload={'command': label, 'error_type': type(exc).__name__},
+            record_event(
+                'verify.command_completed', status='failed', attempt=attempt,
+                data={'command': label, 'error_type': type(exc).__name__},
             )
             return {'status': 'failed', 'reason': 'verification_command_failed', 'results': results}
-        safe_emit(
-            trace, 'verify.command_completed', status='completed' if done.returncode == 0 else 'failed',
-            attempt=attempt, payload={'command': label, 'returncode': done.returncode},
+        record_event(
+            'verify.command_completed', status='completed' if done.returncode == 0 else 'failed',
+            attempt=attempt, data={'command': label, 'returncode': done.returncode},
         )
         if results[-1]['returncode'] != 0:
             return {'status': 'failed', 'reason': 'verification_command_failed', 'results': results}
@@ -567,11 +553,3 @@ def _allowed_scope_roots(values: Any, violations: list[Any]) -> list[str]:
     ]
     violations.extend(invalid)
     return [root for root in roots if root not in set(invalid)]
-
-
-def _int(value: Any, default: int, low: int, high: int) -> int:
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        number = default
-    return max(low, min(high, number))

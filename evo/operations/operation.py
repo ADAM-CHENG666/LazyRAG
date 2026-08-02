@@ -5,6 +5,7 @@ from typing import Any
 
 from evo import artifacts as A
 from evo.artifact_runtime import (
+    AggregateValue,
     Operation,
     OperationContext,
     OperationResult,
@@ -15,6 +16,8 @@ from evo.artifact_runtime import (
     one,
     operation,
     partitioned,
+    record_event,
+    record_process,
     scalar,
 )
 
@@ -29,10 +32,9 @@ from .dataset.generation import build_case_requests, generate_case, prepare_case
 from .dataset.kb_loader import build_corpus_snapshot, load_corpus
 from .eval.answer import async_answer_case
 from .eval.judge import judge_case
-from .public_contracts import build_eval_summary_root
+from .public_contracts import build_eval_summary_root, require_mapping as _mapping
 from .repair.loop import build_verified_patch, prepare_candidate_workspace, run_repair_loop
 from .repair.plan import build_repair_plan
-from .repair.trace import create_trace_sink, safe_emit
 
 
 @operation(
@@ -40,12 +42,9 @@ from .repair.trace import create_trace_sink, safe_emit
     inputs={'source_config': one(A.CORPUS_SOURCE_CONFIG)},
     outputs={'report': scalar(A.CORPUS_REPORT)},
 )
-async def load_corpus_operation(ctx: OperationContext,
-                                source_config: object
-                                ) -> OperationResult:
-    return OperationResult({
-        'report': load_corpus(_mapping(source_config, 'source_config')),
-    })
+async def load_corpus_operation(ctx: OperationContext, source_config: object) -> OperationResult:
+    report = load_corpus(_mapping(source_config, 'source_config'))
+    return await _recorded_result(ctx, 'dataset.corpus_loaded', {'report': report}, status=report.get('status'))
 
 
 @operation(
@@ -56,15 +55,13 @@ async def load_corpus_operation(ctx: OperationContext,
     },
     outputs={'snapshot': scalar(A.CORPUS_SNAPSHOT)},
 )
-async def build_corpus_snapshot_operation(ctx: OperationContext, report: object,
-                                          source_config: object
+async def build_corpus_snapshot_operation(ctx: OperationContext, report: object, source_config: object
                                           ) -> OperationResult:
-    return OperationResult({
-        'snapshot': build_corpus_snapshot(
-            _mapping(report, 'report'),
-            _mapping(source_config, 'source_config'),
-        ),
-    })
+    snapshot = build_corpus_snapshot(_mapping(report, 'report'), _mapping(source_config, 'source_config'))
+    return await _recorded_result(
+        ctx, 'dataset.corpus_snapshot_built', {'snapshot': snapshot},
+        document_count=len(snapshot.get('documents') or ()),
+    )
 
 
 @operation(
@@ -78,17 +75,17 @@ async def build_corpus_snapshot_operation(ctx: OperationContext, report: object,
         'requests': partitioned(A.EVAL_CASE_REQUEST, over=A.EVAL_CASE_REQUESTS),
     },
 )
-async def case_requests_operation(ctx: OperationContext, config: object,
-                                  snapshot: object
-                                  ) -> OperationResult:
+async def case_requests_operation(ctx: OperationContext, config: object, snapshot: object) -> OperationResult:
     requests = build_case_requests(
         _mapping(config, 'config'),
         _mapping(snapshot, 'snapshot'),
     )
-    return OperationResult({
-        'partitions': PartitionSet(tuple(requests)),
-        'requests': requests,
-    })
+    total = len(requests)
+    return await _recorded_result(
+        ctx, 'dataset.case_requests_built',
+        {'partitions': PartitionSet(tuple(requests)), 'requests': requests},
+        current=total, total=total, case_count=total,
+    )
 
 
 @operation(
@@ -101,17 +98,15 @@ async def case_requests_operation(ctx: OperationContext, config: object,
     outputs={'preparation': partitioned(A.EVAL_CASE_PREPARATION)},
     max_concurrency=4,
 )
-async def prepare_case_operation(ctx: OperationContext, request: object,
-                                 config: object, snapshot: object
+async def prepare_case_operation(ctx: OperationContext, request: object, config: object, snapshot: object
                                  ) -> OperationResult:
-    return OperationResult({
-        'preparation': prepare_case(
-            _mapping(config, 'config'),
-            _mapping(snapshot, 'snapshot'),
-            ctx.partition_key,
-            _mapping(request, 'request'),
-        ),
-    })
+    preparation = prepare_case(
+        _mapping(config, 'config'), _mapping(snapshot, 'snapshot'),
+        ctx.partition_key, _mapping(request, 'request'),
+    )
+    return await _recorded_result(
+        ctx, 'dataset.case_prepared', {'preparation': preparation}, case_id=ctx.partition_key,
+    )
 
 
 @operation(
@@ -124,16 +119,16 @@ async def prepare_case_operation(ctx: OperationContext, request: object,
     outputs={'case': partitioned(A.EVAL_CASE)},
     max_concurrency=4,
 )
-async def generate_case_operation(ctx: OperationContext, preparation: object,
-                                  config: object, snapshot: object
+async def generate_case_operation(ctx: OperationContext, preparation: object, config: object, snapshot: object
                                   ) -> OperationResult:
-    return OperationResult({
-        'case': generate_case(
-            _mapping(config, 'config'),
-            _mapping(snapshot, 'snapshot'),
-            _mapping(preparation, 'preparation'),
-        ),
-    })
+    await ctx.record('dataset.case_generation_started', status='started', case_id=ctx.partition_key)
+    case = generate_case(
+        _mapping(config, 'config'), _mapping(snapshot, 'snapshot'),
+        _mapping(preparation, 'preparation'),
+    )
+    return await _recorded_result(
+        ctx, 'dataset.case_generated', {'case': case}, case_id=ctx.partition_key,
+    )
 
 
 @operation(
@@ -141,17 +136,19 @@ async def generate_case_operation(ctx: OperationContext, preparation: object,
     inputs={'cases': all_items(A.EVAL_CASE, over=A.EVAL_CASE_REQUESTS)},
     outputs={'dataset': scalar(A.EVAL_DATASET)},
 )
-async def assemble_dataset_operation(ctx: OperationContext,
-                                     cases: object
-                                     ) -> OperationResult:
+async def assemble_dataset_operation(ctx: OperationContext, cases: object) -> OperationResult:
     case_map = _mapping(cases, 'cases')
-    return OperationResult({
-        'dataset': assemble_dataset(
-            case_map,
-            run_id=ctx.run_id,
-            min_case_count=len(case_map),
-        ),
-    })
+    failures = _failure_summary(cases)
+    if not case_map:
+        raise ValueError('dataset has no successful cases')
+    dataset = assemble_dataset(
+        case_map, run_id=ctx.run_id, failed_cases=failures['failed_cases'],
+    )
+    return await _recorded_result(
+        ctx, 'dataset.assembled', {'dataset': dataset},
+        current=len(case_map), total=len(case_map) + failures['failed_case_num'], case_count=len(case_map),
+        failed_case_count=failures['failed_case_num'],
+    )
 
 
 @operation(
@@ -165,16 +162,17 @@ async def assemble_dataset_operation(ctx: OperationContext,
     outputs={'answer': partitioned(A.EVAL_RAG_ANSWER)},
     max_concurrency=4,
 )
-async def eval_answer_operation(ctx: OperationContext, case: object,
-                                dataset: object, target_config: object,
-                                approval: object
-                                ) -> OperationResult:
-    return OperationResult({
-        'answer': await async_answer_case(
-            _mapping(case, 'case'),
-            _mapping(target_config, 'target_config'),
-        ),
-    })
+async def eval_answer_operation(ctx: OperationContext, case: object, dataset: object, target_config: object,
+                                approval: object) -> OperationResult:
+    await ctx.record('eval.answer_requested', status='started', case_id=ctx.partition_key)
+    answer = await async_answer_case(
+        _mapping(case, 'case'),
+        _mapping(target_config, 'target_config'),
+    )
+    return await _recorded_result(
+        ctx, 'eval.answer_received', {'answer': answer}, case_id=ctx.partition_key,
+        answer_status=answer.get('status'), trace_id=answer.get('trace_id'),
+    )
 
 
 @operation(
@@ -187,16 +185,17 @@ async def eval_answer_operation(ctx: OperationContext, case: object,
     outputs={'judge': partitioned(A.EVAL_JUDGE_RESULT)},
     max_concurrency=4,
 )
-async def eval_judge_operation(ctx: OperationContext, case: object,
-                               answer: object, policy: object
-                               ) -> OperationResult:
-    return OperationResult({
-        'judge': judge_case(
-            _mapping(case, 'case'),
-            _mapping(answer, 'answer'),
-            _mapping(policy, 'policy'),
-        ),
-    })
+async def eval_judge_operation(ctx: OperationContext, case: object, answer: object, policy: object) -> OperationResult:
+    judge = judge_case(
+        _mapping(case, 'case'),
+        _mapping(answer, 'answer'),
+        _mapping(policy, 'policy'),
+    )
+    return await _recorded_result(
+        ctx, 'eval.case_judged', {'judge': judge}, case_id=ctx.partition_key,
+        quality_label=judge.get('quality_label'), failure_type=judge.get('failure_type'),
+        overall_score=judge.get('overall_score'),
+    )
 
 
 @operation(
@@ -204,15 +203,15 @@ async def eval_judge_operation(ctx: OperationContext, case: object,
     inputs={'judges': all_items(A.EVAL_JUDGE_RESULT, over=A.EVAL_CASE_REQUESTS)},
     outputs={'summary': scalar(A.EVAL_SUMMARY)},
 )
-async def eval_summary_operation(ctx: OperationContext,
-                                 judges: object
-                                 ) -> OperationResult:
-    return OperationResult({
-        'summary': build_eval_summary_root(
-            ctx.run_id,
-            _partition_values(judges, 'judges'),
-        ),
-    })
+async def eval_summary_operation(ctx: OperationContext, judges: object) -> OperationResult:
+    values = _partition_values(judges, 'judges')
+    failures = _failure_summary(judges)
+    summary = build_eval_summary_root(ctx.run_id, values, failures['failed_cases'])
+    return await _recorded_result(
+        ctx, 'eval.summary_built', {'summary': summary},
+        current=len(values), total=len(values) + failures['failed_case_num'], case_count=len(values),
+        failed_case_count=failures['failed_case_num'],
+    )
 
 
 @operation(
@@ -226,16 +225,15 @@ async def eval_summary_operation(ctx: OperationContext,
     outputs={'summary': partitioned(A.ANALYSIS_TRACE_SUMMARY)},
     max_concurrency=4,
 )
-async def trace_summary_operation(ctx: OperationContext, case: object,
-                                  answer: object, eval_summary: object,
-                                  approval: object
-                                  ) -> OperationResult:
-    return OperationResult({
-        'summary': build_trace_summary(
-            _mapping(case, 'case'),
-            _mapping(answer, 'answer'),
-        ),
-    })
+async def trace_summary_operation(ctx: OperationContext, case: object, answer: object, eval_summary: object,
+                                  approval: object) -> OperationResult:
+    _mapping(eval_summary, 'eval_summary')
+    summary = build_trace_summary(_mapping(case, 'case'), _mapping(answer, 'answer'))
+    return await _recorded_result(
+        ctx, 'analysis.trace_summarized', {'summary': summary}, case_id=ctx.partition_key,
+        retrieval_step_count=len(summary.get('retrieval_steps') or ()),
+        error_stage_count=len(summary.get('error_stages') or ()),
+    )
 
 
 @operation(
@@ -249,18 +247,16 @@ async def trace_summary_operation(ctx: OperationContext, case: object,
     outputs={'classification': partitioned(A.ANALYSIS_CASE_CLASSIFICATION)},
     max_concurrency=4,
 )
-async def classify_case_operation(ctx: OperationContext, case: object,
-                                  answer: object, judge: object,
-                                  trace: object
+async def classify_case_operation(ctx: OperationContext, case: object, answer: object, judge: object, trace: object
                                   ) -> OperationResult:
-    return OperationResult({
-        'classification': classify_case(
-            _mapping(case, 'case'),
-            _mapping(answer, 'answer'),
-            _mapping(judge, 'judge'),
-            _mapping(trace, 'trace'),
-        ),
-    })
+    classification = classify_case(
+        _mapping(case, 'case'), _mapping(answer, 'answer'),
+        _mapping(judge, 'judge'), _mapping(trace, 'trace'),
+    )
+    return await _recorded_result(
+        ctx, 'analysis.case_classified', {'classification': classification}, case_id=ctx.partition_key,
+        issue_type=classification.get('issue_type'), failure_mode=classification.get('failure_mode'),
+    )
 
 
 @operation(
@@ -273,14 +269,13 @@ async def classify_case_operation(ctx: OperationContext, case: object,
     },
     outputs={'clusters': scalar(A.ANALYSIS_TRACE_CLUSTERS)},
 )
-async def trace_clusters_operation(ctx: OperationContext,
-                                   classifications: object
-                                   ) -> OperationResult:
-    return OperationResult({
-        'clusters': cluster_traces(
-            _partition_values(classifications, 'classifications'),
-        ),
-    })
+async def trace_clusters_operation(ctx: OperationContext, classifications: object) -> OperationResult:
+    values = _partition_values(classifications, 'classifications')
+    clusters = cluster_traces(values) | _failure_summary(classifications)
+    return await _recorded_result(
+        ctx, 'analysis.traces_clustered', {'clusters': clusters},
+        case_count=len(values), cluster_count=len(clusters.get('clusters') or ()),
+    )
 
 
 @operation(
@@ -294,17 +289,16 @@ async def trace_clusters_operation(ctx: OperationContext,
     },
     outputs={'summary': scalar(A.ANALYSIS_SUMMARY)},
 )
-async def analysis_summary_operation(ctx: OperationContext,
-                                     classifications: object,
-                                     clusters: object
+async def analysis_summary_operation(ctx: OperationContext, classifications: object, clusters: object
                                      ) -> OperationResult:
-    return OperationResult({
-        'summary': build_analysis_summary(
-            ctx.run_id,
-            _partition_values(classifications, 'classifications'),
-            _mapping(clusters, 'clusters'),
-        ),
-    })
+    values = _partition_values(classifications, 'classifications')
+    summary = build_analysis_summary(ctx.run_id, values, _mapping(clusters, 'clusters')) | _failure_summary(
+        classifications,
+    )
+    return await _recorded_result(
+        ctx, 'analysis.summary_built', {'summary': summary},
+        case_count=len(values), repair_group_count=len(summary.get('repair_group_queue') or ()),
+    )
 
 
 @operation(
@@ -316,15 +310,13 @@ async def analysis_summary_operation(ctx: OperationContext,
     },
     outputs={'plan': scalar(A.REPAIR_PLAN)},
 )
-async def repair_plan_operation(ctx: OperationContext, analysis: object,
-                                policy: object, approval: object
+async def repair_plan_operation(ctx: OperationContext, analysis: object, policy: object, approval: object
                                 ) -> OperationResult:
-    return OperationResult({
-        'plan': build_repair_plan(
-            _mapping(analysis, 'analysis'),
-            _mapping(policy, 'policy'),
-        ),
-    })
+    plan = build_repair_plan(_mapping(analysis, 'analysis'), _mapping(policy, 'policy'))
+    return await _recorded_result(
+        ctx, 'repair.plan_built', {'plan': plan}, status=plan.get('status'),
+        validation_case_count=len((plan.get('objective') or {}).get('validation_case_ids') or ()),
+    )
 
 
 @operation(
@@ -335,15 +327,12 @@ async def repair_plan_operation(ctx: OperationContext, analysis: object,
     },
     outputs={'workspace': scalar(A.REPAIR_CANDIDATE_WORKSPACE)},
 )
-async def candidate_workspace_operation(ctx: OperationContext, plan: object,
-                                        policy: object
-                                        ) -> OperationResult:
-    return OperationResult({
-        'workspace': prepare_candidate_workspace(
-            _mapping(plan, 'plan'),
-            _mapping(policy, 'policy'),
-        ),
-    })
+async def candidate_workspace_operation(ctx: OperationContext, plan: object, policy: object) -> OperationResult:
+    workspace = prepare_candidate_workspace(_mapping(plan, 'plan'), _mapping(policy, 'policy'))
+    return await _recorded_result(
+        ctx, 'repair.workspace_prepared', {'workspace': workspace}, status=workspace.get('status'),
+        workspace_kind=workspace.get('workspace_kind'),
+    )
 
 
 @operation(
@@ -361,13 +350,12 @@ async def candidate_workspace_operation(ctx: OperationContext, plan: object,
         'policy': one(A.REPAIR_POLICY),
     },
     outputs={'result': scalar(A.REPAIR_LOOP_RESULT)},
+    timeout=1800.0,
 )
-async def repair_loop_operation(ctx: OperationContext, plan: object,
-                                workspace: object, cases: object,
-                                baseline_judges: object, eval_policy: object,
-                                candidate_config: object, policy: object
+@record_process
+async def repair_loop_operation(ctx: OperationContext, plan: object, workspace: object, cases: object,
+                                baseline_judges: object, eval_policy: object, candidate_config: object, policy: object
                                 ) -> OperationResult:
-    trace = create_trace_sink(ctx.run_id, 'repair.loop_result')
     return OperationResult({
         'result': await run_repair_loop(
             _mapping(workspace, 'workspace'),
@@ -378,7 +366,6 @@ async def repair_loop_operation(ctx: OperationContext, plan: object,
             _mapping(policy, 'policy'),
             ctx,
             _mapping(plan, 'plan'),
-            trace,
         ),
     })
 
@@ -388,17 +375,14 @@ async def repair_loop_operation(ctx: OperationContext, plan: object,
     inputs={'loop': one(A.REPAIR_LOOP_RESULT)},
     outputs={'patch': scalar(A.REPAIR_VERIFIED_PATCH)},
 )
-async def verified_patch_operation(ctx: OperationContext,
-                                   loop: object
-                                   ) -> OperationResult:
+@record_process
+async def verified_patch_operation(ctx: OperationContext, loop: object) -> OperationResult:
     patch = build_verified_patch(ctx.run_id, _mapping(loop, 'loop'))
-    trace = create_trace_sink(ctx.run_id, 'repair.verified_patch')
-    safe_emit(
-        trace,
+    record_event(
         'repair.patch_verified',
         status='completed',
         terminal=True,
-        payload={
+        data={
             'status': patch.get('status'),
             'file_count': len(patch.get('diff') or {}),
         },
@@ -416,18 +400,16 @@ async def verified_patch_operation(ctx: OperationContext,
     },
     outputs={'service': scalar(A.ABTEST_CANDIDATE_SERVICE)},
 )
-async def candidate_service_operation(ctx: OperationContext, config: object,
-                                      patch: object, workspace: object,
-                                      approval: object
-                                      ) -> OperationResult:
-    return OperationResult({
-        'service': candidate_service(
-            _mapping(config, 'config'),
-            _mapping(patch, 'patch'),
-            ctx,
-            _mapping(workspace, 'workspace'),
-        ),
-    })
+async def candidate_service_operation(ctx: OperationContext, config: object, patch: object, workspace: object,
+                                      approval: object) -> OperationResult:
+    await ctx.record('abtest.candidate_service_starting', status='started')
+    service = candidate_service(
+        _mapping(config, 'config'), _mapping(patch, 'patch'), ctx, _mapping(workspace, 'workspace'),
+    )
+    return await _recorded_result(
+        ctx, 'abtest.candidate_service_ready', {'service': service}, status=service.get('status'),
+        service_kind=service.get('service_kind'), algorithm_id=service.get('algorithm_id'),
+    )
 
 
 @operation(
@@ -439,15 +421,16 @@ async def candidate_service_operation(ctx: OperationContext, config: object,
     outputs={'answer': partitioned(A.ABTEST_CANDIDATE_RAG_ANSWER)},
     max_concurrency=4,
 )
-async def candidate_answer_operation(ctx: OperationContext, case: object,
-                                     service: object
-                                     ) -> OperationResult:
-    return OperationResult({
-        'answer': await async_candidate_rag_answer(
-            _mapping(case, 'case'),
-            _mapping(service, 'service'),
-        ),
-    })
+async def candidate_answer_operation(ctx: OperationContext, case: object, service: object) -> OperationResult:
+    await ctx.record('abtest.candidate_answer_requested', status='started', case_id=ctx.partition_key)
+    answer = await async_candidate_rag_answer(
+        _mapping(case, 'case'),
+        _mapping(service, 'service'),
+    )
+    return await _recorded_result(
+        ctx, 'abtest.candidate_answer_received', {'answer': answer}, case_id=ctx.partition_key,
+        answer_status=answer.get('status'), trace_id=answer.get('trace_id'),
+    )
 
 
 @operation(
@@ -460,16 +443,18 @@ async def candidate_answer_operation(ctx: OperationContext, case: object,
     outputs={'judge': partitioned(A.ABTEST_CANDIDATE_JUDGE_RESULT)},
     max_concurrency=4,
 )
-async def candidate_judge_operation(ctx: OperationContext, case: object,
-                                    answer: object, policy: object
+async def candidate_judge_operation(ctx: OperationContext, case: object, answer: object, policy: object
                                     ) -> OperationResult:
-    return OperationResult({
-        'judge': judge_case(
-            _mapping(case, 'case'),
-            _mapping(answer, 'answer'),
-            _mapping(policy, 'policy'),
-        ),
-    })
+    judge = judge_case(
+        _mapping(case, 'case'),
+        _mapping(answer, 'answer'),
+        _mapping(policy, 'policy'),
+    )
+    return await _recorded_result(
+        ctx, 'abtest.candidate_case_judged', {'judge': judge}, case_id=ctx.partition_key,
+        quality_label=judge.get('quality_label'), failure_type=judge.get('failure_type'),
+        overall_score=judge.get('overall_score'),
+    )
 
 
 @operation(
@@ -482,15 +467,15 @@ async def candidate_judge_operation(ctx: OperationContext, case: object,
     },
     outputs={'summary': scalar(A.ABTEST_CANDIDATE_EVAL_SUMMARY)},
 )
-async def candidate_summary_operation(ctx: OperationContext,
-                                      judges: object
-                                      ) -> OperationResult:
-    return OperationResult({
-        'summary': build_eval_summary_root(
-            ctx.run_id,
-            _partition_values(judges, 'judges'),
-        ),
-    })
+async def candidate_summary_operation(ctx: OperationContext, judges: object) -> OperationResult:
+    values = _partition_values(judges, 'judges')
+    failures = _failure_summary(judges)
+    summary = build_eval_summary_root(ctx.run_id, values, failures['failed_cases'])
+    return await _recorded_result(
+        ctx, 'abtest.candidate_summary_built', {'summary': summary},
+        current=len(values), total=len(values) + failures['failed_case_num'], case_count=len(values),
+        failed_case_count=failures['failed_case_num'],
+    )
 
 
 @operation(
@@ -502,8 +487,7 @@ async def candidate_summary_operation(ctx: OperationContext,
     },
     outputs={'comparison': scalar(A.ABTEST_COMPARISON)},
 )
-async def compare_abtest_operation(ctx: OperationContext, baseline: object,
-                                   candidate: object, service: object
+async def compare_abtest_operation(ctx: OperationContext, baseline: object, candidate: object, service: object
                                    ) -> OperationResult:
     comparison = compare_abtest(
         ctx.run_id,
@@ -512,9 +496,10 @@ async def compare_abtest_operation(ctx: OperationContext, baseline: object,
         _mapping(service, 'service'),
     )
     finalize_candidate(_mapping(service, 'service'), comparison)
-    return OperationResult({
-        'comparison': comparison,
-    })
+    return await _recorded_result(
+        ctx, 'abtest.comparison_completed', {'comparison': comparison},
+        verdict=comparison.get('verdict'), status=comparison.get('status'),
+    )
 
 
 _EVO_OPERATIONS: tuple[Operation, ...] = (
@@ -547,17 +532,37 @@ def evo_operations() -> tuple[Operation, ...]:
     return _EVO_OPERATIONS
 
 
-def _mapping(value: object, name: str) -> Mapping[str, Any]:
-    if not isinstance(value, Mapping):
-        raise ValueError(f'{name} must be a mapping')
-    return value
+async def _recorded_result(ctx: OperationContext, event_type: str, values: Mapping[str, object], *,
+                           current: int | None = None, total: int | None = None, **data: object) -> OperationResult:
+    await ctx.record(event_type, status='completed', data=data, current=current, total=total)
+    return OperationResult(values)
 
 
 def _partition_values(value: object, name: str) -> tuple[Mapping[str, Any], ...]:
     values = tuple(_mapping(value, name).values())
+    if not values:
+        raise ValueError(f'{name} has no successful cases')
     if not all(isinstance(item, Mapping) for item in values):
         raise ValueError(f'{name} must contain mappings')
     return values
+
+
+def _failure_summary(value: object) -> dict[str, object]:
+    failures = [] if not isinstance(value, AggregateValue) else [
+        {
+            'case_id': failure.case_id,
+            'operation_id': failure.operation_id,
+            'attempt_id': failure.attempt_id,
+            'error_kind': failure.error.kind,
+            'error_message': failure.error.message,
+        }
+        for failure in value.failures.values()
+    ]
+    return {
+        'failed_case_num': len(failures),
+        'failed_cases': failures,
+        'completed_with_problems': bool(failures),
+    }
 
 
 __all__ = [

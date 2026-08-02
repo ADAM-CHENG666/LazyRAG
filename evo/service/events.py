@@ -9,12 +9,10 @@ from sse_starlette.sse import EventSourceResponse
 from .projections import ProjectionService
 
 
-async def execution_stream(projections: ProjectionService, thread_id: str,
-                           step_id: str, request: Request, *, trace: bool
+async def execution_stream(projections: ProjectionService, thread_id: str, step_id: str, request: Request
                            ) -> EventSourceResponse:
     cursor = request.headers.get('last-event-id', '').strip()
-    projection = projections.event_trace if trace else projections.events
-    initial = await projection(thread_id, step_id, cursor)
+    initial = await projections.events(thread_id, step_id, cursor)
 
     async def stream():
         nonlocal initial, cursor
@@ -22,7 +20,7 @@ async def execution_stream(projections: ProjectionService, thread_id: str,
             snapshot = initial
             initial = None
             if snapshot is None:
-                snapshot = await projection(thread_id, step_id, cursor)
+                snapshot = await projections.events(thread_id, step_id, cursor)
             for event in snapshot['items']:
                 cursor = str(event['event_id'])
                 payload = dict(event, type=event['event_type'])
@@ -38,6 +36,8 @@ async def execution_stream(projections: ProjectionService, thread_id: str,
                         'thread_id', 'step_id', 'status', 'reason', 'current_step',
                         'checkpoint_state', 'first_missing_step',
                         'last_released_step', 'retry_from_step', 'last_error',
+                        'flow_status', 'progress', 'completed_with_problems',
+                        'failures', 'stages', 'running', 'ready_count', 'awaiting_artifacts',
                     )
                 }
                 done['last_event_id'] = cursor

@@ -43,7 +43,8 @@ class ThreadInputs(StrictModel):
 
 
 class ThreadCreate(StrictModel):
-    mode: Literal['auto', 'interactive']
+    mode: Literal['interactive'] = 'interactive'
+    automatic: bool = False
     title: str = ''
     inputs: ThreadInputs
     llm_config: dict[str, Any]
@@ -73,8 +74,84 @@ class RetryRequest(StrictModel):
     stage: str = ''
 
 
+class CaseRerunBody(StrictModel):
+    command_id: str = ''
+    stage: str = ''
+    artifact_id: str = ''
+
+    @model_validator(mode='after')
+    def validate_start(self) -> Self:
+        if bool(self.stage) == bool(self.artifact_id):
+            raise ValueError('case rerun requires exactly one of stage or artifact_id')
+        return self
+
+
 class ControlRequest(StrictModel):
     command_id: str = ''
+
+
+class AutomaticUpdateBody(StrictModel):
+    request_id: str = Field(min_length=1, max_length=160)
+    base_version: int = Field(ge=1)
+    enabled: bool
+
+
+class ExternalResultBody(StrictModel):
+    values: dict[str, Any]
+
+
+class ArtifactValue(StrictModel):
+    artifact_id: str = Field(min_length=1)
+    partition_key: str = ''
+    base_version: int = Field(ge=1)
+    value: Any
+
+
+class ArtifactUpdateBody(StrictModel):
+    request_id: str = Field(min_length=1, max_length=160)
+    updates: list[ArtifactValue] = Field(min_length=1)
+
+    @model_validator(mode='after')
+    def validate_targets(self) -> Self:
+        targets = [(item.artifact_id, item.partition_key) for item in self.updates]
+        if len(set(targets)) != len(targets):
+            raise ValueError('updates cannot contain the same artifact twice')
+        return self
+
+
+class ConfigurationUpdateBody(StrictModel):
+    request_id: str = Field(min_length=1, max_length=160)
+    target: Literal[
+        'run_config', 'source_config', 'target_config', 'eval_policy',
+        'repair_policy', 'candidate_config',
+    ]
+    base_version: int = Field(ge=1)
+    value: dict[str, Any]
+
+
+class CaseSeed(StrictModel):
+    artifact_id: str = Field(min_length=1)
+    case_id: str = Field(min_length=1)
+    value: Any
+
+
+class CaseStructureBody(StrictModel):
+    request_id: str = Field(min_length=1, max_length=160)
+    partition_set_id: str = Field(min_length=1)
+    base_version: int = Field(ge=1)
+    case_ids: list[str]
+    seeds: list[CaseSeed] = Field(default_factory=list)
+
+    @model_validator(mode='after')
+    def validate_cases(self) -> Self:
+        if any(not case_id.strip() for case_id in self.case_ids):
+            raise ValueError('case_ids must contain non-empty values')
+        if len(set(self.case_ids)) != len(self.case_ids):
+            raise ValueError('case_ids must be unique')
+        targets = [(seed.artifact_id, seed.case_id) for seed in self.seeds]
+        if len(set(targets)) != len(targets):
+            raise ValueError('seeds cannot contain the same artifact twice')
+        return self
 
 
 class MessageBody(StrictModel):
@@ -121,7 +198,9 @@ class AbStrategyBody(StrictModel):
 
 
 __all__ = [
-    'AbStrategyBody', 'AlgorithmActionBody', 'AlgorithmOwner', 'CommandRequest',
-    'ControlRequest', 'MessageBody', 'RegisterAlgorithmBody', 'RetryRequest', 'StrictModel',
-    'ServiceError', 'ThreadCreate', 'ThreadInputs',
+    'AbStrategyBody', 'AlgorithmActionBody', 'AlgorithmOwner', 'ArtifactUpdateBody', 'ArtifactValue',
+    'AutomaticUpdateBody', 'CaseRerunBody', 'CaseSeed', 'CaseStructureBody', 'CommandRequest',
+    'ConfigurationUpdateBody', 'ControlRequest', 'ExternalResultBody', 'MessageBody', 'RegisterAlgorithmBody',
+    'RetryRequest',
+    'ServiceError', 'StrictModel', 'ThreadCreate', 'ThreadInputs',
 ]

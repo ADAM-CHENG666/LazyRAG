@@ -16,14 +16,12 @@ from .artifact import (
     ArtifactKey,
     ArtifactRecord,
     ArtifactRef,
-    is_intervention_key,
 )
 from .errors import (
     DefinitionError,
     _as_exception,
     _integer,
     _positive_number,
-    _string,
     _text,
 )
 from .operation import Operation, OperationResult
@@ -34,21 +32,20 @@ from .planning import (
     plan_next,
     project_runtime_snapshot,
 )
-from .session import RunSession, _load_case_failures, _load_interventions
+from .session import RunSession, _load_case_failures
 from .state import (
     ArtifactRetryRequest,
     AttemptSnapshot,
     CaseFailure,
     CaseOperationSnapshot,
     CaseSnapshot,
-    InterventionBundle,
+    EventLevel,
+    EventStatus,
+    RecordedOperationEvent,
     OperationDefinitionSnapshot,
-    ProgressEvent,
-    ProgressUpdate,
     RunConfiguration,
     RunHistory,
     RuntimeSnapshot,
-    UserIntervention,
 )
 from .store import ArtifactStore
 
@@ -81,11 +78,11 @@ class ArtifactRuntime:
         self._closed = False
 
     @classmethod
-    async def open(cls, root: str | Path, operations: Sequence[Operation], *, max_concurrency: int = 4,
-                   terminate_timeout: float = 1.0) -> ArtifactRuntime:
+    async def open(cls, root: str | Path, operations: Sequence[Operation] | RuntimeDefinition, *,
+                   max_concurrency: int = 4, terminate_timeout: float = 1.0) -> ArtifactRuntime:
         _integer(max_concurrency, 'max_concurrency', minimum=1)
         _positive_number(terminate_timeout, 'terminate_timeout')
-        definition = compile_operations(operations)
+        definition = operations if isinstance(operations, RuntimeDefinition) else compile_operations(operations)
         store = await ArtifactStore.open(root)
         try:
             await store.recover_runs()
@@ -128,26 +125,13 @@ class ArtifactRuntime:
                 raise
 
     async def start(self, run_id: str) -> RuntimeSnapshot:
-        return await self._session_command(run_id, RunSession.start, claim_active=True)
+        return await self._session_command(run_id, lambda session: session.enter_running('created'), claim_active=True)
 
     async def pause(self, run_id: str) -> RuntimeSnapshot:
         return await self._session_command(run_id, RunSession.pause)
 
     async def resume(self, run_id: str) -> RuntimeSnapshot:
-        return await self._session_command(run_id, RunSession.resume, claim_active=True)
-
-    async def retry(self, run_id: str, artifact_keys: Iterable[ArtifactKey] = (), *,
-                    request_id: str = '') -> RuntimeSnapshot:
-        keys = tuple(artifact_keys)
-        if not all(isinstance(key, ArtifactKey) for key in keys):
-            raise TypeError('retry artifact_keys must contain ArtifactKey values')
-        if keys:
-            _text(request_id, 'retry request_id')
-        return await self._session_command(
-            run_id,
-            lambda session: session.retry(keys, request_id),
-            claim_active=True,
-        )
+        return await self._session_command(run_id, lambda session: session.enter_running('paused'), claim_active=True)
 
     async def cancel(self, run_id: str) -> RuntimeSnapshot:
         return await self._session_command(run_id, RunSession.cancel)
@@ -161,25 +145,38 @@ class ArtifactRuntime:
             claim_active=True,
         )
 
-    async def retry_artifact(self, run_id: str, artifact_key: ArtifactKey, *, request_id: str) -> RuntimeSnapshot:
-        if not isinstance(artifact_key, ArtifactKey):
-            raise TypeError('artifact_key must be ArtifactKey')
-        _text(request_id, 'retry request_id')
-        return await self._session_command(
-            run_id,
-            lambda session: session.retry_artifact(artifact_key, request_id),
-            claim_active=True,
-        )
-
-    async def rerun_artifacts(self, run_id: str, artifact_keys: Iterable[ArtifactKey], *,
-                              request_id: str) -> RuntimeSnapshot:
+    async def rerun_artifacts(self, run_id: str, artifact_keys: Iterable[ArtifactKey], *, request_id: str
+                              ) -> RuntimeSnapshot:
         keys = tuple(artifact_keys)
         if not keys or not all(isinstance(key, ArtifactKey) for key in keys):
             raise TypeError('artifact_keys must contain ArtifactKey values')
         _text(request_id, 'rerun request_id')
         return await self._session_command(
             run_id,
-            lambda session: session.retry(keys, request_id, rerun=True),
+            lambda session: session.recompute(keys, (), (), request_id),
+            claim_active=True,
+        )
+
+    async def rerun_operations(self, run_id: str, operation_ids: Iterable[str], *, request_id: str,
+                               case_ids: Iterable[str] = ()) -> RuntimeSnapshot:
+        operations = tuple(dict.fromkeys(operation_ids))
+        cases = tuple(dict.fromkeys(case_ids))
+        if not operations:
+            raise DefinitionError('operation rerun requires at least one operation')
+        for operation_id in operations:
+            _text(operation_id, 'operation_id')
+        for case_id in cases:
+            _text(case_id, 'case_id')
+        _text(request_id, 'operation rerun request_id')
+        return await self._session_command(
+            run_id,
+            lambda session: session.recompute(
+                (),
+                operations,
+                cases,
+                request_id,
+                failures_only=False,
+            ),
             claim_active=True,
         )
 
@@ -188,35 +185,31 @@ class ArtifactRuntime:
         _text(request_id, 'case retry request_id')
         return await self._session_command(
             run_id,
-            lambda session: session.retry_case(case_id, request_id),
+            lambda session: session.recompute(
+                (),
+                (),
+                (case_id,),
+                request_id,
+                failures_only=True,
+            ),
             claim_active=True,
         )
 
-    async def submit_intervention(self, run_id: str, *, intervention_id: str, target_key: ArtifactKey, message: str,
-                                  target_ref: ArtifactRef | None = None, field: str = '', quote: str = '',
-                                  start: int | None = None, end: int | None = None) -> RuntimeSnapshot:
-        _text(intervention_id, 'intervention_id')
-        if not isinstance(target_key, ArtifactKey):
-            raise TypeError('intervention target_key must be ArtifactKey')
-        if target_ref is not None and (
-            not isinstance(target_ref, ArtifactRef)
-            or target_ref.key != target_key
-        ):
-            raise DefinitionError('intervention target_ref must identify target_key')
-        _text(message, 'intervention message')
-        _string(field, 'intervention field')
-        _string(quote, 'intervention quote')
+    async def retry_operations(self, run_id: str, operation_ids: Iterable[str], *, request_id: str) -> RuntimeSnapshot:
+        operations = tuple(dict.fromkeys(operation_ids))
+        if not operations:
+            raise DefinitionError('operation retry requires at least one operation')
+        for operation_id in operations:
+            _text(operation_id, 'operation_id')
+        _text(request_id, 'operation retry request_id')
         return await self._session_command(
             run_id,
-            lambda session: session.submit_intervention(
-                intervention_id,
-                target_key,
-                target_ref,
-                message,
-                field,
-                quote,
-                start,
-                end,
+            lambda session: session.recompute(
+                (),
+                operations,
+                (),
+                request_id,
+                failures_only=True,
             ),
             claim_active=True,
         )
@@ -244,27 +237,32 @@ class ArtifactRuntime:
         return value
 
     async def update_configuration(self, run_id: str, configuration: Mapping[str, object] | RunConfiguration, *,
-                                   request_id: str) -> RuntimeSnapshot:
+                                   request_id: str, base_version: int | None = None) -> RuntimeSnapshot:
         _text(request_id, 'configuration request_id')
         value = configuration if isinstance(configuration, RunConfiguration) else RunConfiguration(configuration)
         key = ArtifactKey.scalar(RUN_CONFIGURATION_ARTIFACT_ID)
-        current = await self.head(run_id, key)
-        if current is None:
-            raise DefinitionError(f'run has no configuration: {run_id}')
+        if base_version is None:
+            current = await self.head(run_id, key)
+            if current is None:
+                raise DefinitionError(f'run has no configuration: {run_id}')
+            expected = current.ref
+        else:
+            expected = ArtifactRef(key, base_version)
         return await self.commit(
             run_id,
             ArtifactCommit(
                 f'configuration:{request_id}',
                 f'runtime:configuration:{request_id}',
                 (ArtifactDraft(key, value),),
-                {key: current.ref},
+                {key: expected},
             ),
         )
 
     async def case_snapshot(self, run_id: str, case_id: str) -> CaseSnapshot:
         _text(case_id, 'case_id')
         async with self._access():
-            snapshot = await self._inspect(run_id)
+            history = await self._run_history(run_id)
+            snapshot = history.snapshot
             memberships = sorted(
                 (
                     key,
@@ -275,10 +273,8 @@ class ArtifactRuntime:
             )
             if not memberships:
                 raise DefinitionError(f'case is not active: {case_id}')
-            attempts, progress_events = await asyncio.gather(
-                self._store.attempts(run_id),
-                self._store.progress_events(run_id),
-            )
+            attempts = history.attempts
+            operation_events = history.operation_events
             partition_set_ids = {key.artifact_id for key, _ in memberships}
             operations = tuple(
                 operation
@@ -293,9 +289,9 @@ class ArtifactRuntime:
                 for failure in snapshot.case_failures
                 if failure.case_id == case_id
             )
-            progress_by_attempt: dict[str, ProgressUpdate] = {}
-            for event in progress_events:
-                progress_by_attempt[event.attempt_id] = event.update
+            latest_event_by_attempt: dict[str, RecordedOperationEvent] = {}
+            for event in operation_events:
+                latest_event_by_attempt[event.attempt_id] = event
             operation_snapshots = tuple(
                 _case_operation_snapshot(
                     operation,
@@ -303,7 +299,7 @@ class ArtifactRuntime:
                     snapshot,
                     attempts,
                     case_failures,
-                    progress_by_attempt,
+                    latest_event_by_attempt,
                 )
                 for operation in operations
             )
@@ -332,18 +328,17 @@ class ArtifactRuntime:
                 operation_snapshots,
                 artifacts,
                 case_failures,
-                tuple(
-                    item
-                    for item in snapshot.interventions
-                    if item.intervention.case_id == case_id
-                ),
+                tuple(record for record in history.artifacts if record.ref.key.partition_key == case_id),
+                tuple(attempt for attempt in attempts if attempt.partition_key == case_id),
+                tuple(event for event in operation_events if event.partition_key == case_id),
+                tuple(request for request in history.retry_requests if request.artifact_key.partition_key == case_id),
             )
 
     async def snapshot(self, run_id: str) -> RuntimeSnapshot:
         return await self._query(self._inspect, run_id)
 
-    async def wait_for_status(self, run_id: str, statuses: str | tuple[str, ...], *,
-                              timeout: float = 10.0) -> RuntimeSnapshot:
+    async def wait_for_status(self, run_id: str, statuses: str | tuple[str, ...], *, timeout: float = 10.0
+                              ) -> RuntimeSnapshot:
         async with self._access(), self._run_lock(run_id):
             session = await self._session(run_id)
         return await session.wait_for_status(statuses, timeout=timeout)
@@ -356,64 +351,64 @@ class ArtifactRuntime:
     async def attempts(self, run_id: str) -> tuple[AttemptSnapshot, ...]:
         return await self._query(self._store.attempts, run_id)
 
-    async def progress_events(self, run_id: str, attempt_id: str | None = None) -> tuple[ProgressEvent, ...]:
-        return await self._query(self._store.progress_events, run_id, attempt_id)
+    async def operation_events(self, run_id: str, *, attempt_id: str = '', operation_id: str = '',
+                               operation_ids: Iterable[str] = (),
+                               case_id: str | None = None, event_type: str = '', level: EventLevel | None = None,
+                               status: EventStatus | None = None, after: int = 0, limit: int | None = None
+                               ) -> tuple[RecordedOperationEvent, ...]:
+        async with self._access():
+            return await self._store.operation_events(
+                run_id,
+                attempt_id=attempt_id,
+                operation_id=operation_id,
+                operation_ids=operation_ids,
+                partition_key=case_id,
+                event_type=event_type,
+                level=level,
+                status=status,
+                after=after,
+                limit=limit,
+            )
 
     async def retry_requests(self, run_id: str) -> tuple[ArtifactRetryRequest, ...]:
         return await self._query(self._store.retry_requests, run_id)
 
     async def run_history(self, run_id: str) -> RunHistory:
         async with self._access():
-            snapshot, artifacts, attempts, progress_events, retries = await asyncio.gather(
-                self._inspect(run_id),
-                self._store.artifact_records(run_id),
-                self._store.attempts(run_id),
-                self._store.progress_events(run_id),
-                self._store.retry_requests(run_id),
-            )
-            intervention_records = tuple(
-                record
-                for record in artifacts
-                if is_intervention_key(record.ref.key)
-            )
-            values = await self._store.read_many(
-                run_id,
-                (record.ref for record in intervention_records),
-            )
-            interventions: dict[str, UserIntervention] = {}
-            for record in intervention_records:
-                bundle = values[record.ref]
-                if not isinstance(bundle, InterventionBundle):
-                    raise DefinitionError(
-                        'intervention artifact must contain InterventionBundle'
-                    )
-                for intervention in bundle.interventions:
-                    interventions.setdefault(intervention.intervention_id, intervention)
-            return RunHistory(
-                snapshot,
-                tuple(
-                    OperationDefinitionSnapshot(
-                        operation.spec.op_id,
-                        tuple(
-                            (name, binding.artifact_id, binding.mode, binding.partition_set_id)
-                            for name, binding in operation.spec.inputs.items()
-                        ),
-                        tuple(
-                            (name, output.artifact_id, output.mode)
-                            for name, output in operation.spec.outputs.items()
-                        ),
-                        operation.spec.execution,
-                        operation.spec.max_concurrency,
-                        operation.spec.timeout,
-                    )
-                    for operation in self._definition.operations
-                ),
-                artifacts,
-                attempts,
-                progress_events,
-                retries,
-                tuple(interventions.values()),
-            )
+            return await self._run_history(run_id)
+
+    async def _run_history(self, run_id: str) -> RunHistory:
+        inspection, artifacts, operation_events, retries = await asyncio.gather(
+            self._store.inspect(run_id, self._definition.partition_set_ids),
+            self._store.artifact_records(run_id),
+            self._store.operation_events(run_id),
+            self._store.retry_requests(run_id),
+        )
+        snapshot = await self._inspect(run_id, inspection)
+        return RunHistory(
+            snapshot,
+            tuple(
+                OperationDefinitionSnapshot(
+                    operation.spec.op_id,
+                    tuple(
+                        (name, binding.artifact_id, binding.mode, binding.partition_set_id)
+                        for name, binding in operation.spec.inputs.items()
+                    ),
+                    tuple(
+                        (name, output.artifact_id, output.mode)
+                        for name, output in operation.spec.outputs.items()
+                    ),
+                    operation.spec.execution,
+                    operation.spec.max_concurrency,
+                    operation.spec.timeout,
+                )
+                for operation in self._definition.operations
+            ),
+            artifacts,
+            inspection[2],
+            operation_events,
+            retries,
+        )
 
     async def read(self, run_id: str, ref: ArtifactRef) -> object:
         return await self._query(self._store.read, run_id, ref)
@@ -574,25 +569,15 @@ class ArtifactRuntime:
             self._consume_session_task(run_id, entry)
         return entry.session
 
-    async def _inspect(self, run_id: str) -> RuntimeSnapshot:
-        state, artifacts, attempts, retries = await self._store.inspect(
-            run_id,
-            self._definition.partition_set_ids,
+    async def _inspect(self, run_id: str, inspection: tuple | None = None) -> RuntimeSnapshot:
+        state, artifacts, attempts, retries = inspection or await self._store.inspect(
+            run_id, self._definition.partition_set_ids,
         )
         decision = plan_next(self._definition, artifacts, retries)
-        view = decision.view
-        failures, interventions = await asyncio.gather(
-            _load_case_failures(
-                self._store,
-                run_id,
-                decision.failure_refs,
-            ),
-            _load_interventions(
-                self._store,
-                run_id,
-                view.records,
-                attempts,
-            ),
+        failures = await _load_case_failures(
+            self._store,
+            run_id,
+            decision.failure_refs,
         )
         return project_runtime_snapshot(
             run_id,
@@ -602,7 +587,6 @@ class ArtifactRuntime:
             decision,
             attempts,
             failures,
-            interventions,
         )
 
     async def _require_run(self, run_id: str):
@@ -696,7 +680,7 @@ def _with_run_configuration(initial_commit: ArtifactCommit | None,
 
 def _case_operation_snapshot(operation: Operation, case_id: str, snapshot: RuntimeSnapshot,
                              attempts: tuple[AttemptSnapshot, ...], failures: tuple[CaseFailure, ...],
-                             progress_by_attempt: Mapping[str, ProgressUpdate]) -> CaseOperationSnapshot:
+                             latest_event_by_attempt: Mapping[str, RecordedOperationEvent]) -> CaseOperationSnapshot:
     operation_attempts = tuple(sorted(
         (
             attempt
@@ -745,8 +729,8 @@ def _case_operation_snapshot(operation: Operation, case_id: str, snapshot: Runti
         status,
         outputs,
         '' if latest is None else latest.attempt_id,
-        max(0, len(operation_attempts) - 1),
-        None if latest is None else progress_by_attempt.get(latest.attempt_id),
+        sum(bool(attempt.retry_request_id) for attempt in operation_attempts),
+        None if latest is None else latest_event_by_attempt.get(latest.attempt_id),
         None if failure is None else failure.error,
     )
 

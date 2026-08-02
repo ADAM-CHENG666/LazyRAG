@@ -15,7 +15,6 @@ from .errors import (
 
 
 _FAILURE_PREFIX = '__artifact_runtime_failure__.'
-_INTERVENTION_PREFIX = '__artifact_runtime_intervention__.'
 RUN_CONFIGURATION_ARTIFACT_ID = '__artifact_runtime__.configuration'
 
 
@@ -230,27 +229,8 @@ def is_failure_key(key: ArtifactKey) -> bool:
     return key.artifact_id.startswith(_FAILURE_PREFIX)
 
 
-def intervention_key(operation_id: str, partition_key: str = '') -> ArtifactKey:
-    _text(operation_id, 'intervention operation_id')
-    _string(partition_key, 'intervention partition_key')
-    return ArtifactKey(f'{_INTERVENTION_PREFIX}{operation_id}', partition_key)
-
-
-def is_intervention_key(key: ArtifactKey) -> bool:
-    if not isinstance(key, ArtifactKey):
-        raise TypeError('key must be ArtifactKey')
-    return key.artifact_id.startswith(_INTERVENTION_PREFIX)
-
-
-def intervention_operation_id(key: ArtifactKey) -> str:
-    if not is_intervention_key(key):
-        raise DefinitionError('key is not an internal intervention artifact')
-    return key.artifact_id.removeprefix(_INTERVENTION_PREFIX)
-
-
 __all__ = [
     'ArtifactCommit', 'ArtifactDraft', 'ArtifactKey', 'ArtifactRecord', 'ArtifactRef',
-    'ArtifactSnapshot', 'PartitionGuard', 'PartitionSet', 'failure_key',
-    'intervention_key', 'intervention_operation_id', 'is_failure_key',
-    'is_intervention_key', 'merge_refs', 'RUN_CONFIGURATION_ARTIFACT_ID',
+    'ArtifactSnapshot', 'PartitionGuard', 'PartitionSet',
+    'failure_key', 'is_failure_key', 'merge_refs', 'RUN_CONFIGURATION_ARTIFACT_ID',
 ]

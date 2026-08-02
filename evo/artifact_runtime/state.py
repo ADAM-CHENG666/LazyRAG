@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -42,9 +44,21 @@ AttemptStatus = Literal[
 ]
 
 RetryStatus = Literal['pending', 'fulfilled', 'cancelled']
-InterventionStatus = Literal['pending', 'processing', 'consumed']
 CaseOperationStatus = Literal['pending', 'running', 'succeeded', 'failed']
 CaseStatus = Literal['pending', 'running', 'completed', 'failed']
+EventLevel = Literal['debug', 'info', 'warning', 'error']
+EventStatus = Literal['started', 'running', 'completed', 'failed', 'skipped']
+
+_EVENT_COLLECTION_LIMIT = 50
+_EVENT_DATA_LIMIT = 16 * 1024
+_EVENT_DEPTH_LIMIT = 4
+_EVENT_TYPE_LIMIT = 256
+_SECRET_KEY = re.compile(r'(api[_-]?key|token|secret|password|authorization|llm_config)', re.I)
+_SECRET_VALUE = re.compile(
+    r'(?i)\b(authorization|api[_-]?key|token|secret|password)\b\s*[:=]\s*(?:bearer\s+)?[^\s,;)\]}]+'
+)
+_BEARER = re.compile(r'(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}')
+_URL_SECRET = re.compile(r'(?i)([?&](?:api[_-]?key|token|secret|password)=)[^&#\s]+')
 
 
 @dataclass(frozen=True)
@@ -80,27 +94,37 @@ class RuntimeErrorInfo:
 
 
 @dataclass(frozen=True)
-class ProgressUpdate:
-    phase: str
+class OperationEvent:
+    event_type: str
+    level: EventLevel = 'info'
+    status: EventStatus | None = None
     message: str = ''
+    data: Mapping[str, object] = field(default_factory=dict)
     current: int | None = None
     total: int | None = None
-    detail: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        _text(self.phase, 'progress phase')
-        _string(self.message, 'progress message')
+        _text(self.event_type, 'operation event_type')
+        if len(self.event_type.encode()) > _EVENT_TYPE_LIMIT:
+            raise DefinitionError('operation event_type must not exceed 256 bytes')
+        _known(self.level, get_args(EventLevel), 'operation event level')
+        if self.status is not None:
+            _known(self.status, get_args(EventStatus), 'operation event status')
+        _string(self.message, 'operation event message')
         for name, value in (('current', self.current), ('total', self.total)):
             if value is not None:
-                _integer(value, f'progress {name}')
+                _integer(value, f'operation event {name}')
         if self.current is not None and self.total is not None and self.current > self.total:
-            raise DefinitionError('progress current cannot exceed total')
-        detail = dict(self.detail)
-        try:
-            json.dumps(detail, ensure_ascii=False, sort_keys=True)
-        except (TypeError, ValueError) as exc:
-            raise DefinitionError('progress detail must be JSON-serializable') from exc
-        object.__setattr__(self, 'detail', MappingProxyType(detail))
+            raise DefinitionError('operation event current cannot exceed total')
+        message = _event_value(self.message)
+        data = _event_value(dict(self.data))
+        assert isinstance(message, str) and isinstance(data, dict)
+        encoded = json.dumps(data, ensure_ascii=False, sort_keys=True, allow_nan=False)
+        if len(encoded.encode()) > _EVENT_DATA_LIMIT:
+            summary = encoded.encode()[:_EVENT_DATA_LIMIT].decode('utf-8', 'ignore')
+            data = {'truncated': True, 'summary': summary}
+        object.__setattr__(self, 'message', message)
+        object.__setattr__(self, 'data', MappingProxyType(data))
 
 
 @dataclass(frozen=True)
@@ -174,17 +198,25 @@ class ArtifactRetryRequest:
 
 
 @dataclass(frozen=True)
-class ProgressEvent:
+class RecordedOperationEvent:
+    run_id: str
     attempt_id: str
+    invocation_id: str
+    operation_id: str
+    partition_key: str
     sequence: int
-    update: ProgressUpdate
+    event: OperationEvent
     created_at: float
 
     def __post_init__(self) -> None:
+        _text(self.run_id, 'operation event run_id')
         _text(self.attempt_id, 'attempt_id')
-        _integer(self.sequence, 'progress sequence', minimum=1)
-        if not isinstance(self.update, ProgressUpdate):
-            raise TypeError('update must be ProgressUpdate')
+        _text(self.invocation_id, 'operation event invocation_id')
+        _text(self.operation_id, 'operation event operation_id')
+        _string(self.partition_key, 'operation event partition_key')
+        _integer(self.sequence, 'operation event sequence', minimum=1)
+        if not isinstance(self.event, OperationEvent):
+            raise TypeError('event must be OperationEvent')
         _number(self.created_at, 'created_at')
 
 
@@ -216,92 +248,6 @@ class CaseFailure:
         _number(self.failed_at, 'case failure failed_at')
         object.__setattr__(self, 'input_refs', inputs)
         object.__setattr__(self, 'output_keys', outputs)
-
-
-@dataclass(frozen=True)
-class UserIntervention:
-    intervention_id: str
-    operation_id: str
-    target_key: ArtifactKey
-    target_ref: ArtifactRef | None
-    message: str
-    field: str
-    quote: str
-    start: int | None
-    end: int | None
-    created_at: float
-    introduced_version: int
-
-    def __post_init__(self) -> None:
-        _text(self.intervention_id, 'intervention_id')
-        _text(self.operation_id, 'intervention operation_id')
-        if not isinstance(self.target_key, ArtifactKey):
-            raise TypeError('intervention target_key must be ArtifactKey')
-        if self.target_ref is not None and (
-            not isinstance(self.target_ref, ArtifactRef)
-            or self.target_ref.key != self.target_key
-        ):
-            raise DefinitionError('intervention target_ref must identify target_key')
-        _text(self.message, 'intervention message')
-        _string(self.field, 'intervention field')
-        _string(self.quote, 'intervention quote')
-        if (self.start is None) != (self.end is None):
-            raise DefinitionError('intervention start and end must both be set or omitted')
-        if self.start is not None:
-            _integer(self.start, 'intervention start')
-            _integer(self.end, 'intervention end')
-            if self.end < self.start:
-                raise DefinitionError('intervention end must not precede start')
-        _number(self.created_at, 'intervention created_at')
-        _integer(self.introduced_version, 'intervention introduced_version', minimum=1)
-
-    @property
-    def case_id(self) -> str:
-        return self.target_key.partition_key
-
-
-@dataclass(frozen=True)
-class InterventionBundle:
-    operation_id: str
-    partition_key: str
-    interventions: tuple[UserIntervention, ...]
-
-    def __post_init__(self) -> None:
-        _text(self.operation_id, 'intervention bundle operation_id')
-        _string(self.partition_key, 'intervention bundle partition_key')
-        interventions = _tuple_of(self.interventions, UserIntervention,
-                                  'intervention bundle must contain UserIntervention values',
-                                  nonempty=True)
-        _unique(interventions, 'intervention ids must be unique within one invocation',
-                key=lambda item: item.intervention_id)
-        if any(item.operation_id != self.operation_id for item in interventions):
-            raise DefinitionError('intervention operation must match its bundle')
-        if self.partition_key and any(
-            item.case_id != self.partition_key for item in interventions
-        ):
-            raise DefinitionError('partitioned intervention must match its bundle case')
-        object.__setattr__(self, 'interventions', interventions)
-
-
-@dataclass(frozen=True)
-class InterventionSnapshot:
-    intervention: UserIntervention
-    status: InterventionStatus
-    consumed_by_attempt_ids: tuple[str, ...] = ()
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.intervention, UserIntervention):
-            raise TypeError('intervention snapshot requires UserIntervention')
-        _known(self.status, get_args(InterventionStatus), 'intervention status')
-        attempts = tuple(self.consumed_by_attempt_ids)
-        if not all(isinstance(attempt_id, str) and attempt_id for attempt_id in attempts):
-            raise TypeError('consumed attempt ids must be non-empty strings')
-        _unique(attempts, 'consumed attempt ids must be unique')
-        if self.status == 'pending' and attempts:
-            raise DefinitionError('pending intervention cannot have consuming attempts')
-        if self.status != 'pending' and not attempts:
-            raise DefinitionError('adopted intervention requires a consuming attempt')
-        object.__setattr__(self, 'consumed_by_attempt_ids', attempts)
 
 
 @dataclass(frozen=True)
@@ -361,7 +307,7 @@ class CaseOperationSnapshot:
     output_refs: tuple[ArtifactRef, ...] = ()
     latest_attempt_id: str = ''
     retry_count: int = 0
-    latest_progress: ProgressUpdate | None = None
+    latest_event: RecordedOperationEvent | None = None
     error: RuntimeErrorInfo | None = None
 
     def __post_init__(self) -> None:
@@ -371,10 +317,8 @@ class CaseOperationSnapshot:
                             'case operation output_refs must contain ArtifactRef values')
         _string(self.latest_attempt_id, 'case latest_attempt_id')
         _integer(self.retry_count, 'case retry_count')
-        if self.latest_progress is not None and not isinstance(
-            self.latest_progress, ProgressUpdate
-        ):
-            raise TypeError('case latest_progress must be ProgressUpdate or None')
+        if self.latest_event is not None and not isinstance(self.latest_event, RecordedOperationEvent):
+            raise TypeError('case latest_event must be RecordedOperationEvent or None')
         if self.error is not None and not isinstance(self.error, RuntimeErrorInfo):
             raise TypeError('case operation error must be RuntimeErrorInfo or None')
         if self.status == 'failed' and self.error is None:
@@ -391,7 +335,10 @@ class CaseSnapshot:
     operations: tuple[CaseOperationSnapshot, ...]
     artifacts: Mapping[ArtifactKey, ArtifactRef] = field(default_factory=dict)
     failures: tuple[CaseFailure, ...] = ()
-    interventions: tuple[InterventionSnapshot, ...] = ()
+    artifact_records: tuple[ArtifactRecord, ...] = ()
+    attempts: tuple[AttemptSnapshot, ...] = ()
+    operation_events: tuple[RecordedOperationEvent, ...] = ()
+    retries: tuple[ArtifactRetryRequest, ...] = ()
 
     def __post_init__(self) -> None:
         _text(self.run_id, 'case snapshot run_id')
@@ -415,14 +362,29 @@ class CaseSnapshot:
                              'case failures must contain CaseFailure values')
         if any(failure.case_id != self.case_id for failure in failures):
             raise DefinitionError('case failures must identify this case')
-        interventions = _tuple_of(self.interventions, InterventionSnapshot,
-                                  'case interventions must contain InterventionSnapshot values')
-        if any(item.intervention.case_id != self.case_id for item in interventions):
-            raise DefinitionError('case interventions must identify this case')
+        records = _tuple_of(self.artifact_records, ArtifactRecord,
+                            'case artifact_records must contain ArtifactRecord values')
+        attempts = _tuple_of(self.attempts, AttemptSnapshot,
+                             'case attempts must contain AttemptSnapshot values')
+        events = _tuple_of(self.operation_events, RecordedOperationEvent,
+                           'case operation_events must contain RecordedOperationEvent values')
+        retries = _tuple_of(self.retries, ArtifactRetryRequest,
+                            'case retries must contain ArtifactRetryRequest values')
+        if any(record.ref.key.partition_key != self.case_id for record in records):
+            raise DefinitionError('case artifact_records must identify this case')
+        if any(attempt.partition_key != self.case_id for attempt in attempts):
+            raise DefinitionError('case attempts must identify this case')
+        if any(event.partition_key != self.case_id for event in events):
+            raise DefinitionError('case operation_events must identify this case')
+        if any(request.artifact_key.partition_key != self.case_id for request in retries):
+            raise DefinitionError('case retries must identify this case')
         object.__setattr__(self, 'operations', operations)
         object.__setattr__(self, 'artifacts', MappingProxyType(artifacts))
         object.__setattr__(self, 'failures', failures)
-        object.__setattr__(self, 'interventions', interventions)
+        object.__setattr__(self, 'artifact_records', records)
+        object.__setattr__(self, 'attempts', attempts)
+        object.__setattr__(self, 'operation_events', events)
+        object.__setattr__(self, 'retries', retries)
 
 
 @dataclass(frozen=True)
@@ -437,7 +399,6 @@ class RuntimeSnapshot:
     active_attempts: tuple[AttemptSnapshot, ...] = ()
     awaiting_artifacts: tuple[ArtifactKey, ...] = ()
     case_failures: tuple[CaseFailure, ...] = ()
-    interventions: tuple[InterventionSnapshot, ...] = ()
     progress: RuntimeProgress = field(default_factory=RuntimeProgress)
 
     def __post_init__(self) -> None:
@@ -489,10 +450,6 @@ class RuntimeSnapshot:
         _unique(failures, 'case failure attempt ids must be unique',
                 key=lambda failure: failure.attempt_id)
 
-        interventions = _tuple_of(self.interventions, InterventionSnapshot,
-                                  'interventions must contain InterventionSnapshot values')
-        _unique(interventions, 'runtime intervention ids must be unique',
-                key=lambda item: item.intervention.intervention_id)
         if not isinstance(self.progress, RuntimeProgress):
             raise TypeError('runtime progress must be RuntimeProgress')
 
@@ -502,7 +459,6 @@ class RuntimeSnapshot:
         object.__setattr__(self, 'active_attempts', attempts)
         object.__setattr__(self, 'awaiting_artifacts', awaiting)
         object.__setattr__(self, 'case_failures', failures)
-        object.__setattr__(self, 'interventions', interventions)
 
 
 @dataclass(frozen=True)
@@ -521,16 +477,37 @@ class RunHistory:
     operations: tuple[OperationDefinitionSnapshot, ...]
     artifacts: tuple[ArtifactRecord, ...]
     attempts: tuple[AttemptSnapshot, ...]
-    progress_events: tuple[ProgressEvent, ...]
+    operation_events: tuple[RecordedOperationEvent, ...]
     retry_requests: tuple[ArtifactRetryRequest, ...]
-    interventions: tuple[UserIntervention, ...]
 
 
 __all__ = [
     'ArtifactRetryRequest', 'AttemptSnapshot', 'AttemptStatus', 'CaseFailure',
-    'CaseOperationSnapshot', 'CaseSnapshot', 'InterventionSnapshot',
-    'InterventionStatus', 'InvocationSnapshot', 'OperationDefinitionSnapshot',
-    'ProgressEvent', 'ProgressUpdate', 'RetryStatus', 'RunConfiguration', 'RunHistory',
+    'CaseOperationSnapshot', 'CaseSnapshot', 'InvocationSnapshot', 'OperationDefinitionSnapshot',
+    'EventLevel', 'EventStatus', 'OperationEvent', 'RecordedOperationEvent', 'RetryStatus',
+    'RunConfiguration', 'RunHistory',
     'RunStatus', 'RuntimeErrorInfo', 'RuntimeProgress', 'RuntimeSnapshot',
-    'UserIntervention',
 ]
+
+
+def _event_value(value: object, depth: int = 0) -> object:
+    if depth > _EVENT_DEPTH_LIMIT:
+        return '<truncated>'
+    if isinstance(value, Mapping):
+        return {
+            str(key): '<redacted>' if _SECRET_KEY.search(str(key)) else _event_value(item, depth + 1)
+            for key, item in list(value.items())[:_EVENT_COLLECTION_LIMIT]
+        }
+    if isinstance(value, (list, tuple)):
+        return [_event_value(item, depth + 1) for item in value[:_EVENT_COLLECTION_LIMIT]]
+    if isinstance(value, str):
+        text = _URL_SECRET.sub(r'\1<redacted>', _BEARER.sub('bearer <redacted>', _SECRET_VALUE.sub(
+            lambda match: f'{match.group(1)}=<redacted>', value,
+        )))
+        encoded = text.encode()
+        return text if len(encoded) <= _EVENT_DATA_LIMIT else encoded[:_EVENT_DATA_LIMIT].decode('utf-8', 'ignore')
+    if isinstance(value, bool) or value is None or isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    return _event_value(repr(value), depth)

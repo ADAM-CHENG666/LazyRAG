@@ -17,9 +17,7 @@ from evo import artifacts as A
 from evo.artifact_flow import ArtifactFlow, FlowSnapshot
 from evo.artifact_runtime import ArtifactKey, ArtifactRef, ArtifactRuntimeError
 
-from . import planner
-from .actions import ActionExecutor, PreparedAction, intent_catalog
-from .config_guard import ConfigValidationError
+from .actions import ActionExecutor, PreparedAction, _artifact_key_data, _artifact_ref_data, intent_catalog
 from .schemas import (
     ClarifyAction,
     ConfirmationAction,
@@ -39,6 +37,7 @@ from .storage import (
     json_bytes,
     message_history,
 )
+from .planner import StructuredPlanError, answer_query, plan_next_turn
 
 
 class MessageIntent:
@@ -52,14 +51,10 @@ class MessageIntent:
         self.lock_root = self.root / 'message-store' / 'locks'
         self.lock_root.mkdir(parents=True, exist_ok=True)
 
-    async def run(self, origin: Literal['user', 'auto'], thread_id: str,
-                  request: MessageRequest
-                  ) -> MessageTurnResult:
+    async def run(self, origin: Literal['user', 'auto'], thread_id: str, request: MessageRequest) -> MessageTurnResult:
         return await _Turn(self, origin, thread_id, request).run()
 
-    def history(self, thread_id: str, page_size: int = 20,
-                page_token: str = ''
-                ) -> MessageHistoryResponse:
+    def history(self, thread_id: str, page_size: int = 20, page_token: str = '') -> MessageHistoryResponse:
         return message_history(self.root, thread_id, page_size, page_token)
 
     async def delete_thread(self, thread_id: str) -> None:
@@ -73,25 +68,19 @@ class MessageIntent:
         )
 
 
-async def run_turn(origin: Literal['user', 'auto'], root: str | Path,
-                   flow: ArtifactFlow, thread_id: str,
-                   request: MessageRequest
-                   ) -> MessageTurnResult:
+async def run_turn(origin: Literal['user', 'auto'], root: str | Path, flow: ArtifactFlow, thread_id: str,
+                   request: MessageRequest) -> MessageTurnResult:
     return await MessageIntent(root, flow).run(origin, thread_id, request)
 
 
-def _delete_thread(lock: FileLock, audit: MessageAuditStore,
-                   blobs: MessageBlobStore, thread_id: str
-                   ) -> None:
+def _delete_thread(lock: FileLock, audit: MessageAuditStore, blobs: MessageBlobStore, thread_id: str) -> None:
     with lock:
         audit.delete_thread(thread_id)
         blobs.delete_thread(thread_id)
 
 
 class _Turn:
-    def __init__(self, intent: MessageIntent, origin: str,
-                 thread_id: str, request: MessageRequest
-                 ) -> None:
+    def __init__(self, intent: MessageIntent, origin: str, thread_id: str, request: MessageRequest) -> None:
         self.intent = intent
         self.origin = origin
         self.thread_id = thread_id
@@ -131,11 +120,11 @@ class _Turn:
         context, base_observation, projection = await self._observe()
         try:
             plan = await asyncio.to_thread(
-                planner.plan_next_turn,
+                plan_next_turn,
                 context,
                 config.get('llm_config') if isinstance(config, Mapping) else {},
             )
-        except planner.StructuredPlanError as exc:
+        except StructuredPlanError as exc:
             return self._finish(
                 'needs_input',
                 f'无法解析为结构化意图: {exc}',
@@ -177,8 +166,8 @@ class _Turn:
             )
         try:
             prepared = await self.executor.prepare(action, self.message_id)
-        except (ArtifactRuntimeError, ConfigValidationError, ValueError) as exc:
-            return self._finish('needs_input', _error_text(exc), projection)
+        except (ArtifactRuntimeError, ValueError) as exc:
+            return self._finish('needs_input', str(exc), projection)
         if prepared.needs_confirmation:
             return self._pending(prepared, base_observation, projection)
         return await self._dispatch(prepared, projection, context, config)
@@ -193,6 +182,10 @@ class _Turn:
 
     async def _observe(self) -> tuple[dict[str, Any], MessageContentRef, dict[str, Any]]:
         snapshot = await self.intent.flow.snapshot(self.thread_id)
+        try:
+            control = (await self.intent.flow.configuration(self.thread_id)).values
+        except ArtifactRuntimeError:
+            control = {}
         observation = _flow_observation(snapshot)
         observation_ref = self._blob('base_observation', observation)
         previous = self.intent.audit.projection(self.thread_id)
@@ -210,15 +203,15 @@ class _Turn:
             },
             'recent_messages': self._recent_messages(),
             'flow_snapshot': observation,
+            'flow_control': {
+                'mode': str(control.get('mode') or 'interactive'),
+                'automatic': bool(control.get('automatic')),
+            },
         }
         return context, observation_ref, projection
 
-    async def _confirm(self, action: ConfirmationAction,
-                       pending_ref: object,
-                       base_observation: MessageContentRef,
-                       projection: dict[str, Any],
-                       config: Mapping[str, Any]
-                       ) -> MessageTurnResult:
+    async def _confirm(self, action: ConfirmationAction, pending_ref: object, base_observation: MessageContentRef,
+                       projection: dict[str, Any], config: Mapping[str, Any]) -> MessageTurnResult:
         if action.decision in {'reject', 'amend', 'replace'}:
             decision = 'rejected' if action.decision == 'reject' else 'needs_input'
             text = (
@@ -262,9 +255,9 @@ class _Turn:
             )
         try:
             prepared = await self.executor.prepare(intent, pending.origin_message_id)
-        except (ArtifactRuntimeError, ConfigValidationError, ValueError) as exc:
+        except (ArtifactRuntimeError, ValueError) as exc:
             projection['pending_confirmation_ref'] = None
-            return self._finish('needs_input', _error_text(exc), projection)
+            return self._finish('needs_input', str(exc), projection)
         projection['pending_confirmation_ref'] = None
         context = {
             'thread_id': self.thread_id,
@@ -274,9 +267,7 @@ class _Turn:
         }
         return await self._dispatch(prepared, projection, context, config)
 
-    def _pending(self, prepared: PreparedAction,
-                 base_observation: MessageContentRef,
-                 projection: dict[str, Any]
+    def _pending(self, prepared: PreparedAction, base_observation: MessageContentRef, projection: dict[str, Any]
                  ) -> MessageTurnResult:
         intent_ref = self._blob('pending_intent', prepared.action.model_dump())
         token = f'confirm_{_hash(prepared.command_id)[:16]}'
@@ -296,11 +287,8 @@ class _Turn:
             pending_confirmation_ref=pending_ref,
         )
 
-    async def _dispatch(self, prepared: PreparedAction,
-                        projection: dict[str, Any],
-                        context: Mapping[str, Any],
-                        config: Mapping[str, Any]
-                        ) -> MessageTurnResult:
+    async def _dispatch(self, prepared: PreparedAction, projection: dict[str, Any], context: Mapping[str, Any],
+                        config: Mapping[str, Any]) -> MessageTurnResult:
         self._blob('prepared_action', {
             'command_id': prepared.command_id,
             'summary': prepared.summary,
@@ -308,14 +296,14 @@ class _Turn:
         })
         try:
             result = await self.executor.execute(prepared)
-        except (ArtifactRuntimeError, ConfigValidationError, ValueError) as exc:
+        except (ArtifactRuntimeError, ValueError) as exc:
             receipt = self._blob('action_receipt', {
                 'status': 'rejected',
-                'error': _error_text(exc),
+                'error': str(exc),
             })
             return self._finish(
                 'needs_input',
-                _error_text(exc),
+                str(exc),
                 projection,
                 command_id=prepared.command_id,
                 action_receipt_ref=receipt,
@@ -330,7 +318,7 @@ class _Turn:
                 text = _progress_text(observation)
             else:
                 text = await asyncio.to_thread(
-                    planner.answer_query,
+                    answer_query,
                     context,
                     _jsonable(result),
                     config.get('llm_config') if isinstance(config, Mapping) else {},
@@ -351,9 +339,7 @@ class _Turn:
             action_receipt_ref=receipt,
         )
 
-    def _finish(self, decision: str, text: str,
-                projection: dict[str, Any], **refs: Any
-                ) -> MessageTurnResult:
+    def _finish(self, decision: str, text: str, projection: dict[str, Any], **refs: Any) -> MessageTurnResult:
         result = MessageTurnResult(
             thread_id=self.thread_id,
             turn_id=self.turn_id,
@@ -415,6 +401,8 @@ def _flow_observation(snapshot: FlowSnapshot) -> dict[str, Any]:
                 'approved': stage.approved,
                 'result_ref': _ref_data(stage.result_ref),
                 'approval_ref': _ref_data(stage.approval_ref),
+                'progress': _jsonable(stage.progress),
+                'failures': _jsonable(stage.failures),
             }
             for stage in snapshot.stages
         ],
@@ -429,8 +417,10 @@ def _flow_observation(snapshot: FlowSnapshot) -> dict[str, Any]:
                 for invocation in snapshot.runtime.running
             ],
             'awaiting_artifacts': [
-                _key_data(key) for key in snapshot.runtime.awaiting_artifacts
+                _artifact_key_data(key) for key in snapshot.runtime.awaiting_artifacts
             ],
+            'progress': _jsonable(snapshot.progress),
+            'failures': _jsonable(snapshot.failures),
         },
     }
 
@@ -460,23 +450,8 @@ def _progress_text(observation: Mapping[str, Any]) -> str:
     return text + '。'
 
 
-def _error_text(error: Exception) -> str:
-    if isinstance(error, ConfigValidationError):
-        return '；'.join(issue.message for issue in error.issues)
-    return str(error)
-
-
 def _ref_data(ref: ArtifactRef | None) -> dict[str, object] | None:
-    if ref is None:
-        return None
-    return {**_key_data(ref.key), 'version': ref.version}
-
-
-def _key_data(key: ArtifactKey) -> dict[str, str]:
-    return {
-        'artifact_id': key.artifact_id,
-        'partition_key': key.partition_key,
-    }
+    return None if ref is None else dict(_artifact_ref_data(ref))
 
 
 def _hash(value: object) -> str:

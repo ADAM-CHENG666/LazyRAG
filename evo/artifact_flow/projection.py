@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Iterable
+from dataclasses import replace
 
 from evo.artifact_runtime import (
     ArtifactKey,
-    ArtifactRef,
     ArtifactRetryRequest,
-    AttemptSnapshot,
+    CaseFailure,
     DefinitionError,
     RuntimeProgress,
     RuntimeSnapshot,
@@ -17,8 +17,8 @@ from .definition import FlowDefinition
 from .state import FlowSnapshot, StageProgress, StageStatus
 
 
-def project_flow(definition: FlowDefinition, runtime: RuntimeSnapshot, retries: Iterable[ArtifactRetryRequest] = (),
-                 attempts: Iterable[AttemptSnapshot] = ()) -> FlowSnapshot:
+def project_flow(definition: FlowDefinition, runtime: RuntimeSnapshot,
+                 retries: Iterable[ArtifactRetryRequest] = ()) -> FlowSnapshot:
     if not isinstance(definition, FlowDefinition):
         raise TypeError('definition must be FlowDefinition')
     if not isinstance(runtime, RuntimeSnapshot):
@@ -27,9 +27,6 @@ def project_flow(definition: FlowDefinition, runtime: RuntimeSnapshot, retries: 
     requests = tuple(retries)
     if not all(isinstance(request, ArtifactRetryRequest) for request in requests):
         raise TypeError('retries must contain ArtifactRetryRequest values')
-    attempt_history = tuple(attempts)
-    if not all(isinstance(attempt, AttemptSnapshot) for attempt in attempt_history):
-        raise TypeError('attempts must contain AttemptSnapshot values')
 
     refs = tuple(
         (
@@ -40,100 +37,93 @@ def project_flow(definition: FlowDefinition, runtime: RuntimeSnapshot, retries: 
         )
         for stage in definition.stages
     )
-    approval_index = _approval_index(definition, runtime, refs)
-    incomplete_index = _incomplete_index(definition, refs)
+    artifact_index = next(
+        (
+            index
+            for index, stage in enumerate(definition.stages)
+            if refs[index][0] is None or stage.approval_key is not None and refs[index][1] is None
+        ),
+        None,
+    )
+    approval_index = (
+        artifact_index
+        if artifact_index is not None
+        and refs[artifact_index][0] is not None
+        and definition.stages[artifact_index].approval_key is not None
+        else None
+    )
     active_index = _active_index(definition, runtime, requests)
-    stage_progress = tuple(
-        _progress(definition, index, runtime, attempt_history)
+    stage_details = tuple(
+        _progress(definition, index, runtime)
         for index in range(len(definition.stages))
     )
     failure_index = next(
         (
             index
-            for index, progress in enumerate(stage_progress)
+            for index, (progress, _) in enumerate(stage_details)
             if progress.case_total > 0 and progress.case_failed == progress.case_total
         ),
         None,
     )
     frontier = min(
-        (index for index in (approval_index, incomplete_index, active_index, failure_index) if index is not None),
+        (index for index in (artifact_index, active_index, failure_index) if index is not None),
         default=None,
     )
     if failure_index is None and frontier is not None and refs[frontier][0] is None and runtime.status == 'failed':
         failure_index = frontier
 
+    stages: list[StageProgress] = []
+    for index, stage in enumerate(definition.stages):
+        progress, failures = stage_details[index]
+        if runtime.status == 'failed' and failure_index == index and progress.pending:
+            failed = progress.failed + progress.pending
+            progress = replace(
+                progress,
+                failed=failed,
+                pending=0,
+                percentage=0.0 if progress.total == 0 else round(
+                    (progress.completed + failed) * 100 / progress.total,
+                    2,
+                ),
+                case_failed=progress.case_failed + progress.case_pending,
+                case_pending=0,
+            )
+        stages.append(StageProgress(
+            stage.name,
+            stage.result_key,
+            refs[index][0],
+            stage.approval_key,
+            refs[index][1],
+            _stage_status(index, frontier, active_index, approval_index, failure_index, runtime),
+            tuple(operation.spec.op_id for operation in definition.stage_operations(index)),
+            progress,
+            failures,
+            runtime.error if failure_index == index else None,
+        ))
+    stage_values = tuple(stages)
+    total = sum(stage.progress.total for stage in stage_values)
+    completed = sum(stage.progress.completed for stage in stage_values)
+    running = sum(stage.progress.running for stage in stage_values)
+    failed = sum(stage.progress.failed for stage in stage_values)
+    pending = sum(stage.progress.pending for stage in stage_values)
     return FlowSnapshot(
         runtime,
-        tuple(
-            StageProgress(
-                stage.name,
-                stage.result_key,
-                refs[index][0],
-                stage.approval_key,
-                refs[index][1],
-                _stage_status(
-                    index,
-                    frontier,
-                    active_index,
-                    approval_index,
-                    failure_index,
-                    runtime,
-                ),
-                tuple(
-                    operation.spec.op_id
-                    for operation in definition.stage_operations(index)
-                ),
-                stage_progress[index],
-                tuple(
-                    failure
-                    for failure in runtime.case_failures
-                    if definition.stage_index_for_operation(failure.operation_id) == index
-                ),
-            )
-            for index, stage in enumerate(definition.stages)
+        stage_values,
+        replace(
+            runtime.progress,
+            total=total,
+            completed=completed,
+            running=running,
+            failed=failed,
+            pending=pending,
+            percentage=0.0 if total == 0 else round((completed + failed) * 100 / total, 2),
         ),
+        runtime.case_failures,
     )
 
 
-def _approval_index(definition: FlowDefinition, runtime: RuntimeSnapshot,
-                    refs: tuple[tuple[ArtifactRef | None, ArtifactRef | None], ...]) -> int | None:
-    return next(
-        (
-            index
-            for index, stage in enumerate(definition.stages)
-            if (
-                refs[index][0] is not None
-                and refs[index][1] is None
-                and stage.approval_key in runtime.awaiting_artifacts
-            )
-        ),
-        None,
-    )
-
-
-def _incomplete_index(definition: FlowDefinition,
-                      refs: tuple[tuple[ArtifactRef | None, ArtifactRef | None], ...]) -> int | None:
-    missing = next(
-        (
-            index
-            for index in range(len(definition.stages))
-            if refs[index][0] is None
-        ),
-        None,
-    )
-    if missing is None or missing == 0:
-        return missing
-    previous = missing - 1
-    if (
-        definition.stages[previous].approval_key is not None
-        and refs[previous][1] is None
-    ):
-        return previous
-    return missing
-
-
-def _active_index(definition: FlowDefinition, runtime: RuntimeSnapshot,
-                  retries: tuple[ArtifactRetryRequest, ...]) -> int | None:
+def _active_index(definition: FlowDefinition, runtime: RuntimeSnapshot, retries: tuple[ArtifactRetryRequest, ...]
+                  ) -> int | None:
     indices = [
         _required_stage(
             definition.stage_index_for_operation(attempt.operation_id),
@@ -191,54 +181,58 @@ def _stage_status(index: int, frontier: int | None, active: int | None, approval
     return 'pending'
 
 
-def _progress(definition: FlowDefinition, stage_index: int, runtime: RuntimeSnapshot,
-              attempts: tuple[AttemptSnapshot, ...]) -> RuntimeProgress:
+def _progress(definition: FlowDefinition, stage_index: int,
+              runtime: RuntimeSnapshot) -> tuple[RuntimeProgress, tuple[CaseFailure, ...]]:
     operations = definition.stage_operations(stage_index)
     operation_ids = {operation.spec.op_id for operation in operations}
-    failures = {
-        (failure.operation_id, failure.case_id)
-        for failure in runtime.case_failures
-        if failure.operation_id in operation_ids
-    }
+    failures_by_case: dict[str, list[CaseFailure]] = {}
+    for failure in runtime.case_failures:
+        failures_by_case.setdefault(failure.case_id, []).append(failure)
     active = {
         (attempt.operation_id, attempt.partition_key)
         for attempt in runtime.active_attempts
         if attempt.operation_id in operation_ids
     }
-    latest: dict[tuple[str, str], AttemptSnapshot] = {}
-    for attempt in attempts:
-        if attempt.operation_id in operation_ids:
-            identity = (attempt.operation_id, attempt.partition_key)
-            previous = latest.get(identity)
-            if previous is None or attempt.created_at > previous.created_at:
-                latest[identity] = attempt
-
     operation_states: Counter[str] = Counter()
     case_states: dict[str, list[str]] = {}
+    stage_failure_attempts: set[str] = set()
     for operation in operations:
         if operation.spec.driver_input is None:
             partition_keys = ('',)
         else:
             partitions = runtime.partition_sets.get(ArtifactKey.scalar(operation.spec.partition_set_id))
             partition_keys = () if partitions is None else partitions.keys
+        dependencies = definition.dependencies_by_operation_id[operation.spec.op_id]
         for partition_key in partition_keys:
             identity = (operation.spec.op_id, partition_key)
-            output_keys = tuple(output.key_for(partition_key) for output in operation.spec.outputs.values())
+            blocking_failures = tuple(
+                failure
+                for failure in failures_by_case.get(partition_key, ())
+                if (
+                    failure.operation_id == operation.spec.op_id
+                    or any(key.artifact_id in dependencies for key in failure.output_keys)
+                )
+            )
+            output_keys: list[ArtifactKey] = []
+            for output in operation.spec.outputs.values():
+                if partition_key or output.mode == 'scalar':
+                    output_keys.append(output.key_for(partition_key))
+                    continue
+                partitions = runtime.partition_sets.get(ArtifactKey.scalar(output.partition_set_id))
+                if partitions is not None:
+                    output_keys.extend(output.key_for(case_id) for case_id in partitions.keys)
             if identity in active:
                 status = 'running'
             elif output_keys and all(key in runtime.completed_artifacts for key in output_keys):
                 status = 'completed'
-            elif identity in failures or (
-                not partition_key
-                and identity in latest
-                and latest[identity].status == 'failed'
-            ):
+            elif blocking_failures:
                 status = 'failed'
             else:
                 status = 'pending'
             operation_states[status] += 1
             if partition_key:
                 case_states.setdefault(partition_key, []).append(status)
+                stage_failure_attempts.update(failure.attempt_id for failure in blocking_failures)
 
     cases: Counter[str] = Counter()
     for states in case_states.values():
@@ -252,18 +246,21 @@ def _progress(definition: FlowDefinition, stage_index: int, runtime: RuntimeSnap
             cases['pending'] += 1
     total = sum(operation_states.values())
     finished = operation_states['completed'] + operation_states['failed']
-    return RuntimeProgress(
-        total,
-        operation_states['completed'],
-        operation_states['running'],
-        operation_states['failed'],
-        operation_states['pending'],
-        0.0 if total == 0 else round(finished * 100 / total, 2),
-        len(case_states),
-        cases['completed'],
-        cases['running'],
-        cases['failed'],
-        cases['pending'],
+    return (
+        RuntimeProgress(
+            total,
+            operation_states['completed'],
+            operation_states['running'],
+            operation_states['failed'],
+            operation_states['pending'],
+            0.0 if total == 0 else round(finished * 100 / total, 2),
+            len(case_states),
+            cases['completed'],
+            cases['running'],
+            cases['failed'],
+            cases['pending'],
+        ),
+        tuple(failure for failure in runtime.case_failures if failure.attempt_id in stage_failure_attempts),
     )
 
 

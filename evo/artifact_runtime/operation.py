@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
 import json
-import time
 from collections.abc import Awaitable, Callable, Iterator, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, field
-from functools import partial, wraps
+from functools import wraps
+import logging
 from types import MappingProxyType
 from typing import Literal, Protocol, Self, TypeVar, cast, get_args
 
@@ -19,7 +21,6 @@ from .artifact import (
     PartitionGuard,
     PartitionSet,
     is_failure_key,
-    intervention_key,
     merge_refs,
 )
 from .errors import (
@@ -32,13 +33,15 @@ from .errors import (
     _tuple_of,
     _unique,
 )
-from .state import CaseFailure, InterventionBundle, ProgressUpdate, UserIntervention
+from .state import CaseFailure, EventLevel, EventStatus, OperationEvent
 
 
 BindingMode = Literal['one', 'each', 'keyed', 'all']
 OutputMode = Literal['scalar', 'partitioned']
 ExecutionMode = Literal['cooperative', 'isolated']
-ProgressReporter = Callable[[ProgressUpdate], Awaitable[None]]
+EventReporter = Callable[[OperationEvent], Awaitable[None]]
+_RECORDER: ContextVar[Callable[[OperationEvent], None] | None] = ContextVar('operation_recorder', default=None)
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -202,7 +205,7 @@ class OperationSpec:
     outputs: Mapping[str, OutputSpec]
     execution: ExecutionMode = 'isolated'
     max_concurrency: int = 1
-    timeout: float | None = None
+    timeout: float | None = 300.0
     driver_input: str | None = field(init=False)
 
     def __post_init__(self) -> None:
@@ -246,8 +249,8 @@ class OperationSpec:
         object.__setattr__(self, 'driver_input', driver_input)
 
     @staticmethod
-    def _validate_outputs(inputs: Mapping[str, InputSpec], outputs: Mapping[str, OutputSpec],
-                          driver_input: str | None) -> None:
+    def _validate_outputs(inputs: Mapping[str, InputSpec], outputs: Mapping[str, OutputSpec], driver_input: str | None
+                          ) -> None:
         if driver_input is not None:
             if not all(output.mode == 'partitioned' for output in outputs.values()):
                 raise DefinitionError('partitioned invocation must use only partitioned outputs')
@@ -292,22 +295,19 @@ class OperationContext:
     run_id: str
     invocation_id: str
     partition_key: str = ''
-    _reporter: ProgressReporter | None = field(default=None, repr=False, compare=False)
-    interventions: tuple[UserIntervention, ...] = ()
+    _reporter: EventReporter | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         _text(self.run_id, 'run_id')
         _text(self.invocation_id, 'invocation_id')
         _string(self.partition_key, 'partition_key')
-        interventions = _tuple_of(self.interventions, UserIntervention,
-                                  'operation interventions must contain UserIntervention values')
-        object.__setattr__(self, 'interventions', interventions)
 
-    async def report(self, phase: str, message: str = '', *, current: int | None = None, total: int | None = None,
-                     detail: Mapping[str, object] | None = None) -> None:
-        update = ProgressUpdate(phase, message, current, total, detail or {})
+    async def record(self, event_type: str, message: str = '', *, level: EventLevel = 'info',
+                     status: EventStatus | None = None, data: Mapping[str, object] | None = None,
+                     current: int | None = None, total: int | None = None, **fields: object) -> None:
+        event = OperationEvent(event_type, level, status, message, {**(data or {}), **fields}, current, total)
         if self._reporter is not None:
-            await self._reporter(update)
+            await self._reporter(event)
 
 
 @dataclass(frozen=True)
@@ -342,8 +342,8 @@ F = TypeVar('F', bound=OperationFunction)
 
 
 def operation(*, op_id: str, inputs: Mapping[str, InputSpec], outputs: Mapping[str, OutputSpec],
-              execution: ExecutionMode = 'isolated', max_concurrency: int = 1,
-              timeout: float | None = None) -> Callable[[F], F]:
+              execution: ExecutionMode = 'isolated', max_concurrency: int = 1, timeout: float | None = 300.0
+              ) -> Callable[[F], F]:
     spec = OperationSpec(op_id, inputs, outputs, execution, max_concurrency, timeout)
 
     def decorate(function: F) -> F:
@@ -361,48 +361,40 @@ def operation(*, op_id: str, inputs: Mapping[str, InputSpec], outputs: Mapping[s
     return decorate
 
 
-def record_progress(phase: str, message: str = '') -> Callable[[F], F]:
-    _text(phase, 'progress phase')
-    _string(message, 'progress message')
+def record_process(function: F) -> F:
+    if not inspect.iscoroutinefunction(function):
+        raise DefinitionError('record_process can only decorate async functions')
 
-    def decorate(function: F) -> F:
-        if not inspect.iscoroutinefunction(function):
-            raise DefinitionError('progress can only decorate async functions')
+    @wraps(function)
+    async def wrapped(ctx: OperationContext, *args: object, **kwargs: object) -> OperationResult:
+        loop = asyncio.get_running_loop()
+        pending = []
 
-        @wraps(function)
-        async def wrapped(ctx: OperationContext, *args: object, **kwargs: object) -> OperationResult:
-            started = time.monotonic()
-            report = partial(ctx.report, phase, message)
-            await report(
-                current=0,
-                total=1,
-                detail={'event': 'started'},
-            )
-            try:
-                result = await function(ctx, *args, **kwargs)
-            except Exception as exc:
-                await report(
-                    detail={
-                        'event': 'failed',
-                        'elapsed_ms': round((time.monotonic() - started) * 1000),
-                        'error_kind': type(exc).__name__,
-                        'error_message': str(exc) or type(exc).__name__,
-                    },
-                )
-                raise
-            await report(
-                current=1,
-                total=1,
-                detail={
-                    'event': 'completed',
-                    'elapsed_ms': round((time.monotonic() - started) * 1000),
-                },
-            )
-            return result
+        def schedule(event: OperationEvent) -> None:
+            if ctx._reporter is not None:
+                pending.append(asyncio.run_coroutine_threadsafe(ctx._reporter(event), loop))
 
-        return cast(F, wrapped)
+        token = _RECORDER.set(schedule)
+        try:
+            return await function(ctx, *args, **kwargs)
+        finally:
+            _RECORDER.reset(token)
+            for result in await asyncio.gather(
+                *(asyncio.wrap_future(future) for future in pending), return_exceptions=True,
+            ):
+                if isinstance(result, BaseException):
+                    _LOG.warning('operation event could not be recorded: %s', result)
 
-    return decorate
+    return cast(F, wrapped)
+
+
+def record_event(event_type: str, message: str = '', *, level: EventLevel = 'info', status: EventStatus | None = None,
+                 data: Mapping[str, object] | None = None, current: int | None = None, total: int | None = None,
+                 **fields: object) -> None:
+    recorder = _RECORDER.get()
+    if recorder is None:
+        raise DefinitionError('record_event requires an active @record_process operation')
+    recorder(OperationEvent(event_type, level, status, message, {**(data or {}), **fields}, current, total))
 
 
 def _validate_signature(function: OperationFunction, spec: OperationSpec) -> None:
@@ -434,7 +426,6 @@ class OperationInvocation:
     expected_heads: Mapping[ArtifactKey, ArtifactRef | None] = field(default_factory=dict)
     partition_key: str = ''
     retry_request_id: str = ''
-    intervention_ref: ArtifactRef | None = None
     invocation_id: str = field(init=False)
     output_keys: Mapping[str, ArtifactKey | None] = field(init=False)
     partition_set_key: ArtifactKey | None = field(init=False)
@@ -454,14 +445,6 @@ class OperationInvocation:
         has_driver = self.operation.spec.driver_input is not None
         if has_driver != bool(self.partition_key):
             raise DefinitionError('partition_key must be set exactly for partitioned invocation')
-        if self.intervention_ref is not None and (
-            not isinstance(self.intervention_ref, ArtifactRef)
-            or self.intervention_ref.key != intervention_key(
-                self.operation.spec.op_id,
-                self.partition_key if has_driver else '',
-            )
-        ):
-            raise DefinitionError('intervention_ref must identify this invocation')
 
         output_keys = {
             name: (
@@ -492,7 +475,6 @@ class OperationInvocation:
             inputs,
             output_keys,
             self.retry_request_id,
-            self.intervention_ref,
         )
 
         object.__setattr__(self, 'inputs', MappingProxyType(inputs))
@@ -530,10 +512,10 @@ class OperationInvocation:
         return expected_heads
 
     def value_refs(self) -> tuple[ArtifactRef, ...]:
-        return _bound_refs(self.inputs, lineage=False, intervention_ref=self.intervention_ref)
+        return _bound_refs(self.inputs, lineage=False)
 
     def lineage_refs(self) -> tuple[ArtifactRef, ...]:
-        return _bound_refs(self.inputs, lineage=True, intervention_ref=self.intervention_ref)
+        return _bound_refs(self.inputs, lineage=True)
 
     def bind_values(self, values: Mapping[ArtifactRef, object]) -> Mapping[str, object]:
         bound: dict[str, object] = {}
@@ -554,24 +536,9 @@ class OperationInvocation:
                 bound[name] = AggregateValue(successful, tuple(failures.items()))
         return MappingProxyType(bound)
 
-    def bind_interventions(self, values: Mapping[ArtifactRef, object]) -> tuple[UserIntervention, ...]:
-        if self.intervention_ref is None:
-            return ()
-        bundle = values[self.intervention_ref]
-        if not isinstance(bundle, InterventionBundle):
-            raise DefinitionError('intervention artifact must contain InterventionBundle')
-        return bundle.interventions
-
     def is_current(self, records: Mapping[ArtifactKey, ArtifactRecord],
                    effective_records: Mapping[ArtifactKey, ArtifactRecord],
                    partition_sets: Mapping[ArtifactKey, PartitionSet]) -> bool:
-        current_intervention = effective_records.get(intervention_key(
-            self.operation.spec.op_id,
-            self.partition_key if self.operation.spec.driver_input is not None else '',
-        ))
-        if getattr(current_intervention, 'ref', None) != self.intervention_ref:
-            return False
-
         for ref in self.lineage_refs():
             current = effective_records.get(ref.key)
             if current is None or current.ref != ref:
@@ -664,8 +631,7 @@ class OperationInvocation:
         )
 
 
-def _bound_refs(inputs: Mapping[str, BoundInput], *, lineage: bool,
-                intervention_ref: ArtifactRef | None = None) -> tuple[ArtifactRef, ...]:
+def _bound_refs(inputs: Mapping[str, BoundInput], *, lineage: bool) -> tuple[ArtifactRef, ...]:
     refs: list[ArtifactRef] = []
     for value in inputs.values():
         if isinstance(value, ArtifactRef):
@@ -675,13 +641,11 @@ def _bound_refs(inputs: Mapping[str, BoundInput], *, lineage: bool,
                 refs.append(value.partition_set_ref)
             refs.extend(value.member_refs)
             refs.extend(value.failure_refs)
-    if intervention_ref is not None:
-        refs.append(intervention_ref)
     return merge_refs(refs)
 
 
 def _invocation_id(op_id: str, inputs: Mapping[str, BoundInput], outputs: Mapping[str, ArtifactKey | None],
-                   retry_request_id: str, intervention_ref: ArtifactRef | None) -> str:
+                   retry_request_id: str) -> str:
     payload = {
         'operation': op_id,
         'inputs': [
@@ -697,15 +661,6 @@ def _invocation_id(op_id: str, inputs: Mapping[str, BoundInput], outputs: Mappin
             for name, key in sorted(outputs.items())
         ],
         'retry_request_id': retry_request_id,
-        'intervention': (
-            None
-            if intervention_ref is None
-            else [
-                intervention_ref.key.artifact_id,
-                intervention_ref.key.partition_key,
-                intervention_ref.version,
-            ]
-        ),
     }
     digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()
@@ -739,6 +694,6 @@ def _bound_identity(value: BoundInput) -> list[object]:
 __all__ = [
     'AggregateValue', 'BindingMode', 'BoundAggregate', 'BoundInput', 'ExecutionMode',
     'InputSpec', 'Operation', 'OperationContext', 'OperationInvocation', 'OperationResult',
-    'OperationSpec', 'OutputMode', 'OutputSpec', 'ProgressReporter', 'all_items', 'each',
-    'keyed', 'one', 'operation', 'partitioned', 'record_progress', 'scalar',
+    'EventReporter', 'OperationSpec', 'OutputMode', 'OutputSpec', 'all_items', 'each',
+    'keyed', 'one', 'operation', 'partitioned', 'record_event', 'record_process', 'scalar',
 ]

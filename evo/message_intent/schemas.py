@@ -20,15 +20,6 @@ class MessageRequest(StrictModel):
     text: str = Field(min_length=1, max_length=20000)
 
 
-class ConfigValidationIssue(StrictModel):
-    path: str = Field(max_length=240)
-    code: Literal[
-        'missing_required', 'invalid_type', 'invalid_url', 'out_of_range',
-        'unknown_field', 'invalid_value', 'immutable_field',
-    ]
-    message: str = Field(max_length=500)
-
-
 class PendingConfirmation(StrictModel):
     confirmation_token: str = Field(max_length=80)
     expires_at: float
@@ -39,113 +30,80 @@ class PendingConfirmation(StrictModel):
 
 class FlowAction(StrictModel):
     kind: Literal['flow']
-    command: Literal['start', 'approve', 'pause', 'resume', 'retry', 'cancel']
+    command: Literal['start', 'approve', 'pause', 'resume', 'rerun', 'retry', 'cancel']
     stage: str = ''
 
     @model_validator(mode='after')
     def validate_stage(self) -> FlowAction:
-        if self.command == 'approve' and not self.stage:
-            raise ValueError('approve requires stage')
-        if self.command not in {'approve', 'retry'} and self.stage:
-            raise ValueError('stage is only valid for approve or retry')
+        if self.command in {'approve', 'rerun'} and not self.stage:
+            raise ValueError(f'{self.command} requires stage')
+        if self.command not in {'approve', 'rerun', 'retry'} and self.stage:
+            raise ValueError('stage is only valid for approve, rerun or retry')
         return self
 
 
 class QueryAction(StrictModel):
     kind: Literal['query']
-    query: Literal['progress', 'stage_result', 'artifact', 'artifact_history']
+    query: Literal[
+        'progress', 'run_history', 'stage_snapshot', 'case_snapshot',
+        'operation_events', 'stage_result', 'artifact', 'artifact_history',
+    ]
     stage: str = ''
+    case_id: str = ''
+    event_type: str = ''
+    level: Literal['debug', 'info', 'warning', 'error'] | None = None
+    limit: int = Field(default=50, ge=1, le=200)
     artifact_id: str = ''
     partition_key: str = ''
     version: int | None = Field(default=None, ge=1)
 
     @model_validator(mode='after')
     def validate_query(self) -> QueryAction:
-        if self.query == 'progress':
-            if self.stage or self.artifact_id or self.partition_key or self.version is not None:
-                raise ValueError('progress does not accept a query target')
+        event_target = self.case_id or self.event_type or self.level is not None or self.limit != 50
+        if self.query in {'progress', 'run_history'}:
+            if self.stage or event_target or self.artifact_id or self.partition_key or self.version is not None:
+                raise ValueError(f'{self.query} does not accept a query target')
             return self
-        if self.query == 'stage_result':
-            if not self.stage:
-                raise ValueError('stage_result requires stage')
+        if self.query == 'operation_events':
             if self.artifact_id or self.partition_key or self.version is not None:
-                raise ValueError('stage_result only accepts stage')
+                raise ValueError('operation_events only accepts event filters')
+            return self
+        if self.query in {'stage_result', 'stage_snapshot'}:
+            if not self.stage:
+                raise ValueError(f'{self.query} requires stage')
+            if event_target or self.artifact_id or self.partition_key or self.version is not None:
+                raise ValueError(f'{self.query} only accepts stage')
+            return self
+        if self.query == 'case_snapshot':
+            if not self.case_id:
+                raise ValueError('case_snapshot requires case_id')
+            if self.stage or self.event_type or self.level is not None or self.limit != 50:
+                raise ValueError('case_snapshot only accepts case_id')
+            if self.artifact_id or self.partition_key or self.version is not None:
+                raise ValueError('case_snapshot only accepts case_id')
             return self
         if not self.artifact_id:
             raise ValueError(f'{self.query} requires artifact_id')
-        if self.stage:
-            raise ValueError(f'{self.query} does not accept stage')
+        if self.stage or event_target:
+            raise ValueError(f'{self.query} only accepts an artifact target')
         if self.version is not None and self.query != 'artifact':
             raise ValueError('version is only valid for artifact')
         return self
 
 
-class ArtifactAction(StrictModel):
-    kind: Literal['artifact']
-    command: Literal['patch', 'replace', 'retry', 'rollback']
-    artifact_id: str = Field(min_length=1)
-    partition_key: str = ''
-    pointer: str = ''
-    value: Any = None
-    version: int | None = Field(default=None, ge=1)
-
-    @model_validator(mode='after')
-    def validate_command(self) -> ArtifactAction:
-        has_value = 'value' in self.model_fields_set
-        if self.command == 'patch':
-            if not self.pointer or not has_value:
-                raise ValueError('patch requires pointer and value')
-            if self.version is not None:
-                raise ValueError('patch does not accept version')
-            return self
-        if self.command == 'replace':
-            if not has_value:
-                raise ValueError('replace requires value')
-            if self.pointer or self.version is not None:
-                raise ValueError('replace only accepts value')
-            return self
-        if self.command == 'rollback':
-            if self.version is None:
-                raise ValueError('rollback requires version')
-            if self.pointer or (has_value and self.value is not None):
-                raise ValueError('rollback only accepts version')
-            return self
-        if self.pointer or (has_value and self.value is not None) or self.version is not None:
-            raise ValueError('retry only accepts an artifact key')
-        return self
-
-
 class CaseAction(StrictModel):
     kind: Literal['case']
-    command: Literal['add', 'delete']
+    command: Literal['rerun', 'retry']
     case_id: str = Field(min_length=1)
-    case: dict[str, Any] | None = None
-    instruction: str = ''
-    required_chunks: list[str] = Field(default_factory=list)
+    stage: str = ''
 
     @model_validator(mode='after')
     def validate_command(self) -> CaseAction:
-        if self.command == 'add' and self.case is None and not self.instruction:
-            raise ValueError('add case requires a complete case or instruction')
-        if self.command == 'add' and self.case is not None and (
-            self.instruction or self.required_chunks
-        ):
-            raise ValueError('complete case and generation guidance are mutually exclusive')
-        if self.command == 'delete' and (
-            self.case is not None or self.instruction or self.required_chunks
-        ):
-            raise ValueError('delete case only accepts case_id')
+        if self.command == 'rerun' and not self.stage:
+            raise ValueError('case rerun requires stage')
+        if self.command != 'rerun' and self.stage:
+            raise ValueError('stage is only valid for case rerun')
         return self
-
-
-class ConfigPatchAction(StrictModel):
-    kind: Literal['config_patch']
-    target: Literal[
-        'run_config', 'source_config', 'target_config', 'eval_policy',
-        'repair_policy', 'candidate_config',
-    ]
-    pointer: str
-    value: Any = None
 
 
 class ConfirmationAction(StrictModel):
@@ -172,8 +130,7 @@ class FinalAction(StrictModel):
 
 
 PlannedAction = Annotated[
-    FlowAction | QueryAction | ArtifactAction | CaseAction | ConfigPatchAction
-    | ConfirmationAction | ClarifyAction | FinalAction,
+    FlowAction | QueryAction | CaseAction | ConfirmationAction | ClarifyAction | FinalAction,
     Field(discriminator='kind'),
 ]
 PlannedActionAdapter = TypeAdapter(PlannedAction)
@@ -245,8 +202,7 @@ class MessageHistoryResponse(StrictModel):
 
 
 __all__ = [
-    'ArtifactAction', 'CaseAction', 'ClarifyAction', 'ConfigPatchAction',
-    'ConfigValidationIssue', 'ConfirmationAction', 'FinalAction', 'FlowAction',
+    'CaseAction', 'ClarifyAction', 'ConfirmationAction', 'FinalAction', 'FlowAction',
     'MessageContentRef', 'MessageHistoryItem', 'MessageHistoryResponse',
     'MessageRequest', 'MessageTurnResult', 'PendingConfirmation', 'PlannedAction',
     'QueryAction', 'TurnPlan', 'parse_planned_action',

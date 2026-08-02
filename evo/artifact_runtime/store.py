@@ -15,27 +15,30 @@ import aiosqlite
 
 from .artifact import (
     ArtifactCommit,
+    ArtifactDraft,
     ArtifactKey,
     ArtifactRecord,
     ArtifactRef,
     ArtifactSnapshot,
     PartitionSet,
 )
-from .errors import DefinitionError, _string, _text, _tuple_of
+from .errors import DefinitionError, _integer, _known, _string, _text, _tuple_of
 from .state import (
     ArtifactRetryRequest,
     AttemptSnapshot,
     AttemptStatus,
-    ProgressEvent,
-    ProgressUpdate,
+    EventLevel,
+    EventStatus,
+    OperationEvent,
+    RecordedOperationEvent,
     RunStatus,
     RuntimeErrorInfo,
 )
 
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 _SCHEMA_TABLES = frozenset({
-    'artifacts', 'attempts', 'commits', 'progress_events', 'retry_requests', 'runs',
+    'artifacts', 'attempts', 'commits', 'operation_events', 'retry_requests', 'runs',
 })
 _Row = Mapping[str, object]
 _RUN_STATUSES = frozenset(get_args(RunStatus))
@@ -275,58 +278,77 @@ class ArtifactStore:
             for row in rows
         )
 
-    async def request_retry(self, run_id: str, request_id: str, artifact_key: ArtifactKey,
-                            base_ref: ArtifactRef) -> ArtifactRetryRequest:
-        _text(run_id, 'run_id')
-        _text(request_id, 'retry request_id')
-        if not isinstance(artifact_key, ArtifactKey):
-            raise TypeError('artifact_key must be ArtifactKey')
-        if not isinstance(base_ref, ArtifactRef) or base_ref.key != artifact_key:
-            raise DefinitionError('base_ref must identify artifact_key')
-
-        async with self._transaction():
-            await self._require_run(run_id)
-            existing = await self._retry_row(run_id, request_id)
-            if existing is not None:
-                request = _retry_request(existing)
-                if request.artifact_key != artifact_key or request.base_ref != base_ref:
-                    raise DefinitionError(f'retry request id reused: {request_id}')
-                return request
-
-            current = await self._head_ref(run_id, artifact_key)
-            if current != base_ref:
-                raise DefinitionError('retry target is no longer the current artifact version')
-            conflict = await self._fetchone(
-                """
-                SELECT request_id FROM retry_requests
-                WHERE run_id = ? AND artifact_id = ? AND partition_key = ? AND status = 'pending'
-                """,
-                (run_id, artifact_key.artifact_id, artifact_key.partition_key),
-            )
-            if conflict is not None:
-                raise DefinitionError(
-                    f'artifact already has a pending retry: {conflict["request_id"]}'
-                )
-
-            request = await self._insert_retry(
-                run_id,
-                request_id,
-                artifact_key,
-                base_ref,
-            )
-        return request
-
     async def replace_pending_retries(
-        self,
-        run_id: str,
-        entries: Iterable[tuple[str, ArtifactKey, ArtifactRef]],
-    ) -> tuple[ArtifactRetryRequest, ...]:
+        self, run_id: str, entries: Iterable[tuple[str, ArtifactKey, ArtifactRef]], *, command_id: str, producer: str,
+        scope: str, resolved_failures: Iterable[ArtifactRecord] = (), required_failure_cases: Iterable[str] = (),
+        failed_attempt_ids: Iterable[str] = (), require_failures: bool = False,
+    ) -> tuple[ArtifactRetryRequest, ...] | None:
         _text(run_id, 'run_id')
+        _text(command_id, 'recompute command_id')
+        _text(producer, 'recompute producer')
+        _text(scope, 'recompute scope')
         requests = _validated_retry_entries(entries)
+        failures = _tuple_of(
+            resolved_failures,
+            ArtifactRecord,
+            'resolved_failures must contain ArtifactRecord values',
+        )
+        required_cases = tuple(dict.fromkeys(required_failure_cases))
+        for case_id in required_cases:
+            _text(case_id, 'required failure case_id')
+        failed_attempts = tuple(dict.fromkeys(failed_attempt_ids))
+        for attempt_id in failed_attempts:
+            _text(attempt_id, 'failed attempt_id')
+        fingerprint = hashlib.sha256(f'{run_id}\0{producer}\0{scope}'.encode()).hexdigest()
+        marker = None
+        if failures:
+            marker = await asyncio.to_thread(
+                _prepare_commit,
+                run_id,
+                ArtifactCommit(
+                    command_id,
+                    producer,
+                    tuple(
+                        ArtifactDraft(
+                            record.ref.key,
+                            {'command_id': command_id, 'failure_ref': record.ref},
+                            record.input_refs,
+                        )
+                        for record in failures
+                    ),
+                    {record.ref.key: record.ref for record in failures},
+                ),
+            )
 
         results: list[ArtifactRetryRequest] = []
         async with self._transaction():
             await self._require_run(run_id)
+            receipt = await self._fetchone(
+                'SELECT request_hash FROM commits WHERE run_id = ? AND commit_id = ?',
+                (run_id, command_id),
+            )
+            if receipt is not None:
+                if receipt['request_hash'] != fingerprint:
+                    raise DefinitionError(f'command id reused with different request: {command_id}')
+                return None
+            failed_cases = {record.ref.key.partition_key for record in failures}
+            missing_cases = tuple(case_id for case_id in required_cases if case_id not in failed_cases)
+            if missing_cases:
+                raise DefinitionError(f'cases have no active failure: {", ".join(missing_cases)}')
+            if failed_attempts:
+                placeholders = ','.join('?' for _ in failed_attempts)
+                rows = await self._connection.execute_fetchall(
+                    f"""
+                    SELECT attempt_id FROM attempts
+                    WHERE run_id = ? AND status = 'failed'
+                      AND attempt_id IN ({placeholders})
+                    """,
+                    (run_id, *failed_attempts),
+                )
+                if {row['attempt_id'] for row in rows} != set(failed_attempts):
+                    raise DefinitionError('failed attempts changed before retry was applied')
+            if require_failures and not (failures or failed_attempts):
+                raise DefinitionError('recompute scope has no active case failure')
             rows = await self._connection.execute_fetchall(
                 """
                 SELECT * FROM retry_requests
@@ -376,10 +398,21 @@ class ArtifactStore:
                     artifact_key,
                     base_ref,
                 ))
+            refs: tuple[ArtifactRef, ...] = ()
+            if marker is not None:
+                rows = await self._head_rows(run_id)
+                snapshot = await asyncio.to_thread(_snapshot_from_rows, rows, frozenset())
+                if not await self._commit_is_current(run_id, marker.command, snapshot):
+                    raise DefinitionError('case failures changed before retry was applied')
+                refs = (await self._apply_commit(marker)).refs
+            await self._connection.execute(
+                'INSERT INTO commits(run_id, commit_id, request_hash, refs_json) VALUES (?, ?, ?, ?)',
+                (run_id, command_id, fingerprint, _refs_json(refs)),
+            )
         return tuple(results)
 
-    async def _insert_retry(self, run_id: str, request_id: str, artifact_key: ArtifactKey,
-                            base_ref: ArtifactRef) -> ArtifactRetryRequest:
+    async def _insert_retry(self, run_id: str, request_id: str, artifact_key: ArtifactKey, base_ref: ArtifactRef
+                            ) -> ArtifactRetryRequest:
         created_at = time.time()
         await self._connection.execute(
             """
@@ -467,13 +500,9 @@ class ArtifactStore:
             """
         )
 
-    async def inspect(self, run_id: str, partition_set_ids: Iterable[str] = ()
-                      ) -> tuple[
-        StoredRunState,
-        ArtifactSnapshot,
-        tuple[AttemptSnapshot, ...],
-        tuple[ArtifactRetryRequest, ...],
-    ]:
+    async def inspect(
+        self, run_id: str, partition_set_ids: Iterable[str] = (),
+    ) -> tuple[StoredRunState, ArtifactSnapshot, tuple[AttemptSnapshot, ...], tuple[ArtifactRetryRequest, ...],]:
         _text(run_id, 'run_id')
         ids = frozenset(partition_set_ids)
         async with self._lock:
@@ -623,62 +652,124 @@ class ArtifactStore:
         )
         return tuple(_attempt_snapshot(row) for row in rows)
 
-    async def append_progress(self, run_id: str, attempt_id: str, update: ProgressUpdate) -> ProgressEvent:
+    async def append_operation_event(self, run_id: str, attempt_id: str, event: OperationEvent
+                                     ) -> RecordedOperationEvent:
         _text(run_id, 'run_id')
         _text(attempt_id, 'attempt_id')
-        if not isinstance(update, ProgressUpdate):
-            raise TypeError('update must be ProgressUpdate')
+        if not isinstance(event, OperationEvent):
+            raise TypeError('event must be OperationEvent')
         created_at = time.time()
-        detail_json = json.dumps(dict(update.detail), ensure_ascii=False, sort_keys=True)
+        data_json = json.dumps(dict(event.data), ensure_ascii=False, sort_keys=True, allow_nan=False)
         async with self._transaction():
             row = await self._attempt_row(run_id, attempt_id)
             if row is None:
                 raise DefinitionError(f'attempt not found: {attempt_id}')
             if row['status'] != 'running':
-                raise DefinitionError('progress can only be appended to a running attempt')
-            row = await self._fetchone(
+                raise DefinitionError('operation events can only be appended to a running attempt')
+            sequence_row = await self._fetchone(
                 """
                 SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence
-                FROM progress_events WHERE run_id = ? AND attempt_id = ?
+                FROM operation_events WHERE run_id = ?
                 """,
-                (run_id, attempt_id),
+                (run_id,),
             )
-            assert row is not None
-            sequence = int(row['sequence'])
+            assert sequence_row is not None
+            sequence = int(sequence_row['sequence'])
             await self._connection.execute(
                 """
-                INSERT INTO progress_events(
-                  run_id, attempt_id, sequence, phase, message,
-                  current_value, total_value, detail_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO operation_events(
+                  run_id, sequence, attempt_id, event_type, level, status, message,
+                  current_value, total_value, data_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    run_id, attempt_id, sequence, update.phase, update.message,
-                    update.current, update.total, detail_json, created_at,
+                    run_id, sequence, attempt_id, event.event_type, event.level, event.status,
+                    event.message, event.current, event.total, data_json, created_at,
                 ),
             )
-        return ProgressEvent(attempt_id, sequence, update, created_at)
+        return RecordedOperationEvent(
+            run_id,
+            attempt_id,
+            cast(str, row['invocation_id']),
+            cast(str, row['operation_id']),
+            cast(str, row['partition_key']),
+            sequence,
+            event,
+            created_at,
+        )
 
-    async def progress_events(self, run_id: str, attempt_id: str | None = None) -> tuple[ProgressEvent, ...]:
+    async def operation_events(self, run_id: str, *, attempt_id: str = '', operation_id: str = '',
+                               operation_ids: Iterable[str] = (),
+                               partition_key: str | None = None, event_type: str = '', level: EventLevel | None = None,
+                               status: EventStatus | None = None, after: int = 0, limit: int | None = None
+                               ) -> tuple[RecordedOperationEvent, ...]:
         _text(run_id, 'run_id')
-        statement = 'SELECT * FROM progress_events WHERE run_id = ?'
-        parameters: tuple[object, ...] = ()
-        if attempt_id is not None:
+        _integer(after, 'operation event cursor')
+        if limit is not None:
+            _integer(limit, 'operation event limit', minimum=1)
+        filters = ['event.run_id = ?', 'event.sequence > ?']
+        parameters: list[object] = [after]
+        if attempt_id:
             _text(attempt_id, 'attempt_id')
-            statement += ' AND attempt_id = ?'
-            parameters = (attempt_id,)
-        statement += ' ORDER BY created_at, attempt_id, sequence'
-        rows = await self._rows(run_id, statement, parameters)
+            filters.append('event.attempt_id = ?')
+            parameters.append(attempt_id)
+        selected_operations = tuple(dict.fromkeys(operation_ids))
+        for selected in selected_operations:
+            _text(selected, 'operation_id')
+        if operation_id and selected_operations:
+            raise DefinitionError('operation_id and operation_ids are mutually exclusive')
+        if operation_id:
+            _text(operation_id, 'operation_id')
+            filters.append('attempt.operation_id = ?')
+            parameters.append(operation_id)
+        elif selected_operations:
+            placeholders = ','.join('?' for _ in selected_operations)
+            filters.append(f'attempt.operation_id IN ({placeholders})')
+            parameters.extend(selected_operations)
+        if partition_key is not None:
+            _string(partition_key, 'partition_key')
+            filters.append('attempt.partition_key = ?')
+            parameters.append(partition_key)
+        if event_type:
+            _text(event_type, 'event_type')
+            filters.append('event.event_type = ?')
+            parameters.append(event_type)
+        if level is not None:
+            _known(level, get_args(EventLevel), 'operation event level')
+            filters.append('event.level = ?')
+            parameters.append(level)
+        if status is not None:
+            _known(status, get_args(EventStatus), 'operation event status')
+            filters.append('event.status = ?')
+            parameters.append(status)
+        statement = f"""
+            SELECT event.*, attempt.invocation_id, attempt.operation_id, attempt.partition_key
+            FROM operation_events AS event
+            JOIN attempts AS attempt
+              ON attempt.run_id = event.run_id AND attempt.attempt_id = event.attempt_id
+            WHERE {' AND '.join(filters)}
+            ORDER BY event.sequence
+        """
+        if limit is not None:
+            statement += ' LIMIT ?'
+            parameters.append(limit)
+        rows = await self._rows(run_id, statement, tuple(parameters))
         return tuple(
-            ProgressEvent(
+            RecordedOperationEvent(
+                cast(str, row['run_id']),
                 cast(str, row['attempt_id']),
+                cast(str, row['invocation_id']),
+                cast(str, row['operation_id']),
+                cast(str, row['partition_key']),
                 cast(int, row['sequence']),
-                ProgressUpdate(
-                    cast(str, row['phase']),
+                OperationEvent(
+                    cast(str, row['event_type']),
+                    cast(EventLevel, row['level']),
+                    cast(str | None, row['status']),
                     cast(str, row['message']),
+                    json.loads(cast(str, row['data_json'])),
                     cast(int | None, row['current_value']),
                     cast(int | None, row['total_value']),
-                    json.loads(cast(str, row['detail_json'])),
                 ),
                 cast(float, row['created_at']),
             )
@@ -705,29 +796,19 @@ class ArtifactStore:
             now = time.time()
             for row in rows:
                 run_id = row['run_id']
-                active = await self._fetchone(
-                    """
-                    SELECT 1 FROM attempts
-                    WHERE run_id = ? AND status IN ('scheduled', 'running', 'cancelling')
-                    LIMIT 1
-                    """,
-                    (run_id,),
-                )
-                if row['status'] == 'running' and active is None:
-                    continue
                 cancelling = row['status'] == 'cancelling'
                 attempt_status = 'cancelled' if cancelling else 'interrupted'
                 await self._connection.execute(
-                    '''
+                    """
                     UPDATE attempts SET status = ?, finished_at = ?
                     WHERE run_id = ? AND status IN ('scheduled', 'running', 'cancelling')
-                    ''',
+                    """,
                     (attempt_status, now, run_id),
                 )
                 if row['status'] != 'failed':
                     run_status = 'cancelled' if cancelling else 'paused'
                     await self._connection.execute(
-                        'UPDATE runs SET status = ?, error_kind = \'\', error_message = \'\' WHERE run_id = ?',
+                        "UPDATE runs SET status = ?, error_kind = '', error_message = '' WHERE run_id = ?",
                         (run_status, run_id),
                     )
                     if cancelling:
@@ -1124,23 +1205,26 @@ class ArtifactStore:
             CREATE UNIQUE INDEX active_attempt_by_invocation
               ON attempts(run_id, invocation_id)
               WHERE status IN ('scheduled', 'running', 'cancelling');
-            CREATE TABLE progress_events(
+            CREATE TABLE operation_events(
               run_id TEXT NOT NULL,
-              attempt_id TEXT NOT NULL,
               sequence INTEGER NOT NULL CHECK(sequence > 0),
-              phase TEXT NOT NULL,
+              attempt_id TEXT NOT NULL,
+              event_type TEXT NOT NULL,
+              level TEXT NOT NULL CHECK(level IN ('debug', 'info', 'warning', 'error')),
+              status TEXT CHECK(status IS NULL OR status IN ('started', 'running', 'completed', 'failed', 'skipped')),
               message TEXT NOT NULL,
               current_value INTEGER,
               total_value INTEGER,
-              detail_json TEXT NOT NULL,
+              data_json TEXT NOT NULL,
               created_at REAL NOT NULL,
-              PRIMARY KEY(run_id, attempt_id, sequence),
+              PRIMARY KEY(run_id, sequence),
               FOREIGN KEY(run_id, attempt_id)
                 REFERENCES attempts(run_id, attempt_id) ON DELETE CASCADE,
               CHECK(current_value IS NULL OR current_value >= 0),
               CHECK(total_value IS NULL OR total_value >= 0),
               CHECK(current_value IS NULL OR total_value IS NULL OR current_value <= total_value)
             );
+            CREATE INDEX operation_events_by_attempt ON operation_events(run_id, attempt_id, sequence);
             PRAGMA user_version = {_SCHEMA_VERSION};
             COMMIT;
             """
@@ -1175,9 +1259,8 @@ class ArtifactStore:
                 raise
 
 
-def _validated_retry_entries(
-    entries: Iterable[tuple[str, ArtifactKey, ArtifactRef]],
-) -> tuple[tuple[str, ArtifactKey, ArtifactRef], ...]:
+def _validated_retry_entries(entries: Iterable[tuple[str, ArtifactKey, ArtifactRef]]
+                             ) -> tuple[tuple[str, ArtifactKey, ArtifactRef], ...]:
     requests = tuple(entries)
     request_ids: set[str] = set()
     artifact_keys: set[ArtifactKey] = set()
@@ -1322,15 +1405,10 @@ def _commit_fingerprint(run_id: str, commit: ArtifactCommit, payloads: tuple[byt
         digest.update(json.dumps(_key_data(write.key), separators=(',', ':')).encode())
         digest.update(_refs_json(write.input_refs).encode())
         digest.update(payload)
-    expected = [
-        [_key_data(key), _ref_data(ref)]
-        for key, ref in sorted(commit.expected_heads.items())
-    ]
     guards = [
         [_key_data(guard.partition_set_key), guard.partition_key]
         for guard in sorted(commit.partition_guards)
     ]
-    digest.update(json.dumps(expected, separators=(',', ':')).encode())
     digest.update(json.dumps(guards, separators=(',', ':')).encode())
     return digest.hexdigest()
 
