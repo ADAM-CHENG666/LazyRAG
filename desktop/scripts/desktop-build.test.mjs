@@ -152,6 +152,8 @@ test("Windows installer diagnoses paths and does not roll back when warmup fails
     install,
     /ExecWait[^\n]+--installer-warmup[^\n]+\$3[\s\S]*LMWarmupCheckStopped:[\s\S]*check-stopped --install-dir "\$INSTDIR"/,
   );
+  assert.match(install, /installer-nsis\.log[\s\S]*Starting Electron installer warmup/);
+  assert.match(install, /Electron installer warmup returned exit code \$3/);
   assert.match(
     install,
     /\$0 == 10[\s\S]*force-stop --install-dir "\$INSTDIR"[\s\S]*Goto LMWarmupCheckStopped/,
@@ -178,9 +180,11 @@ test("Windows CI treats branches as non-tags without leaking git probe failures"
     source,
     /name:\s*\$\{\{ needs\.build-windows-installer\.outputs\.artifact_name \}\}/,
   );
-  assert.match(source, /Start-Process -FilePath \$installer\[0\]\.FullName -ArgumentList "\/S" -Wait/);
+  assert.match(source, /Start-Process -FilePath \$env:INSTALLER_PATH -ArgumentList "\/S" -Wait/);
   assert.match(source, /DisplayVersion -ne \$env:EXPECTED_VERSION/);
   assert.match(source, /Start-Process -FilePath \$uninstaller -ArgumentList "\/S" -Wait/);
+  assert.match(source, /RegistryView\]::Registry64[\s\S]*RegistryView\]::Registry32/);
+  assert.match(source, /name: Upload installer diagnostics[\s\S]*if: always\(\)/);
 });
 
 test("Windows NSIS installer uses electron-builder's default LZMA payload", () => {
@@ -188,7 +192,9 @@ test("Windows NSIS installer uses electron-builder's default LZMA payload", () =
   const packageJson = JSON.parse(readFileSync(electronPackage, "utf8"));
   const buildScript = readFileSync(path.join(scriptsDir, "build-windows-x64.ps1"), "utf8");
   const workflow = readFileSync(windowsWorkflow, "utf8");
+  assert.equal(packageJson.version, "0.2.0-dev");
   assert.doesNotMatch(source, /useZip\s*:/);
+  assert.match(source, /uninstallDisplayName:\s*"LazyMind"/);
   assert.match(packageJson.scripts["pack:win:x64"], /--publish never$/);
   assert.match(packageJson.scripts["pack:win:x64:installer"], /--publish never$/);
   assert.match(buildScript, /function Invoke-WindowsPackagingWithRetry/);
@@ -299,6 +305,19 @@ test("macOS CI notarizes ZIP then DMG and preserves only the DMG timeout fallbac
   assert.match(finalizeWorkflow, /name:\s*LazyMind-macos-arm64-notarized/);
 });
 
+test("installer workflows launch the packaged application before publishing", () => {
+  const macosSource = readFileSync(macosWorkflow, "utf8");
+  const windowsSource = readFileSync(windowsWorkflow, "utf8");
+  for (const source of [macosSource, windowsSource]) {
+    assert.match(source, /packaged-app-smoke\.mjs/);
+    assert.match(source, /--timeout-ms 300000/);
+  }
+  assert.match(macosSource, /LAZYMIND_DESKTOP_RUNTIME_ROOT=/);
+  assert.ok(
+    windowsSource.indexOf("packaged-app-smoke.mjs") < windowsSource.indexOf("$uninstall = Start-Process"),
+  );
+});
+
 test("packaged macOS app runs installation warmup once before its normal window", () => {
   const source = readFileSync(electronMainScript, "utf8");
   assert.match(
@@ -324,6 +343,13 @@ test("Desktop does not create the Chat window after quitting or moving to backgr
     /const status = await waitForDesktopHomeReady\(\);\s*if \(isQuitting \|\| windowHiddenByUser \|\| nextStartupWindow\.isDestroyed\(\)\) \{\s*return;\s*\}\s*nextMainWindow = new BrowserWindow/,
     "quit and background state must be rechecked before creating the hidden Chat window",
   );
+});
+
+test("Desktop renderer keeps Node disabled behind an isolated preload bridge", () => {
+  const source = readFileSync(electronMainScript, "utf8");
+  assert.match(source, /contextIsolation:\s*true/);
+  assert.match(source, /nodeIntegration:\s*false/);
+  assert.match(source, /preload:\s*path\.join\(__dirname, "preload\.js"\)/);
 });
 
 test("Desktop opens the home page from the sidecar readiness event with status polling as fallback", () => {
