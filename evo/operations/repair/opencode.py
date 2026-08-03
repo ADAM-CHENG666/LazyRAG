@@ -13,6 +13,7 @@ from shutil import copy2
 from typing import Any, NamedTuple, TextIO
 
 from evo.artifact_runtime import record_event
+from evo.llm import parse_json_object
 
 PERMISSIONS = {
     **dict.fromkeys(('read', 'grep', 'glob', 'list', 'edit', 'write'), 'allow'),
@@ -457,8 +458,8 @@ def _secrets(env: dict[str, str]) -> list[str]:
 
 def read_opencode_report(path: Path, task: str = '') -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding='utf-8'))
-    except (json.JSONDecodeError, OSError) as exc:
+        value = parse_json_object(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError) as exc:
         return {'status': 'missing', 'reason': type(exc).__name__}
     if not isinstance(value, dict):
         return {'status': 'invalid', 'reason': 'report_not_object'}
@@ -517,10 +518,14 @@ def _phase1_task_card(task: str, instruction: str, category_id: str, context_pat
             'Read opencode/context.json before acting.',
             'Never execute the Demo or use shell/bash.',
             'Never modify source/, inputs/, web/, outputs/, or logs/.',
+            'Write report_path as one strict JSON object and escape every embedded quote.',
         ],
     }
     if task == 'investigate':
-        common['constraints'].append('Search and read source/ only; do not modify demo/.')
+        common['constraints'].extend([
+            'Search and read source/ only; do not modify demo/.',
+            'Keep observations concise and paraphrase code; do not embed Markdown links or code literals.',
+        ])
         common['report_schema'] = {
             'findings': [{'path': 'source/algorithm/...', 'symbol': '...', 'observation': '...'}],
             'open_questions': ['...'],

@@ -142,21 +142,12 @@ def _web_search_providers() -> list[Any]:
             providers.append(provider_type())
         except Exception:
             continue
-    try:
-        from lazymind.chat.engine.tools.infra.web_search_support import OpenWebSearch
-
-        providers.append(OpenWebSearch())
-    except Exception:
-        pass
     return providers
 
 
 def _open_search(question: str, limit: int) -> list[dict[str, str]]:
     """Credential-free Repair fallback for deployments where HTML search is blocked."""
-    from lazymind.chat.engine.tools.infra.web_search_support import (
-        _search_query_variants,
-        fetch_public_url,
-    )
+    from lazymind.chat.engine.tools.infra.web_search_support import fetch_public_url
 
     headers = {
         'User-Agent': (
@@ -172,6 +163,15 @@ def _open_search(question: str, limit: int) -> list[dict[str, str]]:
         if results := _parse_open_results(response.text, limit):
             return results
     return []
+
+
+def _search_query_variants(question: str) -> list[str]:
+    """Normalize Agent queries locally without extending the shared WebSearch tool."""
+    normalized = ' '.join(str(question or '').split())
+    if not normalized:
+        return []
+    concise = ' '.join(normalized.split()[:10])
+    return list(dict.fromkeys((concise, normalized)))
 
 
 def _parse_open_results(html: str, limit: int) -> list[dict[str, str]]:

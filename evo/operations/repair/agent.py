@@ -116,6 +116,13 @@ def _next_turn(client: LazyLLMClient, state: Mapping[str, Any], counters: Mappin
             turn = AgentTurn.model_validate(parse_json_object(raw))
             if turn.action not in available:
                 raise ValueError(f'action {turn.action!r} is not currently available')
+            if turn.action == 'read_web':
+                unread = _known_urls(state) - set(state.get('read_urls') or ())
+                stale = [url for url in turn.urls if url not in unread]
+                if stale:
+                    raise ValueError(
+                        'read_web urls must be unread exact URLs from State web search results or user guidance'
+                    )
             if turn.action == 'experiment':
                 scope = state.get('repair_scope') if isinstance(state.get('repair_scope'), Mapping) else {}
                 if not inside_repair_scope(
@@ -212,7 +219,9 @@ def _review_experiment(client: LazyLLMClient, state: Mapping[str, Any], candidat
         'demo_method consumes the trusted _repair_live_probes results; controlled doubles cannot prove that live '
         'claim. A local fallback/control-flow method may instead use clearly labeled controlled inputs to compare '
         'old failure and new output without live_urls, because actual service health is checked after the formal '
-        'patch. For an endpoint replacement, both the original '
+        'patch. Merely calling an external client in the eventual patch is not a live-health claim: do not require '
+        'a probe when the Demo proves only fallback selection, request shaping, transformation, or output contracts '
+        'with controlled responses and explicitly disclaims service health. For an endpoint replacement, both the original '
         'failing URL and proposed URL must appear in candidate.live_urls; one live side plus one simulated side is '
         'not a comparison. It is otherwise a method-level, pure in-process Demo: it need not import modified source, '
         'prove the formal edit, start a service, or prove downstream service health. Those are Phase-2 checks and '
@@ -370,7 +379,7 @@ def _experiment_grounding_issues(state: Mapping[str, Any], candidate: Mapping[st
     issues = _guidance_evidence_issues(state)
     live_urls = [str(item).strip() for item in candidate.get('live_urls') or () if str(item).strip()]
     claim_text = ' '.join(str(candidate.get(key) or '') for key in ('repair_method', 'demo_method')).casefold()
-    service_claim = bool(re.search(r'/(?:[a-z0-9_-]+)(?:/[a-z0-9_-]+)*', claim_text)) and any(
+    service_claim = bool(re.search(r'(?<![a-z0-9_])/(?:[a-z0-9_-]+)(?:/[a-z0-9_-]+)*', claim_text)) and any(
         marker in claim_text for marker in (
             'status 200', 'status 404', 'returned 200', 'returned 404',
             'ready', 'readiness', 'healthy',
@@ -457,7 +466,11 @@ def _available_actions(state: Mapping[str, Any], counters: Mapping[str, int],
         actions.append('read_web')
     if counters['opencode_calls'] < budget['opencode_calls']:
         actions.append('investigate')
-    if not _guidance_evidence_issues(state) and counters['experiments'] < budget['experiments']:
+    if (
+        state.get('code_findings')
+        and not _guidance_evidence_issues(state)
+        and counters['experiments'] < budget['experiments']
+    ):
         actions.append('experiment')
     if state.get('experiment') and counters['opencode_calls'] < budget['opencode_calls']:
         actions.append('revise_demo')
