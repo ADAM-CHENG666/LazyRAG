@@ -9,7 +9,6 @@ from evo.artifact_runtime import (
     Operation,
     OperationContext,
     OperationResult,
-    PartitionSet,
     all_items,
     each,
     keyed,
@@ -27,128 +26,12 @@ from .analysis.classify import classify_case
 from .analysis.cluster import cluster_traces
 from .analysis.summary import build_analysis_summary
 from .analysis.trace_summary import build_trace_summary
-from .dataset.assemble import assemble_dataset
-from .dataset.generation import build_case_requests, generate_case, prepare_case
-from .dataset.kb_loader import build_corpus_snapshot, load_corpus
+from .dataset.operations import dataset_operations
 from .eval.answer import async_answer_case
 from .eval.judge import judge_case
 from .public_contracts import build_eval_summary_root, require_mapping as _mapping
 from .repair.loop import build_verified_patch, prepare_candidate_workspace, run_repair_loop
 from .repair.phase1 import build_repair_plan
-
-
-@operation(
-    op_id='dataset.load_corpus',
-    inputs={'source_config': one(A.CORPUS_SOURCE_CONFIG)},
-    outputs={'report': scalar(A.CORPUS_REPORT)},
-)
-async def load_corpus_operation(ctx: OperationContext, source_config: object) -> OperationResult:
-    report = load_corpus(_mapping(source_config, 'source_config'))
-    return await _recorded_result(ctx, 'dataset.corpus_loaded', {'report': report}, status=report.get('status'))
-
-
-@operation(
-    op_id='dataset.build_corpus_snapshot',
-    inputs={
-        'report': one(A.CORPUS_REPORT),
-        'source_config': one(A.CORPUS_SOURCE_CONFIG),
-    },
-    outputs={'snapshot': scalar(A.CORPUS_SNAPSHOT)},
-)
-async def build_corpus_snapshot_operation(ctx: OperationContext, report: object, source_config: object
-                                          ) -> OperationResult:
-    snapshot = build_corpus_snapshot(_mapping(report, 'report'), _mapping(source_config, 'source_config'))
-    return await _recorded_result(
-        ctx, 'dataset.corpus_snapshot_built', {'snapshot': snapshot},
-        document_count=len(snapshot.get('documents') or ()),
-    )
-
-
-@operation(
-    op_id='dataset.case_requests',
-    inputs={
-        'config': one(A.RUN_CONFIG),
-        'snapshot': one(A.CORPUS_SNAPSHOT),
-    },
-    outputs={
-        'partitions': scalar(A.EVAL_CASE_REQUESTS),
-        'requests': partitioned(A.EVAL_CASE_REQUEST, over=A.EVAL_CASE_REQUESTS),
-    },
-)
-async def case_requests_operation(ctx: OperationContext, config: object, snapshot: object) -> OperationResult:
-    requests = build_case_requests(
-        _mapping(config, 'config'),
-        _mapping(snapshot, 'snapshot'),
-    )
-    total = len(requests)
-    return await _recorded_result(
-        ctx, 'dataset.case_requests_built',
-        {'partitions': PartitionSet(tuple(requests)), 'requests': requests},
-        current=total, total=total, case_count=total,
-    )
-
-
-@operation(
-    op_id='dataset.prepare_case',
-    inputs={
-        'request': each(A.EVAL_CASE_REQUEST, over=A.EVAL_CASE_REQUESTS),
-        'config': one(A.RUN_CONFIG),
-        'snapshot': one(A.CORPUS_SNAPSHOT),
-    },
-    outputs={'preparation': partitioned(A.EVAL_CASE_PREPARATION)},
-    max_concurrency=4,
-)
-async def prepare_case_operation(ctx: OperationContext, request: object, config: object, snapshot: object
-                                 ) -> OperationResult:
-    preparation = prepare_case(
-        _mapping(config, 'config'), _mapping(snapshot, 'snapshot'),
-        ctx.partition_key, _mapping(request, 'request'),
-    )
-    return await _recorded_result(
-        ctx, 'dataset.case_prepared', {'preparation': preparation}, case_id=ctx.partition_key,
-    )
-
-
-@operation(
-    op_id='dataset.generate_case',
-    inputs={
-        'preparation': each(A.EVAL_CASE_PREPARATION, over=A.EVAL_CASE_REQUESTS),
-        'config': one(A.RUN_CONFIG),
-        'snapshot': one(A.CORPUS_SNAPSHOT),
-    },
-    outputs={'case': partitioned(A.EVAL_CASE)},
-    max_concurrency=4,
-)
-async def generate_case_operation(ctx: OperationContext, preparation: object, config: object, snapshot: object
-                                  ) -> OperationResult:
-    await ctx.record('dataset.case_generation_started', status='started', case_id=ctx.partition_key)
-    case = generate_case(
-        _mapping(config, 'config'), _mapping(snapshot, 'snapshot'),
-        _mapping(preparation, 'preparation'),
-    )
-    return await _recorded_result(
-        ctx, 'dataset.case_generated', {'case': case}, case_id=ctx.partition_key,
-    )
-
-
-@operation(
-    op_id='dataset.assemble',
-    inputs={'cases': all_items(A.EVAL_CASE, over=A.EVAL_CASE_REQUESTS)},
-    outputs={'dataset': scalar(A.EVAL_DATASET)},
-)
-async def assemble_dataset_operation(ctx: OperationContext, cases: object) -> OperationResult:
-    case_map = _mapping(cases, 'cases')
-    failures = _failure_summary(cases)
-    if not case_map:
-        raise ValueError('dataset has no successful cases')
-    dataset = assemble_dataset(
-        case_map, run_id=ctx.run_id, failed_cases=failures['failed_cases'],
-    )
-    return await _recorded_result(
-        ctx, 'dataset.assembled', {'dataset': dataset},
-        current=len(case_map), total=len(case_map) + failures['failed_case_num'], case_count=len(case_map),
-        failed_case_count=failures['failed_case_num'],
-    )
 
 
 @operation(
@@ -510,12 +393,7 @@ async def compare_abtest_operation(ctx: OperationContext, baseline: object, cand
 
 
 _EVO_OPERATIONS: tuple[Operation, ...] = (
-    load_corpus_operation,
-    build_corpus_snapshot_operation,
-    case_requests_operation,
-    prepare_case_operation,
-    generate_case_operation,
-    assemble_dataset_operation,
+    *dataset_operations(),
     eval_answer_operation,
     eval_judge_operation,
     eval_summary_operation,
@@ -573,12 +451,10 @@ def _failure_summary(value: object) -> dict[str, object]:
 
 
 __all__ = [
-    'analysis_summary_operation', 'assemble_dataset_operation', 'build_corpus_snapshot_operation',
-    'candidate_answer_operation', 'candidate_judge_operation', 'candidate_service_operation',
-    'candidate_summary_operation', 'candidate_workspace_operation', 'case_requests_operation',
+    'analysis_summary_operation', 'candidate_answer_operation', 'candidate_judge_operation',
+    'candidate_service_operation', 'candidate_summary_operation', 'candidate_workspace_operation',
     'classify_case_operation', 'compare_abtest_operation', 'eval_answer_operation',
-    'eval_judge_operation', 'eval_summary_operation', 'evo_operations', 'generate_case_operation',
-    'load_corpus_operation', 'prepare_case_operation', 'repair_loop_operation',
+    'eval_judge_operation', 'eval_summary_operation', 'evo_operations', 'repair_loop_operation',
     'repair_plan_operation', 'trace_clusters_operation', 'trace_summary_operation',
     'verified_patch_operation',
 ]
