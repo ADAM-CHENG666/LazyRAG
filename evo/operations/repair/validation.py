@@ -28,7 +28,7 @@ def pre_validate(root: Path, diff_info: Mapping[str, Any], plan: Mapping[str, An
     record_event('verify.pre_validation_started', status='started', attempt=attempt)
     diff, files = str(diff_info.get('diff') or ''), list(diff_info.get('files') or ())
     checks = [
-        _scope_check(files, plan, policy),
+        _scope_check(files, plan, analysis, policy),
         _hardcode_check(diff, analysis, plan),
         _safety_check(diff, policy),
         _python_change_check(root, diff, files),
@@ -53,11 +53,13 @@ def pre_validate(root: Path, diff_info: Mapping[str, Any], plan: Mapping[str, An
     }
 
 
-def _scope_check(files: list[str], plan: Mapping[str, Any], policy: Mapping[str, Any]) -> dict[str, Any]:
-    method = plan.get('method') if isinstance(plan.get('method'), Mapping) else {}
+def _scope_check(files: list[str], plan: Mapping[str, Any], analysis: Mapping[str, Any],
+                 policy: Mapping[str, Any]) -> dict[str, Any]:
+    categories = analysis.get('categories') if isinstance(analysis.get('categories'), Mapping) else {}
+    category = categories.get(plan.get('category_id')) if isinstance(categories, Mapping) else {}
     scope_paths = {
         _relative_path(item.get('path'))
-        for item in method.get('code_scope') or ()
+        for item in category.get('code_span') or ()
         if isinstance(item, Mapping) and _relative_path(item.get('path'))
     }
     scope = repair_scope(policy.get('allowed_roots'), policy.get('blocked_roots'))
@@ -75,7 +77,7 @@ def _scope_check(files: list[str], plan: Mapping[str, Any], policy: Mapping[str,
         'reason': reason,
         'violations': violations,
         'allowed_roots': allowed,
-        'code_scope': sorted(scope_paths),
+        'analysis_code_scope': sorted(scope_paths),
     }
 
 
