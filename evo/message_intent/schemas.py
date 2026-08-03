@@ -106,6 +106,11 @@ class CaseAction(StrictModel):
         return self
 
 
+class RepairGuidanceAction(StrictModel):
+    kind: Literal['repair_guidance']
+    message: str = Field(min_length=1, max_length=4000)
+
+
 class ConfirmationAction(StrictModel):
     kind: Literal['confirmation']
     decision: Literal['confirm', 'reject', 'amend', 'replace', 'unclear']
@@ -130,7 +135,7 @@ class FinalAction(StrictModel):
 
 
 PlannedAction = Annotated[
-    FlowAction | QueryAction | CaseAction | ConfirmationAction | ClarifyAction | FinalAction,
+    FlowAction | QueryAction | CaseAction | RepairGuidanceAction | ConfirmationAction | ClarifyAction | FinalAction,
     Field(discriminator='kind'),
 ]
 PlannedActionAdapter = TypeAdapter(PlannedAction)
@@ -205,5 +210,5 @@ __all__ = [
     'CaseAction', 'ClarifyAction', 'ConfirmationAction', 'FinalAction', 'FlowAction',
     'MessageContentRef', 'MessageHistoryItem', 'MessageHistoryResponse',
     'MessageRequest', 'MessageTurnResult', 'PendingConfirmation', 'PlannedAction',
-    'QueryAction', 'TurnPlan', 'parse_planned_action',
+    'QueryAction', 'RepairGuidanceAction', 'TurnPlan', 'parse_planned_action',
 ]

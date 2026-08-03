@@ -28,6 +28,7 @@ from .schemas import (
     MessageTurnResult,
     PendingConfirmation,
     QueryAction,
+    RepairGuidanceAction,
     parse_planned_action,
 )
 from .storage import (
@@ -135,6 +136,8 @@ class _Turn:
         action = plan.next_action
         if action is None:
             return self._finish('needs_input', '没有得到可执行的结构化动作', projection)
+        if isinstance(action, RepairGuidanceAction):
+            action = RepairGuidanceAction(kind='repair_guidance', message=self.request.text)
 
         pending_ref = self.intent.audit.projection(self.thread_id).get(
             'pending_confirmation_ref'

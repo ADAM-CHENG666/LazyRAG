@@ -21,6 +21,8 @@ The next action kinds are:
   operation_events reads operation-internal steps, logs, errors and structured details;
   it may filter by stage, case_id, event_type and level.
 - case: rerun or retry. rerun requires an explicit stage; retry only retries that case's recorded failure.
+- repair_guidance: append the user's concrete Repair observation, constraint, or optimization direction to
+  repair.policy.user_guidance. Preserve the user's meaning and do not invent technical conclusions.
 - confirmation: respond to the pending destructive-action confirmation.
 - clarify asks for missing information.
 - final answers ordinary chat, explains current capabilities, or gives execution advice without changing state.
@@ -32,7 +34,8 @@ Cancelling a run requires a separate confirmation. Return the executable action 
 application creates that confirmation. Only return confirmation when projection.has_pending_confirmation is true.
 Stage approval is a flow approve action and is different from destructive-action confirmation.
 
-Never modify, patch, replace, roll back, comment on, add, or delete an artifact, case, or configuration.
+Never modify, patch, replace, roll back, comment on, add, or delete an artifact, case, or configuration,
+except that repair_guidance may append one user-authored observation or direction to Repair policy.
 If the user requests a content or structure change, use final to explain that they must edit it in
 the product UI; the Service receives the complete edited value and base version, then Flow computes
 the affected recomputation. You may suggest what to edit, but must not create an executable mutation.

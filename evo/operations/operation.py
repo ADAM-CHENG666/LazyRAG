@@ -34,7 +34,7 @@ from .eval.answer import async_answer_case
 from .eval.judge import judge_case
 from .public_contracts import build_eval_summary_root, require_mapping as _mapping
 from .repair.loop import build_verified_patch, prepare_candidate_workspace, run_repair_loop
-from .repair.plan import build_repair_plan
+from .repair.phase1 import build_repair_plan
 
 
 @operation(
@@ -309,13 +309,18 @@ async def analysis_summary_operation(ctx: OperationContext, classifications: obj
         'approval': one(A.APPROVAL_ANALYSIS),
     },
     outputs={'plan': scalar(A.REPAIR_PLAN)},
+    timeout=1900.0,
 )
+@record_process
 async def repair_plan_operation(ctx: OperationContext, analysis: object, policy: object, approval: object
                                 ) -> OperationResult:
-    plan = build_repair_plan(_mapping(analysis, 'analysis'), _mapping(policy, 'policy'))
+    analysis_value = _mapping(analysis, 'analysis')
+    plan = build_repair_plan(ctx.run_id, analysis_value, _mapping(policy, 'policy'))
+    categories = analysis_value.get('categories') if isinstance(analysis_value.get('categories'), Mapping) else {}
+    category = categories.get(plan.get('category_id')) if isinstance(categories, Mapping) else {}
     return await _recorded_result(
         ctx, 'repair.plan_built', {'plan': plan}, status=plan.get('status'),
-        validation_case_count=len((plan.get('objective') or {}).get('validation_case_ids') or ()),
+        validation_case_count=len((category or {}).get('cases') or ()),
     )
 
 
@@ -340,6 +345,7 @@ async def candidate_workspace_operation(ctx: OperationContext, plan: object, pol
     inputs={
         'plan': one(A.REPAIR_PLAN),
         'workspace': one(A.REPAIR_CANDIDATE_WORKSPACE),
+        'analysis': one(A.ANALYSIS_SUMMARY),
         'cases': all_items(A.EVAL_CASE, over=A.EVAL_CASE_REQUESTS),
         'baseline_judges': all_items(
             A.EVAL_JUDGE_RESULT,
@@ -350,15 +356,16 @@ async def candidate_workspace_operation(ctx: OperationContext, plan: object, pol
         'policy': one(A.REPAIR_POLICY),
     },
     outputs={'result': scalar(A.REPAIR_LOOP_RESULT)},
-    timeout=1800.0,
+    timeout=7200.0,
 )
 @record_process
 async def repair_loop_operation(ctx: OperationContext, plan: object, workspace: object, cases: object,
-                                baseline_judges: object, eval_policy: object, candidate_config: object, policy: object
-                                ) -> OperationResult:
+                                analysis: object, baseline_judges: object, eval_policy: object,
+                                candidate_config: object, policy: object) -> OperationResult:
     return OperationResult({
         'result': await run_repair_loop(
             _mapping(workspace, 'workspace'),
+            _mapping(analysis, 'analysis'),
             _partition_values(cases, 'cases'),
             _partition_values(baseline_judges, 'baseline_judges'),
             _mapping(eval_policy, 'eval_policy'),

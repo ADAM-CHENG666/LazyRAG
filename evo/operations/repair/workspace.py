@@ -6,22 +6,13 @@ import os
 import shutil
 import subprocess
 from collections.abc import Mapping
-from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
 from evo.operations.public_contracts import clean_text as _text
 
-ALGORITHM_APP = Path('algorithm/lazymind/chat/app.py')
-SOURCE_IGNORE_PATTERNS = (
-    '.git',
-    '.evo_repair_logs',
-    '__pycache__',
-    '*.pyc',
-    '.venv',
-    '.venv-*',
-    'venv',
-)
+from .source import ALGORITHM_APP, copy_source, source_hash, source_root
+
 
 
 def workspace_path(policy: Mapping[str, Any], plan: Mapping[str, Any]) -> Path:
@@ -30,7 +21,11 @@ def workspace_path(policy: Mapping[str, Any], plan: Mapping[str, Any]) -> Path:
         ch if ch.isalnum() or ch in '._-' else '_'
         for ch in _text(policy.get('workspace_namespace') or policy.get('thread_id') or 'shared')
     ).strip('._-') or 'shared'
-    digest = hashlib.sha1(json.dumps(plan.get('objective') or {}, sort_keys=True).encode()).hexdigest()[:12]
+    digest = hashlib.sha256(json.dumps(
+        {'category_id': plan.get('category_id'), 'method': plan.get('method')},
+        sort_keys=True,
+        default=str,
+    ).encode()).hexdigest()[:16]
     if policy.get('candidate_workdir'):
         workspace = Path(_text(policy['candidate_workdir'])).resolve()
         expected = base / namespace / digest / 'candidate'
@@ -53,7 +48,7 @@ def prepare_workspace(source: Path, workspace: Path, objective_hash: str = '') -
         shutil.rmtree(workspace)
     created = not workspace.exists()
     if created:
-        _copy_source(source, workspace)
+        copy_source(source, workspace)
     elif (workspace / '.git').exists():
         reset_workspace(workspace)
     if not (workspace / ALGORITHM_APP).exists():
@@ -64,11 +59,7 @@ def prepare_workspace(source: Path, workspace: Path, objective_hash: str = '') -
 
 
 def algorithm_source_root(value: Any) -> Path:
-    path = Path(_text(value)).resolve()
-    for candidate in (path, *path.parents):
-        if (candidate / ALGORITHM_APP).exists():
-            return candidate
-    return path
+    return source_root(_text(value))
 
 
 def reset_workspace(workspace: Path) -> None:
@@ -88,16 +79,6 @@ def workspace_diff(workspace: Path) -> dict[str, Any]:
     }
 
 
-def apply_diff(workspace: Path, diff: str) -> None:
-    if not diff.strip():
-        return
-    result = subprocess.run(['git', '-c', f'safe.directory={workspace}', '-C', str(workspace), 'apply', '-'],
-                            input=diff, text=True, capture_output=True, timeout=60, check=False)
-    if result.returncode:
-        message = (result.stderr or result.stdout or f'git apply exited with {result.returncode}').strip()
-        raise RuntimeError(message)
-
-
 def git(workspace: Path, *args: str, strip: bool = True) -> str:
     result = subprocess.run(['git', '-c', f'safe.directory={workspace}', '-C', str(workspace), *args],
                             capture_output=True, text=True, timeout=60, check=False)
@@ -107,7 +88,7 @@ def git(workspace: Path, *args: str, strip: bool = True) -> str:
 
 
 def source_fingerprint(source: Path) -> dict[str, str]:
-    return {'source_dir': str(source), 'source_hash': _tree_hash(source)}
+    return {'source_dir': str(source), 'source_hash': source_hash(source)}
 
 
 def workspace_fingerprint(workspace: Path) -> dict[str, str]:
@@ -116,17 +97,6 @@ def workspace_fingerprint(workspace: Path) -> dict[str, str]:
         return value if isinstance(value, dict) else {}
     except (FileNotFoundError, json.JSONDecodeError, TypeError):
         return {}
-
-
-def _copy_source(source: Path, target: Path) -> None:
-    target.mkdir(parents=True, exist_ok=True)
-    ignore = shutil.ignore_patterns(*SOURCE_IGNORE_PATTERNS)
-    for name in ('algorithm',):
-        if (source / name).exists():
-            shutil.copytree(source / name, target / name, ignore=ignore, dirs_exist_ok=True)
-    for name in ('.dockerignore', 'Dockerfile', 'config.py', 'requirements.txt'):
-        if (source / name).exists():
-            shutil.copy2(source / name, target / name)
 
 
 def _ensure_git(workspace: Path, created: bool) -> None:
@@ -151,25 +121,4 @@ def _write_workspace_fingerprint(workspace: Path, value: Mapping[str, str]) -> N
     (workspace / '.git' / 'evo_repair_source.json').write_text(
         json.dumps(dict(value), sort_keys=True),
         encoding='utf-8',
-    )
-
-
-def _tree_hash(source: Path) -> str:
-    digest = hashlib.sha1()
-    for path in sorted(source.rglob('*')):
-        relative = path.relative_to(source)
-        if path.is_file() and not _ignored_source_path(relative):
-            rel = relative.as_posix()
-            content = path.read_bytes()
-            digest.update(rel.encode())
-            digest.update(b'\0')
-            digest.update(content)
-    return digest.hexdigest()
-
-
-def _ignored_source_path(path: Path) -> bool:
-    return any(
-        fnmatchcase(part, pattern)
-        for part in path.parts
-        for pattern in SOURCE_IGNORE_PATTERNS
     )

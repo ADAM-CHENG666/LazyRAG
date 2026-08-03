@@ -8,9 +8,10 @@ from types import MappingProxyType
 
 from evo import artifacts as A
 from evo.artifact_flow import ArtifactFlow
+from evo.artifact_flow.state import ArtifactUpdate
 from evo.artifact_runtime import ArtifactKey, ArtifactRecord, ArtifactRef
 
-from .schemas import CaseAction, FlowAction, PlannedAction, QueryAction
+from .schemas import CaseAction, FlowAction, PlannedAction, QueryAction, RepairGuidanceAction
 
 
 @dataclass(frozen=True)
@@ -31,9 +32,10 @@ class ActionExecutor:
         self.thread_id = thread_id
 
     async def prepare(self, action: PlannedAction, source_message_id: str) -> PreparedAction:
-        if isinstance(action, (FlowAction, QueryAction, CaseAction)):
-            if action.stage and action.stage not in A.STEPS:
-                raise ValueError(f'unknown flow stage: {action.stage}')
+        if isinstance(action, (FlowAction, QueryAction, CaseAction, RepairGuidanceAction)):
+            stage = getattr(action, 'stage', '')
+            if stage and stage not in A.STEPS:
+                raise ValueError(f'unknown flow stage: {stage}')
             return PreparedAction(
                 action,
                 _command_id(self.thread_id, source_message_id, action),
@@ -59,6 +61,26 @@ class ActionExecutor:
             return await self.flow.retry_failed_case(
                 self.thread_id,
                 action.case_id,
+                request_id=prepared.command_id,
+            )
+        if isinstance(action, RepairGuidanceAction):
+            key = ArtifactKey.scalar(A.REPAIR_POLICY)
+            record = await self.flow.head(self.thread_id, key)
+            if record is None:
+                raise ValueError('repair policy is not available')
+            current = await self.flow.read(self.thread_id, record.ref)
+            if not isinstance(current, Mapping):
+                raise ValueError('repair policy must be an object')
+            raw_guidance = current.get('user_guidance') or []
+            if not isinstance(raw_guidance, (list, tuple)):
+                raise ValueError('repair policy user_guidance must be a list')
+            guidance = [str(item).strip() for item in raw_guidance if str(item).strip()]
+            if len(guidance) >= 100:
+                raise ValueError('repair policy user_guidance limit reached')
+            guidance.append(action.message.strip())
+            return await self.flow.update_artifacts(
+                self.thread_id,
+                (ArtifactUpdate(record.ref, {**current, 'user_guidance': guidance}),),
                 request_id=prepared.command_id,
             )
         raise TypeError('prepared action is not executable')
@@ -155,6 +177,8 @@ def _summary(action: PlannedAction) -> str:
             if action.command == 'rerun'
             else f'重试失败 case {action.case_id}'
         )
+    if isinstance(action, RepairGuidanceAction):
+        return '补充 Repair 修复观察与方向'
     raise ValueError(f'action has no summary: {action.kind}')
 
 
