@@ -37,7 +37,6 @@ async def validate_candidate_patch(
     validation_case_ids: Sequence[str],
     target_case_ids: Sequence[str],
     category_baseline: Mapping[str, Any],
-    success_metric: str,
     cases: Mapping[str, Mapping[str, Any]],
     baseline_judges: Mapping[str, Mapping[str, Any]],
     eval_policy: Mapping[str, Any],
@@ -97,7 +96,7 @@ async def validate_candidate_patch(
         category_metrics = _category_metrics(
             category_baseline, target_case_ids, baseline_judges, judges,
         )
-        mechanism_gate = _mechanism_gate(success_metric, category_metrics)
+        mechanism_gate = _mechanism_gate(category_metrics)
         gate = _score_gate(comparison, target_case_ids, baseline_judges, judges)
         accepted = comparison.get('status') == 'completed' and not candidate_summary.get('execution_failures') \
             and mechanism_gate['status'] == 'passed' and gate['status'] == 'passed'
@@ -169,17 +168,23 @@ def _evaluation_evidence(selected: Mapping[str, Any], answers: Mapping[str, Mapp
     }
 
 
-def _mechanism_gate(success_metric: str, metrics: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
-    value = metrics.get(success_metric) if isinstance(metrics.get(success_metric), Mapping) else {}
-    delta = _number(value.get('delta'))
-    reason = '' if math.isfinite(delta) and delta > EPSILON else 'root_cause_metric_not_improved'
+def _mechanism_gate(metrics: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    direct = {
+        metric: value
+        for metric, value in metrics.items()
+        if metric != 'overall_score' and isinstance(value, Mapping)
+    }
+    improved = sorted(
+        metric
+        for metric, value in direct.items()
+        if math.isfinite(_number(value.get('delta'))) and _number(value.get('delta')) > EPSILON
+    )
+    reason = '' if improved else 'root_cause_metrics_not_improved'
     return {
         'status': 'failed' if reason else 'passed',
         'reason': reason,
-        'metric': success_metric,
-        'baseline': _number(value.get('baseline')),
-        'candidate': _number(value.get('candidate')),
-        'delta': delta,
+        'improved_metrics': improved,
+        'observed_metrics': sorted(direct),
     }
 
 

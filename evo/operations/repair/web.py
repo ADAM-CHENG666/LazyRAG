@@ -7,12 +7,12 @@ import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, quote_plus, unquote, urlparse
+from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
 
-from .experiment import content_ref, write_json
+from .memory import content_ref, write_json
 
 
 def search_web(query: str, artifact_root: Path, limit: int = 5) -> dict[str, Any]:
@@ -95,6 +95,8 @@ def read_web_pages(question: str, urls: Sequence[str], work_root: Path, artifact
         if final_url in seen_final:
             continue
         seen_final.add(final_url)
+        page = _enhance_page(final_url, page)
+        final_url = str(page.get('final_url') or page.get('url') or final_url).strip()
         content = str(page.get('content') or '').strip()
         content_type = str(page.get('content_type') or '').casefold()
         status = (
@@ -124,6 +126,84 @@ def read_web_pages(question: str, urls: Sequence[str], work_root: Path, artifact
     result = {'question': prompt, 'pages': pages}
     write_json(artifact_root / 'web' / 'reads' / f'{_digest(prompt + json.dumps(selected))}.json', result)
     return result
+
+
+def _enhance_page(url: str, page: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Replace navigation-heavy HTML extraction with Repair's focused body.
+
+    The shared url_fetch remains the network/security boundary. Repair performs
+    a second safe read only for HTML so documentation pages can keep tables and
+    code examples that the shared 4k generic extraction often truncates.
+    """
+    content_type = str(page.get('content_type') or '').casefold()
+    if content_type and 'html' not in content_type and 'xhtml' not in content_type:
+        return page
+    try:
+        enhanced = _fetch_repair_page(url)
+    except Exception:
+        return page
+    return enhanced if str(enhanced.get('content') or '').strip() else page
+
+
+def _fetch_repair_page(url: str) -> dict[str, Any]:
+    from lazymind.chat.engine.tools.infra.web_search_support import fetch_public_url
+
+    headers = {
+        'User-Agent': (
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
+            '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+        ),
+    }
+    with requests.Session() as session:
+        response = fetch_public_url(session, url, timeout=15, headers=headers)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+        if redirect := _html_redirect(response.url, soup):
+            response = fetch_public_url(session, redirect, timeout=15, headers=headers)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, 'html.parser')
+    return {
+        'url': url,
+        'final_url': response.url,
+        'content_type': str(response.headers.get('Content-Type') or 'text/html'),
+        'title': str(soup.title.string if soup.title and soup.title.string else '').strip(),
+        'content': _extract_repair_text(soup),
+    }
+
+
+def _html_redirect(base_url: str, soup: BeautifulSoup) -> str:
+    refresh = soup.find('meta', attrs={'http-equiv': re.compile(r'^refresh$', re.I)})
+    if refresh:
+        match = re.search(r'url\s*=\s*[\"\']?([^\"\';]+)', str(refresh.get('content') or ''), re.I)
+        if match:
+            return urljoin(base_url, match.group(1).strip())
+    canonical = soup.find('link', attrs={'rel': lambda value: value and 'canonical' in value})
+    href = str(canonical.get('href') or '').strip() if canonical else ''
+    return urljoin(base_url, href) if href else ''
+
+
+def _extract_repair_text(soup: BeautifulSoup, limit: int = 60_000) -> str:
+    root = (
+        soup.select_one('#main-content')
+        or soup.select_one('[role="main"] article')
+        or soup.find('article')
+        or soup.select_one('.td-content')
+        or soup.find('main')
+        or soup.body
+        or soup
+    )
+    for tag in root.select('script, style, noscript, nav, aside, footer'):
+        tag.decompose()
+    lines = []
+    seen = set()
+    for node in root.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'li', 'pre', 'tr']):
+        text = ' '.join(node.get_text(' ', strip=True).split())
+        if text and text not in seen:
+            seen.add(text)
+            lines.append(text)
+    if not lines:
+        lines = [line.strip() for line in root.get_text('\n', strip=True).splitlines() if line.strip()]
+    return '\n'.join(lines)[:limit]
 
 
 def _web_search_providers() -> list[Any]:

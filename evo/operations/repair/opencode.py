@@ -59,26 +59,28 @@ class OpenCodeRunResult(NamedTuple):
 
 
 class OpenCodeSession:
-    """Keep code investigation and Demo writing for one target in one OpenCode session."""
+    """Keep all code research for one target in one resumable OpenCode session."""
 
-    def __init__(self, *, category_id: str, input_hash: str, workdir: Path, artifact_root: Path,
-                 config: dict[str, str], timeout_s: float = 900) -> None:
+    def __init__(self, *, category_id: str, workdir: Path, artifact_root: Path,
+                 config: dict[str, str], timeout_s: float = 900, session_id: str = '',
+                 calls: int = 0) -> None:
         self.category_id = category_id
-        self.input_hash = input_hash
         self.workdir = workdir
         self.artifact_root = artifact_root
         self.config = config
         self.timeout_s = timeout_s
-        self.session_id = ''
-        self.calls = 0
+        self.session_id = str(session_id)
+        self.calls = max(0, int(calls))
         self.recovered = False
 
-    def run(self, task: str, instruction: str, timeout_s: float | None = None) -> dict[str, Any]:
-        if task not in {'investigate', 'write_demo', 'revise_demo'}:
-            raise ValueError(f'unsupported opencode task: {task}')
+    def run(self, instruction: str, expected_result: str = '',
+            timeout_s: float | None = None) -> dict[str, Any]:
+        if not str(instruction).strip():
+            raise ValueError('opencode_instruction_missing')
         self.calls += 1
-        call_dir = self.artifact_root / 'opencode' / 'calls' / f'call-{self.calls:02d}'
-        report_path = self.workdir / 'opencode' / 'reports' / f'call-{self.calls:02d}.json'
+        call_dir = self.artifact_root / 'opencode' / 'calls' / f'call-{self.calls:03d}'
+        report_path = self.workdir / 'memory' / 'reports' / f'call-{self.calls:03d}.json'
+        report_path.parent.mkdir(parents=True, exist_ok=True)
         persisted_report = self.artifact_root / 'opencode' / 'reports' / report_path.name
         report_path.unlink(missing_ok=True)
         before = _workspace_snapshot(self.workdir)
@@ -86,8 +88,8 @@ class OpenCodeSession:
         run = run_opencode_streaming(
             workdir=str(self.workdir),
             prompt=json.dumps(_phase1_task_card(
-                task, instruction, self.category_id,
-                Path('opencode/context.json'), report_path.relative_to(self.workdir),
+                instruction, expected_result, self.category_id,
+                Path('memory/context.json'), report_path.relative_to(self.workdir),
             ), ensure_ascii=False, indent=2),
             artifact_dir=call_dir,
             session_id=self.session_id,
@@ -101,8 +103,8 @@ class OpenCodeSession:
             run = run_opencode_streaming(
                 workdir=str(self.workdir),
                 prompt=json.dumps(_phase1_task_card(
-                    task, instruction, self.category_id,
-                    Path('opencode/context.json'), report_path.relative_to(self.workdir),
+                    instruction, expected_result, self.category_id,
+                    Path('memory/context.json'), report_path.relative_to(self.workdir),
                 ), ensure_ascii=False, indent=2),
                 artifact_dir=call_dir,
                 config=self.config,
@@ -112,14 +114,14 @@ class OpenCodeSession:
         self.session_id = run.session_id or self.session_id
         after = _workspace_snapshot(self.workdir)
         changed = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
-        invalid = [path for path in changed if task == 'investigate' or not path.startswith('demo/')]
-        report = read_opencode_report(report_path, task)
+        invalid = [path for path in changed if not path.startswith('work/')]
+        report = read_opencode_report(report_path, 'phase1')
         if report_path.is_file():
             persisted_report.parent.mkdir(parents=True, exist_ok=True)
             copy2(report_path, persisted_report)
         failure = _run_failure(run)
         reported = sorted(report.get('changed_files') or ())
-        mismatch = task != 'investigate' and reported != changed
+        mismatch = reported != changed
         reason = (
             failure or
             ('opencode_scope_violation' if invalid else '') or
@@ -130,7 +132,6 @@ class OpenCodeSession:
             'status': 'failed' if reason else 'completed',
             'reason': reason,
             'session_id': self.session_id,
-            'task': task,
             'report': report,
             'changed_files': changed,
             'invalid_changes': invalid,
@@ -167,7 +168,7 @@ def run_opencode_streaming(*, workdir: str, prompt: str, artifact_dir: Path, ses
                            config: dict[str, str] | None = None, timeout_s: float = 900,
                            attempt: int | None = None
                            ) -> OpenCodeRunResult:
-    started = time.time()
+    started = time.monotonic()
     settings, secrets = _opencode_settings(config or {}), _secrets(config or {})
     artifact_dir.mkdir(parents=True, exist_ok=True)
     prompt_path = artifact_dir / 'opencode_prompt.json'
@@ -220,7 +221,7 @@ def run_opencode_streaming(*, workdir: str, prompt: str, artifact_dir: Path, ses
         session, error, finish_reason = session_id, None, ''
         try:
             while proc.poll() is None:
-                now = time.time()
+                now = time.monotonic()
                 if now - started > timeout_s:
                     error = logs.record({'type': 'timeout', 'message': f'opencode timed out after {timeout_s}s'})
                     _terminate(proc)
@@ -231,8 +232,18 @@ def run_opencode_streaming(*, workdir: str, prompt: str, artifact_dir: Path, ses
                 session, error, finish_reason = _read_line(
                     ready[0].readline(), logs, session, error, finish_reason,
                 )
+            # A killed CLI may leave a descendant holding the stdout pipe.
+            # Drain only data that is immediately available; iterating the pipe
+            # until EOF would turn a controlled timeout into an unbounded wait.
             if proc.stdout:
-                for line in proc.stdout:
+                drain_deadline = time.monotonic() + 1.0
+                while time.monotonic() < drain_deadline:
+                    ready, _, _ = select.select([proc.stdout], [], [], 0.05)
+                    if not ready:
+                        break
+                    line = ready[0].readline()
+                    if not line:
+                        break
                     session, error, finish_reason = _read_line(
                         line, logs, session, error, finish_reason,
                     )
@@ -463,23 +474,19 @@ def read_opencode_report(path: Path, task: str = '') -> dict[str, Any]:
         return {'status': 'missing', 'reason': type(exc).__name__}
     if not isinstance(value, dict):
         return {'status': 'invalid', 'reason': 'report_not_object'}
-    if task == 'investigate':
-        findings = [
-            {
-                'path': str(item.get('path') or '').strip(),
-                'symbol': str(item.get('symbol') or '').strip(),
-                'observation': str(item.get('observation') or '').strip(),
-            }
-            for item in value.get('findings') or ()
-            if isinstance(item, dict) and str(item.get('path') or '').strip()
-            and str(item.get('observation') or '').strip()
-        ]
+    if task == 'phase1':
+        summary = str(value.get('summary') or '').strip()
+        changed = _report_files(value.get('changed_files'))
+        commands = []
+        for item in value.get('suggested_commands') or ():
+            if isinstance(item, list) and item and all(isinstance(part, str) and part for part in item):
+                commands.append(item[:32])
         return {
-            'status': 'completed' if findings else 'invalid',
-            'reason': '' if findings else 'investigation_findings_missing',
-            'findings': findings[:20],
-            'open_questions': [str(item).strip() for item in value.get('open_questions') or ()
-                               if str(item).strip()][:20],
+            'status': 'completed' if summary else 'invalid',
+            'reason': '' if summary else 'phase1_report_summary_missing',
+            'summary': summary[:4000],
+            'changed_files': changed,
+            'suggested_commands': commands[:8],
         }
     if task == 'formal_patch':
         changed = _report_files(value.get('files_changed'))
@@ -505,50 +512,36 @@ def read_opencode_report(path: Path, task: str = '') -> dict[str, Any]:
     }
 
 
-def _phase1_task_card(task: str, instruction: str, category_id: str, context_path: Path,
+def _phase1_task_card(instruction: str, expected_result: str, category_id: str, context_path: Path,
                       report_path: Path) -> dict[str, Any]:
-    common = {
+    return {
         'mode': 'repair_phase1',
-        'task': task,
         'category_id': category_id,
         'instruction': instruction,
+        'expected_result': expected_result,
         'context_path': context_path.as_posix(),
         'report_path': report_path.as_posix(),
         'constraints': [
-            'Read opencode/context.json before acting.',
-            'Never execute the Demo or use shell/bash.',
-            'Never modify source/, inputs/, web/, outputs/, or logs/.',
+            'Read memory/context.json before acting and continue from the current session history.',
+            'Use search/read tools to inspect source/. Never modify source/.',
+            'Create or revise experiments only under work/.',
+            'Do not execute commands or use shell/bash; the trusted runner executes suggested commands later.',
             'Write report_path as one strict JSON object and escape every embedded quote.',
         ],
+        'report_schema': {
+            'summary': 'what was learned or changed this turn',
+            'changed_files': ['work/...'],
+            'suggested_commands': [['python', 'work/...']],
+        },
     }
-    if task == 'investigate':
-        common['constraints'].extend([
-            'Search and read source/ only; do not modify demo/.',
-            'Keep observations concise and paraphrase code; do not embed Markdown links or code literals.',
-        ])
-        common['report_schema'] = {
-            'findings': [{'path': 'source/algorithm/...', 'symbol': '...', 'observation': '...'}],
-            'open_questions': ['...'],
-        }
-    else:
-        common['constraints'].extend([
-            'Create or edit files only under demo/.',
-            'The fixed entry is demo/run_demo.py and must accept --input <json path>.',
-            'Print exactly one JSON object to stdout; do not perform network access.',
-        ])
-        common['report_schema'] = {'entrypoint': 'demo/run_demo.py', 'changed_files': ['demo/run_demo.py']}
-    return common
 
 
 def _workspace_snapshot(root: Path) -> dict[str, str]:
     result = {}
-    for path in root.rglob('*'):
-        if not path.is_file():
-            continue
-        relative = path.relative_to(root).as_posix()
-        if relative.startswith(('opencode/', 'logs/', 'outputs/')) or relative == 'opencode.json':
-            continue
-        result[relative] = sha256(path.read_bytes()).hexdigest()
+    for name in ('source', 'work'):
+        for path in (root / name).rglob('*'):
+            if path.is_file():
+                result[path.relative_to(root).as_posix()] = sha256(path.read_bytes()).hexdigest()
     return result
 
 

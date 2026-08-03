@@ -163,7 +163,6 @@ async def run_repair_loop(
                     for retry in range(infra_retries + 1):
                         candidate = await validate_candidate_patch(
                             root, diff_info['diff'], validation_ids, target_ids, category['metric_averages'],
-                            str(plan['method']['success_metric']),
                             case_map, baseline_map, eval_policy, candidate_config, ctx, attempt_no,
                         )
                         if not str(candidate.get('reason') or '').startswith('candidate_eval_stopped:'):
@@ -303,7 +302,7 @@ def _task_card(plan: Mapping[str, Any], category: Mapping[str, Any], workspace: 
             'to trace every earlier operation that can raise the same failure before the intended recovery path.',
             'If a KB tool succeeds but returns zero items, use its query, kb_id, and trace observation to inspect '
             'the actual index mapping and request filters; do not misclassify an empty result as an exception.',
-            'Edit only files listed in verified_method.code_scope.',
+            'Edit only files listed in root_cause.code_span.',
             'Do not copy Demo files into the formal workspace.',
             'Do not hard-code case ids, trace ids, questions, answers, document ids, or metric thresholds.',
             'Leave a non-empty git diff and do not edit tests, eval data, secrets, or vendored dependencies.',
