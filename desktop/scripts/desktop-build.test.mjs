@@ -192,6 +192,9 @@ test("Windows CI treats branches as non-tags without leaking git probe failures"
   assert.match(source, /Start-Process -FilePath \$uninstaller -ArgumentList "\/S" -Wait/);
   assert.match(source, /RegistryView\]::Registry64[\s\S]*RegistryView\]::Registry32/);
   assert.match(source, /name: Upload installer diagnostics[\s\S]*if: always\(\)/);
+  assert.doesNotMatch(source, /name: Run explicit Electron warmup/);
+  assert.doesNotMatch(source, /steps\.warmup\.outcome/);
+  assert.match(source, /name: Verify installer warmup result[\s\S]*startup-metrics-latest\.json/);
 });
 
 test("Windows NSIS installer uses electron-builder's default LZMA payload", () => {
