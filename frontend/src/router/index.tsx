@@ -30,6 +30,9 @@ import FeishuSetupGuide from "@/modules/modelProvider/pages/FeishuSetupGuide";
 import NotionSetupGuide from "@/modules/modelProvider/pages/NotionSetupGuide";
 import DatasetListPage from "@/modules/datasetManagement/pages/list";
 import DatasetDetailPage from "@/modules/datasetManagement/pages/detail";
+import {
+  TerminalConnectionPage,
+} from "@/modules/channelGateway";
 import MemoryManagement from "@/modules/memory";
 import MemoryManagementListPage from "@/modules/memory/pages/list";
 import MemoryReviewPage from "@/modules/memory/pages/review";
@@ -51,6 +54,7 @@ import {
 import { getAntdLocale } from "@/i18n/antdLocale";
 import { runtimeFeatures } from "@/runtime/features";
 import { isLocalSessionEnabled } from "@/runtime/localSession";
+import UserAgreementPage from "@/pages/UserAgreementPage";
 
 const PluginDetailPage = lazy(() => import("@/modules/plugin/pages/detail"));
 const BuiltinPluginDetailPage = lazy(() => import("@/modules/plugin/pages/builtin-detail"));
@@ -64,6 +68,10 @@ export default function AppRouter() {
       locale={getAntdLocale(i18n.resolvedLanguage || i18n.language)}
     >
       <Routes>
+        <Route
+          path="/legal/user-agreement"
+          element={<UserAgreementPage />}
+        />
         {localSessionEnabled ? (
           <Route path="/login" element={<Navigate to="/agent/chat" replace />} />
         ) : (
@@ -145,6 +153,15 @@ export default function AppRouter() {
             element={<DatasetDetailPage />}
           />
           <Route path="databases" element={<DatabaseConnectionsPage />} />
+          <Route path="channels" element={<TerminalConnectionPage />} />
+          <Route
+            path="channels/wechat"
+            element={<Navigate to="/channels?provider=wechat" replace />}
+          />
+          <Route
+            path="channels/feishu"
+            element={<Navigate to="/channels?provider=feishu" replace />}
+          />
           <Route path="cloud-documents" element={<CloudDocumentsLayout />}>
             <Route index element={<CloudDocumentsPage />} />
             <Route path="local" element={<LocalDataSourcePage />} />

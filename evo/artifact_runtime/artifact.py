@@ -4,8 +4,18 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
-from .errors import DefinitionError
-from .utils import _positive_int, _string, _text
+from .errors import (
+    DefinitionError,
+    _integer,
+    _string,
+    _text,
+    _tuple_of,
+    _unique,
+)
+
+
+_FAILURE_PREFIX = '__artifact_runtime_failure__.'
+RUN_CONFIGURATION_ARTIFACT_ID = '__artifact_runtime__.configuration'
 
 
 @dataclass(frozen=True, order=True)
@@ -38,7 +48,7 @@ class ArtifactRef:
     def __post_init__(self) -> None:
         if not isinstance(self.key, ArtifactKey):
             raise TypeError('key must be ArtifactKey')
-        _positive_int(self.version, 'version')
+        _integer(self.version, 'version', minimum=1)
 
 
 @dataclass(frozen=True)
@@ -52,13 +62,11 @@ class ArtifactRecord:
             raise TypeError('ref must be ArtifactRef')
 
         _text(self.producer, 'producer')
-        inputs = tuple(self.input_refs)
-        if not all(isinstance(ref, ArtifactRef) for ref in inputs):
-            raise TypeError('input_refs must contain ArtifactRef values')
-
-        inputs = tuple(sorted(inputs))
-        if len({ref.key for ref in inputs}) != len(inputs):
-            raise DefinitionError('input_refs must contain at most one ref per artifact key')
+        inputs = tuple(sorted(_tuple_of(
+            self.input_refs, ArtifactRef, 'input_refs must contain ArtifactRef values'
+        )))
+        _unique(inputs, 'input_refs must contain at most one ref per artifact key',
+                key=lambda ref: ref.key)
 
         object.__setattr__(self, 'input_refs', inputs)
 
@@ -72,8 +80,7 @@ class PartitionSet:
         for key in keys:
             _text(key, 'partition key')
 
-        if len(set(keys)) != len(keys):
-            raise DefinitionError('partition keys must be unique')
+        _unique(keys, 'partition keys must be unique')
 
         object.__setattr__(self, 'keys', keys)
 
@@ -122,13 +129,12 @@ class ArtifactCommit:
     def __post_init__(self) -> None:
         _text(self.commit_id, 'artifact commit id')
         _text(self.producer, 'artifact commit producer')
-        writes = tuple(self.writes)
+        writes = _tuple_of(self.writes, ArtifactDraft,
+                           'artifact commit writes must contain ArtifactDraft values')
         if not writes:
             raise DefinitionError('artifact commit must contain at least one write')
-        if not all(isinstance(write, ArtifactDraft) for write in writes):
-            raise TypeError('artifact commit writes must contain ArtifactDraft values')
-        if len({write.key for write in writes}) != len(writes):
-            raise DefinitionError('artifact commit write keys must be unique')
+        _unique(writes, 'artifact commit write keys must be unique',
+                key=lambda write: write.key)
 
         expected_heads = dict(self.expected_heads)
         for key, ref in expected_heads.items():
@@ -139,11 +145,9 @@ class ArtifactCommit:
             if ref is not None and ref.key != key:
                 raise DefinitionError('expected head must identify its artifact key')
 
-        guards = tuple(self.partition_guards)
-        if not all(isinstance(guard, PartitionGuard) for guard in guards):
-            raise TypeError('partition_guards must contain PartitionGuard values')
-        if len(set(guards)) != len(guards):
-            raise DefinitionError('partition guards must be unique')
+        guards = _tuple_of(self.partition_guards, PartitionGuard,
+                           'partition_guards must contain PartitionGuard values')
+        _unique(guards, 'partition guards must be unique')
 
         object.__setattr__(self, 'writes', writes)
         object.__setattr__(self, 'expected_heads', MappingProxyType(expected_heads))
@@ -180,17 +184,20 @@ class ArtifactSnapshot:
 
     def effective_records(self) -> Mapping[ArtifactKey, ArtifactRecord]:
         effective = dict(self.records)
-        changed = True
-        while changed:
-            changed = False
-            for key, record in tuple(effective.items()):
-                if any(
-                    effective.get(ref.key) is None or effective[ref.key].ref != ref
-                    for ref in record.input_refs
-                ):
-                    del effective[key]
-                    changed = True
+        while _drop_stale(effective):
+            pass
         return MappingProxyType(effective)
+
+
+def _drop_stale(records: dict[ArtifactKey, ArtifactRecord]) -> bool:
+    stale = tuple(
+        key for key, record in records.items()
+        if any(records.get(ref.key) is None or records[ref.key].ref != ref
+               for ref in record.input_refs)
+    )
+    for key in stale:
+        del records[key]
+    return bool(stale)
 
 
 def merge_refs(*groups: Iterable[ArtifactRef]) -> tuple[ArtifactRef, ...]:
@@ -208,7 +215,22 @@ def merge_refs(*groups: Iterable[ArtifactRef]) -> tuple[ArtifactRef, ...]:
     return tuple(sorted(refs.values()))
 
 
+def failure_key(output_key: ArtifactKey) -> ArtifactKey:
+    if not isinstance(output_key, ArtifactKey):
+        raise TypeError('output_key must be ArtifactKey')
+    if is_failure_key(output_key):
+        raise DefinitionError('cannot create a failure key for an internal failure artifact')
+    return ArtifactKey(f'{_FAILURE_PREFIX}{output_key.artifact_id}', output_key.partition_key)
+
+
+def is_failure_key(key: ArtifactKey) -> bool:
+    if not isinstance(key, ArtifactKey):
+        raise TypeError('key must be ArtifactKey')
+    return key.artifact_id.startswith(_FAILURE_PREFIX)
+
+
 __all__ = [
     'ArtifactCommit', 'ArtifactDraft', 'ArtifactKey', 'ArtifactRecord', 'ArtifactRef',
-    'ArtifactSnapshot', 'PartitionGuard', 'PartitionSet', 'merge_refs',
+    'ArtifactSnapshot', 'PartitionGuard', 'PartitionSet',
+    'failure_key', 'is_failure_key', 'merge_refs', 'RUN_CONFIGURATION_ARTIFACT_ID',
 ]

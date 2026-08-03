@@ -23,9 +23,7 @@ def answer_case(case: Mapping[str, Any], target_config: Mapping[str, Any]) -> di
     return failure if failure is not None else call_chat_answer(case, target_config, kb_id)
 
 
-async def async_answer_case(case: Mapping[str, Any],
-                            target_config: Mapping[str, Any]
-                            ) -> dict[str, Any]:
+async def async_answer_case(case: Mapping[str, Any], target_config: Mapping[str, Any]) -> dict[str, Any]:
     failure, kb_id = _preflight(case, target_config)
     return failure if failure is not None else await async_call_chat_answer(
         case,
@@ -34,9 +32,7 @@ async def async_answer_case(case: Mapping[str, Any],
     )
 
 
-def _preflight(case: Mapping[str, Any],
-               target_config: Mapping[str, Any]
-               ) -> tuple[dict[str, Any] | None, str]:
+def _preflight(case: Mapping[str, Any], target_config: Mapping[str, Any]) -> tuple[dict[str, Any] | None, str]:
     kb_id = case_kb_id(case, target_config)
     target = {
         'router_chat_url': str(target_config.get('router_chat_url') or ''),
@@ -102,9 +98,7 @@ def call_chat_answer(case: Mapping[str, Any], target_config: Mapping[str, Any], 
     return _with_case(case, result)
 
 
-async def async_call_chat_answer(case: Mapping[str, Any],
-                                 target_config: Mapping[str, Any],
-                                 kb_id: str
+async def async_call_chat_answer(case: Mapping[str, Any], target_config: Mapping[str, Any], kb_id: str
                                  ) -> dict[str, Any]:
     try:
         result = await async_call_router_chat(
@@ -116,8 +110,7 @@ async def async_call_chat_answer(case: Mapping[str, Any],
     return _with_case(case, result)
 
 
-def _chat_request(case: Mapping[str, Any], target_config: Mapping[str, Any],
-                  kb_id: str) -> RouterChatRequest:
+def _chat_request(case: Mapping[str, Any], target_config: Mapping[str, Any], kb_id: str) -> RouterChatRequest:
     kb_ids = tuple(dict.fromkeys(
         item.strip()
         for item in str(kb_id or '').split(';')
@@ -129,11 +122,12 @@ def _chat_request(case: Mapping[str, Any], target_config: Mapping[str, Any],
     if not kb_ids:
         raise ValueError('case routing metadata missing kb_id')
     llm_config = target_config.get('llm_config')
+    query = str(case.get('question') or '')
     return RouterChatRequest(
         router_chat_url=target['router_chat_url'],
         router_admin_url=target['router_admin_url'],
         algorithm_id=target['algorithm_id'],
-        query=str(case.get('question') or ''),
+        query=query,
         kb_ids=kb_ids,
         trace_id=session_id,
         conversation_id=target['conversation_id'],
@@ -155,13 +149,8 @@ def _chat_request(case: Mapping[str, Any], target_config: Mapping[str, Any],
     )
 
 
-def failed_rag_answer(
-    case: Mapping[str, Any],
-    stream: Mapping[str, Any],
-    target: Mapping[str, Any],
-    error_type: str,
-    message: str,
-) -> dict[str, Any]:
+def failed_rag_answer(case: Mapping[str, Any], stream: Mapping[str, Any], target: Mapping[str, Any], error_type: str,
+                      message: str) -> dict[str, Any]:
     return _answer_base(case, stream, target) | {
         'status': 'failed',
         'chat_error': {'type': error_type, 'message': message},

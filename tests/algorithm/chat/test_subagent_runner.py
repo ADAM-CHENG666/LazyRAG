@@ -185,6 +185,29 @@ def test_subagent_plan_preserves_extension_params_without_structured_duplicates(
     assert 'required_output_artifact_keys' not in parameter_section.content
 
 
+@pytest.mark.parametrize('thinking_depth', ['low', 'medium', 'high', 'max'])
+def test_subagent_plan_uses_200_rounds_in_every_thinking_mode(tmp_path, thinking_depth):
+    import lazyllm
+    from lazymind.chat.engine.subagent.context import SubAgentContext
+
+    ctx = SubAgentContext(
+        task_id=f'task-{thinking_depth}', conversation_id='conv-1', agent_type='research',
+        objective='deep research', params={'_thinking_depth': thinking_depth}, workspace_path=str(tmp_path),
+        input_slots=[], output_slots=[], db=None, emit=lambda _event: None,
+    )
+    previous = lazyllm.globals.get('agentic_config')
+    try:
+        lazyllm.globals['agentic_config'] = {'thinking_depth': thinking_depth}
+        with runner_mod._cfg.temp('agentic_expanded_max_rounds', 200):
+            plan = runner_mod._build_subagent_plan(
+                ctx, None, tools=[], tool_prompt_appendices={},
+            )
+    finally:
+        lazyllm.globals['agentic_config'] = previous or {}
+
+    assert plan.execution_options.max_retries == 199
+
+
 # ---------------------------------------------------------------------------
 # Test: task not found
 # ---------------------------------------------------------------------------
@@ -214,8 +237,8 @@ def test_run_subagent_stream_happy_path(monkeypatch):
     _install_fake_translator(monkeypatch)
 
     # Simulate: text event → tool_calls → tool_results (triggers artifact emit) → text
-    tool_calls_event = {'tag': 'tool_calls', 'tool_calls': [{'id': 'c1', 'name': 'save_artifact', 'args': {}}]}
-    tool_results_event = {'tag': 'tool_results', 'tool_results': [{'id': 'c1', 'name': 'save_artifact', 'result': 'ok'}]}
+    tool_calls_event = {'tag': 'tool_calls', 'tool_calls': [{'id': 'c1', 'name': 'save_artifacts', 'args': {}}]}
+    tool_results_event = {'tag': 'tool_results', 'tool_results': [{'id': 'c1', 'name': 'save_artifacts', 'result': 'ok'}]}
     events = [
         {'tag': 'text', 'delta': 'Starting...'},
         tool_calls_event,

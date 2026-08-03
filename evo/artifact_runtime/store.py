@@ -5,7 +5,7 @@ import hashlib
 import json
 import pickle
 import time
-from collections.abc import AsyncIterator, Iterable, Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,29 +15,32 @@ import aiosqlite
 
 from .artifact import (
     ArtifactCommit,
+    ArtifactDraft,
     ArtifactKey,
     ArtifactRecord,
     ArtifactRef,
     ArtifactSnapshot,
     PartitionSet,
 )
-from .errors import DefinitionError
+from .errors import DefinitionError, _integer, _known, _string, _text, _tuple_of
 from .state import (
     ArtifactRetryRequest,
     AttemptSnapshot,
     AttemptStatus,
-    ProgressEvent,
-    ProgressUpdate,
+    EventLevel,
+    EventStatus,
+    OperationEvent,
+    RecordedOperationEvent,
     RunStatus,
     RuntimeErrorInfo,
 )
-from .utils import _string, _text
 
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 _SCHEMA_TABLES = frozenset({
-    'artifacts', 'attempts', 'commits', 'progress_events', 'retry_requests', 'runs',
+    'artifacts', 'attempts', 'commits', 'operation_events', 'retry_requests', 'runs',
 })
+_Row = Mapping[str, object]
 _RUN_STATUSES = frozenset(get_args(RunStatus))
 _ACTIVE_ATTEMPT_STATUSES = ('scheduled', 'running', 'cancelling')
 _ATTEMPT_TRANSITIONS = {
@@ -57,30 +60,11 @@ class StoredRunState:
     status: RunStatus
     error: RuntimeErrorInfo | None = None
 
-    def __post_init__(self) -> None:
-        if self.status not in _RUN_STATUSES:
-            raise DefinitionError(f'unknown run status: {self.status}')
-        if self.error is not None and not isinstance(self.error, RuntimeErrorInfo):
-            raise TypeError('run error must be RuntimeErrorInfo or None')
-        if self.status == 'failed' and self.error is None:
-            raise DefinitionError('failed run requires error details')
-        if self.status != 'failed' and self.error is not None:
-            raise DefinitionError('run error is only valid for failed status')
-
 
 @dataclass(frozen=True)
 class CommitResult:
     status: Literal['ok', 'stale']
     refs: tuple[ArtifactRef, ...] = ()
-    replayed: bool = False
-
-    def __post_init__(self) -> None:
-        if self.status not in {'ok', 'stale'}:
-            raise DefinitionError(f'unknown commit status: {self.status}')
-        refs = tuple(self.refs)
-        if not all(isinstance(ref, ArtifactRef) for ref in refs):
-            raise TypeError('commit result refs must contain ArtifactRef values')
-        object.__setattr__(self, 'refs', refs)
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,8 +105,7 @@ class ArtifactStore:
             await self._connection.close()
             self._closed = True
 
-    async def create_run(self, run_id: str, initial_commit: ArtifactCommit | None = None
-                         ) -> StoredRunState:
+    async def create_run(self, run_id: str, initial_commit: ArtifactCommit | None = None) -> StoredRunState:
         _text(run_id, 'run_id')
         prepared = None
         if initial_commit is not None:
@@ -152,8 +135,7 @@ class ArtifactStore:
                 await self._write_receipt(prepared, result.refs)
         return StoredRunState('created')
 
-    async def commit(self, run_id: str, commit: ArtifactCommit, *, attempt_id: str | None = None
-                     ) -> CommitResult:
+    async def commit(self, run_id: str, commit: ArtifactCommit, *, attempt_id: str | None = None) -> CommitResult:
         _text(run_id, 'run_id')
         if not isinstance(commit, ArtifactCommit):
             raise TypeError('commit must be ArtifactCommit')
@@ -187,9 +169,7 @@ class ArtifactStore:
 
     async def read_many(self, run_id: str, refs: Iterable[ArtifactRef]) -> Mapping[ArtifactRef, object]:
         _text(run_id, 'run_id')
-        requested = tuple(refs)
-        if not all(isinstance(ref, ArtifactRef) for ref in requested):
-            raise TypeError('refs must contain ArtifactRef values')
+        requested = _tuple_of(refs, ArtifactRef, 'refs must contain ArtifactRef values')
 
         payloads: dict[ArtifactRef, bytes] = {}
         async with self._lock:
@@ -206,7 +186,7 @@ class ArtifactStore:
                         ref.key.partition_key,
                         ref.version,
                     ))
-                cursor = await self._connection.execute(
+                rows = await self._connection.execute_fetchall(
                     f"""
                     SELECT artifact_id, partition_key, version, payload
                     FROM artifacts
@@ -215,7 +195,7 @@ class ArtifactStore:
                     """,
                     parameters,
                 )
-                for row in await cursor.fetchall():
+                for row in rows:
                     ref = ArtifactRef(
                         ArtifactKey(row['artifact_id'], row['partition_key']),
                         row['version'],
@@ -225,111 +205,227 @@ class ArtifactStore:
         missing = next((ref for ref in requested if ref not in payloads), None)
         if missing is not None:
             raise DefinitionError(f'input artifact is missing: {missing}')
-        return await asyncio.to_thread(_deserialize_many, requested, payloads)
+        return await asyncio.to_thread(
+            lambda: {ref: pickle.loads(payloads[ref]) for ref in requested}
+        )
 
     async def record(self, run_id: str, ref: ArtifactRef) -> ArtifactRecord | None:
         _text(run_id, 'run_id')
         if not isinstance(ref, ArtifactRef):
             raise TypeError('ref must be ArtifactRef')
-        async with self._lock:
-            await self._require_run(run_id)
-            cursor = await self._connection.execute(
-                """
-                SELECT producer, input_refs_json FROM artifacts
-                WHERE run_id = ? AND artifact_id = ? AND partition_key = ? AND version = ?
-                """,
-                (run_id, ref.key.artifact_id, ref.key.partition_key, ref.version),
-            )
-            row = await cursor.fetchone()
+        rows = await self._rows(
+            run_id,
+            """
+            SELECT producer, input_refs_json FROM artifacts
+            WHERE run_id = ? AND artifact_id = ? AND partition_key = ? AND version = ?
+            """,
+            (ref.key.artifact_id, ref.key.partition_key, ref.version),
+        )
+        row = rows[0] if rows else None
         return None if row is None else _record_from_row(ref, row)
 
     async def head(self, run_id: str, key: ArtifactKey) -> ArtifactRecord | None:
         _text(run_id, 'run_id')
         if not isinstance(key, ArtifactKey):
             raise TypeError('key must be ArtifactKey')
-        async with self._lock:
-            await self._require_run(run_id)
-            cursor = await self._connection.execute(
-                """
-                SELECT version, producer, input_refs_json FROM artifacts
-                WHERE run_id = ? AND artifact_id = ? AND partition_key = ?
-                ORDER BY version DESC LIMIT 1
-                """,
-                (run_id, key.artifact_id, key.partition_key),
-            )
-            row = await cursor.fetchone()
-        if row is None:
-            return None
-        return _record_from_row(ArtifactRef(key, row['version']), row)
+        rows = await self._rows(
+            run_id,
+            """
+            SELECT version, producer, input_refs_json FROM artifacts
+            WHERE run_id = ? AND artifact_id = ? AND partition_key = ?
+            ORDER BY version DESC LIMIT 1
+            """,
+            (key.artifact_id, key.partition_key),
+        )
+        return None if not rows else _record_from_row(ArtifactRef(key, rows[0]['version']), rows[0])
 
     async def history(self, run_id: str, key: ArtifactKey) -> tuple[ArtifactRecord, ...]:
         _text(run_id, 'run_id')
         if not isinstance(key, ArtifactKey):
             raise TypeError('key must be ArtifactKey')
-        async with self._lock:
-            await self._require_run(run_id)
-            cursor = await self._connection.execute(
-                """
-                SELECT version, producer, input_refs_json FROM artifacts
-                WHERE run_id = ? AND artifact_id = ? AND partition_key = ?
-                ORDER BY version
-                """,
-                (run_id, key.artifact_id, key.partition_key),
-            )
-            rows = await cursor.fetchall()
+        rows = await self._rows(
+            run_id,
+            """
+            SELECT version, producer, input_refs_json FROM artifacts
+            WHERE run_id = ? AND artifact_id = ? AND partition_key = ?
+            ORDER BY version
+            """,
+            (key.artifact_id, key.partition_key),
+        )
         return tuple(
             _record_from_row(ArtifactRef(key, row['version']), row)
             for row in rows
         )
 
-    async def request_retry(self, run_id: str, request_id: str, artifact_key: ArtifactKey,
-                            base_ref: ArtifactRef
-                            ) -> ArtifactRetryRequest:
+    async def artifact_records(self, run_id: str) -> tuple[ArtifactRecord, ...]:
         _text(run_id, 'run_id')
-        _text(request_id, 'retry request_id')
-        if not isinstance(artifact_key, ArtifactKey):
-            raise TypeError('artifact_key must be ArtifactKey')
-        if not isinstance(base_ref, ArtifactRef) or base_ref.key != artifact_key:
-            raise DefinitionError('base_ref must identify artifact_key')
-
-        async with self._transaction():
-            await self._require_run(run_id)
-            existing = await self._retry_row(run_id, request_id)
-            if existing is not None:
-                request = _retry_request(existing)
-                if request.artifact_key != artifact_key or request.base_ref != base_ref:
-                    raise DefinitionError(f'retry request id reused: {request_id}')
-                return request
-
-            current = await self._head_ref(run_id, artifact_key)
-            if current != base_ref:
-                raise DefinitionError('retry target is no longer the current artifact version')
-            cursor = await self._connection.execute(
-                """
-                SELECT request_id FROM retry_requests
-                WHERE run_id = ? AND artifact_id = ? AND partition_key = ? AND status = 'pending'
-                """,
-                (run_id, artifact_key.artifact_id, artifact_key.partition_key),
+        rows = await self._rows(
+            run_id,
+            """
+            SELECT artifact_id, partition_key, version, producer, input_refs_json
+            FROM artifacts WHERE run_id = ?
+            ORDER BY artifact_id, partition_key, version
+            """,
+        )
+        return tuple(
+            _record_from_row(
+                ArtifactRef(
+                    ArtifactKey(row['artifact_id'], row['partition_key']),
+                    row['version'],
+                ),
+                row,
             )
-            conflict = await cursor.fetchone()
-            if conflict is not None:
-                raise DefinitionError(
-                    f'artifact already has a pending retry: {conflict["request_id"]}'
-                )
+            for row in rows
+        )
 
-            created_at = time.time()
-            await self._connection.execute(
-                """
-                INSERT INTO retry_requests(
-                  run_id, request_id, artifact_id, partition_key, base_version,
-                  status, created_at, result_version
-                ) VALUES (?, ?, ?, ?, ?, 'pending', ?, NULL)
-                """,
-                (
-                    run_id, request_id, artifact_key.artifact_id,
-                    artifact_key.partition_key, base_ref.version, created_at,
+    async def replace_pending_retries(
+        self, run_id: str, entries: Iterable[tuple[str, ArtifactKey, ArtifactRef]], *, command_id: str, producer: str,
+        scope: str, resolved_failures: Iterable[ArtifactRecord] = (), required_failure_cases: Iterable[str] = (),
+        failed_attempt_ids: Iterable[str] = (), require_failures: bool = False,
+    ) -> tuple[ArtifactRetryRequest, ...] | None:
+        _text(run_id, 'run_id')
+        _text(command_id, 'recompute command_id')
+        _text(producer, 'recompute producer')
+        _text(scope, 'recompute scope')
+        requests = _validated_retry_entries(entries)
+        failures = _tuple_of(
+            resolved_failures,
+            ArtifactRecord,
+            'resolved_failures must contain ArtifactRecord values',
+        )
+        required_cases = tuple(dict.fromkeys(required_failure_cases))
+        for case_id in required_cases:
+            _text(case_id, 'required failure case_id')
+        failed_attempts = tuple(dict.fromkeys(failed_attempt_ids))
+        for attempt_id in failed_attempts:
+            _text(attempt_id, 'failed attempt_id')
+        fingerprint = hashlib.sha256(f'{run_id}\0{producer}\0{scope}'.encode()).hexdigest()
+        marker = None
+        if failures:
+            marker = await asyncio.to_thread(
+                _prepare_commit,
+                run_id,
+                ArtifactCommit(
+                    command_id,
+                    producer,
+                    tuple(
+                        ArtifactDraft(
+                            record.ref.key,
+                            {'command_id': command_id, 'failure_ref': record.ref},
+                            record.input_refs,
+                        )
+                        for record in failures
+                    ),
+                    {record.ref.key: record.ref for record in failures},
                 ),
             )
+
+        results: list[ArtifactRetryRequest] = []
+        async with self._transaction():
+            await self._require_run(run_id)
+            receipt = await self._fetchone(
+                'SELECT request_hash FROM commits WHERE run_id = ? AND commit_id = ?',
+                (run_id, command_id),
+            )
+            if receipt is not None:
+                if receipt['request_hash'] != fingerprint:
+                    raise DefinitionError(f'command id reused with different request: {command_id}')
+                return None
+            failed_cases = {record.ref.key.partition_key for record in failures}
+            missing_cases = tuple(case_id for case_id in required_cases if case_id not in failed_cases)
+            if missing_cases:
+                raise DefinitionError(f'cases have no active failure: {", ".join(missing_cases)}')
+            if failed_attempts:
+                placeholders = ','.join('?' for _ in failed_attempts)
+                rows = await self._connection.execute_fetchall(
+                    f"""
+                    SELECT attempt_id FROM attempts
+                    WHERE run_id = ? AND status = 'failed'
+                      AND attempt_id IN ({placeholders})
+                    """,
+                    (run_id, *failed_attempts),
+                )
+                if {row['attempt_id'] for row in rows} != set(failed_attempts):
+                    raise DefinitionError('failed attempts changed before retry was applied')
+            if require_failures and not (failures or failed_attempts):
+                raise DefinitionError('recompute scope has no active case failure')
+            rows = await self._connection.execute_fetchall(
+                """
+                SELECT * FROM retry_requests
+                WHERE run_id = ? AND status = 'pending'
+                """,
+                (run_id,),
+            )
+            pending = {
+                ArtifactKey(row['artifact_id'], row['partition_key']): row
+                for row in rows
+            }
+            retained_ids: set[str] = set()
+            missing: list[tuple[str, ArtifactKey, ArtifactRef]] = []
+            for request_id, artifact_key, base_ref in requests:
+                current = await self._head_ref(run_id, artifact_key)
+                if current != base_ref:
+                    raise DefinitionError(
+                        'retry target is no longer the current artifact version'
+                    )
+                row = pending.get(artifact_key)
+                if row is not None and int(row['base_version']) == base_ref.version:
+                    retained_ids.add(str(row['request_id']))
+                    results.append(_retry_request(row))
+                else:
+                    missing.append((request_id, artifact_key, base_ref))
+
+            if retained_ids:
+                placeholders = ','.join('?' for _ in retained_ids)
+                await self._connection.execute(
+                    f"""
+                    UPDATE retry_requests SET status = 'cancelled'
+                    WHERE run_id = ? AND status = 'pending'
+                      AND request_id NOT IN ({placeholders})
+                    """,
+                    (run_id, *sorted(retained_ids)),
+                )
+            else:
+                await self._cancel_pending_retries(run_id)
+
+            for request_id, artifact_key, base_ref in missing:
+                existing = await self._retry_row(run_id, request_id)
+                if existing is not None:
+                    raise DefinitionError(f'retry request id reused: {request_id}')
+                results.append(await self._insert_retry(
+                    run_id,
+                    request_id,
+                    artifact_key,
+                    base_ref,
+                ))
+            refs: tuple[ArtifactRef, ...] = ()
+            if marker is not None:
+                rows = await self._head_rows(run_id)
+                snapshot = await asyncio.to_thread(_snapshot_from_rows, rows, frozenset())
+                if not await self._commit_is_current(run_id, marker.command, snapshot):
+                    raise DefinitionError('case failures changed before retry was applied')
+                refs = (await self._apply_commit(marker)).refs
+            await self._connection.execute(
+                'INSERT INTO commits(run_id, commit_id, request_hash, refs_json) VALUES (?, ?, ?, ?)',
+                (run_id, command_id, fingerprint, _refs_json(refs)),
+            )
+        return tuple(results)
+
+    async def _insert_retry(self, run_id: str, request_id: str, artifact_key: ArtifactKey, base_ref: ArtifactRef
+                            ) -> ArtifactRetryRequest:
+        created_at = time.time()
+        await self._connection.execute(
+            """
+            INSERT INTO retry_requests(
+              run_id, request_id, artifact_id, partition_key, base_version,
+              status, created_at, result_version
+            ) VALUES (?, ?, ?, ?, ?, 'pending', ?, NULL)
+            """,
+            (
+                run_id, request_id, artifact_key.artifact_id,
+                artifact_key.partition_key, base_ref.version, created_at,
+            ),
+        )
         return ArtifactRetryRequest(
             request_id,
             artifact_key,
@@ -338,17 +434,13 @@ class ArtifactStore:
             created_at,
         )
 
-    async def retry_requests(self, run_id: str, *, pending_only: bool = False
-                             ) -> tuple[ArtifactRetryRequest, ...]:
+    async def retry_requests(self, run_id: str, *, pending_only: bool = False) -> tuple[ArtifactRetryRequest, ...]:
         _text(run_id, 'run_id')
         statement = 'SELECT * FROM retry_requests WHERE run_id = ?'
         if pending_only:
             statement += " AND status = 'pending'"
         statement += ' ORDER BY created_at, request_id'
-        async with self._lock:
-            await self._require_run(run_id)
-            cursor = await self._connection.execute(statement, (run_id,))
-            rows = await cursor.fetchall()
+        rows = await self._rows(run_id, statement)
         return tuple(_retry_request(row) for row in rows)
 
     async def cancel_retry(self, run_id: str, request_id: str) -> ArtifactRetryRequest:
@@ -370,9 +462,7 @@ class ArtifactStore:
                 row['status'] = 'cancelled'
         return _retry_request(row)
 
-    async def set_run_state(self, run_id: str, status: RunStatus, *,
-                            error: RuntimeErrorInfo | None = None
-                            ) -> None:
+    async def set_run_state(self, run_id: str, status: RunStatus, *, error: RuntimeErrorInfo | None = None) -> None:
         _text(run_id, 'run_id')
         state = StoredRunState(status, error)
         error_kind = '' if state.error is None else state.error.kind
@@ -392,43 +482,42 @@ class ArtifactStore:
         _text(run_id, 'run_id')
         async with self._lock:
             self._require_open()
-            cursor = await self._connection.execute(
+            row = await self._fetchone(
                 'SELECT status, error_kind, error_message FROM runs WHERE run_id = ?',
                 (run_id,),
             )
-            row = await cursor.fetchone()
         return None if row is None else _run_state(row)
 
     async def run_ids(self) -> tuple[str, ...]:
-        async with self._lock:
-            self._require_open()
-            cursor = await self._connection.execute('SELECT run_id FROM runs ORDER BY run_id')
-            return tuple(row['run_id'] for row in await cursor.fetchall())
+        return await self._list_run_ids('SELECT run_id FROM runs ORDER BY run_id')
 
-    async def inspect(self, run_id: str, partition_set_ids: Iterable[str] = ()
-                      ) -> tuple[
-        StoredRunState,
-        ArtifactSnapshot,
-        tuple[AttemptSnapshot, ...],
-        tuple[ArtifactRetryRequest, ...],
-    ]:
+    async def active_run_ids(self) -> tuple[str, ...]:
+        return await self._list_run_ids(
+            """
+            SELECT run_id FROM runs
+            WHERE status IN ('running', 'pausing', 'paused', 'cancelling')
+            ORDER BY run_id
+            """
+        )
+
+    async def inspect(
+        self, run_id: str, partition_set_ids: Iterable[str] = (),
+    ) -> tuple[StoredRunState, ArtifactSnapshot, tuple[AttemptSnapshot, ...], tuple[ArtifactRetryRequest, ...],]:
         _text(run_id, 'run_id')
         ids = frozenset(partition_set_ids)
         async with self._lock:
-            cursor = await self._connection.execute(
+            state_row = await self._fetchone(
                 'SELECT status, error_kind, error_message FROM runs WHERE run_id = ?',
                 (run_id,),
             )
-            state_row = await cursor.fetchone()
             if state_row is None:
                 raise DefinitionError(f'run not found: {run_id}')
             artifact_rows = await self._head_rows(run_id)
-            cursor = await self._connection.execute(
+            attempt_rows = await self._connection.execute_fetchall(
                 'SELECT * FROM attempts WHERE run_id = ? ORDER BY created_at, attempt_id',
                 (run_id,),
             )
-            attempt_rows = await cursor.fetchall()
-            cursor = await self._connection.execute(
+            retry_rows = await self._connection.execute_fetchall(
                 """
                 SELECT * FROM retry_requests
                 WHERE run_id = ? AND status = 'pending'
@@ -436,7 +525,6 @@ class ArtifactStore:
                 """,
                 (run_id,),
             )
-            retry_rows = await cursor.fetchall()
         snapshot = await asyncio.to_thread(_snapshot_from_rows, artifact_rows, ids)
         return (
             _run_state(state_row),
@@ -445,12 +533,9 @@ class ArtifactStore:
             tuple(_retry_request(row) for row in retry_rows),
         )
 
-    async def create_attempt(self, run_id: str, attempt_id: str, invocation_id: str,
-                             operation_id: str, partition_key: str,
-                             input_refs: Iterable[ArtifactRef] = (),
-                             output_keys: Iterable[ArtifactKey] = (), *,
-                             retry_request_id: str = ''
-                             ) -> AttemptSnapshot:
+    async def create_attempt(self, run_id: str, attempt_id: str, invocation_id: str, operation_id: str,
+                             partition_key: str, input_refs: Iterable[ArtifactRef] = (),
+                             output_keys: Iterable[ArtifactKey] = (), *, retry_request_id: str = '') -> AttemptSnapshot:
         for value, name in (
             (run_id, 'run_id'),
             (attempt_id, 'attempt_id'),
@@ -504,8 +589,7 @@ class ArtifactStore:
         return snapshot
 
     async def set_attempt_status(self, run_id: str, attempt_id: str, status: AttemptStatus, *,
-                                 error: RuntimeErrorInfo | None = None
-                                 ) -> AttemptSnapshot:
+                                 error: RuntimeErrorInfo | None = None) -> AttemptSnapshot:
         _text(run_id, 'run_id')
         _text(attempt_id, 'attempt_id')
         if status in {'succeeded', 'discarded'}:
@@ -515,7 +599,6 @@ class ArtifactStore:
             if row is None:
                 raise DefinitionError(f'attempt not found: {attempt_id}')
             current = row['status']
-            _validate_attempt_transition(current, status)
             if current == status:
                 snapshot = _attempt_snapshot(row)
                 if error is not None and error != snapshot.error:
@@ -525,9 +608,7 @@ class ArtifactStore:
             await self._update_attempt(run_id, attempt_id, updated)
         return _attempt_snapshot(updated)
 
-    async def fail_attempt_and_run(self, run_id: str, attempt_id: str,
-                                   error: RuntimeErrorInfo
-                                   ) -> AttemptSnapshot:
+    async def fail_attempt_and_run(self, run_id: str, attempt_id: str, error: RuntimeErrorInfo) -> AttemptSnapshot:
         if not isinstance(error, RuntimeErrorInfo):
             raise TypeError('error must be RuntimeErrorInfo')
         async with self._transaction():
@@ -547,80 +628,158 @@ class ArtifactStore:
                 raise DefinitionError(f'run not found: {run_id}')
         return _attempt_snapshot(updated)
 
-    async def finish_pause(self, run_id: str) -> None:
-        await self._finish_stopping(run_id, 'paused', cancel_retries=False)
-
-    async def finish_cancel(self, run_id: str) -> None:
-        await self._finish_stopping(run_id, 'cancelled', cancel_retries=True)
+    async def finish_stopping(self, run_id: str, status: Literal['paused', 'cancelled']) -> None:
+        async with self._transaction():
+            await self._require_run(run_id)
+            await self._connection.execute(
+                """
+                UPDATE attempts SET status = 'cancelled', finished_at = ?
+                WHERE run_id = ? AND status IN ('scheduled', 'running', 'cancelling')
+                """,
+                (time.time(), run_id),
+            )
+            await self._connection.execute(
+                "UPDATE runs SET status = ?, error_kind = '', error_message = '' WHERE run_id = ?",
+                (status, run_id),
+            )
+            if status == 'cancelled':
+                await self._cancel_pending_retries(run_id)
 
     async def attempts(self, run_id: str) -> tuple[AttemptSnapshot, ...]:
         _text(run_id, 'run_id')
-        async with self._lock:
-            await self._require_run(run_id)
-            cursor = await self._connection.execute(
-                'SELECT * FROM attempts WHERE run_id = ? ORDER BY created_at, attempt_id',
-                (run_id,),
-            )
-            rows = await cursor.fetchall()
+        rows = await self._rows(
+            run_id, 'SELECT * FROM attempts WHERE run_id = ? ORDER BY created_at, attempt_id'
+        )
         return tuple(_attempt_snapshot(row) for row in rows)
 
-    async def append_progress(self, run_id: str, attempt_id: str,
-                              update: ProgressUpdate
-                              ) -> ProgressEvent:
+    async def append_operation_event(self, run_id: str, attempt_id: str, event: OperationEvent
+                                     ) -> RecordedOperationEvent:
         _text(run_id, 'run_id')
         _text(attempt_id, 'attempt_id')
-        if not isinstance(update, ProgressUpdate):
-            raise TypeError('update must be ProgressUpdate')
+        if not isinstance(event, OperationEvent):
+            raise TypeError('event must be OperationEvent')
         created_at = time.time()
-        detail_json = json.dumps(dict(update.detail), ensure_ascii=False, sort_keys=True)
+        data_json = json.dumps(dict(event.data), ensure_ascii=False, sort_keys=True, allow_nan=False)
         async with self._transaction():
             row = await self._attempt_row(run_id, attempt_id)
             if row is None:
                 raise DefinitionError(f'attempt not found: {attempt_id}')
             if row['status'] != 'running':
-                raise DefinitionError('progress can only be appended to a running attempt')
-            cursor = await self._connection.execute(
+                raise DefinitionError('operation events can only be appended to a running attempt')
+            sequence_row = await self._fetchone(
                 """
                 SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence
-                FROM progress_events WHERE run_id = ? AND attempt_id = ?
+                FROM operation_events WHERE run_id = ?
                 """,
-                (run_id, attempt_id),
+                (run_id,),
             )
-            sequence = int((await cursor.fetchone())['sequence'])
+            assert sequence_row is not None
+            sequence = int(sequence_row['sequence'])
             await self._connection.execute(
                 """
-                INSERT INTO progress_events(
-                  run_id, attempt_id, sequence, phase, message,
-                  current_value, total_value, detail_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO operation_events(
+                  run_id, sequence, attempt_id, event_type, level, status, message,
+                  current_value, total_value, data_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    run_id, attempt_id, sequence, update.phase, update.message,
-                    update.current, update.total, detail_json, created_at,
+                    run_id, sequence, attempt_id, event.event_type, event.level, event.status,
+                    event.message, event.current, event.total, data_json, created_at,
                 ),
             )
-        return ProgressEvent(attempt_id, sequence, update, created_at)
+        return RecordedOperationEvent(
+            run_id,
+            attempt_id,
+            cast(str, row['invocation_id']),
+            cast(str, row['operation_id']),
+            cast(str, row['partition_key']),
+            sequence,
+            event,
+            created_at,
+        )
 
-    async def progress_events(self, run_id: str, attempt_id: str | None = None
-                              ) -> tuple[ProgressEvent, ...]:
+    async def operation_events(self, run_id: str, *, attempt_id: str = '', operation_id: str = '',
+                               operation_ids: Iterable[str] = (),
+                               partition_key: str | None = None, event_type: str = '', level: EventLevel | None = None,
+                               status: EventStatus | None = None, after: int = 0, limit: int | None = None
+                               ) -> tuple[RecordedOperationEvent, ...]:
         _text(run_id, 'run_id')
-        statement = 'SELECT * FROM progress_events WHERE run_id = ?'
-        parameters: tuple[object, ...] = (run_id,)
-        if attempt_id is not None:
+        _integer(after, 'operation event cursor')
+        if limit is not None:
+            _integer(limit, 'operation event limit', minimum=1)
+        filters = ['event.run_id = ?', 'event.sequence > ?']
+        parameters: list[object] = [after]
+        if attempt_id:
             _text(attempt_id, 'attempt_id')
-            statement += ' AND attempt_id = ?'
-            parameters = (run_id, attempt_id)
-        statement += ' ORDER BY created_at, attempt_id, sequence'
-        async with self._lock:
-            await self._require_run(run_id)
-            cursor = await self._connection.execute(statement, parameters)
-            rows = await cursor.fetchall()
-        return tuple(_progress_event(row) for row in rows)
+            filters.append('event.attempt_id = ?')
+            parameters.append(attempt_id)
+        selected_operations = tuple(dict.fromkeys(operation_ids))
+        for selected in selected_operations:
+            _text(selected, 'operation_id')
+        if operation_id and selected_operations:
+            raise DefinitionError('operation_id and operation_ids are mutually exclusive')
+        if operation_id:
+            _text(operation_id, 'operation_id')
+            filters.append('attempt.operation_id = ?')
+            parameters.append(operation_id)
+        elif selected_operations:
+            placeholders = ','.join('?' for _ in selected_operations)
+            filters.append(f'attempt.operation_id IN ({placeholders})')
+            parameters.extend(selected_operations)
+        if partition_key is not None:
+            _string(partition_key, 'partition_key')
+            filters.append('attempt.partition_key = ?')
+            parameters.append(partition_key)
+        if event_type:
+            _text(event_type, 'event_type')
+            filters.append('event.event_type = ?')
+            parameters.append(event_type)
+        if level is not None:
+            _known(level, get_args(EventLevel), 'operation event level')
+            filters.append('event.level = ?')
+            parameters.append(level)
+        if status is not None:
+            _known(status, get_args(EventStatus), 'operation event status')
+            filters.append('event.status = ?')
+            parameters.append(status)
+        statement = f"""
+            SELECT event.*, attempt.invocation_id, attempt.operation_id, attempt.partition_key
+            FROM operation_events AS event
+            JOIN attempts AS attempt
+              ON attempt.run_id = event.run_id AND attempt.attempt_id = event.attempt_id
+            WHERE {' AND '.join(filters)}
+            ORDER BY event.sequence
+        """
+        if limit is not None:
+            statement += ' LIMIT ?'
+            parameters.append(limit)
+        rows = await self._rows(run_id, statement, tuple(parameters))
+        return tuple(
+            RecordedOperationEvent(
+                cast(str, row['run_id']),
+                cast(str, row['attempt_id']),
+                cast(str, row['invocation_id']),
+                cast(str, row['operation_id']),
+                cast(str, row['partition_key']),
+                cast(int, row['sequence']),
+                OperationEvent(
+                    cast(str, row['event_type']),
+                    cast(EventLevel, row['level']),
+                    cast(str | None, row['status']),
+                    cast(str, row['message']),
+                    json.loads(cast(str, row['data_json'])),
+                    cast(int | None, row['current_value']),
+                    cast(int | None, row['total_value']),
+                ),
+                cast(float, row['created_at']),
+            )
+            for row in rows
+        )
 
     async def recover_runs(self) -> tuple[str, ...]:
         recovered: list[str] = []
         async with self._transaction():
-            cursor = await self._connection.execute(
+            rows = await self._connection.execute_fetchall(
                 """
                 SELECT run_id, status FROM runs AS run
                 WHERE status IN ('running', 'pausing', 'cancelling')
@@ -634,34 +793,11 @@ class ArtifactStore:
                 ORDER BY run_id
                 """
             )
-            rows = await cursor.fetchall()
             now = time.time()
             for row in rows:
                 run_id = row['run_id']
                 cancelling = row['status'] == 'cancelling'
-                cursor = await self._connection.execute(
-                    """
-                    SELECT 1 FROM attempts
-                    WHERE run_id = ? AND status IN ('scheduled', 'running', 'cancelling')
-                    LIMIT 1
-                    """,
-                    (run_id,),
-                )
-                has_active_attempt = await cursor.fetchone() is not None
-                if row['status'] == 'running' and not has_active_attempt:
-                    continue
-                if row['status'] == 'failed':
-                    await self._connection.execute(
-                        """
-                        UPDATE attempts SET status = 'interrupted', finished_at = ?
-                        WHERE run_id = ? AND status IN ('scheduled', 'running', 'cancelling')
-                        """,
-                        (now, run_id),
-                    )
-                    recovered.append(run_id)
-                    continue
                 attempt_status = 'cancelled' if cancelling else 'interrupted'
-                run_status = 'cancelled' if cancelling else 'paused'
                 await self._connection.execute(
                     """
                     UPDATE attempts SET status = ?, finished_at = ?
@@ -669,12 +805,14 @@ class ArtifactStore:
                     """,
                     (attempt_status, now, run_id),
                 )
-                await self._connection.execute(
-                    "UPDATE runs SET status = ?, error_kind = '', error_message = '' WHERE run_id = ?",
-                    (run_status, run_id),
-                )
-                if cancelling:
-                    await self._cancel_pending_retries(run_id)
+                if row['status'] != 'failed':
+                    run_status = 'cancelled' if cancelling else 'paused'
+                    await self._connection.execute(
+                        "UPDATE runs SET status = ?, error_kind = '', error_message = '' WHERE run_id = ?",
+                        (run_status, run_id),
+                    )
+                    if cancelling:
+                        await self._cancel_pending_retries(run_id)
                 recovered.append(run_id)
         return tuple(recovered)
 
@@ -698,13 +836,26 @@ class ArtifactStore:
             replay = await self._replay(prepared)
             if replay is not None:
                 if attempt is not None:
-                    await self._reconcile_replayed_attempt(prepared.run_id, attempt, replay)
+                    if attempt['status'] == 'running':
+                        await self._finish_attempt_commit(prepared.run_id, attempt, replay)
+                    elif attempt['status'] != 'succeeded':
+                        raise DefinitionError(
+                            f'replayed commit conflicts with attempt state: '
+                            f'{attempt["attempt_id"]} is {attempt["status"]}'
+                        )
                 return replay
             if attempt is not None and attempt['status'] != 'running':
                 return CommitResult('stale')
 
             if attempt is not None and attempt['retry_request_id']:
-                await self._validate_retry_attempt(prepared, attempt)
+                request_id = cast(str, attempt['retry_request_id'])
+                row = await self._retry_row(prepared.run_id, request_id)
+                if row is None or row['status'] != 'pending':
+                    raise DefinitionError(f'pending retry request not found: {request_id}')
+                key = ArtifactKey(cast(str, row['artifact_id']), cast(str, row['partition_key']))
+                base = ArtifactRef(key, cast(int, row['base_version']))
+                if prepared.command.expected_heads.get(key) != base:
+                    raise DefinitionError('retry commit must compare against its requested base version')
 
             retry_conflict = await self._pending_retry_conflict(prepared, attempt)
             if retry_conflict is not None:
@@ -714,30 +865,23 @@ class ArtifactStore:
                         'cancel the run or wait for it'
                     )
                 result = CommitResult('stale')
-                await self._finish_attempt_commit(prepared.run_id, attempt, result)
-                return result
-
-            rows = await self._head_rows(prepared.run_id)
-            snapshot = await asyncio.to_thread(_snapshot_from_rows, rows, frozenset())
-            if not await self._commit_is_current(prepared.run_id, prepared.command, snapshot):
-                result = CommitResult('stale')
             else:
-                result = await self._apply_commit(prepared)
-                await self._write_receipt(prepared, result.refs)
+                rows = await self._head_rows(prepared.run_id)
+                snapshot = await asyncio.to_thread(_snapshot_from_rows, rows, frozenset())
+                if not await self._commit_is_current(prepared.run_id, prepared.command, snapshot):
+                    result = CommitResult('stale')
+                else:
+                    result = await self._apply_commit(prepared)
+                    await self._write_receipt(prepared, result.refs)
 
             if attempt is not None:
                 await self._finish_attempt_commit(prepared.run_id, attempt, result)
             return result
 
-    async def _commit_is_current(self, run_id: str, commit: ArtifactCommit,
-                                 snapshot: ArtifactSnapshot
-                                 ) -> bool:
+    async def _commit_is_current(self, run_id: str, commit: ArtifactCommit, snapshot: ArtifactSnapshot) -> bool:
         for key, expected in commit.expected_heads.items():
             current = snapshot.records.get(key)
-            if expected is None:
-                if current is not None:
-                    return False
-            elif current is None or current.ref != expected:
+            if (None if current is None else current.ref) != expected:
                 return False
 
         effective = snapshot.effective_records()
@@ -770,7 +914,8 @@ class ArtifactStore:
     async def _apply_commit(self, prepared: _PreparedCommit) -> CommitResult:
         records: list[ArtifactRecord] = []
         for write, payload in zip(prepared.command.writes, prepared.payloads, strict=True):
-            ref = await self._next_ref(prepared.run_id, write.key)
+            current = await self._head_ref(prepared.run_id, write.key)
+            ref = ArtifactRef(write.key, 1 if current is None else current.version + 1)
             record = ArtifactRecord(ref, prepared.command.producer, write.input_refs)
             await self._connection.execute(
                 """
@@ -787,9 +932,7 @@ class ArtifactStore:
             records.append(record)
         return CommitResult('ok', tuple(record.ref for record in records))
 
-    async def _write_receipt(self, prepared: _PreparedCommit,
-                             refs: tuple[ArtifactRef, ...]
-                             ) -> None:
+    async def _write_receipt(self, prepared: _PreparedCommit, refs: tuple[ArtifactRef, ...]) -> None:
         await self._connection.execute(
             """
             INSERT INTO commits(run_id, commit_id, request_hash, refs_json)
@@ -799,49 +942,32 @@ class ArtifactStore:
         )
 
     async def _replay(self, prepared: _PreparedCommit) -> CommitResult | None:
-        cursor = await self._connection.execute(
+        rows = await self._connection.execute_fetchall(
             'SELECT request_hash, refs_json FROM commits WHERE run_id = ? AND commit_id = ?',
             (prepared.run_id, prepared.command.commit_id),
         )
-        row = await cursor.fetchone()
+        row = rows[0] if rows else None
         if row is None:
             return None
         if row['request_hash'] != prepared.request_hash:
             raise DefinitionError(f'commit id reused with different request: {prepared.command.commit_id}')
-        return CommitResult('ok', _refs_from_json(row['refs_json']), True)
+        return CommitResult('ok', _refs_from_json(row['refs_json']))
 
-    async def _pending_retry_conflict(self, prepared: _PreparedCommit,
-                                      attempt: Mapping[str, object] | None
-                                      ) -> str | None:
+    async def _pending_retry_conflict(self, prepared: _PreparedCommit, attempt: _Row | None) -> str | None:
         allowed = '' if attempt is None else cast(str | None, attempt['retry_request_id']) or ''
         for write in prepared.command.writes:
-            cursor = await self._connection.execute(
+            row = await self._fetchone(
                 """
                 SELECT request_id FROM retry_requests
                 WHERE run_id = ? AND artifact_id = ? AND partition_key = ? AND status = 'pending'
                 """,
                 (prepared.run_id, write.key.artifact_id, write.key.partition_key),
             )
-            row = await cursor.fetchone()
             if row is not None and row['request_id'] != allowed:
                 return cast(str, row['request_id'])
         return None
 
-    async def _validate_retry_attempt(self, prepared: _PreparedCommit,
-                                      attempt: Mapping[str, object]
-                                      ) -> None:
-        request_id = cast(str, attempt['retry_request_id'])
-        row = await self._retry_row(prepared.run_id, request_id)
-        if row is None or row['status'] != 'pending':
-            raise DefinitionError(f'pending retry request not found: {request_id}')
-        key = ArtifactKey(cast(str, row['artifact_id']), cast(str, row['partition_key']))
-        base = ArtifactRef(key, cast(int, row['base_version']))
-        if prepared.command.expected_heads.get(key) != base:
-            raise DefinitionError('retry commit must compare against its requested base version')
-
-    async def _finish_attempt_commit(self, run_id: str, attempt: Mapping[str, object],
-                                     result: CommitResult
-                                     ) -> None:
+    async def _finish_attempt_commit(self, run_id: str, attempt: _Row, result: CommitResult) -> None:
         status = 'succeeded' if result.status == 'ok' else 'discarded'
         cursor = await self._connection.execute(
             """
@@ -870,37 +996,6 @@ class ArtifactStore:
                 (ref.version, run_id, request_id),
             )
 
-    async def _reconcile_replayed_attempt(self, run_id: str,
-                                          attempt: Mapping[str, object], result: CommitResult
-                                          ) -> None:
-        if attempt['status'] == 'succeeded':
-            return
-        if attempt['status'] != 'running':
-            raise DefinitionError(
-                f'replayed commit conflicts with attempt state: '
-                f'{attempt["attempt_id"]} is {attempt["status"]}'
-            )
-        await self._finish_attempt_commit(run_id, attempt, result)
-
-    async def _finish_stopping(self, run_id: str, status: Literal['paused', 'cancelled'], *,
-                               cancel_retries: bool
-                               ) -> None:
-        async with self._transaction():
-            await self._require_run(run_id)
-            await self._connection.execute(
-                """
-                UPDATE attempts SET status = 'cancelled', finished_at = ?
-                WHERE run_id = ? AND status IN ('scheduled', 'running', 'cancelling')
-                """,
-                (time.time(), run_id),
-            )
-            await self._connection.execute(
-                "UPDATE runs SET status = ?, error_kind = '', error_message = '' WHERE run_id = ?",
-                (status, run_id),
-            )
-            if cancel_retries:
-                await self._cancel_pending_retries(run_id)
-
     async def _cancel_pending_retries(self, run_id: str) -> None:
         await self._connection.execute(
             "UPDATE retry_requests SET status = 'cancelled' "
@@ -909,7 +1004,7 @@ class ArtifactStore:
         )
 
     async def _head_rows(self, run_id: str) -> list[aiosqlite.Row]:
-        cursor = await self._connection.execute(
+        rows = await self._connection.execute_fetchall(
             """
             WITH heads AS (
               SELECT artifact_id, partition_key, MAX(version) AS version
@@ -925,51 +1020,58 @@ class ArtifactStore:
             """,
             (run_id, run_id),
         )
-        return list(await cursor.fetchall())
+        return list(rows)
+
+    async def _rows(self, run_id: str, statement: str, parameters: Sequence[object] = ()) -> list[aiosqlite.Row]:
+        async with self._lock:
+            await self._require_run(run_id)
+            rows = await self._connection.execute_fetchall(statement, (run_id, *parameters))
+            return list(rows)
+
+    async def _list_run_ids(self, statement: str) -> tuple[str, ...]:
+        async with self._lock:
+            self._require_open()
+            rows = await self._connection.execute_fetchall(statement)
+            return tuple(row['run_id'] for row in rows)
+
+    async def _fetchone(self, statement: str, parameters: Sequence[object] = ()) -> aiosqlite.Row | None:
+        cursor = await self._connection.execute(statement, parameters)
+        return await cursor.fetchone()
 
     async def _head_ref(self, run_id: str, key: ArtifactKey) -> ArtifactRef | None:
-        cursor = await self._connection.execute(
+        row = await self._fetchone(
             """
             SELECT MAX(version) AS version FROM artifacts
             WHERE run_id = ? AND artifact_id = ? AND partition_key = ?
             """,
             (run_id, key.artifact_id, key.partition_key),
         )
-        row = await cursor.fetchone()
+        assert row is not None
         return None if row['version'] is None else ArtifactRef(key, row['version'])
 
-    async def _next_ref(self, run_id: str, key: ArtifactKey) -> ArtifactRef:
-        current = await self._head_ref(run_id, key)
-        return ArtifactRef(key, 1 if current is None else current.version + 1)
-
     async def _payload(self, run_id: str, ref: ArtifactRef) -> bytes | None:
-        cursor = await self._connection.execute(
+        row = await self._fetchone(
             """
             SELECT payload FROM artifacts
             WHERE run_id = ? AND artifact_id = ? AND partition_key = ? AND version = ?
             """,
             (run_id, ref.key.artifact_id, ref.key.partition_key, ref.version),
         )
-        row = await cursor.fetchone()
         return None if row is None else row['payload']
 
     async def _attempt_row(self, run_id: str, attempt_id: str) -> aiosqlite.Row | None:
-        cursor = await self._connection.execute(
+        return await self._fetchone(
             'SELECT * FROM attempts WHERE run_id = ? AND attempt_id = ?',
             (run_id, attempt_id),
         )
-        return await cursor.fetchone()
 
     async def _retry_row(self, run_id: str, request_id: str) -> aiosqlite.Row | None:
-        cursor = await self._connection.execute(
+        return await self._fetchone(
             'SELECT * FROM retry_requests WHERE run_id = ? AND request_id = ?',
             (run_id, request_id),
         )
-        return await cursor.fetchone()
 
-    async def _update_attempt(self, run_id: str, attempt_id: str,
-                              values: Mapping[str, object]
-                              ) -> None:
+    async def _update_attempt(self, run_id: str, attempt_id: str, values: _Row) -> None:
         await self._connection.execute(
             """
             UPDATE attempts SET status = ?, started_at = ?, finished_at = ?,
@@ -984,8 +1086,7 @@ class ArtifactStore:
 
     async def _require_run(self, run_id: str) -> None:
         self._require_open()
-        cursor = await self._connection.execute('SELECT 1 FROM runs WHERE run_id = ?', (run_id,))
-        if await cursor.fetchone() is None:
+        if await self._fetchone('SELECT 1 FROM runs WHERE run_id = ?', (run_id,)) is None:
             raise DefinitionError(f'run not found: {run_id}')
 
     def _require_open(self) -> None:
@@ -993,8 +1094,9 @@ class ArtifactStore:
             raise RuntimeError('artifact store is closed')
 
     async def _create_schema(self) -> None:
-        cursor = await self._connection.execute('PRAGMA user_version')
-        version = int((await cursor.fetchone())[0])
+        row = await self._fetchone('PRAGMA user_version')
+        assert row is not None
+        version = int(row[0])
         if version == _SCHEMA_VERSION:
             await self._validate_schema()
             return
@@ -1002,10 +1104,10 @@ class ArtifactStore:
             raise DefinitionError(
                 f'unsupported artifact store schema version: {version}; delete and recreate it'
             )
-        cursor = await self._connection.execute(
+        row = await self._fetchone(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' LIMIT 1"
         )
-        if await cursor.fetchone() is not None:
+        if row is not None:
             raise DefinitionError('unversioned artifact store; delete and recreate it')
 
         await self._connection.executescript(
@@ -1103,37 +1205,39 @@ class ArtifactStore:
             CREATE UNIQUE INDEX active_attempt_by_invocation
               ON attempts(run_id, invocation_id)
               WHERE status IN ('scheduled', 'running', 'cancelling');
-            CREATE TABLE progress_events(
+            CREATE TABLE operation_events(
               run_id TEXT NOT NULL,
-              attempt_id TEXT NOT NULL,
               sequence INTEGER NOT NULL CHECK(sequence > 0),
-              phase TEXT NOT NULL,
+              attempt_id TEXT NOT NULL,
+              event_type TEXT NOT NULL,
+              level TEXT NOT NULL CHECK(level IN ('debug', 'info', 'warning', 'error')),
+              status TEXT CHECK(status IS NULL OR status IN ('started', 'running', 'completed', 'failed', 'skipped')),
               message TEXT NOT NULL,
               current_value INTEGER,
               total_value INTEGER,
-              detail_json TEXT NOT NULL,
+              data_json TEXT NOT NULL,
               created_at REAL NOT NULL,
-              PRIMARY KEY(run_id, attempt_id, sequence),
+              PRIMARY KEY(run_id, sequence),
               FOREIGN KEY(run_id, attempt_id)
                 REFERENCES attempts(run_id, attempt_id) ON DELETE CASCADE,
               CHECK(current_value IS NULL OR current_value >= 0),
               CHECK(total_value IS NULL OR total_value >= 0),
               CHECK(current_value IS NULL OR total_value IS NULL OR current_value <= total_value)
             );
+            CREATE INDEX operation_events_by_attempt ON operation_events(run_id, attempt_id, sequence);
             PRAGMA user_version = {_SCHEMA_VERSION};
             COMMIT;
             """
         )
 
     async def _validate_schema(self) -> None:
-        cursor = await self._connection.execute(
+        rows = await self._connection.execute_fetchall(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
         )
-        tables = frozenset(row[0] for row in await cursor.fetchall())
+        tables = frozenset(row[0] for row in rows)
         if tables != _SCHEMA_TABLES:
             raise DefinitionError('invalid artifact store schema; delete and recreate it')
-        cursor = await self._connection.execute('PRAGMA foreign_key_check')
-        if await cursor.fetchone() is not None:
+        if await self._fetchone('PRAGMA foreign_key_check') is not None:
             raise DefinitionError('artifact store contains invalid references')
 
     @asynccontextmanager
@@ -1155,21 +1259,40 @@ class ArtifactStore:
                 raise
 
 
-def _run_state(row: Mapping[str, object]) -> StoredRunState:
+def _validated_retry_entries(entries: Iterable[tuple[str, ArtifactKey, ArtifactRef]]
+                             ) -> tuple[tuple[str, ArtifactKey, ArtifactRef], ...]:
+    requests = tuple(entries)
+    request_ids: set[str] = set()
+    artifact_keys: set[ArtifactKey] = set()
+    for request_id, artifact_key, base_ref in requests:
+        _text(request_id, 'retry request_id')
+        if not isinstance(artifact_key, ArtifactKey):
+            raise TypeError('artifact_key must be ArtifactKey')
+        if not isinstance(base_ref, ArtifactRef) or base_ref.key != artifact_key:
+            raise DefinitionError('base_ref must identify artifact_key')
+        if request_id in request_ids:
+            raise DefinitionError(f'duplicate retry request id: {request_id}')
+        if artifact_key in artifact_keys:
+            raise DefinitionError(f'duplicate retry artifact: {artifact_key}')
+        request_ids.add(request_id)
+        artifact_keys.add(artifact_key)
+    return requests
+
+
+def _run_state(row: _Row) -> StoredRunState:
     status = cast(RunStatus, row['status'])
-    error = None
-    if status == 'failed':
-        error = RuntimeErrorInfo(cast(str, row['error_kind']), cast(str, row['error_message']))
+    error = (
+        RuntimeErrorInfo(cast(str, row['error_kind']), cast(str, row['error_message']))
+        if status == 'failed' else None
+    )
     return StoredRunState(status, error)
 
 
-def _record_from_row(ref: ArtifactRef, row: Mapping[str, object]) -> ArtifactRecord:
+def _record_from_row(ref: ArtifactRef, row: _Row) -> ArtifactRecord:
     return ArtifactRecord(ref, cast(str, row['producer']), _refs_from_json(cast(str, row['input_refs_json'])))
 
 
-def _snapshot_from_rows(rows: Iterable[Mapping[str, object]],
-                        partition_set_ids: frozenset[str]
-                        ) -> ArtifactSnapshot:
+def _snapshot_from_rows(rows: Iterable[_Row], partition_set_ids: frozenset[str]) -> ArtifactSnapshot:
     records: dict[ArtifactKey, ArtifactRecord] = {}
     partition_sets: dict[ArtifactKey, PartitionSet] = {}
     for row in rows:
@@ -1184,15 +1307,10 @@ def _snapshot_from_rows(rows: Iterable[Mapping[str, object]],
     return ArtifactSnapshot(records, partition_sets)
 
 
-def _validate_attempt_transition(current: str, target: AttemptStatus) -> None:
-    if current != target and target not in _ATTEMPT_TRANSITIONS.get(current, frozenset()):
-        raise DefinitionError(f'cannot transition attempt from {current} to {target}')
-
-
-def _attempt_status_values(row: Mapping[str, object], status: AttemptStatus,
-                           error: RuntimeErrorInfo | None
-                           ) -> dict[str, object]:
-    _validate_attempt_transition(cast(str, row['status']), status)
+def _attempt_status_values(row: _Row, status: AttemptStatus, error: RuntimeErrorInfo | None) -> dict[str, object]:
+    current = cast(str, row['status'])
+    if current != status and status not in _ATTEMPT_TRANSITIONS.get(current, frozenset()):
+        raise DefinitionError(f'cannot transition attempt from {current} to {status}')
     if status == 'failed' and error is None:
         raise DefinitionError('failed attempt requires error details')
     if status != 'failed' and error is not None:
@@ -1211,7 +1329,7 @@ def _attempt_status_values(row: Mapping[str, object], status: AttemptStatus,
     return values
 
 
-def _validate_attempt_commit(attempt: Mapping[str, object], commit: ArtifactCommit) -> None:
+def _validate_attempt_commit(attempt: _Row, commit: ArtifactCommit) -> None:
     attempt_id = attempt['attempt_id']
     if attempt['invocation_id'] != commit.commit_id:
         raise DefinitionError(f'attempt {attempt_id} does not belong to commit {commit.commit_id}')
@@ -1232,11 +1350,12 @@ def _validate_attempt_commit(attempt: Mapping[str, object], commit: ArtifactComm
         raise DefinitionError(f'attempt {attempt_id} partition guard does not match commit')
 
 
-def _attempt_snapshot(row: Mapping[str, object]) -> AttemptSnapshot:
+def _attempt_snapshot(row: _Row) -> AttemptSnapshot:
     status = cast(AttemptStatus, row['status'])
-    error = None
-    if status == 'failed':
-        error = RuntimeErrorInfo(cast(str, row['error_kind']), cast(str, row['error_message']))
+    error = (
+        RuntimeErrorInfo(cast(str, row['error_kind']), cast(str, row['error_message']))
+        if status == 'failed' else None
+    )
     output_keys = tuple(
         ArtifactKey(item[0], item[1])
         for item in json.loads(cast(str, row['output_keys_json']))
@@ -1257,7 +1376,7 @@ def _attempt_snapshot(row: Mapping[str, object]) -> AttemptSnapshot:
     )
 
 
-def _retry_request(row: Mapping[str, object]) -> ArtifactRetryRequest:
+def _retry_request(row: _Row) -> ArtifactRetryRequest:
     key = ArtifactKey(cast(str, row['artifact_id']), cast(str, row['partition_key']))
     result_version = cast(int | None, row['result_version'])
     return ArtifactRetryRequest(
@@ -1267,22 +1386,6 @@ def _retry_request(row: Mapping[str, object]) -> ArtifactRetryRequest:
         cast(Literal['pending', 'fulfilled', 'cancelled'], row['status']),
         cast(float, row['created_at']),
         None if result_version is None else ArtifactRef(key, result_version),
-    )
-
-
-def _progress_event(row: Mapping[str, object]) -> ProgressEvent:
-    update = ProgressUpdate(
-        cast(str, row['phase']),
-        cast(str, row['message']),
-        cast(int | None, row['current_value']),
-        cast(int | None, row['total_value']),
-        json.loads(cast(str, row['detail_json'])),
-    )
-    return ProgressEvent(
-        cast(str, row['attempt_id']),
-        cast(int, row['sequence']),
-        update,
-        cast(float, row['created_at']),
     )
 
 
@@ -1302,22 +1405,12 @@ def _commit_fingerprint(run_id: str, commit: ArtifactCommit, payloads: tuple[byt
         digest.update(json.dumps(_key_data(write.key), separators=(',', ':')).encode())
         digest.update(_refs_json(write.input_refs).encode())
         digest.update(payload)
-    expected = [
-        [_key_data(key), _ref_data(ref)]
-        for key, ref in sorted(commit.expected_heads.items())
-    ]
     guards = [
         [_key_data(guard.partition_set_key), guard.partition_key]
         for guard in sorted(commit.partition_guards)
     ]
-    digest.update(json.dumps(expected, separators=(',', ':')).encode())
     digest.update(json.dumps(guards, separators=(',', ':')).encode())
     return digest.hexdigest()
-
-
-def _deserialize_many(refs: tuple[ArtifactRef, ...], payloads: Mapping[ArtifactRef, bytes]
-                      ) -> Mapping[ArtifactRef, object]:
-    return {ref: pickle.loads(payloads[ref]) for ref in refs}
 
 
 def _key_data(key: ArtifactKey) -> list[str]:
@@ -1325,9 +1418,7 @@ def _key_data(key: ArtifactKey) -> list[str]:
 
 
 def _ref_data(ref: ArtifactRef | None) -> list[object] | None:
-    if ref is None:
-        return None
-    return [ref.key.artifact_id, ref.key.partition_key, ref.version]
+    return None if ref is None else [ref.key.artifact_id, ref.key.partition_key, ref.version]
 
 
 def _refs_json(refs: Iterable[ArtifactRef]) -> str:

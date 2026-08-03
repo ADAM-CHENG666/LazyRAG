@@ -7,10 +7,10 @@ from evo.operations.public_contracts import DatasetRoot, case_source_label, dump
 from .csv_loader import CASE_FIELDS, case_source, norm_text, normalize_eval_case
 
 
-def assemble_dataset(
-    cases: Mapping[str, Any] | Iterable[Mapping[str, Any]], *, run_id: str, min_case_count: int = 1,
-) -> dict[str, Any]:
+def assemble_dataset(cases: Mapping[str, Any] | Iterable[Mapping[str, Any]], *, run_id: str, min_case_count: int = 1,
+                     failed_cases: Iterable[Mapping[str, Any]] = ()) -> dict[str, Any]:
     rows = _rows(cases)
+    failures = [dict(failure) for failure in failed_cases]
     id_counts = Counter(row['id'] for row in rows)
     question_counts = Counter(norm_text(row['question']) for row in rows)
     errors = [{'code': 'duplicate_id', 'id': case_id} for case_id, count in id_counts.items() if count > 1]
@@ -24,6 +24,9 @@ def assemble_dataset(
         'run_id': run_id,
         'case_num': len(rows),
         'cases': [_case(row) for row in rows],
+        'failed_case_num': len(failures),
+        'failed_cases': failures,
+        'completed_with_problems': bool(failures),
     })
 
 

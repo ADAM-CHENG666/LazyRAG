@@ -3,15 +3,16 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
+from evo.llm import parse_json_object
+from evo.operations.public_contracts import require_mapping as _mapping
+
 from .csv_loader import DIFFICULTIES, GENERATED_CASE_FIELDS, QUESTION_TYPES, as_list, as_text
-from .csv_loader import json_object, norm_text, normalize_eval_case
+from .csv_loader import norm_text, normalize_eval_case
 
 QUESTION_RETRY_COUNT = 3
 
 
-def build_case_requests(config: Mapping[str, Any],
-                        snapshot: Mapping[str, Any]
-                        ) -> dict[str, dict[str, str]]:
+def build_case_requests(config: Mapping[str, Any], snapshot: Mapping[str, Any]) -> dict[str, dict[str, str]]:
     cases = [row for row in snapshot.get('cases') or () if isinstance(row, Mapping)]
     case_ids = [as_text(row.get('id')) for row in cases]
     if any(not case_id for case_id in case_ids):
@@ -43,8 +44,7 @@ def build_case_requests(config: Mapping[str, Any],
 
 
 def prepare_case(config: Mapping[str, Any], snapshot: Mapping[str, Any], case_id: str,
-                 request: Mapping[str, Any] | None = None
-                 ) -> dict[str, Any]:
+                 request: Mapping[str, Any] | None = None) -> dict[str, Any]:
     request = request or {}
     requested_id = as_text(request.get('case_id'))
     if requested_id and requested_id != case_id:
@@ -121,20 +121,22 @@ def generate_case(config: Mapping[str, Any], snapshot: Mapping[str, Any], prep: 
                   duplicate_questions: Callable[[Mapping[str, Any]], list[str]] | None = None) -> dict[str, Any]:
     if not (case_id := as_text(prep.get('case_id'))):
         raise ValueError('case preparation missing case_id')
-    if prep.get('mode') == 'manual_case':
-        case = normalize_eval_case(_mapping(prep.get('case'), 'manual case'), default_id=case_id)
-        if case['id'] != case_id:
-            raise ValueError('manual case id does not match case preparation')
-        source = dict(case.get('source_preparation') or {})
-        source.update({'case_id': case_id, 'mode': 'manual_case'})
-        return {**case, 'source_preparation': source}
-    if prep.get('mode') == 'imported_eval_dataset':
-        case = _case_by_id(snapshot, case_id)
+    mode = prep.get('mode')
+    if mode in {'manual_case', 'imported_eval_dataset'}:
+        case = (
+            normalize_eval_case(_mapping(prep.get('case'), 'manual case'), default_id=case_id)
+            if mode == 'manual_case'
+            else _case_by_id(snapshot, case_id)
+        )
         if case is None:
             raise ValueError(f'imported eval dataset has no case for partition {case_id}')
-        return {**dict(case), 'source_preparation': dict(prep)}
-    if prep.get('mode') != 'generated_kb_dataset':
-        raise ValueError(f'unsupported case preparation mode: {as_text(prep.get("mode"))}')
+        if case['id'] != case_id:
+            raise ValueError('case id does not match case preparation')
+        source = dict(case.get('source_preparation') or {})
+        source.update({'case_id': case_id, 'mode': mode})
+        return {**dict(case), 'source_preparation': source}
+    if mode != 'generated_kb_dataset':
+        raise ValueError(f'unsupported case preparation mode: {as_text(mode)}')
     contexts = prep.get('context_reference')
     if not isinstance(contexts, list) or not all(isinstance(item, Mapping) for item in contexts):
         raise ValueError('case preparation context_reference must be a list of objects')
@@ -167,12 +169,6 @@ def _case_by_id(snapshot: Mapping[str, Any], case_id: str) -> Mapping[str, Any] 
                  if isinstance(row, Mapping) and as_text(row.get('id')) == case_id), None)
 
 
-def _mapping(value: object, name: str) -> Mapping[str, Any]:
-    if not isinstance(value, Mapping):
-        raise ValueError(f'{name} must be a mapping')
-    return value
-
-
 def _with_warnings(prep: dict[str, Any], snapshot: Mapping[str, Any], index: int) -> dict[str, Any]:
     if index == 0 and (warnings := [item for item in snapshot.get('warnings', []) if isinstance(item, Mapping)]):
         prep['warnings'] = [*list(prep.get('warnings') or []), *warnings]
@@ -202,12 +198,20 @@ def _complete_case(config: Mapping[str, Any], prep: Mapping[str, Any], complete:
             'Generate a question that is not semantically equivalent to any item in avoid_questions_json. '
             f'avoid_questions_json: {json.dumps(avoid, ensure_ascii=False)}'
         )
-    data = json_object(complete(prompt), message='LLM did not return a JSON object')
-    if missing := [field for field in GENERATED_CASE_FIELDS if not data.get(field)]:
-        raise ValueError(f'generated case missing fields: {", ".join(missing)}')
-    if not isinstance(steps := data.get('reasoning_steps'), list) or not all(as_text(step) for step in steps):
-        raise ValueError('generated case reasoning_steps must be a non-empty list of strings')
-    return data
+    error: Exception | None = None
+    for structured_attempt in range(2):
+        try:
+            data = parse_json_object(complete(prompt))
+            if missing := [field for field in GENERATED_CASE_FIELDS if not data.get(field)]:
+                raise ValueError(f'generated case missing fields: {", ".join(missing)}')
+            if not isinstance(steps := data.get('reasoning_steps'), list) or not all(as_text(step) for step in steps):
+                raise ValueError('generated case reasoning_steps must be a non-empty list of strings')
+            return dict(data)
+        except Exception as exc:
+            error = exc
+            if structured_attempt == 0:
+                prompt += '\nThe previous response was invalid. Return exactly one complete JSON object.'
+    raise ValueError(f'LLM did not return a valid dataset case: {error}') from error
 
 
 def _unique_texts(values: Iterable[object]) -> list[str]:
@@ -249,8 +253,7 @@ def _contexts(units: list[Mapping[str, Any]], qtype: str, index: int) -> list[di
     return [_context(unit) for unit in rotated[:limit]]
 
 
-def _required_contexts(units: list[Mapping[str, Any]], required: list[str]
-                       ) -> list[dict[str, str]]:
+def _required_contexts(units: list[Mapping[str, Any]], required: list[str]) -> list[dict[str, str]]:
     by_id = {
         identity: unit
         for unit in units

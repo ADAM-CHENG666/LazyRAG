@@ -42,9 +42,7 @@ class MessageBlobStore:
         self.blob_root = self.root / 'message-store' / 'blobs'
         self.blob_root.mkdir(parents=True, exist_ok=True)
 
-    def append(self, thread_id: str, turn_id: str, kind: str,
-               payload: bytes
-               ) -> MessageContentRef:
+    def append(self, thread_id: str, turn_id: str, kind: str, payload: bytes) -> MessageContentRef:
         digest = hashlib.sha256(payload).hexdigest()
         safe_kind = ''.join(
             character if character.isalnum() or character in '._-' else '_'
@@ -115,9 +113,7 @@ class MessageAuditStore:
                 """
             )
 
-    def begin_turn(self, thread_id: str, turn_id: str, message_id: str,
-                   request_hash: str
-                   ) -> MessageContentRef | None:
+    def begin_turn(self, thread_id: str, turn_id: str, message_id: str, request_hash: str) -> MessageContentRef | None:
         with self._connection() as connection:
             row = connection.execute(
                 'SELECT request_sha256, status, result_ref_json FROM message_turns '
@@ -142,9 +138,7 @@ class MessageAuditStore:
             )
         return None
 
-    def record_request_ref(self, thread_id: str, turn_id: str,
-                           request_ref: MessageContentRef
-                           ) -> None:
+    def record_request_ref(self, thread_id: str, turn_id: str, request_ref: MessageContentRef) -> None:
         with self._connection() as connection:
             connection.execute(
                 'UPDATE message_turns SET request_ref_json = ?, updated_at = ? '
@@ -160,9 +154,7 @@ class MessageAuditStore:
                 ('failed', time.time_ns(), thread_id, turn_id, 'open'),
             )
 
-    def finish_turn(self, thread_id: str, turn_id: str,
-                    result_ref: MessageContentRef,
-                    projection: dict[str, Any]
+    def finish_turn(self, thread_id: str, turn_id: str, result_ref: MessageContentRef, projection: dict[str, Any]
                     ) -> None:
         with self._connection() as connection:
             connection.execute('BEGIN IMMEDIATE')
@@ -199,9 +191,7 @@ class MessageAuditStore:
             ).fetchone()
         return json.loads(row['data_json']) if row is not None else {}
 
-    def list_turns(self, thread_id: str, page_size: int,
-                   page_token: str
-                   ) -> tuple[list[sqlite3.Row], str]:
+    def list_turns(self, thread_id: str, page_size: int, page_token: str) -> tuple[list[sqlite3.Row], str]:
         offset = int(page_token or 0) if str(page_token or '0').isdigit() else -1
         if offset < 0:
             raise ValueError('page_token must be a non-negative integer offset')
@@ -247,9 +237,7 @@ class MessageAuditStore:
         return connection
 
 
-def message_history(root: Path, thread_id: str, page_size: int,
-                    page_token: str
-                    ) -> MessageHistoryResponse:
+def message_history(root: Path, thread_id: str, page_size: int, page_token: str) -> MessageHistoryResponse:
     audit = MessageAuditStore(root)
     blobs = MessageBlobStore(root)
     rows, next_token = audit.list_turns(thread_id, page_size, page_token)
@@ -276,9 +264,7 @@ def message_history(root: Path, thread_id: str, page_size: int,
     )
 
 
-def _load_model(blobs: MessageBlobStore, ref_json: str, thread_id: str,
-                model: type[Any]
-                ) -> Any:
+def _load_model(blobs: MessageBlobStore, ref_json: str, thread_id: str, model: type[Any]) -> Any:
     if not ref_json:
         return None
     ref = MessageContentRef.model_validate(json.loads(ref_json))

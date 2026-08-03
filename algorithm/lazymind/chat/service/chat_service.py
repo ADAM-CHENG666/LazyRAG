@@ -5,6 +5,7 @@ import json
 import re
 import threading
 import time
+import sys
 from typing import Any, Dict, List, Optional, Union
 import lazyllm
 from lazyllm import LOG, set_trace_context
@@ -15,7 +16,9 @@ from lazymind.chat.config import (
     MAX_CONCURRENCY,
     RAG_MODE,
     SENSITIVE_FILTER_RESPONSE_TEXT,
-    SENSITIVE_WORDS_PATH,
+    SENSITIVE_GRAY_WORDS_PATH,
+    SENSITIVE_RED_WORDS_PATH,
+    SENSITIVE_WHITELIST_PATH,
 )
 from lazymind.chat.engine.prompts import (
     add_standard_system_sections,
@@ -30,6 +33,7 @@ from lazymind.chat.service.component import (
     ATTACHMENT_EDIT_TOOL_CONFIG,
     DEFAULT_TOOLS,
     USER_ATTACHMENT_TOOL_CONFIGS,
+    collect_query_appendices,
     collect_system_prompt_appendices,
     filter_tools,
     normalize_history_for_agent,
@@ -51,8 +55,10 @@ from lazymind.chat.engine.tools.intent_writer import (
     build_intentwrite_tool,
     render_intent_section,
 )
+from lazymind.chat.engine.tools.skill_listing import build_list_skills_tool
 from lazymind.chat.service.utils import (
     SensitiveFilter,
+    SensitiveMatch,
     log_and_emit_frame,
     register_image_url,
     response_payload,
@@ -62,14 +68,17 @@ from lazymind.chat.service.utils import (
 )
 from lazyllm.tools.fs.client import FS
 from lazymind.model_config import inject_model_config, summarize_model_config_for_log
-from lazyllm.tools.rag import inject_reader_config
 from lazyllm.tools.tool_config_inject import inject_tool_config
 from lazyllm import AutoModel
 from lazyllm.tools.mcp.client import MCPClient
 from lazymind.config import config as _cfg
 
 rag_sem = asyncio.Semaphore(MAX_CONCURRENCY)
-sensitive_filter = SensitiveFilter(SENSITIVE_WORDS_PATH)
+sensitive_filter = SensitiveFilter(
+    SENSITIVE_RED_WORDS_PATH,
+    SENSITIVE_GRAY_WORDS_PATH,
+    SENSITIVE_WHITELIST_PATH,
+)
 
 # Maps conversation_id → session_id for active chat sessions.
 # Used by task-cancel endpoint to cancel ChatAgent by conversation_id.
@@ -80,8 +89,16 @@ _CITE_MESSAGE_PATTERN = re.compile(
 )
 _MCP_TOOL_CACHE_TTL_SECONDS = 300
 _TASK_PROFILE_ROUTER_TIMEOUT_SECONDS = 20
+_SENSITIVE_MATCH_UNSET = object()
 _mcp_tool_cache: dict[str, tuple[float, list[Any]]] = {}
 _mcp_tool_cache_lock = threading.Lock()
+
+
+def _inject_reader_config(ocr_config: Dict[str, Any]) -> None:
+    if not ocr_config and 'lazyllm.tools.rag' not in sys.modules:
+        return
+    from lazyllm.tools.rag import inject_reader_config
+    inject_reader_config(ocr_config=ocr_config)
 
 
 def _normalize_cite_message_query_for_agent(query: str) -> tuple[str, str]:
@@ -117,13 +134,30 @@ def _normalize_kb_id_filter(raw_kb_id: Any) -> str | list[str] | None:
     return None
 
 
-def check_sensitive_content(
-    query: str,
-) -> Optional[str]:
-    if not sensitive_filter.loaded:
-        return None
-    has_sensitive, sensitive_word = sensitive_filter.check(query)
-    return sensitive_word if has_sensitive else None
+def _active_skills_from_history(
+    history: list[dict[str, Any]],
+    available_skills: list[str] | None,
+) -> list[str]:
+    available = [str(skill) for skill in (available_skills or []) if str(skill).strip()]
+    activated = set()
+    for message in history:
+        for tool_call in message.get('tool_calls') or []:
+            function = tool_call.get('function') if isinstance(tool_call, dict) else None
+            if not isinstance(function, dict) or function.get('name') != 'get_skill':
+                continue
+            arguments = function.get('arguments', {})
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    continue
+            if isinstance(arguments, dict) and isinstance(arguments.get('name'), str):
+                activated.add(arguments['name'].strip())
+    return [skill for skill in available if skill in activated]
+
+
+def check_sensitive_content(query: str) -> Optional[SensitiveMatch]:
+    return sensitive_filter.evaluate(query)
 
 
 def _mcp_server_cache_key(server: Dict[str, Any]) -> str:
@@ -185,9 +219,14 @@ def _build_subagent_chat_tools() -> list:
 
 
 def _build_chat_artifact_tools() -> list:
-    """Tools for artifacts produced directly by the main ChatAgent."""
-    from lazymind.chat.engine.tools.chat_artifact import save_chat_artifact
-    return [save_chat_artifact]
+    """Workspace and artifact tools for the main ChatAgent."""
+    from lazymind.chat.engine.tools.chat_artifact import (
+        list_dir,
+        read_file,
+        save_chat_artifact,
+        write_file,
+    )
+    return [save_chat_artifact, read_file, write_file, list_dir]
 
 
 def _build_user_attachment_tools(has_files: bool) -> list:
@@ -211,8 +250,13 @@ def _build_ask_user_tool() -> list:
     return [ask_user]
 
 
-def _should_register_ask_user(agentic_config: Dict[str, Any]) -> bool:
-    """Auto plugin sessions are mechanically non-interactive."""
+def _should_register_ask_user(
+    agentic_config: Dict[str, Any],
+    disabled_tools: set[str] | None = None,
+) -> bool:
+    """Respect explicit non-interactive requests and legacy auto plugin sessions."""
+    if 'ask_user' in (disabled_tools or set()):
+        return False
     return not (
         agentic_config.get('enable_plugin', True)
         and agentic_config.get('plugin_mode') == 'auto'
@@ -235,7 +279,7 @@ def _task_profile_inputs(request: ChatRequest) -> dict[str, Any]:
         explicit_resources['plugin_refs'] = [active_plugin_ref]
     thinking_depth = (
         request.runtime.thinking_depth
-        if request.runtime.thinking_depth in ('low', 'medium', 'high') else 'medium'
+        if request.runtime.thinking_depth in ('low', 'medium', 'high', 'max') else 'medium'
     )
     return {
         'query': user_input.strip(),
@@ -279,11 +323,24 @@ async def handle_chat(request: ChatRequest) -> Union[Dict[str, Any], StreamingRe
 
     from lazymind.chat.plugin.plugin_manager import is_plugin_driver_turn
     raw_query = str(request.message.query or '')
-    if (
-        not is_plugin_driver_turn(request.plugin.plugin_context)
-        and check_sensitive_content(raw_query)
-    ):
-        return await _handle_chat_impl(request, task_profile_override=provisional)
+    filter_query, _ = _normalize_cite_message_query_for_agent(raw_query)
+    skip_sensitive_filter = (
+        request.runtime.skip_sensitive_filter
+        or is_plugin_driver_turn(request.plugin.plugin_context)
+        or request.runtime.context_usage_preview
+        or request.runtime.context_prompt_export
+    )
+    sensitive_match = (
+        None
+        if skip_sensitive_filter
+        else check_sensitive_content(filter_query)
+    )
+    if sensitive_match is not None:
+        return await _handle_chat_impl(
+            request,
+            task_profile_override=provisional,
+            sensitive_match_override=sensitive_match,
+        )
 
     inject_model_config(request.runtime.llm_config)
 
@@ -302,7 +359,11 @@ async def handle_chat(request: ChatRequest) -> Union[Dict[str, Any], StreamingRe
             )
             await asyncio.sleep(0.08)
         profile = await routing_task
-        response = await _handle_chat_impl(request, task_profile_override=profile)
+        response = await _handle_chat_impl(
+            request,
+            task_profile_override=profile,
+            sensitive_match_override=sensitive_match,
+        )
         if isinstance(response, StreamingResponse):
             async for chunk in response.body_iterator:
                 yield chunk
@@ -313,7 +374,11 @@ async def handle_chat(request: ChatRequest) -> Union[Dict[str, Any], StreamingRe
         profile = provisional
         if request.runtime.context_preview_allow_llm_routing:
             profile = await asyncio.to_thread(_resolve_task_profile_with_model, inputs)
-        return await _handle_chat_impl(request, task_profile_override=profile)
+        return await _handle_chat_impl(
+            request,
+            task_profile_override=profile,
+            sensitive_match_override=sensitive_match,
+        )
     return StreamingResponse(resolve_and_continue(), media_type='text/event-stream')
 
 
@@ -321,6 +386,7 @@ async def _handle_chat_impl(
     request: ChatRequest,
     *,
     task_profile_override: Any = None,
+    sensitive_match_override: SensitiveMatch | None | object = _SENSITIVE_MATCH_UNSET,
 ) -> Union[Dict[str, Any], StreamingResponse]:
     message = request.message
     conversation = request.conversation
@@ -362,15 +428,24 @@ async def _handle_chat_impl(
         cited_message_context = user_cited_context
     language_query = user_input.strip()
     is_driver_turn = is_plugin_driver_turn(plugin.plugin_context)
-    sensitive_word = (
-        None if is_driver_turn or runtime.context_usage_preview or runtime.context_prompt_export
-        else check_sensitive_content(query)
+    skip_sensitive_filter = (
+        runtime.skip_sensitive_filter
+        or is_driver_turn
+        or runtime.context_usage_preview
+        or runtime.context_prompt_export
     )
-    if sensitive_word:
+    if skip_sensitive_filter:
+        sensitive_match = None
+    elif sensitive_match_override is _SENSITIVE_MATCH_UNSET:
+        sensitive_match = check_sensitive_content(query)
+    else:
+        sensitive_match = sensitive_match_override
+    if sensitive_match is not None:
         cost = round(time.time() - start_time, 3)
         LOG.warning(
             f'[ChatServer] [SENSITIVE_FILTER_BLOCKED] [query={query[:50]}...] '
-            f'[sensitive_word={sensitive_word}] [session_id={conversation.session_id}]'
+            f'[sensitive_word={sensitive_match.word}] [tier={sensitive_match.tier}] '
+            f'[session_id={conversation.session_id}]'
         )
         return single_event_stream_response(response_payload(
             200,
@@ -458,13 +533,14 @@ async def _handle_chat_impl(
     lazyllm.locals._init_sid(sid=conversation.session_id)
     inject_model_config(runtime.llm_config)
     inject_tool_config(runtime.tool_config)
-    inject_reader_config(ocr_config=runtime.ocr_config)
+    _inject_reader_config(runtime.ocr_config)
     lazyllm.globals['agentic_config'] = agentic_config
 
     thinking_depth = (
         runtime.thinking_depth
-        if runtime.thinking_depth in ('low', 'medium', 'high') else 'medium'
+        if runtime.thinking_depth in ('low', 'medium', 'high', 'max') else 'medium'
     )
+    agentic_config['thinking_depth'] = thinking_depth
     task_profile = None
     if _cfg['dynamic_prompt_modules']:
         profile_started = time.monotonic()
@@ -587,20 +663,25 @@ async def _handle_chat_impl(
     # (whose tool resolution falls back to DEFAULT_TOOLS) never see it.
     # Auto plugin mode is non-interactive by contract: ask_user must be absent,
     # not merely discouraged by prompt text.
-    allow_ask_user = _should_register_ask_user(agentic_config)
+    allow_ask_user = _should_register_ask_user(agentic_config, disabled)
     ask_user_tools = _build_ask_user_tool() if allow_ask_user else []
     ask_user_configs = [ASK_USER_TOOL_CONFIG] if ask_user_tools else []
     artifact_tools = _build_chat_artifact_tools()
+    workspace = chat_agent_workspace(user_id or '0', conversation_id)
+    skill_listing_tools = [build_list_skills_tool(agent.available_skills)]
     all_tools = ([intentwriter] + agent_tools + artifact_tools + subagent_tools + attachment_tools
-                 + ask_user_tools + plugin_tools + mcp_tools)
+                 + skill_listing_tools + ask_user_tools + plugin_tools + mcp_tools)
     skill_config = agent.available_skills
     selected_skills = agent.available_skills
     if task_profile is not None:
         selected_skills = select_skill_candidates(agent.available_skills, language_query, task_profile)
+        selected_skills = list(dict.fromkeys([
+            *_active_skills_from_history(agent_history, agent.available_skills),
+            *(selected_skills or []),
+        ]))
         skill_config = selected_skills or False
     set_trace_context({
-        'enabled': bool(runtime.trace),
-        'trace_id': conversation.session_id if runtime.trace else None,
+        'trace_id': conversation.session_id,
         'session_id': conversation.session_id,
         'sampled': True,
         'module_trace': {'default': True},
@@ -613,6 +694,7 @@ async def _handle_chat_impl(
         'skills_exposed': list(selected_skills or []),
     })
     prompt_builder = PromptBuilder.for_role(AgentRole.CHAT)
+    active_tool_configs = active_configs + attachment_configs + ask_user_configs
     add_standard_system_sections(
         prompt_builder,
         bool(all_tools),
@@ -623,10 +705,23 @@ async def _handle_chat_impl(
         current_query=language_query,
         conversation_history=agent_history,
         tool_prompt_appendices=collect_system_prompt_appendices(
-            active_configs + attachment_configs + ask_user_configs,
+            active_tool_configs,
         ),
         task_profile=task_profile,
         dynamic_prompt_modules=_cfg['dynamic_prompt_modules'],
+    )
+    prompt_builder.system(
+        'chat_workspace',
+        'Workspace',
+        (
+            f'Use `{workspace}` as the single working directory for all generated and intermediate files. '
+            'When a skill requires an output directory, create it under this workspace and pass its absolute '
+            'path to skill scripts. Treat files outside this workspace as read-only inputs. Use `read_file`, '
+            '`write_file`, and `list_dir` to inspect and update workspace files, then publish completed files '
+            'with `save_chat_artifact`.'
+        ),
+        'agent.workspace',
+        priority=70,
     )
     # Plugin policy historically followed the common system prompt.
     prompt_builder.system(
@@ -684,6 +779,17 @@ async def _handle_chat_impl(
             and task_profile.routing_review_required
         ),
     )
+    prompt_builder.runtime(
+        'chat_tool_query_appendices_before', 'Active Tool Instructions',
+        '\n\n'.join(collect_query_appendices(active_tool_configs, 'before')),
+        'tool.registry', priority=90, authoritative=True, content_kind='instruction',
+    )
+    prompt_builder.runtime(
+        'chat_tool_query_appendices_after', 'Active Tool Instructions',
+        '\n\n'.join(collect_query_appendices(active_tool_configs, 'after')),
+        'tool.registry', priority=90, authoritative=True, content_kind='instruction',
+        placement='after_input',
+    )
     prompt_bundle = prompt_builder.input(
         content=language_query,
         source='user',
@@ -705,7 +811,7 @@ async def _handle_chat_impl(
         force_summarize_context=query,
         execution_options=AgentExecutionOptions(
             skills=skill_config,
-            workspace=chat_agent_workspace(user_id or '0', conversation_id),
+            workspace=workspace,
             keep_full_turns=_cfg['agentic_keep_full_turns'],
             fs=FS,
             skills_dir=_cfg['skill_fs_url'],
@@ -713,6 +819,7 @@ async def _handle_chat_impl(
                 'low': _cfg['agentic_max_rounds_low'],
                 'medium': _cfg['agentic_max_rounds_medium'],
                 'high': _cfg['agentic_max_rounds_high'],
+                'max': max(1, int(_cfg['agentic_expanded_max_rounds']) - 1),
             }.get(thinking_depth, _cfg['agentic_max_rounds_medium']),
             tool_failure_limits={
                 'url_fetch': 2,

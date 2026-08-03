@@ -20,6 +20,7 @@ import {
   HistoryOutlined,
   BookOutlined,
   CloudOutlined,
+  LinkOutlined,
 } from "@ant-design/icons";
 import { Navigate, Outlet, useLocation, useNavigate } from "react-router-dom";
 import type { UserDetailResponse } from "@/api/generated/auth-client";
@@ -50,6 +51,9 @@ import {
 import { runtimeFeatures } from "@/runtime/features";
 import { shouldHideLocalUserControls } from "@/runtime/localSession";
 import { useLocalSessionGate } from "@/runtime/useLocalSessionGate";
+import UserAgreementConsentModal, {
+  useUserAgreementConsentGate,
+} from "@/components/UserAgreementConsentModal";
 import "./index.scss";
 
 const { Content, Sider } = Layout;
@@ -188,6 +192,7 @@ export default function MainLayout() {
   const needsRestoreButtonSafeArea =
     pathname.startsWith("/model-providers") ||
     pathname.startsWith("/cloud-documents") ||
+    pathname.startsWith("/channels") ||
     pathname.startsWith("/lib/knowledge/detail") ||
     pathname.startsWith("/memory-management") ||
     pathname.startsWith("/self-evolution");
@@ -218,6 +223,8 @@ export default function MainLayout() {
     }
   }, []);
   const localSessionGate = useLocalSessionGate(refreshLayoutUser);
+  const { needsConsent, markAccepted, loading: agreementLoading } =
+    useUserAgreementConsentGate(isLoggedIn);
 
   useEffect(() => {
     if (!localSessionGate.enabled) {
@@ -680,6 +687,20 @@ export default function MainLayout() {
     return <Navigate to="/login" replace />;
   }
 
+  if (agreementLoading) {
+    return (
+      <div className="local-session-gate">
+        <div className="local-session-panel">
+          <Spin />
+          <div className="local-session-title">LazyMind</div>
+          <div className="local-session-message">
+            {t("legal.consentChecking")}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <Layout hasSider className="main-layout">
       <Sider
@@ -810,10 +831,6 @@ export default function MainLayout() {
             </div>
           )}
           <div className="sider-bar-bottom">
-            <div className="bottom-item language-item">
-              <GlobalOutlined className="bottom-icon" />
-              {shouldRenderMenuContent && <LanguageSwitcher />}
-            </div>
             {showSettingsTrigger && (
               <Popover
                 content={
@@ -829,9 +846,15 @@ export default function MainLayout() {
                           onClick={() => handleSettingsNavigate(item.key)}
                         >
                           {item.icon}
-                          <span>{item.label}</span>
+                          <span className="settings-popover-label">{item.label}</span>
                           {item.key === "developer-toggle" && developerActive && (
                             <span className="settings-active-badge">{t("admin.developerActiveTag")}</span>
+                          )}
+                          {[
+                            "/model-providers/default-services",
+                            "/admin",
+                          ].includes(item.key) && (
+                            <RightOutlined className="settings-popover-accessory" />
                           )}
                         </Button>
                       );
@@ -852,6 +875,10 @@ export default function MainLayout() {
                       }
                       return btn;
                     })}
+                    <div className="settings-popover-language">
+                      <GlobalOutlined className="settings-popover-icon" />
+                      <LanguageSwitcher />
+                    </div>
                     {!hideLocalUserControls && (
                       isLoggedIn ? (
                         <Button
@@ -874,6 +901,7 @@ export default function MainLayout() {
                   </div>
                 }
                 arrow={false}
+                overlayClassName="settings-popover-overlay"
                 placement="top"
                 trigger="click"
                 open={settingsOpen}
@@ -895,6 +923,25 @@ export default function MainLayout() {
                 </div>
               </Popover>
             )}
+            <div
+              className={`bottom-item terminal-entry${
+                pathname.startsWith("/channels") ? " is-active" : ""
+              }`}
+              role="button"
+              tabIndex={0}
+              onClick={() => handleModuleNavigate("/channels")}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  handleModuleNavigate("/channels");
+                }
+              }}
+            >
+              <LinkOutlined className="bottom-icon" />
+              {shouldRenderMenuContent && (
+                <span className="bottom-text">{t("layout.terminalConnection")}</span>
+              )}
+            </div>
             {userName && !hideLocalUserControls && (
               <div
                 className="bottom-item user-item"
@@ -1074,6 +1121,10 @@ export default function MainLayout() {
           </Form.Item>
         </Form>
       </Modal>
+      <UserAgreementConsentModal
+        open={needsConsent}
+        onAccepted={markAccepted}
+      />
     </Layout>
   );
 }

@@ -25,18 +25,19 @@ import {
 import {
   Configuration as CoreConfiguration,
   DefaultApiFactory as CoreDefaultApiFactory,
+  PromptsApiFactory as CorePromptsApiFactory,
   type ConversationHistoryListResponse,
   type DefaultApiApiCoreConversationsNameHistoryGetRequest,
-  type DefaultApiApiCorePromptsPolishPostRequest,
   type PromptItem,
   type PromptCategory,
   type PromptCategoryListResponse,
   type PromptCategoryRequest,
   type PromptListResponse,
+  type PromptPolishOpenAPIResponse,
   type PromptPatchRequest,
-  type PromptPolishResponse,
   type PromptRequest,
   type PromptStateResponse,
+  type PromptsApiApiCorePromptsPolishPostRequest,
 } from "@/api/generated/core-client";
 import {
   type AllDocumentCreatorsResponse,
@@ -56,6 +57,11 @@ axiosInstance.defaults.timeout = 60 * 1000; // 10 seconds
 const Config = new Configuration();
 const CoreConfig = new CoreConfiguration({ basePath: BASE_URL });
 const coreDefaultClient = CoreDefaultApiFactory(
+  CoreConfig,
+  BASE_URL,
+  axiosInstance,
+);
+const corePromptsClient = CorePromptsApiFactory(
   CoreConfig,
   BASE_URL,
   axiosInstance,
@@ -134,6 +140,17 @@ export const taskStreamUrl = (taskId: string) =>
 export const convEventsUrl = (conversationId: string) =>
   `${coreApiBaseUrl}/conversations/${encodeURIComponent(conversationId)}/events`;
 
+export function decideToolLimit(
+  conversationId: string,
+  decisionId: string,
+  action: "continue" | "summarize",
+) {
+  return axiosInstance.post(
+    `${coreApiBaseUrl}/conversations/${encodeURIComponent(conversationId)}:toolLimitDecision`,
+    { decision_id: decisionId, action },
+  );
+}
+
 export function TaskServiceApi() {
   return {
     listConversationTasks(conversationId: string, options?: RawAxiosRequestConfig) {
@@ -176,6 +193,34 @@ export function PluginInfoApi() {
       return axiosInstance.get(`${coreApiBaseUrl}/plugins`, options);
     },
   };
+}
+
+export type SlotSaveMode = 'draft' | 'checkpoint';
+
+export interface SyncWriterDocumentRequest {
+  base_revision: number;
+  source_document: Record<string, unknown>;
+  revised_document: Record<string, unknown>;
+  /** draft: overwrite selected human artifact; checkpoint (default): new revision. */
+  mode?: SlotSaveMode;
+}
+
+export interface SyncWriterDocumentPatchResult {
+  patch_id?: string;
+  success: boolean;
+  applied_hunks: string[];
+  failed_hunks: string[];
+  message: string;
+  meta?: Record<string, unknown>;
+}
+
+export interface SyncWriterDocumentResult {
+  status: "synced" | "no_change";
+  revision: number;
+  feishu_synced: boolean;
+  artifact_saved: boolean;
+  patch_result: SyncWriterDocumentPatchResult;
+  document: Record<string, unknown>;
 }
 
 // Plugin Session API.
@@ -242,10 +287,39 @@ export function PluginSessionApi() {
         { ...options, data: orderVersion !== undefined ? { order_version: orderVersion } : undefined },
       );
     },
-    patchSlotItem(sessionId: string, slotId: string, listIndex: number, value: any, contentType?: string, options?: RawAxiosRequestConfig) {
+    patchSlotItem(
+      sessionId: string,
+      slotId: string,
+      listIndex: number,
+      value: any,
+      contentType?: string,
+      mode?: SlotSaveMode,
+      options?: RawAxiosRequestConfig,
+    ) {
       return axiosInstance.patch(
         `${coreApiBaseUrl}/plugin-sessions/${encodeURIComponent(sessionId)}/slots/${encodeURIComponent(slotId)}/items/idx/${listIndex}`,
-        { value, ...(contentType ? { content_type: contentType } : {}) },
+        {
+          value,
+          ...(contentType ? { content_type: contentType } : {}),
+          ...(mode ? { mode } : {}),
+        },
+        options,
+      );
+    },
+    syncWriterDocument(
+      sessionId: string,
+      slotId: string,
+      listIndex: number,
+      payload: SyncWriterDocumentRequest,
+      options?: RawAxiosRequestConfig,
+    ) {
+      return axiosInstance.post<{
+        code: number;
+        message: string;
+        data: SyncWriterDocumentResult;
+      }>(
+        `${coreApiBaseUrl}/plugin-sessions/${encodeURIComponent(sessionId)}/slots/${encodeURIComponent(slotId)}/items/idx/${listIndex}:sync-writer-document`,
+        payload,
         options,
       );
     },
@@ -575,13 +649,13 @@ export function PromptServiceApi() {
       );
     },
     promptServicePolishPrompt(
-      requestParameters: DefaultApiApiCorePromptsPolishPostRequest,
+      requestParameters: PromptsApiApiCorePromptsPolishPostRequest,
       options?: RawAxiosRequestConfig,
     ) {
-      return coreDefaultClient.apiCorePromptsPolishPost(
+      return corePromptsClient.apiCorePromptsPolishPost(
         requestParameters,
         options,
-      ) as Promise<AxiosResponse<PromptPolishResponse>>;
+      ) as Promise<AxiosResponse<PromptPolishOpenAPIResponse>>;
     },
   };
 }

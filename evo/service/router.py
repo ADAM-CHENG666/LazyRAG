@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from collections.abc import Callable, Mapping
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -31,6 +33,8 @@ from .contracts import (
 
 T = TypeVar('T')
 _EVO_PREFIX = 'evo_'
+_ROUTER_RECOVERY_TIMEOUT_SECONDS = 180.0
+logger = logging.getLogger(__name__)
 
 
 class RouterService:
@@ -41,12 +45,49 @@ class RouterService:
         self.manager = _ledger_manager(self.ledger)
         self._lock = asyncio.Lock()
 
+    def reconcile_unpublished(self) -> None:
+        for row in self.ledger.list_algorithms(published=False):
+            algorithm_id = str(row['algorithm_id'])
+            try:
+                delete_owned_algorithm(
+                    RouterManager(str(row['router_admin_url']), str(row['service_url'])),
+                    self.ledger,
+                    algorithm_id,
+                    self.root / 'work' / 'repair',
+                )
+            except Exception:
+                # A stale candidate must not prevent Evo from serving default.
+                # Keep its ledger row for the next reconciliation attempt.
+                continue
+
+    def reconcile_published(self) -> None:
+        for row in self.ledger.list_algorithms(published=True, expected_state='active'):
+            algorithm_id = str(row['algorithm_id'])
+            manager = RouterManager(str(row['router_admin_url']), str(row['service_url']))
+            try:
+                detail = manager.get_algorithm(algorithm_id)
+                if detail is None:
+                    logger.warning('published algorithm %s is missing from Router', algorithm_id)
+                    continue
+                spec = RouterAlgorithmSpec(
+                    id=algorithm_id,
+                    name=str(detail.get('name') or algorithm_id),
+                    code_path=str(detail.get('code_path') or row['code_path']),
+                    instance_count=max(1, int(row.get('instance_count') or 1)),
+                    config=dict(detail.get('config') or {}),
+                )
+                manager.ensure_algorithm(
+                    spec,
+                    timeout_s=_ROUTER_RECOVERY_TIMEOUT_SECONDS,
+                    allow_in_ab=True,
+                )
+            except Exception:
+                logger.exception('failed to recover published algorithm %s', algorithm_id)
+
     async def status(self) -> dict[str, Any]:
         return await self._call(self._status)
 
-    async def algorithms(self, *, thread_id: str = '', algorithm_id: str = '',
-                         status: str = ''
-                         ) -> dict[str, Any]:
+    async def algorithms(self, *, thread_id: str = '', algorithm_id: str = '', status: str = '') -> dict[str, Any]:
         return await self._call(
             self._algorithms,
             thread_id,
@@ -54,8 +95,7 @@ class RouterService:
             status,
         )
 
-    async def register(self, request: RegisterAlgorithmBody | Mapping[str, Any]
-                       ) -> dict[str, Any]:
+    async def register(self, request: RegisterAlgorithmBody | Mapping[str, Any]) -> dict[str, Any]:
         request = (
             request
             if isinstance(request, RegisterAlgorithmBody)
@@ -70,9 +110,7 @@ class RouterService:
             raise ServiceError(404, f'thread not found: {request.owner.thread_id}')
         return await self._call(self._register, request)
 
-    async def action(self, algorithm_id: str,
-                     request: AlgorithmActionBody | Mapping[str, Any]
-                     ) -> dict[str, Any]:
+    async def action(self, algorithm_id: str, request: AlgorithmActionBody | Mapping[str, Any]) -> dict[str, Any]:
         request = (
             request
             if isinstance(request, AlgorithmActionBody)
@@ -86,8 +124,7 @@ class RouterService:
     async def get_ab_strategy(self) -> dict[str, Any]:
         return await self._call(self._get_ab_strategy)
 
-    async def put_ab_strategy(self, request: AbStrategyBody | Mapping[str, Any]
-                              ) -> dict[str, Any]:
+    async def put_ab_strategy(self, request: AbStrategyBody | Mapping[str, Any]) -> dict[str, Any]:
         request = (
             request
             if isinstance(request, AbStrategyBody)
@@ -101,9 +138,7 @@ class RouterService:
     async def delete_thread(self, thread_id: str) -> None:
         await self._call(self._delete_thread, thread_id)
 
-    async def _call(self, function: Callable[..., T], *args: Any,
-                    **kwargs: Any
-                    ) -> T:
+    async def _call(self, function: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         async with self._lock:
             return await _run_sync(function, *args, **kwargs)
 
@@ -119,7 +154,7 @@ class RouterService:
             self._delete(str(row['algorithm_id']))
 
     def _status(self) -> dict[str, Any]:
-        rows = self.ledger.list_algorithms()
+        rows = self.ledger.list_algorithms(published=True)
         try:
             self.manager.status()
             live = [_owned_live_item(self.manager, self.ledger, row) for row in rows]
@@ -138,18 +173,19 @@ class RouterService:
         except RouterManagerError as exc:
             raise _router_error(exc) from exc
 
-    def _algorithms(self, thread_id: str, algorithm_id: str,
-                    status: str
-                    ) -> dict[str, Any]:
+    def _algorithms(self, thread_id: str, algorithm_id: str, status: str) -> dict[str, Any]:
         rows = self.ledger.list_algorithms(
             thread_id=thread_id,
             algorithm_id=algorithm_id,
+            published=True,
         )
         try:
             items = [_owned_live_item(self.manager, self.ledger, row) for row in rows]
+            if not thread_id and algorithm_id in {'', 'default'}:
+                items.insert(0, _default_live_item(self.manager))
         except RouterManagerError as exc:
             raise _router_error(exc) from exc
-        if status:
+        if status and status != 'all':
             items = [item for item in items if item['status'] == status]
         return {'items': items}
 
@@ -190,9 +226,7 @@ class RouterService:
         except RouterLedgerError as exc:
             raise ServiceError(409, _error('algorithm_conflict', str(exc))) from exc
 
-    def _action(self, algorithm_id: str,
-                request: AlgorithmActionBody
-                ) -> dict[str, Any]:
+    def _action(self, algorithm_id: str, request: AlgorithmActionBody) -> dict[str, Any]:
         _owned_row(self.ledger, algorithm_id)
         try:
             health = manage_owned_algorithm(
@@ -269,9 +303,7 @@ class RouterService:
             raise ServiceError(409, _error('algorithm_conflict', str(exc))) from exc
 
 
-async def _run_sync(function: Callable[..., T], *args: Any,
-                    **kwargs: Any
-                    ) -> T:
+async def _run_sync(function: Callable[..., T], *args: Any, **kwargs: Any) -> T:
     worker = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
     try:
         return await asyncio.shield(worker)
@@ -296,29 +328,39 @@ def _owned_row(ledger: RouterAlgorithmLedger, algorithm_id: str) -> dict[str, An
     return row
 
 
-def _owned_live_item(manager: RouterManager, ledger: RouterAlgorithmLedger,
-                     row: Mapping[str, Any]
-                     ) -> dict[str, Any]:
+def _owned_live_item(manager: RouterManager, ledger: RouterAlgorithmLedger, row: Mapping[str, Any]) -> dict[str, Any]:
     detail = manager.get_algorithm(str(row['algorithm_id']))
     health = manager.healthcheck_from_detail(detail)
     return {
         'algorithm_id': row['algorithm_id'],
+        'name': str((detail or {}).get('name') or row['algorithm_id']),
         'status': str((detail or {}).get('status') or 'missing'),
-        'expected_state': row['expected_state'],
         'healthy_instances': health['healthy_instances'],
-        'instance_count': len(health['instances']),
-        'owner': {
-            'thread_id': row['thread_id'],
-            'candidate_ref': row['candidate_ref'],
-        },
-        'router_chat_url': row['service_url'],
-        'router_admin_url': row['router_admin_url'],
+        'instance_count': max(1, int(row.get('instance_count') or 1)),
+        'thread_id': row['thread_id'],
+        'created_at': _iso_time(row['created_at']),
     }
 
 
-def _validate_weights(manager: RouterManager, ledger: RouterAlgorithmLedger,
-                      weights: Mapping[str, int]
-                      ) -> None:
+def _default_live_item(manager: RouterManager) -> dict[str, Any]:
+    detail = manager.get_algorithm('default')
+    health = manager.healthcheck_from_detail(detail)
+    return {
+        'algorithm_id': 'default',
+        'name': str((detail or {}).get('name') or 'default'),
+        'status': str((detail or {}).get('status') or 'missing'),
+        'healthy_instances': health['healthy_instances'],
+        'instance_count': len(health['instances']),
+        'thread_id': None,
+        'created_at': (detail or {}).get('created_at'),
+    }
+
+
+def _iso_time(value: object) -> str:
+    return datetime.fromtimestamp(float(value), timezone.utc).isoformat()
+
+
+def _validate_weights(manager: RouterManager, ledger: RouterAlgorithmLedger, weights: Mapping[str, int]) -> None:
     if not weights or any(weight <= 0 for weight in weights.values()):
         raise ServiceError(422, _error(
             'ab_strategy_invalid',
@@ -327,6 +369,11 @@ def _validate_weights(manager: RouterManager, ledger: RouterAlgorithmLedger,
     for algorithm_id in weights:
         if algorithm_id != 'default':
             row = _owned_row(ledger, algorithm_id)
+            if row.get('published_at') is None:
+                raise ServiceError(409, _error(
+                    'ab_strategy_invalid',
+                    f'{algorithm_id} has not passed ABTest',
+                ))
             if row['expected_state'] != 'active':
                 raise ServiceError(409, _error(
                     'ab_strategy_invalid',
@@ -339,9 +386,7 @@ def _validate_weights(manager: RouterManager, ledger: RouterAlgorithmLedger,
             ))
 
 
-def _strategy_response(strategy: Mapping[str, Any],
-                       ledger: RouterAlgorithmLedger
-                       ) -> dict[str, Any]:
+def _strategy_response(strategy: Mapping[str, Any], ledger: RouterAlgorithmLedger) -> dict[str, Any]:
     audit = ledger.latest_ab_audit()
     return {
         **_strategy_view(strategy),
@@ -358,7 +403,7 @@ def _strategy_view(strategy: Mapping[str, Any]) -> dict[str, Any]:
     return {
         'active': raw is not None,
         'id': None if raw is None else raw.get('id'),
-        'weights': {} if raw is None else dict(raw.get('weights') or {}),
+        'weights': {'default': 100} if raw is None else dict(raw.get('weights') or {}),
     }
 
 

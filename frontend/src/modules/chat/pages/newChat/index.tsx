@@ -22,6 +22,7 @@ import { localizeErrorCode } from "@/components/request";
 import PreferenceConfigNotice from "@/modules/chat/components/PreferenceConfigNotice";
 import type { ConversationPluginSettings } from "@/modules/chat/utils/request";
 import { RightOutlined, ScheduleOutlined } from "@ant-design/icons";
+import { useChatThinkStore } from "@/modules/chat/store/chatThink";
 
 function readRunInBackgroundMode() {
   try {
@@ -69,18 +70,36 @@ const NewChatPage = () => {
     );
 
   const [isDragging, setIsDragging] = useState(false);
+
+  useEffect(() => {
+    useChatThinkStore
+      .getState()
+      .setThinkingDepth(runInBackground ? "high" : "medium");
+  }, [runInBackground]);
   const dragCounterRef = useRef(0);
   const isChatDisabled = !modelProviderGuard.canChat;
-  const chatDisabledReason = modelProviderGuard.isChecking
-    ? t("chat.modelProviderChecking")
+  const isWelcomeInputDisabled = isChatDisabled;
+  const runtimeInitializingReason = runInBackground
+    ? t("runtime.aiServiceInitializingWorkflow")
+    : t("runtime.aiServiceInitializingMessage");
+  const chatDisabledReason = modelProviderGuard.needsModelProviderConfig
+    ? t("chat.modelProviderRequiredTitle")
     : modelProviderGuard.status === "error"
       ? localizeErrorCode("2000509")
-      : t("chat.modelProviderRequiredTitle");
-  const chatDisabledDescription = modelProviderGuard.isChecking
-    ? t("chat.modelProviderCheckingDesc")
+      : modelProviderGuard.isRuntimeInitializing
+        ? runtimeInitializingReason
+        : modelProviderGuard.isChecking
+          ? t("chat.modelProviderChecking")
+          : t("chat.modelProviderRequiredTitle");
+  const chatDisabledDescription = modelProviderGuard.needsModelProviderConfig
+    ? t("chat.modelProviderRequiredDesc")
     : modelProviderGuard.status === "error"
       ? localizeErrorCode("2000509")
-      : t("chat.modelProviderRequiredDesc");
+      : modelProviderGuard.isRuntimeInitializing
+        ? undefined
+        : modelProviderGuard.isChecking
+          ? t("chat.modelProviderCheckingDesc")
+          : t("chat.modelProviderRequiredDesc");
   const chatDisabledAction = modelProviderGuard.isChecking ? null : modelProviderGuard.status === "error" ? (
     <Button size="small" onClick={() => void modelProviderGuard.refresh()}>
       {t("chat.retryCheckModelProvider")}
@@ -104,6 +123,21 @@ const NewChatPage = () => {
       <span>{vlmWarningText}</span>
     </>
   ) : chatDisabledDescription;
+  const hideSharedNoticeForRuntime =
+    modelProviderGuard.isRuntimeInitializing &&
+    !modelProviderGuard.needsModelProviderConfig &&
+    modelProviderGuard.status !== "error";
+  const inputDisabledReason = hideSharedNoticeForRuntime
+    ? undefined
+    : chatDisabledReason;
+  const inputDisabledDescription = hideSharedNoticeForRuntime
+    ? undefined
+    : chatDisabledDescriptionContent;
+  const inputDisabledAction = hideSharedNoticeForRuntime
+    ? undefined
+    : chatDisabledAction;
+  const hidePreferenceConfigNotice =
+    !modelProviderGuard.isConfigurationReady;
 
   useEffect(() => {
     if (!isChatContent) {
@@ -185,7 +219,7 @@ const NewChatPage = () => {
   const handleDragEnter = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     e.stopPropagation();
-    if (isChatDisabled) {
+    if (isWelcomeInputDisabled) {
       return;
     }
     // Ignore internal DOM drag-and-drop (e.g. plugin panel card sorting).
@@ -218,7 +252,7 @@ const NewChatPage = () => {
     setIsDragging(false);
     dragCounterRef.current = 0;
 
-    if (isChatDisabled) {
+    if (isWelcomeInputDisabled) {
       message.warning(chatDisabledReason);
       return;
     }
@@ -248,13 +282,13 @@ const NewChatPage = () => {
             setIsChatContent={handleSetIsChatContent}
             setChatConfigFn={setChatConfig}
             initchatConfig={chatConfig}
-            canChat={!isChatDisabled}
+            canChat={modelProviderGuard.canChat}
             embeddingReady={modelProviderGuard.embeddingReady}
             multimodalEmbeddingReady={modelProviderGuard.multimodalEmbeddingReady}
             rerankReady={modelProviderGuard.rerankReady}
-            chatDisabledReason={chatDisabledReason}
-            chatDisabledDescription={chatDisabledDescription}
-            chatDisabledAction={chatDisabledAction}
+            chatDisabledReason={inputDisabledReason}
+            chatDisabledDescription={inputDisabledDescription}
+            chatDisabledAction={inputDisabledAction}
             initPendingPluginSettings={pendingPluginSettings}
           />
         </div>
@@ -283,7 +317,8 @@ const NewChatPage = () => {
               <div className="chat-content">
                 <div className="greeting-section">
                   <h1 className="greeting-text">
-                    {getGreeting()}{t("chat.greetingSuffix")}
+                    {getGreeting()}
+                    {t(runInBackground ? "chat.taskGreetingSuffix" : "chat.greetingSuffix")}
                   </h1>
                 </div>
 
@@ -326,7 +361,19 @@ const NewChatPage = () => {
                       </Button>
                     </div>
                   ) : null}
-                  <PreferenceConfigNotice hidden={isChatDisabled} />
+                  {modelProviderGuard.isRuntimeInitializing ? (
+                    <div
+                      className="model-provider-warning-banner"
+                      role="status"
+                    >
+                      <span className="model-provider-warning-text">
+                        {runtimeInitializingReason}
+                      </span>
+                    </div>
+                  ) : null}
+                  <PreferenceConfigNotice
+                    hidden={hidePreferenceConfigNotice}
+                  />
                   <ChatInput
                     ref={newChatInputRef}
                     value={inputValue}
@@ -346,13 +393,18 @@ const NewChatPage = () => {
                     }}
                     chatConfig={chatConfig}
                     setChatConfig={setChatConfig}
-                    disabled={isChatDisabled}
+                    disabled={isWelcomeInputDisabled}
                     embeddingReady={modelProviderGuard.embeddingReady}
                     multimodalEmbeddingReady={modelProviderGuard.multimodalEmbeddingReady}
                     rerankReady={modelProviderGuard.rerankReady}
-                    disabledReason={chatDisabledReason}
-                    disabledDescription={chatDisabledDescriptionContent}
-                    disabledAction={chatDisabledAction}
+                    disabledReason={inputDisabledReason}
+                    disabledDescription={inputDisabledDescription}
+                    disabledAction={inputDisabledAction}
+                    placeholder={
+                      runInBackground
+                        ? t("chat.taskInputPlaceholder")
+                        : undefined
+                    }
                     onPluginSettingsChange={(settings) => {
                       setPendingPluginSettings(settings);
                     }}

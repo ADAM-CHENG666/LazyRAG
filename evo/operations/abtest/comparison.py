@@ -7,8 +7,10 @@ from typing import Any
 from evo.operations.public_contracts import (
     AGGREGATES,
     AbtestComparison,
+    clean_text as _text,
     dump_contract,
     normalize_eval_summary,
+    number_or_default as _float,
 )
 
 
@@ -23,12 +25,8 @@ COMPARE_METRICS = (
 GOODCASE_MAX_OVERALL_DROP = 0.05
 
 
-def compare_abtest(
-    run_id: str,
-    baseline: Mapping[str, Any],
-    candidate: Mapping[str, Any],
-    service: Mapping[str, Any],
-) -> dict[str, Any]:
+def compare_abtest(run_id: str, baseline: Mapping[str, Any], candidate: Mapping[str, Any], service: Mapping[str, Any]
+                   ) -> dict[str, Any]:
     baseline_summary = normalize_eval_summary(baseline)
     candidate_summary = normalize_eval_summary(candidate)
     origin = _eval_body(baseline_summary)
@@ -42,22 +40,13 @@ def compare_abtest(
         failures.append('candidate service is not ready')
     if not origin['cases']:
         failures.append('abtest has no cases')
-    if origin['scored_case_num'] < 0:
-        failures.append('baseline summary lacks scored case count')
-    elif origin['scored_case_num'] != len(origin['cases']):
-        failures.append('baseline evaluation has unscored cases')
-    if after['scored_case_num'] < 0:
-        failures.append('candidate summary lacks scored case count')
-    elif after['scored_case_num'] != len(after['cases']):
-        failures.append('candidate evaluation has unscored cases')
     if {row['case_id'] for row in origin['cases']} != {row['case_id'] for row in after['cases']}:
         failures.append('baseline and candidate case sets differ')
     reasons = list(failures)
-    if delta['overall'] < 0:
-        reasons.append('candidate overall regressed')
-    if delta['correct_rate'] < 0:
-        reasons.append('candidate correct_rate regressed')
-    verdict = 'reject' if reasons else 'accept'
+    improved = delta['overall'] > 0
+    if not improved:
+        reasons.append('candidate overall did not improve')
+    verdict = 'accept' if not failures and improved else 'reject'
     return dump_contract(AbtestComparison, {
         'run_id': str(run_id),
         'algo_id': str(baseline_summary.get('algo_id') or ''),
@@ -71,10 +60,7 @@ def compare_abtest(
     })
 
 
-def compare_eval_detail_for_repair(
-    baseline: Mapping[str, Any],
-    candidate: Mapping[str, Any],
-) -> dict[str, Any]:
+def compare_eval_detail_for_repair(baseline: Mapping[str, Any], candidate: Mapping[str, Any]) -> dict[str, Any]:
     baseline_rows = _rows_by_case(baseline.get('rows'))
     candidate_rows = _rows_by_case(candidate.get('rows'))
     case_ids = list(dict.fromkeys([
@@ -113,7 +99,10 @@ def compare_eval_detail_for_repair(
         ],
         'data_warnings': [],
         'baseline': {'total': baseline.get('total', 0), 'quality_counts': dict(baseline.get('quality_counts') or {})},
-        'candidate': {'total': candidate.get('total', 0), 'quality_counts': dict(candidate.get('quality_counts') or {})},
+        'candidate': {
+            'total': candidate.get('total', 0),
+            'quality_counts': dict(candidate.get('quality_counts') or {}),
+        },
         'summary': {
             'metrics': {'baseline': before, 'candidate': after, 'delta': delta},
             'case_deltas': case_deltas,
@@ -128,7 +117,10 @@ def compare_eval_detail_for_repair(
 def _eval_body(summary: Mapping[str, Any]) -> dict[str, Any]:
     return {
         key: summary[key]
-        for key in ('scored_case_num', 'correct_rate', 'good_rate', 'metrics', 'cases')
+        for key in (
+            'scored_case_num', 'correct_rate', 'good_rate', 'metrics', 'cases',
+            'failed_case_num', 'failed_cases', 'completed_with_problems',
+        )
     }
 
 
@@ -153,11 +145,7 @@ def _rows_by_case(rows: object) -> dict[str, Mapping[str, Any]]:
     }
 
 
-def _case_delta(
-    case_id: str,
-    baseline: Mapping[str, Any] | None,
-    candidate: Mapping[str, Any] | None,
-) -> dict[str, Any]:
+def _case_delta(case_id: str, baseline: Mapping[str, Any] | None, candidate: Mapping[str, Any] | None) -> dict[str, Any]:
     before, after = _row_metrics(baseline or {}), _row_metrics(candidate or {})
     delta = {key: round(after[key] - before[key], 4) for key in before}
     if not baseline:
@@ -204,14 +192,3 @@ def _goodcase_guard(case_deltas: list[dict[str, Any]]) -> dict[str, Any]:
         'overall_delta': round(after - before, 4),
         'allowed_drop': GOODCASE_MAX_OVERALL_DROP,
     }
-
-
-def _float(value: object) -> float:
-    try:
-        return round(float(value or 0.0), 4)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _text(value: object) -> str:
-    return str(value or '').strip()

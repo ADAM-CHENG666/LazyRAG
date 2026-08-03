@@ -36,11 +36,44 @@ def test_executor_creates_agent_with_shared_defaults(monkeypatch) -> None:
     assert kwargs['stream'] is True
     assert kwargs['force_summarize'] is True
     assert kwargs['enable_builtin_tools'] is False
+    assert callable(kwargs['on_max_retries'])
     assert kwargs['workspace'] == '/tmp/work'
     agent._prepare_tool_context.assert_called_once_with(
         '### User Instruction\n\nhello', [],
     )
     agent.set_stop_tools.assert_called_once_with(['stop'])
+
+
+def test_executor_does_not_pause_subagent_on_round_limit(monkeypatch) -> None:
+    agent = MagicMock()
+    constructor = MagicMock(return_value=agent)
+    monkeypatch.setattr(executor_mod._agent_mod, 'ReactAgent', constructor)
+    plan = _plan()
+    plan.role = AgentRole.SUBAGENT
+
+    AgentExecutor().create_agent('llm', plan)
+
+    assert constructor.call_args.kwargs['on_max_retries'] is None
+
+
+def test_executor_auto_expands_after_plugin_or_subagent_tool(monkeypatch) -> None:
+    agent = MagicMock()
+    agent._tools_manager = MagicMock(return_value=[{'ok': True}])
+    constructor = MagicMock(return_value=agent)
+    monkeypatch.setattr(executor_mod._agent_mod, 'ReactAgent', constructor)
+    workspace = {}
+    monkeypatch.setitem(executor_mod.lazyllm.locals, '_lazyllm_agent', {'workspace': workspace})
+
+    created = AgentExecutor().create_agent('llm', _plan(max_retries=20))
+    created._tools_manager([{
+        'function': {'name': 'create_subagent', 'arguments': '{}'},
+    }])
+
+    with executor_mod._cfg.temp('agentic_expanded_max_rounds', 200):
+        assert workspace['_react_round_limit'] == 200
+        assert constructor.call_args.kwargs['on_max_retries'](
+            None, 21, 21,
+        ) == 200
 
 
 def test_executor_restores_toolkit_activation_from_history(monkeypatch) -> None:
