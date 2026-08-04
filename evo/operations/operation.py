@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import json
+import os
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
+
+from unidiff import PatchSet
 
 from evo import artifacts as A
 from evo.artifact_runtime import (
@@ -15,7 +21,6 @@ from evo.artifact_runtime import (
     one,
     operation,
     partitioned,
-    record_event,
     record_process,
     scalar,
 )
@@ -29,9 +34,12 @@ from .analysis.trace_summary import build_trace_summary
 from .dataset.operations import dataset_operations
 from .eval.answer import async_answer_case
 from .eval.judge import judge_case
-from .public_contracts import build_eval_summary_root, require_mapping as _mapping
-from .repair.loop import build_verified_patch, prepare_candidate_workspace, run_repair_loop
-from .repair.phase1 import build_repair_plan
+from .public_contracts import RepairPatch, build_eval_summary_root, dump_contract, require_mapping as _mapping
+from .repair.capabilities import DefaultCapabilityFactory
+from .repair.contracts import RepairInput
+from .repair.opencode import OpenCodeAdapter
+from .repair.session import RepairSession
+from evo.llm import LazyLLMClient
 
 
 @operation(
@@ -185,99 +193,41 @@ async def analysis_summary_operation(ctx: OperationContext, classifications: obj
 
 
 @operation(
-    op_id='repair.plan',
+    op_id='repair.session',
     inputs={
         'analysis': one(A.ANALYSIS_SUMMARY),
         'policy': one(A.REPAIR_POLICY),
         'approval': one(A.APPROVAL_ANALYSIS),
     },
-    outputs={'plan': scalar(A.REPAIR_PLAN)},
-    timeout=1900.0,
-)
-@record_process
-async def repair_plan_operation(ctx: OperationContext, analysis: object, policy: object, approval: object
-                                ) -> OperationResult:
-    analysis_value = _mapping(analysis, 'analysis')
-    plan = build_repair_plan(ctx.run_id, analysis_value, _mapping(policy, 'policy'))
-    categories = analysis_value.get('categories') if isinstance(analysis_value.get('categories'), Mapping) else {}
-    category = categories.get(plan.get('category_id')) if isinstance(categories, Mapping) else {}
-    return await _recorded_result(
-        ctx, 'repair.plan_built', {'plan': plan}, status=plan.get('status'),
-        validation_case_count=len((category or {}).get('cases') or ()),
-    )
-
-
-@operation(
-    op_id='repair.candidate_workspace',
-    inputs={
-        'plan': one(A.REPAIR_PLAN),
-        'policy': one(A.REPAIR_POLICY),
-    },
-    outputs={'workspace': scalar(A.REPAIR_CANDIDATE_WORKSPACE)},
-)
-async def candidate_workspace_operation(ctx: OperationContext, plan: object, policy: object) -> OperationResult:
-    workspace = prepare_candidate_workspace(_mapping(plan, 'plan'), _mapping(policy, 'policy'))
-    return await _recorded_result(
-        ctx, 'repair.workspace_prepared', {'workspace': workspace}, status=workspace.get('status'),
-        workspace_kind=workspace.get('workspace_kind'),
-    )
-
-
-@operation(
-    op_id='repair.loop_result',
-    inputs={
-        'plan': one(A.REPAIR_PLAN),
-        'workspace': one(A.REPAIR_CANDIDATE_WORKSPACE),
-        'analysis': one(A.ANALYSIS_SUMMARY),
-        'cases': all_items(A.EVAL_CASE, over=A.EVAL_CASE_REQUESTS),
-        'baseline_judges': all_items(
-            A.EVAL_JUDGE_RESULT,
-            over=A.EVAL_CASE_REQUESTS,
-        ),
-        'eval_policy': one(A.EVAL_POLICY),
-        'candidate_config': one(A.ABTEST_CANDIDATE_CONFIG),
-        'policy': one(A.REPAIR_POLICY),
-    },
-    outputs={'result': scalar(A.REPAIR_LOOP_RESULT)},
+    outputs={'patch': scalar(A.REPAIR_VERIFIED_PATCH)},
     timeout=7200.0,
 )
 @record_process
-async def repair_loop_operation(ctx: OperationContext, plan: object, workspace: object, cases: object,
-                                analysis: object, baseline_judges: object, eval_policy: object,
-                                candidate_config: object, policy: object) -> OperationResult:
-    return OperationResult({
-        'result': await run_repair_loop(
-            _mapping(workspace, 'workspace'),
-            _mapping(analysis, 'analysis'),
-            _partition_values(cases, 'cases'),
-            _partition_values(baseline_judges, 'baseline_judges'),
-            _mapping(eval_policy, 'eval_policy'),
-            _mapping(candidate_config, 'candidate_config'),
-            _mapping(policy, 'policy'),
-            ctx,
-            _mapping(plan, 'plan'),
-        ),
-    })
-
-
-@operation(
-    op_id='repair.verified_patch',
-    inputs={'loop': one(A.REPAIR_LOOP_RESULT)},
-    outputs={'patch': scalar(A.REPAIR_VERIFIED_PATCH)},
-)
-@record_process
-async def verified_patch_operation(ctx: OperationContext, loop: object) -> OperationResult:
-    patch = build_verified_patch(ctx.run_id, _mapping(loop, 'loop'))
-    record_event(
-        'repair.patch_verified',
-        status='completed',
-        terminal=True,
-        data={
-            'status': patch.get('status'),
-            'file_count': len(patch.get('diff') or {}),
-        },
+async def repair_session_operation(ctx: OperationContext, analysis: object, policy: object, approval: object
+                                   ) -> OperationResult:
+    del approval
+    policy_value = _mapping(policy, 'policy')
+    repair_input = _repair_input(ctx.run_id, _mapping(analysis, 'analysis'), policy_value)
+    llm_config = policy_value.get('llm_config')
+    client = LazyLLMClient(
+        llm_config=llm_config if isinstance(llm_config, Mapping) else None,
+        model='evo_llm',
     )
-    return OperationResult({'patch': patch})
+    session = RepairSession(
+        OpenCodeAdapter(client, int(policy_value.get('model_timeout_seconds') or 120)),
+        DefaultCapabilityFactory(),
+    )
+    result = await asyncio.to_thread(session.run, repair_input)
+    if result.status != 'success':
+        raise RuntimeError(f'repair session did not complete: {result.status}: {result.summary}')
+    patch = _verified_patch(ctx.run_id, result.patch_ref)
+    return await _recorded_result(
+        ctx,
+        'repair.session_completed',
+        {'patch': patch},
+        status=result.status,
+        file_count=len(patch['diff']),
+    )
 
 
 @operation(
@@ -285,17 +235,14 @@ async def verified_patch_operation(ctx: OperationContext, loop: object) -> Opera
     inputs={
         'config': one(A.ABTEST_CANDIDATE_CONFIG),
         'patch': one(A.REPAIR_VERIFIED_PATCH),
-        'workspace': one(A.REPAIR_CANDIDATE_WORKSPACE),
         'approval': one(A.APPROVAL_REPAIR),
     },
     outputs={'service': scalar(A.ABTEST_CANDIDATE_SERVICE)},
 )
-async def candidate_service_operation(ctx: OperationContext, config: object, patch: object, workspace: object,
+async def candidate_service_operation(ctx: OperationContext, config: object, patch: object,
                                       approval: object) -> OperationResult:
     await ctx.record('abtest.candidate_service_starting', status='started')
-    service = candidate_service(
-        _mapping(config, 'config'), _mapping(patch, 'patch'), ctx, _mapping(workspace, 'workspace'),
-    )
+    service = candidate_service(_mapping(config, 'config'), _mapping(patch, 'patch'), ctx)
     return await _recorded_result(
         ctx, 'abtest.candidate_service_ready', {'service': service}, status=service.get('status'),
         service_kind=service.get('service_kind'), algorithm_id=service.get('algorithm_id'),
@@ -401,10 +348,7 @@ _EVO_OPERATIONS: tuple[Operation, ...] = (
     classify_case_operation,
     trace_clusters_operation,
     analysis_summary_operation,
-    repair_plan_operation,
-    candidate_workspace_operation,
-    repair_loop_operation,
-    verified_patch_operation,
+    repair_session_operation,
     candidate_service_operation,
     candidate_answer_operation,
     candidate_judge_operation,
@@ -450,11 +394,64 @@ def _failure_summary(value: object) -> dict[str, object]:
     }
 
 
+def _repair_input(run_id: str, analysis: Mapping[str, Any], policy: Mapping[str, Any]) -> RepairInput:
+    queue = analysis.get('repair_group_queue')
+    group = queue[0] if isinstance(queue, list) and queue and isinstance(queue[0], Mapping) else None
+    if group is None:
+        raise ValueError('analysis has no repairable group')
+    candidate_files = [str(path).strip() for path in group.get('candidate_files') or () if str(path).strip()]
+    if not candidate_files:
+        raise ValueError('repair group has no candidate files')
+    guidance = policy.get('user_guidance')
+    guidance_text = '\n'.join(str(item) for item in guidance) if isinstance(guidance, list) else str(guidance or '')
+    source_ref = str(
+        policy.get('candidate_source_dir')
+        or os.getenv('LAZYMIND_EVO_SOURCE')
+        or '/app'
+    )
+    budget = policy.get('repair_budget')
+    configured_constraints = policy.get('constraints')
+    constraints = dict(configured_constraints) if isinstance(configured_constraints, Mapping) else {}
+    if 'test_commands' in policy:
+        constraints['test_commands'] = policy['test_commands']
+    return RepairInput(
+        run_id=run_id,
+        objective=json.dumps(dict(group), ensure_ascii=False, sort_keys=True, default=str),
+        guidance=guidance_text,
+        source_ref=source_ref,
+        case_scope='\n'.join(candidate_files),
+        constraints=constraints,
+        budget=dict(budget) if isinstance(budget, Mapping) else {'turns': 50, 'seconds': 7200},
+    )
+
+
+def _verified_patch(run_id: str, patch_ref: str) -> dict[str, Any]:
+    path = Path(patch_ref)
+    text = path.read_text(encoding='utf-8')
+    diff = {}
+    for patched in PatchSet(text.splitlines(True)):
+        source = str(patched.source_file).removeprefix('a/')
+        target = str(patched.target_file).removeprefix('b/')
+        name = source if target == '/dev/null' else target or source
+        if name:
+            diff[name] = str(patched)
+    if not diff:
+        raise ValueError('repair result has no patch')
+    workspace_ref = path.parent.parent / 'sandbox/source'
+    return dump_contract(RepairPatch, {
+        'run_id': run_id,
+        'algo_id': '',
+        'candidate_algo_id': '',
+        'status': 'verified',
+        'workspace_ref': str(workspace_ref),
+        'diff': diff,
+    })
+
+
 __all__ = [
     'analysis_summary_operation', 'candidate_answer_operation', 'candidate_judge_operation',
-    'candidate_service_operation', 'candidate_summary_operation', 'candidate_workspace_operation',
+    'candidate_service_operation', 'candidate_summary_operation',
     'classify_case_operation', 'compare_abtest_operation', 'eval_answer_operation',
-    'eval_judge_operation', 'eval_summary_operation', 'evo_operations', 'repair_loop_operation',
-    'repair_plan_operation', 'trace_clusters_operation', 'trace_summary_operation',
-    'verified_patch_operation',
+    'eval_judge_operation', 'eval_summary_operation', 'evo_operations', 'repair_session_operation',
+    'trace_clusters_operation', 'trace_summary_operation',
 ]
