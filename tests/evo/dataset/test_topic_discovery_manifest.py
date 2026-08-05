@@ -3,264 +3,105 @@ import pytest
 from evo.operations.dataset.topic_discovery import topic_discovery_manifest
 
 
-def _entity_cluster(**overrides):
-    item = {
-        'cluster_id': 'entity_cluster_000001',
-        'cluster_type': 'entity',
-        'topics': ['Tesla'],
-        'chunk_ids': ['chunk-1'],
-        'chunk_count': 1,
-        'scores': {},
-        'metadata': {},
+def _cluster(cluster_id, cluster_type, topics, chunk_ids, **overrides):
+    value = {
+        'cluster_id': cluster_id,
+        'cluster_type': cluster_type,
+        'topics': topics,
+        'chunk_ids': chunk_ids,
+        'chunk_count': len(chunk_ids),
     }
-    item.update(overrides)
-    return item
-
-
-def _embedding_cluster(**overrides):
-    item = {
-        'cluster_id': 'embedding_cluster_000001',
-        'cluster_type': 'embedding',
-        'topics': ['mobility'],
-        'chunk_ids': ['chunk-1', 'chunk-2'],
-        'chunk_count': 2,
-        'scores': {},
-        'metadata': {},
-    }
-    item.update(overrides)
-    return item
+    value.update(overrides)
+    return value
 
 
 def _inputs(*, entity_clusters=None, embedding_clusters=None):
     return {
-        'entity_clusters': {'clusters': entity_clusters if entity_clusters is not None else [_entity_cluster()]},
-        'embedding_clusters': {'clusters': embedding_clusters if embedding_clusters is not None else [_embedding_cluster()]},
+        'entity_clusters': {'clusters': entity_clusters if entity_clusters is not None else [
+            _cluster('entity_cluster_1', 'entity', ['Tesla'], ['chunk-1']),
+        ]},
+        'embedding_clusters': {'clusters': embedding_clusters if embedding_clusters is not None else [
+            _cluster('embedding_cluster_1', 'embedding', ['mobility'], ['chunk-2', 'chunk-3']),
+        ]},
     }
 
 
-def test_topic_discovery_manifest_merges_two_paths_and_relabels_cluster_ids():
-    output = topic_discovery_manifest(None, _inputs())
-
-    assert list(output.keys()) == ['topic_discovery_manifest']
-    assert output['topic_discovery_manifest'] == {
-        'clusters': [
-            {
-                'cluster_id': 'entity_000001',
-                'source_cluster_id': 'entity_cluster_000001',
-                'cluster_type': 'entity',
-                'topics': ['Tesla'],
-                'chunk_ids': ['chunk-1'],
-                'chunk_count': 1,
-            },
-            {
-                'cluster_id': 'embedding_000001',
-                'source_cluster_id': 'embedding_cluster_000001',
-                'cluster_type': 'embedding',
-                'topics': ['mobility'],
-                'chunk_ids': ['chunk-1', 'chunk-2'],
-                'chunk_count': 2,
-            },
+def test_manifest_flattens_clusters_to_topics_in_source_order():
+    # 发布 Artifact 按 entity Cluster/Topic、embedding Cluster/Topic 的稳定顺序展平。
+    manifest = topic_discovery_manifest(None, _inputs(
+        entity_clusters=[
+            _cluster('entity_cluster_1', 'entity', ['Tesla', 'EV'], ['chunk-1']),
+            _cluster('entity_cluster_2', 'entity', ['SpaceX'], ['chunk-2']),
         ],
-        'stats': {
-            'total_topic_count': 2,
-            'unique_chunk_count': 2,
-            'topic_types': {
-                'entity': {
-                    'cluster_count': 1,
-                    'topic_count': 1,
-                    'support_distribution': {
-                        'one_chunk': 1,
-                        'two_chunks': 0,
-                        'three_or_more_chunks': 0,
-                    },
-                },
-                'embedding': {
-                    'cluster_count': 1,
-                    'topic_count': 1,
-                    'support_distribution': {
-                        'one_chunk': 0,
-                        'two_chunks': 1,
-                        'three_or_more_chunks': 0,
-                    },
-                },
-            },
-        },
-    }
+        embedding_clusters=[
+            _cluster('embedding_cluster_1', 'embedding', ['mobility', 'supply chain'], ['chunk-3', 'chunk-4']),
+        ],
+    ))['topic_discovery_manifest']
 
-
-def test_topic_discovery_manifest_keeps_source_order_ids_and_does_not_cross_source_dedup():
-    output = topic_discovery_manifest(
-        None,
-        _inputs(
-            entity_clusters=[
-                _entity_cluster(
-                    cluster_id='entity_cluster_000005',
-                    topics=['Tesla', 'EV'],
-                    chunk_ids=['chunk-1', 'chunk-2'],
-                    chunk_count=2,
-                ),
-                _entity_cluster(cluster_id='entity_cluster_000006', topics=['SpaceX'], chunk_ids=['chunk-3'], chunk_count=1),
-            ],
-            embedding_clusters=[
-                _embedding_cluster(
-                    cluster_id='embedding_cluster_000010',
-                    topics=['Tesla', 'mobility'],
-                    chunk_ids=['chunk-1', 'chunk-2', 'chunk-4'],
-                    chunk_count=3,
-                ),
-            ],
-        ),
-    )['topic_discovery_manifest']
-
-    assert [cluster['cluster_id'] for cluster in output['clusters']] == [
-        'entity_000001',
-        'entity_000002',
-        'embedding_000001',
+    assert [(topic['name'], topic['question_type']) for topic in manifest['topics']] == [
+        ('Tesla', 'precision'), ('EV', 'precision'), ('SpaceX', 'precision'),
+        ('mobility', 'reasoning'), ('supply chain', 'reasoning'),
     ]
-    assert [cluster['source_cluster_id'] for cluster in output['clusters']] == [
-        'entity_cluster_000005',
-        'entity_cluster_000006',
-        'embedding_cluster_000010',
+    assert [topic['chunk_ids'] for topic in manifest['topics']] == [
+        ['chunk-1'], ['chunk-1'], ['chunk-2'], ['chunk-3', 'chunk-4'], ['chunk-3', 'chunk-4'],
     ]
-    assert [cluster['cluster_type'] for cluster in output['clusters']] == ['entity', 'entity', 'embedding']
-    assert output['stats'] == {
+    assert [topic['chunk_count'] for topic in manifest['topics']] == [1, 1, 1, 2, 2]
+    assert manifest['stats'] == {
         'total_topic_count': 5,
-        'unique_chunk_count': 4,
-        'topic_types': {
-            'entity': {
-                'cluster_count': 2,
-                'topic_count': 3,
-                'support_distribution': {
-                    'one_chunk': 1,
-                    'two_chunks': 2,
-                    'three_or_more_chunks': 0,
-                },
-            },
-            'embedding': {
-                'cluster_count': 1,
-                'topic_count': 2,
-                'support_distribution': {
-                    'one_chunk': 0,
-                    'two_chunks': 0,
-                    'three_or_more_chunks': 2,
-                },
-            },
-        },
+        'question_types': {'precision': {'count': 3}, 'reasoning': {'count': 2}},
     }
 
 
-def test_topic_discovery_manifest_counts_support_distribution_by_topic_not_cluster():
-    output = topic_discovery_manifest(
-        None,
-        _inputs(
-            entity_clusters=[
-                _entity_cluster(
-                    cluster_id='entity_cluster_000001',
-                    topics=['single-a', 'single-b'],
-                    chunk_ids=['chunk-1'],
-                    chunk_count=1,
-                ),
-                _entity_cluster(
-                    cluster_id='entity_cluster_000002',
-                    topics=['double'],
-                    chunk_ids=['chunk-2', 'chunk-3'],
-                    chunk_count=2,
-                ),
-                _entity_cluster(
-                    cluster_id='entity_cluster_000003',
-                    topics=['multi-a', 'multi-b', 'multi-c'],
-                    chunk_ids=['chunk-4', 'chunk-5', 'chunk-6'],
-                    chunk_count=3,
-                ),
-            ],
-            embedding_clusters=[],
-        ),
+def test_manifest_uses_unique_opaque_ids_and_allows_duplicate_names():
+    # Topic 身份由 topic_id 定义；不同来源的同名 Topic 必须保留且 ID 唯一。
+    topics = topic_discovery_manifest(None, _inputs(
+        entity_clusters=[_cluster('entity_cluster_1', 'entity', ['Tesla'], ['chunk-1'])],
+        embedding_clusters=[_cluster('embedding_cluster_1', 'embedding', ['Tesla'], ['chunk-2'])],
+    ))['topic_discovery_manifest']['topics']
+
+    assert [topic['name'] for topic in topics] == ['Tesla', 'Tesla']
+    assert len({topic['topic_id'] for topic in topics}) == 2
+    assert all(topic['topic_id'].strip() for topic in topics)
+
+
+def test_manifest_does_not_expose_internal_cluster_fields():
+    # 前端只依赖 Topic 契约，算法 Cluster ID、评分和元数据均不得透传。
+    manifest = topic_discovery_manifest(None, _inputs(
+        entity_clusters=[_cluster(
+            'entity_cluster_1', 'entity', ['Tesla'], ['chunk-1'], scores={'score': 0.9}, metadata={'debug': True},
+        )],
+    ))['topic_discovery_manifest']
+
+    assert set(manifest) == {'topics', 'stats'}
+    assert set(manifest['topics'][0]) == {'topic_id', 'name', 'question_type', 'chunk_ids', 'chunk_count'}
+
+
+def test_manifest_returns_a_valid_empty_topic_collection():
+    # 没有可发现主题时，仍须产生可查询的稳定空 Artifact，而非失败或缺失字段。
+    manifest = topic_discovery_manifest(
+        None, _inputs(entity_clusters=[], embedding_clusters=[]),
     )['topic_discovery_manifest']
 
-    assert output['stats']['total_topic_count'] == 6
-    assert output['stats']['topic_types']['entity'] == {
-        'cluster_count': 3,
-        'topic_count': 6,
-        'support_distribution': {
-            'one_chunk': 2,
-            'two_chunks': 1,
-            'three_or_more_chunks': 3,
-        },
-    }
-    assert output['stats']['topic_types']['embedding'] == {
-        'cluster_count': 0,
-        'topic_count': 0,
-        'support_distribution': {
-            'one_chunk': 0,
-            'two_chunks': 0,
-            'three_or_more_chunks': 0,
-        },
-    }
-
-
-def test_topic_discovery_manifest_returns_complete_zero_stats_for_empty_paths():
-    output = topic_discovery_manifest(
-        None,
-        _inputs(entity_clusters=[], embedding_clusters=[]),
-    )['topic_discovery_manifest']
-
-    assert output == {
-        'clusters': [],
+    assert manifest == {
+        'topics': [],
         'stats': {
             'total_topic_count': 0,
-            'unique_chunk_count': 0,
-            'topic_types': {
-                'entity': {
-                    'cluster_count': 0,
-                    'topic_count': 0,
-                    'support_distribution': {
-                        'one_chunk': 0,
-                        'two_chunks': 0,
-                        'three_or_more_chunks': 0,
-                    },
-                },
-                'embedding': {
-                    'cluster_count': 0,
-                    'topic_count': 0,
-                    'support_distribution': {
-                        'one_chunk': 0,
-                        'two_chunks': 0,
-                        'three_or_more_chunks': 0,
-                    },
-                },
-            },
+            'question_types': {'precision': {'count': 0}, 'reasoning': {'count': 0}},
         },
     }
-
-
-def test_topic_discovery_manifest_rejects_invalid_contract_and_validation_errors():
-    with pytest.raises(ValueError, match='entity_clusters.clusters must be a list'):
-        topic_discovery_manifest(None, {
-            'entity_clusters': {'clusters': 'bad'},
-            'embedding_clusters': {'clusters': [_embedding_cluster()]},
-        })
-
-    with pytest.raises(ValueError, match='cluster_type must be entity'):
-        topic_discovery_manifest(None, _inputs(entity_clusters=[_entity_cluster(cluster_type='embedding')]))
-
-    with pytest.raises(ValueError, match='chunk_count must be a positive integer'):
-        topic_discovery_manifest(None, _inputs(entity_clusters=[_entity_cluster(chunk_count=0)]))
-
-    with pytest.raises(ValueError, match='mapping must be a mapping'):
-        topic_discovery_manifest(None, _inputs(entity_clusters=[_entity_cluster(scores='bad')]))
-
-    with pytest.raises(ValueError, match='mapping must be a mapping'):
-        topic_discovery_manifest(None, _inputs(embedding_clusters=[_embedding_cluster(metadata='bad')]))
 
 
 @pytest.mark.parametrize(
-    ('topics', 'match'),
+    ('entity_clusters', 'match'),
     [
-        ([], 'topics must be non-empty'),
-        ([''], 'topics must contain only non-empty strings'),
-        ('Tesla', 'topics must be list\\[string\\]'),
+        # 上游分支类型不可混用，避免错误题型进入发布 Artifact。
+        ([_cluster('entity_cluster_1', 'embedding', ['Tesla'], ['chunk-1'])], 'cluster_type must be entity'),
+        # 空 Topic、空 Chunk ID 和不一致计数都会导致详情引用与容量统计不可信。
+        ([_cluster('entity_cluster_1', 'entity', [], ['chunk-1'])], 'topics must be non-empty'),
+        ([_cluster('entity_cluster_1', 'entity', ['Tesla'], [''])], 'chunk_ids must contain only non-empty strings'),
+        ([_cluster('entity_cluster_1', 'entity', ['Tesla'], ['chunk-1'], chunk_count=2)], 'chunk_count must match chunk_ids length'),
     ],
 )
-def test_topic_discovery_manifest_rejects_empty_or_invalid_topics(topics, match):
+def test_manifest_rejects_invalid_source_cluster_contract(entity_clusters, match):
     with pytest.raises(ValueError, match=match):
-        topic_discovery_manifest(None, _inputs(entity_clusters=[_entity_cluster(topics=topics)]))
+        topic_discovery_manifest(None, _inputs(entity_clusters=entity_clusters))

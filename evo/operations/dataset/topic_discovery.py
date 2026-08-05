@@ -308,27 +308,25 @@ def topic_discovery_manifest(ctx: Any, inputs: Mapping[str, object]) -> Mapping[
     entity_clusters = _final_clusters(entity.get('clusters'), 'entity')
     embedding_clusters = _final_clusters(embedding.get('clusters'), 'embedding')
 
-    clusters = []
+    topics = []
     for cluster_type, source_clusters in (('entity', entity_clusters), ('embedding', embedding_clusters)):
-        for index, cluster in enumerate(source_clusters, 1):
-            clusters.append({
-                'cluster_id': f'{cluster_type}_{index:06d}',
-                'source_cluster_id': cluster['source_cluster_id'],
-                'cluster_type': cluster_type,
-                'topics': list(cluster['topics']),
-                'chunk_ids': list(cluster['chunk_ids']),
-                'chunk_count': cluster['chunk_count'],
-            })
-
-    unique_chunk_ids = {chunk_id for cluster in clusters for chunk_id in cluster['chunk_ids']}
+        question_type = 'precision' if cluster_type == 'entity' else 'reasoning'
+        for cluster in source_clusters:
+            for name in cluster['topics']:
+                topics.append({
+                    'topic_id': f'topic_{len(topics) + 1:06d}',
+                    'name': name,
+                    'question_type': question_type,
+                    'chunk_ids': list(cluster['chunk_ids']),
+                    'chunk_count': cluster['chunk_count'],
+                })
     return {'topic_discovery_manifest': {
-        'clusters': clusters,
+        'topics': topics,
         'stats': {
-            'total_topic_count': sum(len(cluster['topics']) for cluster in clusters),
-            'unique_chunk_count': len(unique_chunk_ids),
-            'topic_types': {
-                'entity': _topic_type_stats(entity_clusters),
-                'embedding': _topic_type_stats(embedding_clusters),
+            'total_topic_count': len(topics),
+            'question_types': {
+                'precision': {'count': sum(topic['question_type'] == 'precision' for topic in topics)},
+                'reasoning': {'count': sum(topic['question_type'] == 'reasoning' for topic in topics)},
             },
         },
     }}
@@ -663,11 +661,14 @@ def _candidate_clusters(value: Any) -> list[dict[str, Any]]:
     for item in value:
         cluster = _mapping(item, 'embedding_cluster_candidates.clusters[]')
         chunk_ids = _string_list(cluster.get('chunk_ids'), 'chunk_ids')
+        chunk_count = _positive_int(cluster.get('chunk_count'), len(chunk_ids), 'chunk_count')
+        if chunk_count != len(chunk_ids):
+            raise ValueError('chunk_count must match chunk_ids length')
         clusters.append({
             'candidate_id': _required_str(cluster, 'candidate_id'),
             'cluster_type': _required_str(cluster, 'cluster_type'),
             'chunk_ids': chunk_ids,
-            'chunk_count': _positive_int(cluster.get('chunk_count'), len(chunk_ids), 'chunk_count'),
+            'chunk_count': chunk_count,
             'scores': _optional_mapping(cluster.get('scores')),
             'metadata': _optional_mapping(cluster.get('metadata')),
         })
@@ -714,29 +715,16 @@ def _final_clusters(value: Any, cluster_type: str) -> list[dict[str, Any]]:
         chunk_ids = _string_list(cluster.get('chunk_ids'), 'chunk_ids')
         _optional_mapping(cluster.get('scores'))
         _optional_mapping(cluster.get('metadata'))
+        chunk_count = _positive_int(cluster.get('chunk_count'), len(chunk_ids), 'chunk_count')
+        if chunk_count != len(chunk_ids):
+            raise ValueError('chunk_count must match chunk_ids length')
         clusters.append({
             'source_cluster_id': _required_str(cluster, 'cluster_id'),
             'topics': topics,
             'chunk_ids': chunk_ids,
-            'chunk_count': _positive_int(cluster.get('chunk_count'), len(chunk_ids), 'chunk_count'),
+            'chunk_count': chunk_count,
         })
     return clusters
-
-
-def _topic_type_stats(clusters: list[dict[str, Any]]) -> dict[str, Any]:
-    distribution = {'one_chunk': 0, 'two_chunks': 0, 'three_or_more_chunks': 0}
-    for cluster in clusters:
-        bucket = (
-            'one_chunk' if cluster['chunk_count'] == 1
-            else 'two_chunks' if cluster['chunk_count'] == 2
-            else 'three_or_more_chunks'
-        )
-        distribution[bucket] += len(cluster['topics'])
-    return {
-        'cluster_count': len(clusters),
-        'topic_count': sum(len(cluster['topics']) for cluster in clusters),
-        'support_distribution': distribution,
-    }
 
 
 def _cluster_payload(cluster_type: str, topics: list[str], chunk_ids: list[str]) -> dict[str, Any]:

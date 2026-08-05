@@ -1,9 +1,9 @@
-# STEP2 默认总览的已实现契约；保持输出精简，并提供 Topic 统计与可编辑来源定位。
+# 主题发现的发布 Artifact。Cluster 只存在于上游算法过程，最终输出以 Topic 为唯一业务对象。
 operation:
   op_id: dataset.topic_discovery_manifest
   flow: dataset
   stage: topic_discovery_manifest
-  description: 聚合两类 Topic，输出 Topic–Cluster–Chunk 关系及 STEP2 总览统计。
+  description: 将 entity / embedding 聚类结果展平为可展示、可编辑、可被 qaplan 消费的 Topic 集合。
 
 fixed_op:
   inputs:
@@ -22,8 +22,7 @@ fixed_op:
 
 materializer:
   function: topic_discovery_manifest
-  return_keys:
-    - topic_discovery_manifest
+  return_keys: [topic_discovery_manifest]
 
 input_payload:
   entity_clusters:
@@ -32,232 +31,97 @@ input_payload:
         type: array
         required: true
         item:
-          type: object
           fields:
-            cluster_id:
-              type: string
-              required: true
-            cluster_type:
-              type: string
-              required: true
-              enum:
-                - entity
-            topics:
-              type: list[string]
-              required: true
-              validation:
-                - non_empty
-            chunk_ids:
-              type: list[string]
-              required: true
-              validation:
-                - non_empty
-            chunk_count:
-              type: integer
-              required: true
-            scores:
-              type: object
-              required: false
-              default: {}
-            metadata:
-              type: object
-              required: false
-              default: {}
-      stats:
-        type: object
-        required: false
-      params:
-        type: object
-        required: false
+            cluster_id: {type: string, required: true}
+            cluster_type: {type: string, required: true, enum: [entity]}
+            topics: {type: 'list[string]', required: true}
+            chunk_ids: {type: 'list[string]', required: true}
+            chunk_count: {type: integer, required: true}
   embedding_clusters:
     fields:
       clusters:
         type: array
         required: true
         item:
-          type: object
           fields:
-            cluster_id:
-              type: string
-              required: true
-            cluster_type:
-              type: string
-              required: true
-              enum:
-                - embedding
-            topics:
-              type: list[string]
-              required: true
-              validation:
-                - non_empty
-            chunk_ids:
-              type: list[string]
-              required: true
-              validation:
-                - non_empty
-            chunk_count:
-              type: integer
-              required: true
-            scores:
-              type: object
-              required: false
-              default: {}
-            metadata:
-              type: object
-              required: false
-              default: {}
-      skipped_chunks:
-        type: array
-        required: false
-        default: []
-      stats:
-        type: object
-        required: false
-      params:
-        type: object
-        required: false
+            cluster_id: {type: string, required: true}
+            cluster_type: {type: string, required: true, enum: [embedding]}
+            topics: {type: 'list[string]', required: true}
+            chunk_ids: {type: 'list[string]', required: true}
+            chunk_count: {type: integer, required: true}
 
 output_payload:
   topic_discovery_manifest:
     json_compatible: true
     fields:
-      clusters:
-        # Topic 审阅页的主数据。一个 cluster 可包含多个 topics，并共享同一组 chunk_ids。
+      topics:
+        # API 的唯一主题集合；不得输出 cluster / source_cluster_id / scores / metadata。
         type: array
         item:
-          type: object
           fields:
-            cluster_id:
-              # 最终 manifest 内的稳定 ID，供 qaplan 引用；前端不得用它反推上游数组位置。
+            topic_id:
+              # 不透明业务主键。前端仅保存和回传；不能解析其格式。
               type: string
-            source_cluster_id:
-              # 上游 entity_clusters / embedding_clusters 中的 cluster_id；
-              # 前端编辑 topics 时使用该字段定位目标，不依赖数组下标。
+            name:
               type: string
-            cluster_type:
-              # 前端映射为业务名称：entity=精确检索主题，embedding=综合推理主题。
+            question_type:
+              # entity 映射 precision，embedding 映射 reasoning。
               type: string
-              enum:
-                - entity
-                - embedding
-            topics:
-              # Topic 审阅页按此数组展开为“一行一个 Topic”。
-              # 本 manifest 只读；编辑目标是 source_cluster_id 指向的上游 clusters[].topics。
-              type: list[string]
+              enum: [precision, reasoning]
             chunk_ids:
-              # Topic 的支撑 Chunk；用户展开 Topic 或点击详情时再按需读取 Chunk Artifact。
+              # 该 Topic 的稳定支撑 Chunk 顺序；详情页通过 Artifact 血缘读取同版本 Chunk。
               type: list[string]
             chunk_count:
-              # 必须等于 chunk_ids 长度，也是 1 / 2 / 3+ 支撑能力分档的唯一依据。
+              # 必须等于 chunk_ids 长度。
               type: integer
       stats:
-        # STEP2 默认总览的唯一数据源；前端不遍历 clusters 重复计算业务统计。
-        type: object
         fields:
-          total_topic_count:
-            # 所有 clusters[].topics[] 项的总数，不跨 Cluster 或跨类型再次去重。
-            type: integer
-          unique_chunk_count:
-            # 两类 Cluster 引用到的不同 chunk_id 数，仅表示覆盖范围。
-            type: integer
-          topic_types:
-            # 两类 Topic 的并列统计；key 与 cluster_type 保持一致。
-            type: object
+          total_topic_count: {type: integer}
+          question_types:
             fields:
-              entity:
-                type: object
+              precision:
                 fields:
-                  cluster_count:
-                    # entity 类型 Cluster 数；不是 Topic 数。
-                    type: integer
-                  topic_count:
-                    # entity clusters 中 topics[] 项的总数。
-                    type: integer
-                  support_distribution:
-                    # 统计单位是 Topic，不是 Cluster。
-                    type: object
-                    fields:
-                      one_chunk:
-                        # 所属 Cluster 的 chunk_count=1 的 Topic 数。
-                        type: integer
-                      two_chunks:
-                        # 所属 Cluster 的 chunk_count=2 的 Topic 数。
-                        type: integer
-                      three_or_more_chunks:
-                        # 所属 Cluster 的 chunk_count>=3 的 Topic 数。
-                        type: integer
-              embedding:
-                type: object
+                  count: {type: integer}
+              reasoning:
                 fields:
-                  cluster_count:
-                    # embedding 类型 Cluster 数；不是 Topic 数。
-                    type: integer
-                  topic_count:
-                    # embedding clusters 中 topics[] 项的总数。
-                    type: integer
-                  support_distribution:
-                    type: object
-                    fields:
-                      one_chunk:
-                        # 所属 Cluster 的 chunk_count=1 的 Topic 数。
-                        type: integer
-                      two_chunks:
-                        # 所属 Cluster 的 chunk_count=2 的 Topic 数。
-                        type: integer
-                      three_or_more_chunks:
-                        # 所属 Cluster 的 chunk_count>=3 的 Topic 数。
-                        type: integer
+                  count: {type: integer}
 
 execution_flow:
-  - 读取并校验 entity_clusters 与 embedding_clusters。
-  - 校验两路所有 clusters 的 topics 均为非空 list[string]。
-  - 按 entity first、embedding second 合并 clusters。
-  - 当两路 clusters 均为空时，返回 clusters=[] 与零值统计的合法空 manifest，供 auto_case_count=0 的 qaplan 旁路使用。
-  - 生成稳定最终 cluster_id，例如 entity_000001、embedding_000001。
-  - 保留上游 cluster_id 为 source_cluster_id，并输出 cluster_type、topics、chunk_ids 和 chunk_count。
-  - 不向最终 manifest 透传 scores、metadata 或空 params；详情数据由前端按需读取上游 Artifact。
-  - total_topic_count 按所有 clusters[].topics[] 项计数，不在 manifest 再次去重。
-  - 分别按 entity、embedding 汇总 cluster_count、topic_count 和 1 / 2 / 3+ Chunk 支撑分布。
-  - 汇总 unique_chunk_count。
+  - 校验两路 Cluster 的 topics、chunk_ids 均为非空字符串列表，且 chunk_count 等于 chunk_ids 长度。
+  - 按 entity Cluster 顺序、其 topics 顺序、embedding Cluster 顺序、其 topics 顺序展开。
+  - 每个展开 Topic 复制所属 Cluster 的 chunk_ids/chunk_count；entity 赋值 question_type=precision，embedding 赋值 question_type=reasoning。
+  - 为本次主题发现结果中的每个 Topic 创建唯一、不透明 topic_id。主题发现重新执行产生新集合时允许整体换 ID；仅用户重命名时必须保留 ID。
+  - name 允许重复；Topic 的身份是 topic_id，不是名称或 Chunk 集合。
+  - 两路均为空时输出 topics=[]、三个统计均为 0 的合法稳定空结果。
   - 返回 {"topic_discovery_manifest": payload}。
 
 tests:
-  manifest_merge_logic:
-    # 合并主逻辑：固定顺序合并两类 Topic，并生成 STEP2 总览所需的最小 manifest。
+  flattening_and_identity:
+    # 验证最终 Artifact 完全以 Topic 为对象，不泄露上游 Cluster 模型。
     cases:
-      # 正常两路 cluster 输入能合并出最终 manifest，只保留关系、编辑定位字段与总览统计。
-      - success
-      # 最终 clusters 顺序固定为 entity first、embedding second，不按 topic 或 chunk 数重新排序。
-      # 例子：即使 embedding path 的 cluster 在输入里更早准备好，最终输出也必须先列出所有 entity clusters，再列出 embedding clusters。
-      - entity_first_embedding_second
-      # 不做跨来源去重：即使 entity 与 embedding path 命中同一批 chunk，也保留两条 cluster 记录。
-      # 例子：entity cluster 和 embedding cluster 都引用 ['chunk-1', 'chunk-2'] 时，最终 manifest 仍保留两条记录，而不是合并成一条。
-      - no_cross_source_dedup
-      # 最终 cluster_id 稳定生成为 entity_000001、embedding_000001 这类形式，不复用上游 id。
-      # 例子：上游传入 entity_cluster_000005 和 embedding_cluster_000010，最终仍重新编号为 entity_000001、embedding_000001。
-      - stable_cluster_ids
-      # source_cluster_id 保留上游 ID，供前端稳定定位可编辑 Artifact 中的 clusters[].topics。
-      - source_cluster_ids
-      # Topic 数、Cluster 数、1 / 2 / 3+ 支撑分布和 unique_chunk_count 与输出一致。
-      - topic_stats
-      # materializer 返回结构固定为 {"topic_discovery_manifest": payload}，不混入额外字段。
+      # entity 的 Cluster 和其中 topics 先展开，再接 embedding；每一路均保留原有相对顺序。
+      - flattens_entity_then_embedding_and_preserves_source_topic_order
+      # 同一输入 Cluster 的 type 必须稳定映射为产品题型，而不是将 entity/embedding 暴露给前端。
+      - maps_entity_to_precision_and_embedding_to_reasoning
+      # 同名 Topic 可以并存，但 topic_id 必须唯一且前端不应依赖其格式。
+      - creates_unique_opaque_topic_ids_and_does_not_require_unique_names
+      # 一个 Cluster 展开的多个 Topic 共用该 Cluster 的引用 Chunk；chunk_count 必须与数组长度一致。
+      - copies_each_source_cluster_chunk_ids_and_chunk_count_to_every_expanded_topic
+      # 发布结果不包含任何 Cluster 定位、算法评分或算法元数据，避免前端依赖内部模型。
+      - does_not_emit_cluster_source_cluster_id_scores_or_metadata
+      # 无自动材料时，空输入仍应输出可查询的空主题集合与零统计。
+      - empty_inputs_return_a_valid_empty_topic_collection
+  validation:
+    cases:
+      # entity/embedding 来源混用、topics 非数组或 Topic 文本为空时必须拒绝。
+      - rejects_wrong_source_cluster_type_or_non_list_topics
+      # ID 不能为空或重复，支撑 Chunk ID 不能为空；名称不要求跨 Topic 唯一。
+      - rejects_empty_topic_name_duplicate_topic_id_or_invalid_chunk_id
+      # 防止难度容量与详情引用产生不一致。
+      - rejects_chunk_count_not_matching_chunk_ids
+      # FixedOp materializer 只能返回声明的一个输出键。
       - return_keys_match_outputs
-  input_validation:
-    # 输入契约与失败路径：看两路 clusters 的 topics / chunk_ids / cluster_type 是否合法，坏输入是否立即失败。
-    cases:
-      # entity_clusters.clusters 与 embedding_clusters.clusters 都必须是 list，且 cluster_type 必须与来源匹配。
-      # 例子：entity_clusters.clusters 不是 list，或 entity 路里混入 cluster_type=embedding，都应直接失败。
-      - contract
-      # chunk_count、scores、metadata 等上游字段类型非法时应立即抛错，不生成部分 manifest。
-      # scores 与 metadata 虽不再输出，仍属于当前上游输入契约。
-      - validation_error
-      # 任一路 cluster 的 topics 为空、含空字符串或不是 list[string] 时直接失败。
-      # 例子：topics=[]、topics=['']、topics='Tesla' 都应直接失败。
-      - empty_topics_error
-      # 两路空 cluster 能形成稳定空 manifest；仅非空 cluster 需要 topics 非空。
-      - imported_only_empty_manifest_bypass
   runtime_wiring:
-    # fixed op 接线：看两路 unpartitioned clusters 在 runtime 中是否能汇总为最终 manifest。
     cases:
-      # runtime 中 entity_clusters 与 embedding_clusters 能稳定汇总为单个 topic_discovery_manifest。
-      - partition
+      # 两个无分区的内部聚类 Artifact 必须收敛为一个可版本化的 Topic Manifest。
+      - merges_two_unpartitioned_cluster_artifacts_into_one_topic_manifest
