@@ -1,16 +1,12 @@
-# STEP4 计划页的已实现契约；支持显式六路整数配额和面向 Topic 的精简摘要。
+# 全局 Case 选题计划：只保存每个自动 Case 的唯一选题事实，不复制主题名称或引用正文。
 operation:
   op_id: dataset.qaplan_plan
   flow: dataset
   stage: qaplan_plan
-  description: 基于 topic discovery manifest、六路 case 比例、目标 case 总数和全部 chunk 正文，生成全局 QA case 计划。
+  description: 基于扁平 Topic 集合和完整六路整数数量，为自动 Case 分配唯一 topic_id。
 
 fixed_op:
   inputs:
-    source_config:
-      artifact_id: corpus.source_config
-      required: true
-      partition: unpartitioned
     import_cases_manifest:
       artifact_id: dataset.import_cases_manifest
       required: true
@@ -19,11 +15,6 @@ fixed_op:
       artifact_id: dataset.topic_discovery_manifest
       required: true
       partition: unpartitioned
-    chunk:
-      artifact_id: dataset.chunk
-      required: true
-      partition: partitioned
-      mapping: all_to_unpartitioned
     qaplan_plan_params:
       artifact_id: dataset.qaplan_plan_params
       required: true
@@ -35,454 +26,127 @@ fixed_op:
 
 materializer:
   function: qaplan_plan
-  return_keys:
-    - qaplan_plan
+  return_keys: [qaplan_plan]
 
 input_payload:
-  source_config:
-    fields:
-      kb_ids:
-        type: list[string]
-        required: true
-        validation:
-          - non_empty
-          - non_empty_after_strip_items
   import_cases_manifest:
     fields:
       stats:
-        type: object
-        required: true
         fields:
           case_allocation:
-            type: object
-            required: true
             fields:
-              target_case_count:
-                type: integer
-                required: true
-              import_case_count:
-                type: integer
-                required: true
-              auto_case_count:
-                type: integer
-                required: true
-              assignments:
-                type: object
-                required: true
+              target_case_count: {type: integer, required: true}
+              import_case_count: {type: integer, required: true}
+              auto_case_count: {type: integer, required: true}
+              assignments: {type: object, required: true}
   topic_discovery_manifest:
     fields:
-      clusters:
+      topics:
         type: array
         required: true
         item:
-          type: object
           fields:
-            cluster_id:
-              type: string
-              required: true
-              validation:
-                - non_empty_after_strip
-            cluster_type:
-              type: string
-              required: true
-              enum:
-                - entity
-                - embedding
-            topics:
-              type: list[string]
-              required: true
-              validation:
-                - non_empty
-                - non_empty_after_strip_items
-            chunk_ids:
-              type: list[string]
-              required: true
-              validation:
-                - non_empty
-                - non_empty_after_strip_items
-            chunk_count:
-              type: integer
-              required: true
-              validation:
-                - positive_integer
-      stats:
-        type: object
-        required: false
-      params:
-        type: object
-        required: false
-  chunk:
-    tuple: true
-    item:
-      fields:
-        available:
-          type: boolean
-          required: true
-        kb_id:
-          type: string
-          required: false
-        chunk_id:
-          type: string
-          required: true
-          validation:
-            - non_empty_after_strip
-        doc_id:
-          type: string
-          required: true
-          validation:
-            - non_empty_after_strip
-        text:
-          type: string
-          required: true
-        filename:
-          type: string
-          required: false
-          default: ""
-        group:
-          type: string
-          required: false
-          default: ""
-        type:
-          type: string
-          required: false
-          default: text
-        embedding:
-          type: object
-          required: false
-          default: {}
-        metadata:
-          type: object
-          required: false
-          default: {}
+            topic_id: {type: string, required: true, validation: [non_empty_after_strip]}
+            name: {type: string, required: true, validation: [non_empty_after_strip]}
+            question_type: {type: string, required: true, enum: [precision, reasoning]}
+            chunk_ids: {type: 'list[string]', required: true, validation: [non_empty, non_empty_after_strip_items]}
+            chunk_count: {type: integer, required: true, validation: [positive_integer]}
   qaplan_plan_params:
     fields:
       lane_case_counts:
-        # 面向用户的六路整数配额。提供时必须完整包含六路，优先于 lane_ratios。
-        # 六路之和必须等于 import_cases_manifest 中的 auto_case_count；
-        # 每路值必须小于或等于该路 eligible_topic_count。
+        # 前端提交时必须完整提供六路；缺席仅表示本次首次按 1:1 初始化。
         type: object
         required: false
         fields:
-          entity_precision_easy:
-            # 精确检索·简单 Case 数；每个 Case 使用 1 个参考 Chunk。
-            type: integer
-            required: true
-            validation:
-              - non_negative_integer
-          entity_precision_medium:
-            # 精确检索·中等 Case 数；每个 Case 使用 2 个参考 Chunk。
-            type: integer
-            required: true
-            validation:
-              - non_negative_integer
-          entity_precision_hard:
-            # 精确检索·困难 Case 数；每个 Case 使用 3 个参考 Chunk。
-            type: integer
-            required: true
-            validation:
-              - non_negative_integer
-          embedding_reasoning_easy:
-            # 综合推理·简单 Case 数；每个 Case 使用 1 个参考 Chunk。
-            type: integer
-            required: true
-            validation:
-              - non_negative_integer
-          embedding_reasoning_medium:
-            # 综合推理·中等 Case 数；每个 Case 使用 2 个参考 Chunk。
-            type: integer
-            required: true
-            validation:
-              - non_negative_integer
-          embedding_reasoning_hard:
-            # 综合推理·困难 Case 数；每个 Case 使用 3 个参考 Chunk。
-            type: integer
-            required: true
-            validation:
-              - non_negative_integer
-      lane_ratios:
-        # 内部默认与兼容配置。仅当 lane_case_counts 未提供时使用，
-        # materializer 通过最大余数法把相对权重换算为六路整数配额。
-        # 前端不直接向非技术用户展示该字段。
-        type: object
-        required: false
-        default:
-          entity_precision_easy: 1
-          entity_precision_medium: 1
-          entity_precision_hard: 1
-          embedding_reasoning_easy: 1
-          embedding_reasoning_medium: 1
-          embedding_reasoning_hard: 1
-        fields:
-          entity_precision_easy:
-            type: number
-            required: false
-            default: 1
-            validation:
-              - non_negative_number
-          entity_precision_medium:
-            type: number
-            required: false
-            default: 1
-            validation:
-              - non_negative_number
-          entity_precision_hard:
-            type: number
-            required: false
-            default: 1
-            validation:
-              - non_negative_number
-          embedding_reasoning_easy:
-            type: number
-            required: false
-            default: 1
-            validation:
-              - non_negative_number
-          embedding_reasoning_medium:
-            type: number
-            required: false
-            default: 1
-            validation:
-              - non_negative_number
-          embedding_reasoning_hard:
-            type: number
-            required: false
-            default: 1
-            validation:
-              - non_negative_number
+          precision_easy: {type: integer, required: true, validation: [non_negative_integer]}
+          precision_medium: {type: integer, required: true, validation: [non_negative_integer]}
+          precision_hard: {type: integer, required: true, validation: [non_negative_integer]}
+          reasoning_easy: {type: integer, required: true, validation: [non_negative_integer]}
+          reasoning_medium: {type: integer, required: true, validation: [non_negative_integer]}
+          reasoning_hard: {type: integer, required: true, validation: [non_negative_integer]}
 
 output_payload:
   qaplan_plan:
     json_compatible: true
     fields:
-      source:
-        # 本次运行配置的 KB 范围；单个 case 的实际来源由 references 决定。
-        type: object
-        fields:
-          kb_ids:
-            type: list[string]
       items:
         type: array
         item:
-          type: object
           fields:
-            case_id:
-              # 该 plan item 唯一服务的 generated case 分区。
-              type: string
-            plan_item_id:
-              type: string
-            lane:
-              type: string
-              enum:
-                - entity_precision_easy
-                - entity_precision_medium
-                - entity_precision_hard
-                - embedding_reasoning_easy
-                - embedding_reasoning_medium
-                - embedding_reasoning_hard
-            question_type:
-              type: string
-              enum:
-                - precision
-                - reasoning
-            difficulty:
-              type: string
-              enum:
-                - easy
-                - medium
-                - hard
-            cluster_id:
-              type: string
-            cluster_type:
-              type: string
-              enum:
-                - entity
-                - embedding
-            topic:
-              type: string
-            references:
-              # 生成所需的完整证据；每项保留跨 KB 溯源信息。
-              type: array
-              item:
-                type: object
-                fields:
-                  kb_id:
-                    type: string
-                  chunk_id:
-                    type: string
-                  doc_id:
-                    type: string
-                  text:
-                    type: string
-            selection_round:
-              type: integer
+            case_id: {type: string}
+            plan_item_id: {type: string}
+            lane: {type: string, enum: [precision_easy, precision_medium, precision_hard, reasoning_easy, reasoning_medium, reasoning_hard]}
+            question_type: {type: string, enum: [precision, reasoning]}
+            difficulty: {type: string, enum: [easy, medium, hard]}
+            # 每 Case 唯一、可由 PATCH 修改的事实；不在此处缓存 name 或 references。
+            topic_id: {type: string}
       stats:
-        type: object
         fields:
-          # source_config 中指定的本次 dataset case 总数。
-          target_case_count:
-            type: integer
-          # CSV 成功导入并固定跳过 qaplan 的 case 数量。
-          import_case_count:
-            # 已导入、无需 qaplan 或生成模型处理的 case 数量。
-            type: integer
-          # 需要 qaplan 与 LLM 自动生成的剩余 case 数量。
-          auto_case_count:
-            # 参与 lane 配额和容量检查的剩余 case 数量。
-            type: integer
-          # 实际生成的计划项数量；成功时必须等于 auto_case_count。
-          planned_case_count:
-            type: integer
-          # 六路计划的展示摘要，顺序固定为 lane_order。
+          target_case_count: {type: integer}
+          import_case_count: {type: integer}
+          auto_case_count: {type: integer}
+          planned_case_count: {type: integer}
           lane_summaries:
             type: array
             item:
-              type: object
               fields:
-                # 六路中的固定 lane 标识。
-                lane:
-                  type: string
-                # 显式 lane_case_counts 或兼容 ratio 模式解析出的最终整数 Case 数。
-                allocated_case_count:
-                  type: integer
-                # 满足该路题型与难度条件的 Topic 数，也是该路最多可支持的 Case 数。
-                # 统计单位始终是 Topic；即使 allocated_case_count=0 也必须计算真实值。
-                eligible_topic_count:
-                  type: integer
+                lane: {type: string}
+                allocated_case_count: {type: integer}
+                eligible_topic_count: {type: integer}
       params:
-        type: object
         fields:
-          # 用户输入的六路相对权重，允许小数；不要求和为 1 或 100。
-          lane_ratios:
-            type: object
-            value_type: number
-          # 由最大余数法换算得到的六路整数配额，便于准确复现本次 plan。
-          # 当显式提供 lane_case_counts 时，本字段原样记录校验后的整数配额。
-          resolved_lane_quotas:
-            type: object
-            value_type: integer
-          # 余数相同时的稳定分配顺序，也是 items 的 lane 块顺序。
-          lane_order:
-            type: list[string]
+          # 实际使用的六路整数数；不存在 ratio 或比例派生字段。
+          lane_case_counts: {type: object, value_type: integer}
+          # 商相同后的余数分配与 items 块顺序均使用这个固定顺序。
+          lane_order: {type: 'list[string]'}
 
 execution_flow:
-  - 读取 import_cases_manifest，校验 stats.case_allocation.target_case_count 等于 flow 的 runtime case 分区总数，且 assignments 覆盖每个稳定 case id 一次。
-  - 仅将 mode=generated 的 stable case id 作为 qaplan 目标；其数量必须等于 auto_case_count，并保留 runtime case 分区顺序。
-  - 当 auto_case_count=0 时，返回 items=[] 和固定六路的零值摘要；不得读取 cluster 或触发可用 Topic 不足错误。
-  - 当 qaplan_plan_params.lane_case_counts 存在时，校验六路均为非负整数、总和等于 auto_case_count，并直接作为整数配额。
-  - 当 lane_case_counts 不存在时，读取 lane_ratios 作为内部默认与兼容配置；默认六路均为 1，所有 ratio 必须非负且总和大于 0。
-  - ratio 模式按固定 lane 顺序使用最大余数法换算整数配额；先分配向下取整值，再按小数余数从大到小补齐，余数相同时按固定 lane 顺序补齐。
-  - 汇总可用 chunk 并校验 manifest；通过 chunk_id 原样补齐选中引用的 kb_id、doc_id 与完整 text，不分析或转换正文。
-  - 六路始终按来源类型和难度门槛计算 eligible_topic_count，统计单位为符合条件的 Topic；不得因当前配额为 0 而跳过统计。
-  - 校验 eligible_topic_count 不小于该 lane 整数配额；按 manifest 原始 cluster 顺序和 topic 轮次选取 (cluster_id, topic)。
-  - 每个计划项按难度引用 cluster.chunk_ids 原始顺序前 1、2 或 3 个 chunk，按 lane 块顺序生成稳定 plan_item_id，并依次绑定一个 generated assignment 的 case_id。
-  - 生成 source.kb_ids、items、含 target/imported/auto/planned 数量及六路摘要的 stats、resolved_lane_quotas 和 lane_order；返回 {"qaplan_plan": payload}。
+  - 校验 assignments 覆盖每个稳定 Case 分区一次；仅 mode=generated 的 case_id 进入 items，数量必须等于 auto_case_count。
+  - 当 auto_case_count=0 时返回 items=[] 与固定六路零值摘要；空 Topic 集合是合法结果。
+  - lane_case_counts 存在时，必须完整、均为非负整数且总和等于 auto_case_count；不存在时仅为本次运行按固定 lane_order 做 1:1 整数初始化：先整除，再将余数依次分给前面的 lane。
+  - 以 topic.question_type 和 topic.chunk_count >= 难度所需 1/2/3 个 Chunk 计算每路 eligible_topic_count；零配额也必须计算。
+  - 每路配额不得超过 eligible_topic_count。同一 question_type + difficulty 的每个 topic_id 最多分配一次；不同题型或难度可复用同一 topic_id。
+  - 在每个 lane 内按 Manifest topics 原始顺序选取 topic_id；items 按固定 lane_order 输出并绑定 generated case_id，生成稳定 plan_item_id。
+  - 输出只保存 case_id、lane、题型、难度和 topic_id。主题名称、完整 references 与 instruction 由 qaplan_spec 从当前 Manifest/Chunk 派生。
 
 tests:
-  plan_construction:
-    # 计划主逻辑：验证六路 case 如何从 manifest 中按固定顺序、原始 cluster 顺序和 topic 轮次生成全局 qaplan.items。
+  allocation:
     cases:
-      # 空参数时六路均使用默认 ratio=1，并按 target_case_count 平均分配整数 case 数。
-      # 例子：target_case_count=6 时，六路各获得 1 个 case。
-      - default_equal_lane_ratios
-      # 显式 lane_case_counts 完整指定六路整数配额，并优先于兼容用 lane_ratios。
-      # 六路之和必须等于 auto_case_count。
-      - explicit_lane_case_counts
-      # 比例只应用于自动生成的剩余 case；导入 case 不参与配额，也不按其类型或难度补偿。
-      - lane_ratios_apply_only_to_generated_cases
-      # lane_ratios 表示相对权重，不要求和为 1 或 100；相同比例缩放必须得到相同整数配额。
-      # 例子：1:1:1:1:1:1 与 10:10:10:10:10:10 在 target_case_count=60 时均分配为每路 10 个。
-      - ratio_normalization
-      # 目标总数不能整除比例时使用最大余数法，先向下取整，再将剩余 case 分给小数余数最大的 lane。
-      # 例子：target_case_count=5、ratios=1:1:1:1:1:1 时先各得 0，余下 5 个按 lane_order 分给前五路。
-      - largest_remainder_allocation
-      # 最大余数相同的 lane 必须按固定 lane 顺序获得剩余 case，确保计划可复现。
-      # 例子：target_case_count=100、默认比例时，前四路各 17，后两路各 16。
-      - largest_remainder_tie_break_by_lane_order
-      # 输出 items 先按固定 lane 块顺序排列，再在单个 lane 内按 topic 轮次和 cluster 原始顺序排列。
-      # 例子：entity_precision_easy 的所有项必须出现在 entity_precision_medium 之前，即使后者的 cluster 更早出现。
-      - fixed_lane_block_order
-      # entity source 只能生成 precision case，embedding source 只能生成 reasoning case。
-      # 例子：entity_precision_easy 的每个 item 都必须是 cluster_type=entity 且 question_type=precision。
-      - source_to_question_type_mapping
-      # 每个 lane 保持 topic_discovery_manifest.clusters 的原始相对顺序，不按 chunk_count、scores 或 topic 文本排序。
-      # 例子：输入 cluster 顺序为 [cluster_b, cluster_a] 时，第一轮选材也必须先取 cluster_b 的 topic。
-      - preserves_manifest_cluster_order
-      # 同一 lane 先覆盖每个候选 cluster 的第一个 topic，再开始第二个 topic 轮次，以优先提升 cluster 多样性。
-      # 例子：A.topics=[a1,a2]、B.topics=[b1,b2]、配额=3 时，选择顺序应为 A/a1、B/b1、A/a2。
-      - cluster_diversity_before_next_topic_round
-      # 单一路内不允许重复同一个 cluster_id + topic，但不同 lane 可以独立复用同一对来源。
-      # 例子：entity_precision_easy 与 entity_precision_medium 都可选中 entity_000001 / topic_a；各自在本 lane 内最多出现一次。
-      - cluster_topic_uniqueness_scope
-      # plan_item_id 按最终全局 items 顺序稳定编号，且不依赖 runtime case id。
-      # 例子：第一个和第二个 item 固定为 qaplan_item_000001、qaplan_item_000002。
-      - stable_plan_item_ids
-      # 每个计划项绑定一个且仅一个 generated runtime case id；导入分区不出现在 items 中。
-      - assigns_plan_items_only_to_generated_case_ids
-  quota_and_capacity:
-    # 比例、难度和容量：验证总数来源、六路独立校验，以及三档难度的累积 chunk 门槛。
+      # 未提交分布时，auto_case_count 先整除 6，再把余数按固定 lane_order 分给前几路；不读取或保存比例。
+      - initializes_equal_one_to_one_counts_by_quotient_and_remainder
+      # 显式分布必须完整包含六路，且六路之和恰好等于 auto_case_count。
+      - accepts_only_complete_integer_lane_case_counts_with_matching_total
+      # 导入 Case 不进入六路分配；只有 generated assignment 获得一个 plan item。
+      - allocates_only_generated_case_ids
+      # 每路按扁平 topics 的发现顺序选择，而非按名称、Cluster、分数或 Chunk 数重排。
+      - selects_topic_ids_in_manifest_order
+      # 同题型同难度不得重复 topic_id；不同难度或题型允许复用，符合可替换主题的占用规则。
+      - enforces_topic_uniqueness_only_within_question_type_and_difficulty
+      # 输出计划项只含唯一 topic_id 和分配元数据，不泄露 Cluster、topic name、references 或 instruction。
+      - stores_only_topic_id_as_the_topic_selection_fact
+      # 同一输入重复规划时，lane_order、plan_item_id 和 case_id -> topic_id 绑定必须完全一致。
+      - deterministic_replanning_preserves_all_selection_bindings
+      # 用户提交新完整分布后，旧六路数量不得隐式按历史比例换算或保留。
+      - replaces_prior_distribution_without_ratio_carryover
+  capacity_and_empty_results:
     cases:
-      # source_config.target_case_count 是唯一的总 case 数来源，并且必须等于 runtime flow 预创建的 case 分区总数。
-      # 例子：source_config.target_case_count=6 而 runtime 只有 5 个 case 分区时，应直接失败。
-      - target_case_count_source_and_runtime_partition_match
-      # auto_case_count=0 时空 topic manifest 合法；非零时仍保留现有容量不足失败语义。
-      - imported_only_empty_plan_bypass
-      # 配额为 0 的 lane 仍计算真实 eligible_topic_count，供用户后续调整配额。
-      # 例子：embedding_reasoning_hard=0 但存在 4 个合法 Topic 时，摘要仍输出 eligible_topic_count=4。
-      - zero_quota_lane_reports_eligible_topics
-      # 所有 lane ratio 之和必须大于 0；全为 0 时无法把 target_case_count 分配到任何 lane，应直接失败。
-      - zero_total_ratio_error
-      # easy、medium、hard 分别接受 chunk_count>=1、>=2、>=3 的 cluster，且是累积而非互斥分类。
-      # 例子：chunk_count=3 的 entity cluster 同时可用于 entity_precision_easy、medium、hard。
-      - cumulative_difficulty_thresholds
-      # 每一路可支持数是所有合法候选中的 Topic 总数，不以 Cluster 数或 Chunk 数作为统计单位。
-      # 例子：两个候选分别有 2 和 3 个 Topic 时，eligible_topic_count=5。
-      - eligible_count_is_sum_of_topics
-      # 任一整数配额超过 eligible_topic_count 时整个 operation 失败，并在错误中包含 lane、配额和可用 Topic 数。
-      # 例子：medium lane 配额为 3 但符合 chunk_count>=2 的 topics 总数仅为 2 时直接失败。
-      - insufficient_eligible_topics_error
-  reference_materialization:
-    # 参考资料装配：验证全局侧如何通过 chunk_id 将选中的引用补全为可直接生成 QA 的完整正文材料；不做正文语义处理。
+      # easy/medium/hard 分别要求 chunk_count 至少为 1/2/3，且高 Chunk 数 Topic 可参与低难度路。
+      - applies_cumulative_chunk_count_thresholds
+      # 零配额路仍输出真实可用 Topic 数，支持前端展示和下一次完整分布校验。
+      - reports_eligible_topic_count_for_zero_quota_lanes
+      # 任一路配额超过可用 Topic 数时整个 operation 失败，不写入部分计划。
+      - rejects_lane_count_exceeding_eligible_topic_capacity
+      # imported-only run 即使没有任何 Topic 也完成并返回固定六路零摘要。
+      - imported_only_empty_topic_collection_is_valid
+      # auto_case_count 非零且某路没有符合题型/难度的 Topic 时，返回该路容量错误而非跨路借用 Topic。
+      - never_crosses_question_type_or_difficulty_to_fill_a_lane
+  contract_and_runtime:
     cases:
-      # all_to_unpartitioned 能按 runtime 稳定分区顺序把所有 chunk 聚合为 tuple，供单个全局 plan operation 查询。
-      - all_to_unpartitioned_chunk_tuple
-      # easy、medium、hard 的每个计划项分别携带 1、2、3 份 references。
-      # 例子：hard item 的 references 必须恰好包含该 cluster.chunk_ids 的前三项。
-      - reference_chunk_count_matches_difficulty
-      # references 保持 cluster.chunk_ids 的原始顺序，不随 chunk tuple 顺序或 doc_id 排序而变化。
-      # 例子：cluster.chunk_ids=[c2,c1] 时，easy item 引用 c2，medium item 引用 [c2,c1]。
-      - references_keep_cluster_chunk_id_order
-      # 每份 reference 原样携带 kb_id、chunk_id、doc_id 和完整 text；正文不截断、不重写、不做 LLM 分析。
-      - references_include_kb_id_chunk_id_doc_id_and_full_text
-      # manifest 引用不存在的 chunk、available=false 的 chunk 或 text 为空的 chunk 时直接失败，避免下游生成无依据 case。
-      - unavailable_or_missing_referenced_chunk_error
-  stats_and_contract:
-    # 展示统计与输入契约：验证用户可见的总体/分路摘要能够如实反映计划结果，且坏输入不产生部分 qaplan。
-    cases:
-      # target_case_count 来自 source_config，planned_case_count 等于 items 数量；成功时二者相等。
-      - target_and_planned_case_counts
-      # 每个 lane_summary 只记录计划 Case 数和可用 Topic 数。
-      # 例子：allocated_case_count=3、eligible_topic_count=5 时页面可显示还可增加 2 条。
-      - lane_summary_stats
-      # manifest 的 cluster_id 必须唯一，topics/chunk_ids 必须是合法非空字符串列表，chunk_count 必须等于 chunk_ids 数量。
-      - manifest_contract
-      # cluster_id 不能重复，否则无法唯一标识计划来源。
-      # 例子：两个 manifest cluster 都是 entity_000001 时，应直接失败。
-      - duplicate_cluster_id_error
-      # chunk_count 必须等于 chunk_ids 数量，避免难度判定和实际可引用 chunk 数不一致。
-      # 例子：chunk_count=3 而 chunk_ids 只有 2 项时，应直接失败。
-      - chunk_count_mismatch_error
-      # 可用 chunk 的 chunk_id 不能重复，否则引用材料无法确定。
-      # 例子：两个 chunk tuple 项均为 chunk_id=chunk_001 时，不能不确定地选择其中任一项。
-      - duplicate_chunk_id_error
-      # 六路 ratio 只能是非负数，且至少一路为正数。
-      # 例子：easy=-1、medium=true、六路均为 0 时都应直接失败；medium=0.5 是允许的。
-      - lane_ratio_validation_error
-      # 显式六路 Case 数必须完整、均为非负整数、总和等于 auto_case_count，且不超过各路可用 Topic 数。
-      - lane_case_counts_validation_error
-      # materializer 返回结构固定为 {"qaplan_plan": payload}，不混入额外 output key。
+      # 重复或空 topic_id、题型不合法、chunk_count 与 chunk_ids 长度不一致时拒绝上游 Manifest。
+      - rejects_invalid_flat_topic_contract
+      # materializer 只返回声明的 qaplan_plan 输出键。
       - return_keys_match_outputs
-  runtime_wiring:
-    # fixed op 接线：验证 partitioned chunk 聚合到单个 qaplan_plan，且 source_config、topic manifest 与 params 均作为全局输入读取。
-    cases:
-      # runtime 能稳定汇总全部 chunk 分区，并只产生一个无分区 dataset.qaplan_plan artifact。
-      - partition
+      # 三个无分区输入收敛为一个版本化的全局 qaplan_plan Artifact。
+      - unpartitioned_plan_wiring
+      # assignments 缺失、重复、未知 mode 或 auto_case_count 与 generated 数量不一致时拒绝计划。
+      - rejects_inconsistent_case_assignment_snapshot

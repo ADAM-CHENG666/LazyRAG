@@ -129,12 +129,12 @@ output_payload:
               # 内部稳定 lane 标识。
               type: string
               enum:
-                - entity_precision_easy
-                - entity_precision_medium
-                - entity_precision_hard
-                - embedding_reasoning_easy
-                - embedding_reasoning_medium
-                - embedding_reasoning_hard
+                - precision_easy
+                - precision_medium
+                - precision_hard
+                - reasoning_easy
+                - reasoning_medium
+                - reasoning_hard
             question_type:
               # 页面展示为“精确检索题”或“综合推理题”。
               type: string
@@ -161,7 +161,7 @@ execution_flow:
   - 校验 qaplan_plan 的 planned_case_count 等于 auto_case_count 与 items 数量，且 qaplan_specs 数量等于 import_cases_manifest.stats.case_allocation.target_case_count；拒绝重复或空的 spec id。
   - 校验每个 imported assignment 对应 imported qaplan_spec，每个 generated assignment 对应 generated qaplan_spec。
   - 从 import_cases_manifest.stats.case_allocation 汇总 target_case_count、import_case_count 和 auto_case_count，并读取 qaplan_plan.stats.planned_case_count。
-  - 从 qaplan_plan.stats.lane_summaries 复制固定六路的 lane、allocated_case_count 和 eligible_topic_count，并补充 question_type 与 difficulty。
+  - 从 qaplan_plan.stats.lane_summaries 复制固定六路的 lane、allocated_case_count 和 eligible_topic_count，并补充 question_type 与 difficulty；不得暴露 entity/embedding、Cluster 或比例字段。
   - 当 auto_case_count=0 时仍输出固定六路，allocated_case_count 与 eligible_topic_count 均为 0。
   - 不复制 qaplan_plan.items、references、instruction 或导入 Case 详情。
   - 返回 {"qaplan_manifest": payload}，同时作为 STEP4 完成凭证和默认总览数据源。
@@ -172,9 +172,13 @@ tests:
     cases:
       # 全部 spec 到齐且 id 唯一时，输出数量摘要和固定六路摘要。
       - success
-      # 六路仅输出计划 Case 数与可用 Topic 数，不复制 Cluster 统计或计划详情。
+      # 六路仅输出计划 Case 数与可用 Topic 数，不复制 Cluster、entity/embedding 或比例统计、计划详情。
       - overview_summary
       # 自动计划数、全部静态 spec 数、assignment mode 或 spec id 不合法时必须失败，避免提前声明阶段完成。
       - incomplete_or_invalid_specs_error
+      # imported-only run 仍输出固定六路且全为零，不因缺少自动 qaplan spec 误报未完成。
+      - imported_only_run_has_completed_zero_lane_overview
+      # 所有 lane summary 必须按固定产品 lane 顺序输出，并与 qaplan_plan 的整数数量逐项一致。
+      - preserves_fixed_lane_order_and_allocated_counts
       # 返回结构固定为单一 qaplan_manifest output。
       - return_keys_match_outputs

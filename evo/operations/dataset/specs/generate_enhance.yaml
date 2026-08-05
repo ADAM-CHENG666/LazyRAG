@@ -39,24 +39,38 @@ input_payload:
         required: true
         validation:
           - non_empty_after_strip
-      reference_context:
-        # 基础 case 冻结的证据列表；enhance 不重新查询知识库。
+      references:
+        # 新增的完整证据列表；存在时用于校验来源完整性，不改变增强输出接口。
         type: array
-        required: true
+        required: false
         item:
           type: object
           fields:
+            kb_id:
+              type: string
+              required: true
+            doc_id:
+              type: string
+              required: true
             chunk_id:
               type: string
               required: true
             text:
               type: string
               required: true
+      reference_context:
+        # 既有下游兼容输入；仍是 enhancement 的稳定 prompt 输入。
+        type: array
+        required: true
+        item:
+          type: object
+          fields:
+            chunk_id: {type: string, required: true}
+            text: {type: string, required: true}
       reference_chunk_ids:
         type: list[string]
         required: true
-        validation:
-          - non_empty
+        validation: [non_empty]
   run_config:
     fields:
       llm_config:
@@ -82,7 +96,7 @@ output_payload:
             # 只表述 answer 已包含、且由 evidence_chunk_ids 支持的一项原子事实。
             statement:
               type: string
-            # 真实 chunk_id，必须属于输入 case.reference_chunk_ids。
+            # 真实 chunk_id，必须属于输入 case.references。
             evidence_chunk_ids:
               type: list[string]
       # references 明确否定、且本题容易误答的具体结论；允许为空。
@@ -94,8 +108,8 @@ output_payload:
           - non_empty_after_strip_items
 
 execution_flow:
-  - 读取同分区的基础 case；只使用 question、answer、reference_context 和 reference_chunk_ids，不读取 qaplan_spec 或 grading_guidance。
-  - 校验 reference_context 是按 reference_chunk_ids 相同顺序排列的 [{chunk_id, text}]，每个 chunk_id 唯一且文本完整；再为其添加稳定短别名，供两个 LLM 调用引用。
+  - 读取同分区的基础 case；继续使用 question、answer、reference_context 和 reference_chunk_ids，不读取 qaplan_spec 或 grading_guidance。
+  - 校验 reference_context 与 reference_chunk_ids 顺序一致、chunk_id 在 Case 内唯一且文本完整；若提供 references，还必须逐项与既有字段一致并带 kb_id、doc_id；再为其添加稳定短别名，供两个 LLM 调用引用。
   - 第一次调用 LLM：基于 question、answer 和 references，提取 1–5 条 answer 已包含的原子 key points；每条必须由一个或多个 references 支持，不能引入 answer 未出现的新事实。
   - 校验 key points 的结构、证据短别名和 statement；将证据映射为真实 evidence_chunk_ids，并按输出顺序赋予 key_point_1、key_point_2 等 case 内稳定 id。不要求 key points 覆盖全部 references。
   - 第二次独立调用 LLM：基于同一份 question、answer 和 references，提取 0–3 条与本题相关、被 references 明确否定且易误答的 forbidden claims；允许返回空列表。
@@ -106,12 +120,14 @@ tests:
   input_contract:
     # 输入边界：验证 enhancement 只依赖冻结 case 的 QA 与参考资料，不重新读取 planning 信息或出题 guidance。
     cases:
-      # question、answer、reference_context、reference_chunk_ids 均为必填；缺失、空白或类型错误时直接失败。
+      # question、answer、reference_context、reference_chunk_ids 均为必填；新增 references 缺席不影响旧 Case。
       - base_case_contract_error
       # grading_guidance 与 qaplan_spec 即使存在也不进入任一增强 prompt，避免以设计意图扩写事实。
       - ignores_guidance_and_qaplan_spec
-      # reference_context 必须是与 reference_chunk_ids 一致的 [{chunk_id,text}] 列表，且原始顺序稳定用于短别名映射。
-      - reference_context_contract_and_stable_aliases
+      # 既有 context/ID 列表必须顺序一致；若附带完整 references，其四字段也必须逐项对应。
+      - legacy_reference_contract_and_optional_complete_references_consistency
+      # 同一个 chunk_id 重复出现在 context 或 evidence 中时必须失败，避免 key point 证据映射歧义。
+      - rejects_duplicate_reference_or_evidence_chunk_ids
   key_points_generation:
     # 第一次 LLM 调用：验证它只将冻结 answer 拆解为可追溯的原子事实。
     cases:
@@ -132,6 +148,8 @@ tests:
       - grounded_negative_claims_prompt
       # 此调用自身的 JSON 或内容校验最终失败时，整个 operation 失败，不返回仅含 key_points 的部分结果。
       - repair_then_fail_without_partial_output
+      # 两次调用都成功时，输出中的 key_points 和 forbidden_claims 必须来自同一冻结 Case revision。
+      - writes_a_single_consistent_enhancement_result
   runtime_wiring:
     # fixed op 接线：验证 case 使用 same_partition 输入，run_config 使用 unpartitioned_to_all 广播，并输出同分区 dataset.case_enhance。
     cases:

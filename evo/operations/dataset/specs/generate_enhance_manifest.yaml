@@ -53,5 +53,9 @@ tests:
       - success
       # tuple、key_points 或 forbidden_claims 契约错误时必须失败，不生成最终完成凭证。
       - invalid_enhancement_error
+      # 每个稳定 Case 分区必须恰有一份 enhancement；缺失或重复分区都不能宣布阶段完成。
+      - rejects_missing_or_duplicate_case_enhancements
+      # key point 的 evidence_chunk_ids 只校验结构与 Case 局部归属，不把它们扩展为跨 Case 聚合索引。
+      - keeps_evidence_scoped_to_each_case
       # 返回结构固定为单一 generate_enhance_manifest output。
       - return_keys_match_outputs

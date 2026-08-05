@@ -51,9 +51,10 @@ def generate(
     question_type = _choice(preparation.get('question_type'), ('precision', 'reasoning'), 'question_type')
     difficulty = _choice(preparation.get('difficulty'), ('easy', 'medium', 'hard'), 'difficulty')
     instruction = _text(preparation.get('instruction'), 'instruction')
-    topic = _text(preparation.get('topic'), 'topic')
+    topic_value = _mapping(preparation.get('topic'), 'topic')
+    _text(topic_value.get('topic_id'), 'topic.topic_id')
+    topic = _text(topic_value.get('name'), 'topic.name')
     references = _references(preparation.get('references'), difficulty)
-    source = _mapping(preparation.get('source'), 'qaplan_spec.source')
     _mapping(preparation.get('qaplan'), 'qaplan_spec.qaplan')
 
     run_config = _mapping(inputs.get('run_config'), 'run_config')
@@ -73,10 +74,11 @@ def generate(
         'question': generated['question'],
         'answer': generated['answer'],
         'grading_guidance': generated['grading_guidance'],
+        'references': references,
         'reference_context': [{'chunk_id': item['chunk_id'], 'text': item['text']} for item in references],
         'reference_chunk_ids': [item['chunk_id'] for item in references],
         'reference_doc_ids': list(dict.fromkeys(item['doc_id'] for item in references)),
-        'source_preparation': {'kb_ids': _string_list(source.get('kb_ids'), 'qaplan_spec.source.kb_ids')},
+        'source_preparation': {'kb_ids': list(dict.fromkeys(item['kb_id'] for item in references))},
     }}
 
 
@@ -89,6 +91,13 @@ def generate_manifest(ctx: Any, inputs: Mapping[str, object]) -> dict[str, objec
     for index, raw in enumerate(values, 1):
         case = _mapping(raw, f'cases[{index}]')
         reference_chunk_ids = _string_list(case.get('reference_chunk_ids'), 'reference_chunk_ids')
+        raw_references = case.get('references')
+        if raw_references is not None:
+            if not isinstance(raw_references, list) or [
+                _text(_mapping(value, 'references[]').get('chunk_id'), 'references[].chunk_id')
+                for value in raw_references
+            ] != reference_chunk_ids:
+                raise ValueError('references must match reference_chunk_ids')
         cases.append({
             'id': _text(case.get('id'), 'id'),
             'question_type': _choice(case.get('question_type'), ('precision', 'reasoning'), 'question_type'),
@@ -132,6 +141,7 @@ def _references(value: object, difficulty: str) -> list[dict[str, str]]:
     for index, raw in enumerate(value):
         item = _mapping(raw, f'references[{index}]')
         references.append({
+            'kb_id': _text(item.get('kb_id'), 'reference kb_id'),
             'chunk_id': _text(item.get('chunk_id'), 'reference chunk_id'),
             'doc_id': _text(item.get('doc_id'), 'reference doc_id'),
             'text': _text(item.get('text'), 'reference text'),

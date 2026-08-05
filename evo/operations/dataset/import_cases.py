@@ -114,7 +114,8 @@ def _case(row: Mapping[str, str], index: Mapping[str, dict[str, str]], questions
         result.append({'chunk_id': chunk_id, 'text': text, **found})
     questions.add(normalized_question)
     return {'id': '', 'question': question, 'answer': answer, 'question_type': question_type, 'difficulty': difficulty,
-            'grading_guidance': guidance, 'reference_context': [{'chunk_id': item['chunk_id'], 'text': item['text']} for item in result],
+            'grading_guidance': guidance, 'references': result,
+            'reference_context': [{'chunk_id': item['chunk_id'], 'text': item['text']} for item in result],
             'reference_chunk_ids': [item['chunk_id'] for item in result], 'reference_doc_ids': list(dict.fromkeys(item['doc_id'] for item in result)),
             'source_preparation': {'kb_ids': list(dict.fromkeys(item['kb_id'] for item in result))}}
 

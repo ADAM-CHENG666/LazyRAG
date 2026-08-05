@@ -148,27 +148,33 @@ output_payload:
                     - hard
                 grading_guidance:
                   type: string
-                reference_context:
+                references:
+                  # 与自动生成 Case 相同的完整引用结构；同时保留拆分兼容字段。
                   type: array
-                reference_chunk_ids:
-                  type: list[string]
-                reference_doc_ids:
-                  type: list[string]
+                  item:
+                    fields:
+                      kb_id: {type: string}
+                      doc_id: {type: string}
+                      chunk_id: {type: string}
+                      text: {type: string}
+                # 以下为既有 Case 输出字段；从 references 同步派生，继续供下游消费。
+                reference_context: {type: array}
+                reference_chunk_ids: {type: 'list[string]'}
+                reference_doc_ids: {type: 'list[string]'}
                 source_preparation:
                   type: object
                   fields:
-                    kb_ids:
-                      type: list[string]
+                    kb_ids: {type: 'list[string]'}
 
 execution_flow:
   - 读取并校验 source_config.kb_ids 与 target_case_count；kb_ids 是本次可溯源知识库的完整范围。
   - 当 csv_path 为空时，不读取 CSV；details=[]，并在 stats.case_allocation.assignments 中为全部稳定分区写入 mode=generated。
   - 当 csv_path 非空时，读取一次文件并记录路径、字节数与 SHA256；文件不存在、不可读、CSV 无法解析或表头非法时直接失败，不回退为纯自动生成。
-  - CSV 仅允许列 id（可选）、question、answer、question_type、difficulty、grading_guidance、reference_context；未知列或缺少任一必填列属于文件级错误。
+  - CSV 仅允许列 id（可选）、question、answer、question_type、difficulty、grading_guidance、reference_context；CSV 仍以 {chunk_id,text} 提交，未知列或缺少任一必填列属于文件级错误。
   - question、answer、grading_guidance 必须为非空字符串；question_type 仅允许 precision 或 reasoning；difficulty 仅允许 easy、medium、hard。
   - reference_context 必须是 JSON list，项结构严格为 {chunk_id, text}；禁止空值和同一 case 内重复 chunk_id，且引用数量必须满足 easy=1、medium=2、hard=3。
   - 对每个 reference，将换行统一为 LF、去除首尾空白后，与 source_config.kb_ids 所连接知识库中的同一 chunk_id 正文精确比对；未找到、无法溯源、跨知识库歧义或正文不一致均使该行 load_status=invalid，并在 detail.error 写入原因。
-  - 对通过引用复核的行，派生 reference_chunk_ids、reference_doc_ids 与 source_preparation.kb_ids；question 按 trim、压缩空白、忽略大小写进行去重，后出现的重复行同样标记 invalid。
+  - 对通过引用复核的行，从知识库解析并按 CSV 顺序物化完整 references=[{kb_id,doc_id,chunk_id,text}]；同时派生既有 reference_context、reference_chunk_ids、reference_doc_ids 与 source_preparation.kb_ids；question 按 trim、压缩空白、忽略大小写进行去重，后出现的重复行同样标记 invalid。
   - 按源文件顺序压缩全部合法行，选取前 min(合法行数, target_case_count) 行；选中行标记 loaded，超过目标的合法行标记 truncated。
   - 将 loaded 行依次固定写入 case_0001 至 case_00NN 的 stats.case_allocation.assignments，mode=imported；对应 detail.case.id 必须等于该 runtime case id；剩余稳定分区写入 mode=generated。
   - 汇总 stats.csv_reading 的总/有效/加载/无效/截断行数，以及 stats.case_allocation 的目标/导入/自动 Case 数和 assignments；后续 operation 只消费该 manifest，不重新读取或重新分配 CSV。
@@ -190,8 +196,10 @@ tests:
     cases:
       # 必填文本、枚举、reference JSON、难度对应引用数与同 case 重复 chunk_id 均严格校验。
       - base_case_and_reference_contract
-      # chunk 必须能在配置的知识库中唯一溯源，且清洗后的 CSV 文本必须与知识库正文精确一致。
-      - kb_reference_resolution_and_text_match
+      # chunk 必须能在配置的知识库中唯一溯源，且清洗后的 CSV 文本必须与知识库正文精确一致；成功行物化完整 references 和既有派生字段。
+      - kb_reference_resolution_text_match_and_compatible_reference_materialization
+      # 完整 references 与 reference_context、Chunk/文档 ID 列表、KB 摘要必须由同一解析结果派生，顺序一致。
+      - complete_and_legacy_reference_fields_are_consistent
       # question 在简单归一化后重复时，后出现行标记为 duplicate_question。
       - duplicate_question_is_invalid
   assignment_and_audit:
@@ -203,5 +211,7 @@ tests:
       - truncates_valid_rows_with_manifest_stats
       # 无效行不占用 case 分区；invalid_count 等于 invalid_details 数量，不足部分全部由 generated assignments 补齐。
       - invalid_details_do_not_consume_capacity
-      # manifest 保存 CSV 指纹、行级错误、派生溯源字段和 auto chunk 目标，不保存原始 CSV 内容；所有计数可相互对账。
+      # manifest 保存 CSV 指纹、行级错误和完整引用溯源字段，不保存原始 CSV 内容；所有计数可相互对账。
       - records_reproducible_audit_metadata
+      # 相同 CSV 文件、知识库快照和目标总数重复执行时，loaded/truncated 行及 Case 分区绑定必须可复现。
+      - repeated_import_produces_deterministic_case_assignments

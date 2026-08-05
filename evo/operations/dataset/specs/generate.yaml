@@ -57,22 +57,17 @@ input_payload:
           - easy
           - medium
           - hard
-      source:
-        type: object
-        required: false
-        fields:
-          kb_ids:
-            type: list[string]
       instruction:
         type: string
         required: false
         validation:
           - non_empty_after_strip
       topic:
-        type: string
+        type: object
         required: false
-        validation:
-          - non_empty_after_strip
+        fields:
+          topic_id: {type: string, required: true}
+          name: {type: string, required: true, validation: [non_empty_after_strip]}
       qaplan:
         type: object
         required: false
@@ -83,24 +78,15 @@ input_payload:
           lane:
             type: string
             required: true
-          cluster_id:
-            type: string
-            required: true
-          cluster_type:
-            type: string
-            required: true
-            enum:
-              - entity
-              - embedding
-          selection_round:
-            type: integer
-            required: true
       references:
         type: array
         required: false
         item:
           type: object
           fields:
+            kb_id:
+              type: string
+              required: true
             chunk_id:
               type: string
               required: true
@@ -144,26 +130,34 @@ output_payload:
       # 简约说明本题的考察或设计逻辑，供后续判罚辅助使用。
       grading_guidance:
         type: string
-      # 按参考资料原始顺序保存的 [{chunk_id, text}]，供 groundedness 判分和人工审阅。
-      reference_context:
-        # 供评测和人工审阅使用，保持与 CSV 的 {chunk_id,text} 结构一致。
+      # 所有 Case 统一按参考资料原始顺序保存完整引用，供详情、判分与人工审阅。
+      references:
         type: array
         item:
           type: object
           fields:
+            kb_id:
+              type: string
+            doc_id:
+              type: string
             chunk_id:
               type: string
             text:
               type: string
-      # 从知识库 DocNode 原样保留的 chunk_id，供召回率和精确率计算。
+      # 以下字段为既有下游兼容输出；均可由 references 派生，暂不移除。
+      reference_context:
+        # 保持原有 [{chunk_id, text}] 结构与 references 相同顺序。
+        type: array
+        item:
+          type: object
+          fields:
+            chunk_id: {type: string}
+            text: {type: string}
       reference_chunk_ids:
         type: list[string]
-      # 从知识库文档原样保留的 doc_id，供召回率和精确率计算。
       reference_doc_ids:
         type: list[string]
-      # 最终 case 仅保留其引用实际来自的知识库列表。
       source_preparation:
-        # 仅记录此 case 实际使用的 KB，支持单 case 跨多个 KB。
         type: object
         fields:
           kb_ids:
@@ -172,12 +166,12 @@ output_payload:
 execution_flow:
   - 读取当前 case 输出分区，要求它与同分区 qaplan_spec.id 一致，并按 qaplan_spec.mode 选择唯一分支。
   - mode=imported 时，校验 imported_case 是完整基础 case，且 imported_case.id 等于当前分区；不调用 LLM，原样返回 {"case": imported_case}。
-  - mode=generated 时，校验 qaplan_spec 的 question_type、difficulty、instruction、topic、source 和 references；references 必须非空，且每项的 chunk_id、doc_id、text 均为真实知识库标识或正文。
+  - mode=generated 时，校验 qaplan_spec 的 question_type、difficulty、instruction、topic 和 references；references 必须非空，且每项的 kb_id、doc_id、chunk_id、text 均为真实知识库标识或正文。
   - 按 references 原始顺序为每份资料添加稳定短别名，例如 <reference id="ref_1">、<reference id="ref_2">，并保留完整正文。
-  - 先写入通用 QA 约束与三字段输出契约，再追加 qaplan_spec.instruction、topic 和带短别名参考资料；要求模型只使用给定资料，question 与 answer 均实质使用全部 references，不补充外部事实。
+  - 先写入通用 QA 约束与三字段输出契约，再追加 qaplan_spec.instruction、topic.name 和带短别名参考资料；要求模型只使用给定资料，question 与 answer 均实质使用全部 references，不补充外部事实。
   - 调用 run_config.llm_config 指定的生成模型，并要求返回 JSON object：question、answer、grading_guidance。
   - 使用 dataset.llm_json 基础设施解析与修复 JSON；校验 question、answer、grading_guidance 均为非空字符串。JSON 无法解析、字段缺失或类型错误时，按基础设施规则携带校验错误重试一次，仍失败则直接报错。
-  - 构造 generated case：复制 id、question_type、difficulty；将真实 references 转换为按顺序的 reference_context=[{chunk_id,text}]、reference_chunk_ids 与 reference_doc_ids；仅写入实际引用来源的 source_preparation={kb_ids}。
+  - 构造 generated case：复制 id、question_type、difficulty 和按原顺序的完整 references[]；每项必须包含 kb_id、doc_id、chunk_id、text；同时从该数组派生并保留既有 reference_context、reference_chunk_ids、reference_doc_ids 与 source_preparation，保证下游兼容。
   - 返回 {"case": payload}。key_points 与 forbidden_claims 不属于本 operation，由后续 enhancement 流程负责。
 
 tests:
@@ -204,10 +198,10 @@ tests:
       - preserves_question_type
       # easy、medium、hard 均沿用 qaplan_spec 的难度；generate 不根据答案长度或 guidance 内容重新分类。
       - preserves_difficulty
-      # case 保留真实知识库 references，转换为 reference_context、reference_chunk_ids 与 reference_doc_ids。
-      - preserves_kb_reference_ids_and_context
-      # source_preparation 保留实际引用来源 kb_ids，保证跨知识库 case 能追溯到原始知识库。
-      - preserves_source_preparation
+      # case 保留完整四字段 references，同时从其稳定派生旧的 context、Chunk/文档 ID 列表和 KB 摘要，保证现有下游不改接口。
+      - preserves_complete_references_and_legacy_derived_fields
+      # references 的顺序变化必须同步反映到 reference_context、Chunk/文档 ID 列表；不得分别排序或去重重排。
+      - keeps_legacy_reference_fields_ordered_and_consistent_with_references
       # materializer 返回结构固定为 {"case": payload}，不混入额外 output key。
       - return_keys_match_outputs
   model_output_validation:
@@ -221,19 +215,23 @@ tests:
       - one_repair_retry_on_content_validation_error
       # LLM 调用异常直接向上抛出，不生成部分 case 或伪造默认 QA。
       - llm_failure_error
+      # repair 成功时仅接受修复后的完整三字段 JSON；不得沿用首次失败响应中的部分 question、answer 或 guidance。
+      - repair_success_replaces_incomplete_first_response_atomically
   qaplan_spec_validation:
     # 上游 qaplan_spec 契约：验证生成前即拒绝分区错位、必填信息缺失或不完整参考资料。
     cases:
       # qaplan_spec.id 必须等于当前 case 输出分区，避免并行执行时把 QA 写到错误 case。
       - same_partition_case_id_error
-      # question_type、difficulty、instruction、topic、source、qaplan 均为必填且必须合法。
+      # question_type、difficulty、instruction、topic、qaplan 均为必填且必须合法，且 qaplan 不得包含 Cluster 或历史轮次字段。
       - qaplan_spec_contract_error
       # imported / generated 之外的 mode，或与分支不匹配的字段组合，必须在调用模型前失败。
       - mode_branch_contract_error
-      # references 不能为空，且每份资料必须具备非空 chunk_id、doc_id、text。
+      # references 不能为空，且每份资料必须具备非空 kb_id、chunk_id、doc_id、text。
       - reference_contract_error
       # run_config.llm_config 缺失或不是 object 时直接失败。
       - run_config_contract_error
+      # generated spec 的 topic 必须同时具备 topic_id 与非空 name；旧的纯字符串 topic 契约不得被静默兼容。
+      - structured_topic_contract_error
   runtime_wiring:
     # fixed op 接线：验证 qaplan_spec 使用 same_partition 输入，run_config 使用 unpartitioned_to_all 广播，并产生同分区 dataset.case。
     cases:

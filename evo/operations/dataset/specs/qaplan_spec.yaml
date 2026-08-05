@@ -1,9 +1,9 @@
-# STEP4 可视化目标契约；本 Artifact 是只读派生结果，不作为页面修改入口。
+# 每 Case 的只读完整生成规格：选题事实来自 qaplan_plan，详情从当前 Topic/Chunk 派生。
 operation:
   op_id: dataset.qaplan_spec
   flow: dataset
   stage: qaplan_spec
-  description: 按稳定 case 分区分发导入旁路或自动生成所需的 QA 规格。
+  description: 为每个稳定 Case 分区生成导入旁路或包含完整主题、引用和 instruction 的 QA 规格。
 
 fixed_op:
   inputs:
@@ -12,6 +12,16 @@ fixed_op:
       required: true
       partition: unpartitioned
       mapping: unpartitioned_to_all
+    topic_discovery_manifest:
+      artifact_id: dataset.topic_discovery_manifest
+      required: true
+      partition: unpartitioned
+      mapping: unpartitioned_to_all
+    chunk:
+      artifact_id: dataset.chunk
+      required: true
+      partition: partitioned
+      mapping: all_to_all
     import_cases_manifest:
       artifact_id: dataset.import_cases_manifest
       required: true
@@ -24,8 +34,7 @@ fixed_op:
 
 materializer:
   function: qaplan_spec
-  return_keys:
-    - qaplan_spec
+  return_keys: [qaplan_spec]
 
 input_payload:
   qaplan_plan:
@@ -34,176 +43,114 @@ input_payload:
         type: array
         required: true
         item:
-          type: object
           fields:
-            case_id:
-              type: string
-              required: true
-            plan_item_id:
-              # 自动计划项的稳定追踪 ID。
-              type: string
-              required: true
-            lane:
-              # 六路内部标识；页面使用 question_type + difficulty 展示业务名称。
-              type: string
-              required: true
-            question_type:
-              type: string
-              required: true
-            difficulty:
-              type: string
-              required: true
-            cluster_id:
-              # 当前 Topic 所属 Cluster 的内部定位 ID，不向用户展示。
-              type: string
-              required: true
-            cluster_type:
-              # 必须与 lane 的题型来源一致。
-              type: string
-              required: true
-            topic:
-              type: string
-              required: true
-            references:
-              type: array
-              required: true
-            selection_round:
-              # 自动分配时的 Topic 轮次追踪信息，不作为用户控件。
-              type: integer
-              required: true
-      stats:
-        type: object
+            case_id: {type: string, required: true}
+            plan_item_id: {type: string, required: true}
+            lane: {type: string, required: true}
+            question_type: {type: string, required: true, enum: [precision, reasoning]}
+            difficulty: {type: string, required: true, enum: [easy, medium, hard]}
+            topic_id: {type: string, required: true}
+  topic_discovery_manifest:
+    fields:
+      topics:
+        type: array
         required: true
-        fields:
-          auto_case_count:
-            type: integer
-            required: true
-          planned_case_count:
-            type: integer
-            required: true
+        item:
+          fields:
+            topic_id: {type: string, required: true}
+            name: {type: string, required: true}
+            question_type: {type: string, required: true, enum: [precision, reasoning]}
+            chunk_ids: {type: 'list[string]', required: true}
+            chunk_count: {type: integer, required: true}
+  chunk:
+    tuple: true
+    item:
+      fields:
+        available: {type: boolean, required: true}
+        kb_id: {type: string, required: false}
+        chunk_id: {type: string, required: true}
+        doc_id: {type: string, required: true}
+        text: {type: string, required: true}
   import_cases_manifest:
     fields:
       stats:
-        type: object
-        required: true
         fields:
           case_allocation:
-            type: object
-            required: true
             fields:
-              assignments:
-                type: object
-                required: true
-      details:
-        # imported case 由其 loaded detail 提供，不在 manifest 中维护第二份索引。
-        type: array
-        required: true
+              assignments: {type: object, required: true}
+      details: {type: array, required: true}
 
 output_payload:
   qaplan_spec:
     json_compatible: true
     fields:
-      id:
-        type: string
-      mode:
-        # imported 直接透传 base case；generated 读取唯一 qaplan item。
-        type: string
-        enum:
-          - imported
-          - generated
-      imported_case:
-        # 已完成 CSV 校验、可直接作为 dataset.case 的基础 case。
-        type: object
-        required: false
-        description: mode=imported 时的已规范化基础 case；generate 直接返回它。
-      question_type:
-        type: string
-        required: false
-        enum:
-          - precision
-          - reasoning
-      difficulty:
-        type: string
-        required: false
-        enum:
-          - easy
-          - medium
-          - hard
-      source:
-        # generated case 实际引用到的 KB，而非整个运行配置的 KB 集合。
+      id: {type: string}
+      mode: {type: string, enum: [imported, generated]}
+      imported_case: {type: object, required: false}
+      question_type: {type: string, required: false, enum: [precision, reasoning]}
+      difficulty: {type: string, required: false, enum: [easy, medium, hard]}
+      topic:
+        # 完整派生展示信息；只有 topic_id 是 qaplan_plan 中可编辑的选题事实。
         type: object
         required: false
         fields:
-          kb_ids:
-            type: list[string]
-      instruction:
-        # 根据题型生成的后续 QA 生成约束；页面默认不展示或编辑。
-        type: string
-        required: false
-      topic:
-        # 当前 Case 的选题名称。
-        type: string
-        required: false
+          topic_id: {type: string}
+          name: {type: string}
+      instruction: {type: string, required: false}
       qaplan:
         type: object
         required: false
         fields:
-          plan_item_id:
-            type: string
-          lane:
-            type: string
-          cluster_id:
-            # 内部选题定位；用户重选 Topic 时由 qaplan_plan 重新派生。
-            type: string
-          cluster_type:
-            type: string
-            enum:
-              - entity
-              - embedding
-          selection_round:
-            type: integer
+          plan_item_id: {type: string}
+          lane: {type: string}
       references:
-        # Topic 所属 Cluster 自动确定的参考材料；用户只读。
         type: array
         required: false
         item:
-          type: object
           fields:
-            kb_id:
-              type: string
-            chunk_id:
-              type: string
-            doc_id:
-              type: string
-            text:
-              type: string
+            kb_id: {type: string}
+            doc_id: {type: string}
+            chunk_id: {type: string}
+            text: {type: string}
 
 execution_flow:
-  - 读取当前 qaplan_spec 输出分区的稳定 case id，并从 import_cases_manifest.stats.case_allocation.assignments 查找唯一 assignment；缺失、未知 mode 或 assignment 与 runtime 分区不一致时直接失败。
-  - mode=imported 时，要求 details 中存在 source_row_number 匹配 assignment、load_status=loaded 且 case.id 相同的完整规范化基础 case；输出 {id, mode=imported, imported_case}，不读取 qaplan_plan.items，不构造 instruction。
-  - mode=generated 时，要求 qaplan_plan.items 中恰有一个 case_id 等于当前 id 的计划项；不得按 items 索引猜测分配，也不得使用导入 case 占位索引。
-  - 对 generated item 校验 references 非空且数量符合 easy=1、medium=2、hard=3；每项 chunk_id、doc_id、text 均不能为空。
-  - 根据 question_type 构造现有 precision 或 reasoning instruction，并复制计划项的 type、difficulty、topic、references 与 qaplan 追踪字段；source.kb_ids 由 references 中去重后的实际 kb_id 按首次出现顺序构造。
-  - 返回 {"qaplan_spec": payload}。
+  - 从当前输出分区在 assignments 中取得唯一 mode；imported 分区直接输出已校验的 imported_case，不读取 qaplan_plan 或 Topic。
+  - generated 分区必须以 case_id 在 qaplan_plan.items 中唯一匹配计划项；计划项的 topic_id 是唯一可编辑选题事实。
+  - 用 topic_id 在当前 topic_discovery_manifest.topics 中唯一查找 Topic，校验其 question_type 和 chunk_count 满足计划项题型、难度。
+  - 依 Topic.chunk_ids 原顺序从当前 available Chunk 解析完整 {kb_id, doc_id, chunk_id, text} references；禁止保留旧 Topic、旧 Chunk 或只存 chunk_id/text 的引用。
+  - 由题型派生 instruction，并物化 topic={topic_id,name}、完整 references 与 qaplan 跟踪信息；这些均为只读派生字段。引用本身已包含实际 KB 来源，不再冗余保存 source.kb_ids。
+  - Service 的 PATCH 只接收新 topic_id：解析后完整替换该 Case qaplan_spec。若同次显式提交 generate/grading，则在校验新 references 后原子保存，自动派生不得覆盖显式内容。
 
 tests:
-  imported_bypass:
-    # 导入分区的分配已经在 import_cases_manifest 冻结；qaplan spec 只传递已验证的 case。
+  generated_derivation:
     cases:
-      # imported assignment 只产生带原分区 id 的 imported_case，不访问或消费 qaplan item。
-      - imported_case_bypasses_plan_lookup
-      # assignment 或 imported_case 缺失、id 不一致或基础 case 契约非法时直接失败。
-      - imported_case_assignment_contract_error
-  generated_spec:
-    # 自动分区必须按显式 case_id 找到计划项，保证 CSV 导入位于任意静态分区时仍不发生错位。
+      # generated Case 必须用 case_id 唯一定位计划项，不能依据静态分区位置猜测。
+      - resolves_generated_case_by_explicit_case_id
+      # topic_id 从扁平 Manifest 定位 Topic，并派生 topic 名称、完整四字段 references 与 instruction。
+      - materializes_complete_read_only_spec_from_current_topic_and_chunks
+      # Topic 名称更新或当前有效 Chunk 更新后，重算会替换派生字段；不读取历史版本。
+      - rebuilds_derived_fields_from_current_upstream_artifacts
+      # Topic 的 chunk_ids 顺序必须原样决定 references 顺序和后续 prompt 短别名顺序。
+      - preserves_topic_chunk_order_when_materializing_references
+      # 计划题型、难度、Topic 类型、Chunk 数或 Chunk 可用性不匹配时拒绝生成规格。
+      - rejects_invalid_topic_or_current_chunk_for_planned_lane
+  imported_and_patch_contract:
     cases:
-      # generated assignment 通过 plan item.case_id 唯一匹配，而非按全局 case 分区索引匹配。
-      - generated_case_uses_explicit_plan_case_id
-      # 生成路径保留现有 instruction、references、类型、难度与计划追踪元数据。
-      - preserves_generated_qaplan_contract
-      # 缺失、重复或错误绑定的 plan item 必须失败。
-      - generated_plan_binding_error
-  runtime_wiring:
-    # 两个全局 manifest 均广播到每个静态 case 分区，输出仍是一分区一 qaplan_spec。
+      # imported Case 仅透传其已校验完整 Case，不要求或伪造 topic_id。
+      - imported_case_bypasses_topic_derivation
+      # PATCH 只能更新 topic_id；Service 必须完整替换派生 qaplan_spec，不能接受 name、references 或 instruction 局部修改。
+      - patch_accepts_only_topic_id_and_replaces_the_complete_spec
+      # plan + generate 或 plan + generate + grading 时，先按新 Topic 校验引用，再原子保留本次显式生成和评分内容。
+      - combined_patch_validates_new_references_without_overwriting_explicit_content
+      # 仅修改 plan 时旧 case 与 enhancement 必须失效；不允许把旧 Topic 的生成内容继续标记为当前结果。
+      - plan_only_patch_invalidates_stale_downstream_case_artifacts
+  contract_and_runtime:
     cases:
-      - partition
+      # 缺失、重复或错绑计划项，以及不存在或重复 topic_id 时必须失败。
+      - rejects_ambiguous_plan_or_topic_binding
+      # materializer 只返回对应分区的 qaplan_spec。
+      - return_keys_match_outputs
+      # 全局计划和 Topic 广播、Chunk 聚合后，为每个 Case 分区输出独立规格。
+      - partitioned_spec_wiring
+      # 更新一个 Case 的 topic_id 时只重建该 Case 的 spec；其它 Case 的选择事实与已完成结果不受影响。
+      - single_case_topic_replacement_has_partition_local_effect

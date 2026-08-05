@@ -40,8 +40,13 @@ input_payload:
         difficulty:
           type: string
           required: true
+        references:
+          # 与 imported/generated Case 统一的完整引用；manifest 不再依赖拆分 ID 列表。
+          type: array
+          required: false
         reference_chunk_ids:
-          type: list[string]
+          # 既有完成标记输入，保持必填以兼容所有下游汇总逻辑。
+          type: 'list[string]'
           required: true
   import_cases_manifest:
     fields:
@@ -82,7 +87,7 @@ output_payload:
 
 execution_flow:
   - 汇总 all_to_unpartitioned 的 case tuple。
-  - 校验每个 case 的稳定 id、问题类型、难度和 reference_chunk_ids，并拒绝重复 id。
+  - 校验每个 case 的稳定 id、问题类型、难度和既有 reference_chunk_ids，并拒绝重复 id；若存在完整 references，必须与该 ID 列表一致。
   - 使用 import_cases_manifest 的冻结统计输出基础 case 的轻量审计索引、问题/难度分布与 imported/generated 数量；不改写 case 内容，不依赖任何 enhancement 字段，也不承担 assemble 职责。
 
 tests:
@@ -93,10 +98,14 @@ tests:
       - success
       # 同一轮生成中 case.id 必须唯一，避免不同分区的结果在 manifest 中发生歧义。
       - duplicate_id_error
+      # imported/generated 数量必须与 import_cases_manifest 冻结统计相符，不能根据 Case 文本或 topic 是否存在猜测。
+      - uses_frozen_import_and_generated_counts
       # materializer 返回结构固定为 {"generate_manifest": payload}，不混入额外 output key。
       - return_keys_match_outputs
   input_validation:
-    # 基础 case 契约：验证 manifest 只依赖 id、question_type、difficulty、reference_chunk_ids，不再要求 key_points 或 forbidden_claims。
+    # 基础 case 契约：验证 manifest 保持依赖 id、question_type、difficulty、reference_chunk_ids；完整 references 仅作可选一致性校验。
     cases:
       # 基础字段缺失、类型非法，或 question_type / difficulty 不属于允许枚举时应直接失败。
       - base_case_contract_error
+      # 可选完整 references 存在时，references[].chunk_id 必须与既有 reference_chunk_ids 保持相同顺序和集合。
+      - optional_complete_references_must_match_legacy_chunk_ids
