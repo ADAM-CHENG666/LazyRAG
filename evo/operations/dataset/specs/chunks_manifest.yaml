@@ -1,16 +1,12 @@
-# STEP1 默认总览契约：一个 Manifest 直接支撑首页；逐 Chunk 正文按需读取 dataset.chunk。
+# 材料阶段稳定快照：只承载概览与下游需要的已入围 Slot 索引。
 operation:
   op_id: dataset.build_chunks_manifest
   flow: dataset
   stage: build_chunks_manifest
-  description: 汇总数据源、文档选择、候选筛选与静态 Chunk Slot，输出 STEP1 首页所需的精简总览。
+  description: 汇总材料概览、容量告警与已入围 Chunk 的轻量分区索引，作为材料阶段稳定结果。
 
 fixed_op:
   inputs:
-    selected_docs:
-      artifact_id: dataset.selected_docs
-      required: true
-      partition: unpartitioned
     import_cases_manifest:
       artifact_id: dataset.import_cases_manifest
       required: true
@@ -31,313 +27,100 @@ fixed_op:
 
 materializer:
   function: build_chunks_manifest
-  return_keys:
-    - build_chunks_manifest
+  return_keys: [build_chunks_manifest]
 
 input_payload:
-  selected_docs:
-    fields:
-      kb_ids:
-        type: list[string]
-        required: true
-      docs:
-        type: array
-        required: true
-      excluded_docs:
-        type: array
-        required: true
-      stats:
-        type: object
-        required: true
   import_cases_manifest:
     fields:
       source:
-        type: object
-        required: true
         fields:
-          csv_path:
-            type: string
+          csv_path: {type: string}
       stats:
-        type: object
-        required: true
         fields:
           case_allocation:
-            type: object
-            required: true
             fields:
-              target_case_count:
-                type: integer
-              import_case_count:
-                type: integer
-              auto_case_count:
-                type: integer
+              target_case_count: {type: integer}
+              import_case_count: {type: integer}
+              auto_case_count: {type: integer}
   build_chunk_candidates:
     fields:
-      chunks:
-        type: array
-        required: true
-      summary:
-        type: object
-        required: true
-      invalid_counts:
-        type: object
-        required: true
-      manual_exclusions:
-        type: object
-        required: true
-      filter_options:
-        type: object
-        required: true
-      groups:
-        type: array
-        required: true
-      documents:
-        type: array
-        required: true
-      params:
-        type: object
-        required: true
+      summary: {type: object, required: true}
   chunk:
     tuple: true
     item:
       fields:
-        available:
-          type: boolean
-          required: true
-        kb_id:
-          type: string
-          required: false
-        chunk_id:
-          type: string
-          required: true
-        doc_id:
-          type: string
-          required: true
-        filename:
-          type: string
-          required: false
-          default: ""
-        group:
-          type: string
-          required: true
-        type:
-          type: string
-          required: false
-          default: text
+        available: {type: boolean, required: true}
+        chunk_id: {type: string, required: true}
+        kb_id: {type: string, required: false}
+        doc_id: {type: string, required: true}
+        filename: {type: string, required: false}
+        group: {type: string, required: false}
+        type: {type: string, required: false}
 
 output_payload:
   build_chunks_manifest:
     json_compatible: true
     fields:
       source:
-        # 首页数据源摘要；完整 CSV 行级详情按需读取 dataset.import_cases_manifest。
-        type: object
         fields:
-          kb_ids:
-            type: list[string]
-          csv_present:
-            # 只表达是否配置 CSV，不暴露服务器本地路径。
-            type: boolean
+          csv_present: {type: boolean}
           case_counts:
-            type: object
             fields:
-              target:
-                type: integer
-              imported:
-                type: integer
-              automatic:
-                type: integer
+              target: {type: integer}
+              imported: {type: integer}
+              automatic: {type: integer}
       summary:
-        # STEP1 首页顶部的唯一数量口径。
-        type: object
         fields:
-          document_counts:
-            type: object
-            fields:
-              discovered:
-                type: integer
-              scanned:
-                # 等于 selected_docs.stats.selected_count，即实际进入 Chunk 扫描的文档数。
-                type: integer
-              excluded:
-                type: integer
           chunk_counts:
-            type: object
             fields:
-              scanned:
-                type: integer
-              effective:
-                type: integer
-              selected:
-                type: integer
-              unselected_effective:
-                type: integer
-              candidate_target:
-                # 候选目标 ceil(auto_case_count * 1.5)，区别于 source.case_counts.target。
-                type: integer
-              shortfall:
-                type: integer
-          invalid_counts:
-            # 四类规则互斥，前端可直接展示，不再解析内部 reason map。
-            type: object
-            fields:
-              filtered_by_type:
-                type: integer
-              empty_text:
-                type: integer
-              missing_embedding:
-                type: integer
-              invalid_embedding:
-                type: integer
-          manual_exclusions:
-            # 人工屏蔽不归入“无效规则”，首页只显示轻量提示。
-            type: object
-            fields:
-              document_count:
-                type: integer
-              chunk_count:
-                type: integer
-          slots:
-            # 静态运行时 Slot 状态，仅用于解释占位，不作为首页主视觉。
-            type: object
-            fields:
-              total:
-                type: integer
-              available:
-                type: integer
-              placeholder:
-                type: integer
-      filter_options:
-        # 调整筛选规则时直接使用；不得触发额外全库 Chunk 扫描。
-        type: object
-        fields:
-          available_groups:
-            type: list[string]
-          available_types:
-            type: list[string]
-      groups:
-        # Group 分布及当前优先级；前端可作为筛选维度或调整面板摘要。
-        type: array
-        item:
-          type: object
-          fields:
-            group:
-              type: string
-            effective_count:
-              type: integer
-            selected_count:
-              type: integer
-      documents:
-        # STEP1 首页主列表，一个实际扫描文档一项。
-        type: array
-        item:
-          type: object
-          fields:
-            kb_id:
-              type: string
-            doc_id:
-              type: string
-            filename:
-              type: string
-            file_type:
-              type: string
-            effective_count:
-              type: integer
-            selected_count:
-              type: integer
-            groups:
-              type: array
-              item:
-                type: object
-                fields:
-                  group:
-                    type: string
-                  effective_count:
-                    type: integer
-                  selected_count:
-                    type: integer
-      chunks:
-        # 内部轻量 Slot 索引，供 STEP2 完成校验与按需定位 dataset.chunk。
-        # STEP1 首页不渲染此数组，也不在这里保存正文、Embedding 或 metadata。
-        type: array
-        item:
-          type: object
-          fields:
-            available:
-              type: boolean
-            kb_id:
-              type: string
-            chunk_id:
-              type: string
-            doc_id:
-              type: string
-            filename:
-              type: string
-            group:
-              type: string
-            type:
-              type: string
-            partition:
-              type: string
-      params:
-        # STEP1 首页只回显筛选摘要；完整屏蔽参数由详情抽屉按需读取参数 Artifact。
-        type: object
-        fields:
-          groups:
-            type: list[string]
-          allowed_types:
-            type: list[string]
+              scanned: {type: integer}
+              effective: {type: integer}
+              selected: {type: integer}
+              shortfall: {type: integer}
       warnings:
-        # 当前只输出容量不足等需要用户处理的告警；使用后备 Group 是正常行为。
         type: list[string]
+      chunks:
+        # 下游只需定位已入围 Slot；正文/Embedding 保留在 dataset.chunk。
+        type: array
+        item:
+          type: object
+          fields:
+            available: {type: boolean}
+            partition: {type: string}
+            kb_id: {type: string}
+            doc_id: {type: string}
+            chunk_id: {type: string}
+            filename: {type: string}
+            group: {type: string}
+            type: {type: string}
 
 execution_flow:
-  - 校验 selected_docs、import_cases_manifest、build_chunk_candidates 与全部静态 Chunk 分区。
-  - source.csv_present 根据 import_cases_manifest.source.csv_path 是否非空生成；source.case_counts 直接复制目标、导入与自动生成 Case 数。
-  - summary.document_counts 复制文档发现、实际扫描与人工屏蔽数量。
-  - summary.chunk_counts、invalid_counts、filter_options、groups 与 documents 从候选结果直接归一化复制，不在 Manifest 中重复计算业务筛选逻辑。
-  - 要求 selected + unselected_effective = effective，selected + shortfall = candidate_target，且 scanned = 四类 invalid_counts + manual_exclusions.chunk_count + effective。
-  - 按运行时分区顺序生成轻量 chunks 索引；每项只保留定位与 STEP2 校验字段。
-  - summary.slots 汇总全部静态分区的 available/placeholder 数；available 必须等于 summary.chunk_counts.selected。
-  - params 只回显 build_chunk_candidates.params 中实际生效的 groups 与 allowed_types；完整屏蔽配置不复制到默认 Manifest。
-  - auto_case_count>0 且有效容量大于 0 但 selected 小于 candidate_target 时，在 warnings 中写入容量不足；全部 Case 均导入时允许 0 个真实 Chunk。
-  - 返回 {"build_chunks_manifest": payload}。
+  - 将导入、目标与自动生成 Case 数投影为 source.case_counts；仅暴露 csv_present，不复制 csv_path。
+  - 从候选结果复制 scanned/effective/selected/shortfall；材料概览的比率由 Service 计算。
+  - 按 runtime partition 顺序输出 chunks 轻量索引；available 数必须等于 selected。
+  - automatic>0、effective>0 且 shortfall>0 时输出容量不足 warning。
+  - 文档列表、完整有效 Chunk、配额和 selected 由上游 Artifact 提供，不在 Manifest 重复保存。
 
 tests:
-  default_review_contract:
-    # 验证默认页只读取这一份 Manifest 即可呈现 STEP1 总量、容量、损耗和分布概览。
+  overview_snapshot:
     cases:
-      # source、case_counts、document_counts、chunk_counts、invalid_counts、filter_options、groups、documents 均在单一输出中。
-      - one_manifest_contains_all_step1_homepage_fields
-      # 默认 Manifest 只暴露 csv_present 布尔值，不复制本地 csv_path。
-      - csv_path_is_not_exposed
-      # selected+unselected_effective=effective，selected+shortfall=candidate_target，扫描总量按互斥分类完整对账。
-      - summary_counts_are_mutually_reconcilable
-      # documents 行保持候选节点的稳定顺序，且每行 effective/selected 汇总等于顶层对应数量。
-      - document_rows_match_candidate_document_summaries
-      # Manifest 复制候选节点已经得到的轻量选项，不再次枚举 Group 或扫描 Chunk。
-      - filter_options_do_not_require_extra_full_scan
-  runtime_index:
-    # 验证供 STEP2 使用的静态 Slot 索引既可定位来源，又不把大字段带入默认页。
+      # 一次读取 Manifest 即得到 API 材料概览所需的 Case 数、Chunk 数与告警。
+      - exposes_case_counts_chunk_counts_and_warnings_in_one_stable_result
+      # Manifest 不得泄露 CSV 本地路径，也不得复制正文、向量等重字段。
+      - never_exposes_csv_path_or_chunk_heavy_fields
+      # 轻量 Slot 中 available=true 的数量必须和候选结果的 selected_count 相等。
+      - selected_slot_count_matches_candidate_selected_count
+      # 仅自动生成仍需材料且有效容量不足时才产生容量不足告警。
+      - shortfall_warning_only_when_automatic_generation_needs_materials
+  lightweight_slot_index:
     cases:
-      # available Slot 按运行时 partition 顺序保留 kb_id/doc_id/chunk_id 及必要展示字段。
-      - preserves_chunk_provenance_and_partition_order
-      # chunks 索引不得包含正文、Embedding、metadata 等重量字段。
-      - keeps_only_lightweight_chunk_locator_fields
-      # 全部 Case 由 CSV 导入时允许所有静态 Slot 为 available=false 占位。
-      - all_imported_run_produces_placeholder_index
-      # 实际收到的 dataset.chunk 分区数与静态声明不一致时失败，避免生成不完整索引。
-      - static_tuple_count_mismatch_error
-      # summary.slots.available 必须等于 summary.chunk_counts.selected，否则拒绝不一致的运行结果。
-      - available_slot_count_must_match_selected_count
-  manual_intervention:
-    # 验证默认页能够区分人工操作与算法无效规则，并可复现本轮筛选设置。
-    cases:
-      # 文档屏蔽数与 Chunk 屏蔽数分别展示，均不得混入四类 invalid_counts。
-      - exposes_doc_and_chunk_exclusion_counts_separately_from_invalid_rules
-      # params 回显实际生效的 groups/allowed_types；完整屏蔽列表留在详情 Artifact，不复制进默认 Manifest。
-      - resolved_filter_params_are_reproducible
-      # 仅在仍需自动生成且 effective>0、selected<candidate_target 时输出容量不足 warning。
-      - shortfall_warning_only_when_auto_generation_needs_chunks
-      # materializer 只返回规范 output key：{"build_chunks_manifest": payload}。
+      # 每个静态 Slot 都保留 partition 与来源定位字段，供下游按相同快照读取。
+      - preserves_partition_and_source_locator_for_every_slot
+      # Slot 索引必须保持轻量，正文、Embedding、metadata 只能在 dataset.chunk 中读取。
+      - excludes_text_embedding_and_metadata_from_manifest
+      # 全部 Case 已导入时允许所有 Slot 为占位，不将其视为材料阶段失败。
+      - imported_only_run_allows_placeholder_slots
+      # 静态声明与实际 Chunk tuple 数不一致时失败，避免形成不完整稳定快照。
+      - rejects_static_partition_tuple_mismatch
+      # materializer 返回键必须严格等于 FixedOp 输出键。
       - return_keys_match_outputs

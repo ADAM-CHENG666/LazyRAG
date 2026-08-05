@@ -1,9 +1,9 @@
-# STEP1 候选筛选契约：参数面向用户，输出面向算法与精简首页 Manifest。
+# 材料有效性扫描与初始入围：有效 Chunk 全量保留，入围性可由用户直接修改。
 operation:
   op_id: dataset.build_chunk_candidates
   flow: dataset
   stage: build_chunk_candidates
-  description: 按 Group 优先级、Type 与人工 Chunk 屏蔽筛选有效容量，并稳定抽取自动生成侧候选 Chunk。
+  description: 按有效性规则扫描已入选文档，冻结每文档/切分规则配额，并生成带入围标记的完整有效 Chunk 集合。
 
 fixed_op:
   inputs:
@@ -26,306 +26,127 @@ fixed_op:
 
 materializer:
   function: build_chunk_candidates
-  return_keys:
-    - build_chunk_candidates
+  return_keys: [build_chunk_candidates]
 
 input_payload:
   selected_docs:
     fields:
-      kb_ids:
-        type: list[string]
-        required: true
-      docs:
-        type: array
-        required: true
+      documents: {type: array, required: true}
   import_cases_manifest:
     fields:
       stats:
-        type: object
-        required: true
         fields:
           case_allocation:
-            type: object
-            required: true
             fields:
-              auto_case_count:
-                type: integer
-                required: true
+              auto_case_count: {type: integer, required: true}
   build_chunks_params:
     fields:
       groups:
-        # 有序 Group 列表，同时表达“启用范围”和“候选优先级”。
-        # 先使用第一个 Group；其有效容量不足时才继续使用后续 Group。
+        # 已选切分规则及其优先级；完整目录和展示名称由 Core/Service 提供。
         type: list[string]
         required: false
-        default:
-          - block
-        validation:
-          - non_empty
-          - non_empty_after_strip_items
-          - unique_items
+        default: [block]
+        validation: [non_empty, non_empty_after_strip_items, unique_items]
       allowed_types:
-        # 允许进入有效容量的 Chunk Type；无顺序语义。
-        # 可选项来自本次正常扫描实际观察到的 Type，前端不得写死。
+        # 已选版面类型；完整目录和展示名称由 Core/Service 提供。
         type: list[string]
         required: false
-        default:
-          - text
-          - paragraph
-          - table
-          - formula
-          - equation
-          - unknown
-        validation:
-          - non_empty
-          - non_empty_after_strip_items
-          - unique_items
-      excluded_chunks:
-        # 用户人工屏蔽的 Chunk 稳定引用。命中项不计入有效容量，也不会占用配额。
-        # 第一版只支持屏蔽/恢复，不支持指定 Slot 或指定替换 Chunk。
-        type: array
-        required: false
-        default: []
-        validation:
-          - unique_by:
-              - kb_id
-              - chunk_id
-        item:
-          type: object
-          fields:
-            kb_id:
-              type: string
-              required: true
-            doc_id:
-              # 参与稳定定位和详情页按文档归组；实际过滤仍以 kb_id + chunk_id 为准。
-              type: string
-              required: true
-            chunk_id:
-              type: string
-              required: true
+        default: [text, paragraph, table, formula, equation, unknown]
+        validation: [non_empty, non_empty_after_strip_items, unique_items]
       max_scan_docs_per_kb:
-        # 单个知识库允许扫描的文档数硬上限，只用于性能保护，不是用户筛选条件。
-        # 达到上限必须失败，禁止静默截断。
         type: integer
         required: false
         default: 10000
-        validation:
-          - positive_integer
+        validation: [positive_integer]
       max_scan_chunks:
-        # 本轮允许统计的原始 Chunk 总数硬上限，只用于性能保护，不是用户筛选条件。
-        # 达到上限必须失败，禁止部分扫描后继续生成。
         type: integer
         required: false
         default: 100000
-        validation:
-          - positive_integer
+        validation: [positive_integer]
 
 output_payload:
   build_chunk_candidates:
     json_compatible: true
     fields:
       chunks:
-        # 只包含最终真实候选；正文与 Embedding 仅为下游算法读取，不进入 STEP1 默认页。
+        # 全部有效 Chunk；selected 是可编辑的入围性，不参与有效性判定。
         type: array
         item:
           type: object
           fields:
-            kb_id:
-              type: string
-            chunk_id:
-              type: string
-            doc_id:
-              type: string
-            filename:
-              type: string
-            group:
-              type: string
-            type:
-              type: string
-            text:
-              type: string
-            embedding:
-              type: object
-            metadata:
-              type: object
+            kb_id: {type: string}
+            doc_id: {type: string}
+            chunk_id: {type: string}
+            filename: {type: string}
+            group: {type: string}
+            type: {type: string}
+            text: {type: string}
+            embedding: {type: object}
+            metadata: {type: object}
+            discovery_index: {type: integer}
+            selected: {type: boolean}
+            selection_index:
+              # 未入围为 null；入围项按稳定顺序连续编号。
+              type: integer
+              nullable: true
+      quotas:
+        # 冻结的精确入围数；直接编辑 selected 后必须仍满足此约束。
+        type: array
+        item:
+          type: object
+          fields:
+            kb_id: {type: string}
+            doc_id: {type: string}
+            group: {type: string}
+            required: {type: integer}
       summary:
-        # 首页可直接理解的单层数量口径；不再暴露 target/scan/eligibility/allocation 四层内部结构。
-        type: object
         fields:
-          candidate_limit:
-            # ceil(auto_case_count * 1.5)。
-            type: integer
-          scanned_doc_count:
-            type: integer
-          scanned_chunk_count:
-            # 当前启用 Group 中实际检查的 Chunk 数；不为筛选选项额外做全库扫描。
-            type: integer
-          effective_count:
-            # 通过 Type、正文、Embedding 与人工屏蔽规则的有效容量。
-            type: integer
-          selected_count:
-            type: integer
-          unselected_effective_count:
-            # effective_count - selected_count，表示有效但因配额未入选。
-            type: integer
-          shortfall_count:
-            # max(candidate_limit - selected_count, 0)。
-            type: integer
-      invalid_counts:
-        # 只保留用户可理解的四类无效原因；Group 是扫描范围，不作为无效原因。
-        type: object
-        fields:
-          filtered_by_type:
-            type: integer
-          empty_text:
-            type: integer
-          missing_embedding:
-            type: integer
-          invalid_embedding:
-            type: integer
-      manual_exclusions:
-        type: object
-        fields:
-          chunk_count:
-            # 当前扫描范围内实际命中的人工屏蔽 Chunk 数。
-            type: integer
-          chunks:
-            # 只保留命中屏蔽项的轻量定位信息，不保存正文或 Embedding。
-            type: array
-            item:
-              type: object
-              fields:
-                kb_id:
-                  type: string
-                doc_id:
-                  type: string
-                chunk_id:
-                  type: string
-                filename:
-                  type: string
-                group:
-                  type: string
-                type:
-                  type: string
-      filter_options:
-        # 仅提供轻量选项，不为生成选项额外读取全部 Chunk 正文或 Embedding。
-        type: object
-        fields:
-          available_groups:
-            # 从 selected_docs.kb_ids 对应知识库的 Node Group 元数据读取并稳定去重。
-            type: list[string]
-          available_types:
-            # 当前启用 Group 中观察到的 Type 与 params.allowed_types 的稳定去重并集。
-            type: list[string]
-      groups:
-        # 首页 Group 分布与优先级回显。
-        type: array
-        item:
-          type: object
-          fields:
-            group:
-              type: string
-            effective_count:
-              type: integer
-            selected_count:
-              type: integer
-      documents:
-        # 一个实际扫描文档一项，直接支撑“有效容量 / 实际使用”文档分布。
-        type: array
-        item:
-          type: object
-          fields:
-            kb_id:
-              type: string
-            doc_id:
-              type: string
-            filename:
-              type: string
-            file_type:
-              type: string
-            effective_count:
-              type: integer
-            selected_count:
-              type: integer
-            groups:
-              type: array
-              item:
-                type: object
-                fields:
-                  group:
-                    type: string
-                  effective_count:
-                    type: integer
-                  selected_count:
-                    type: integer
-      params:
-        # 实际生效参数；首页仅展示摘要，调整面板按需读取。
-        type: object
-        fields:
-          groups:
-            type: list[string]
-          allowed_types:
-            type: list[string]
-          excluded_chunks:
-            type: array
-          max_scan_docs_per_kb:
-            type: integer
-          max_scan_chunks:
-            type: integer
+          scanned_chunk_count: {type: integer}
+          effective_count: {type: integer}
+          selected_count: {type: integer}
+          shortfall_count: {type: integer}
 
 execution_flow:
-  - 读取 selected_docs、import_cases_manifest 与 build_chunks_params，并解析带默认值的生效参数。
-  - candidate_limit=ceil(auto_case_count*1.5)，只服务仍需自动生成的 Case；静态 Chunk Slot 总数仍由 target_case_count 决定。
-  - 当 auto_case_count=0 时，不扫描知识库，返回空候选及零值 summary。
-  - available_groups 从 selected_docs.kb_ids 对应知识库的 Node Group 元数据读取，按 kb_ids 与元数据原始顺序稳定去重；不得为生成选项额外遍历所有 Group 的 Chunk。
-  - 只扫描 params.groups 中启用的 Group；available_types 为正常扫描观察到的 Type 与 params.allowed_types 的稳定去重并集。
-  - excluded_chunks 中的 kb_id/doc_id/chunk_id 必须去除首尾空白后非空，且 (kb_id, chunk_id) 复合键不得重复；doc_id 只用于一致性校验与详情归组。
-  - 每个 Chunk 按固定顺序归类：人工屏蔽、Type 不允许、正文为空、缺少 Embedding、Embedding 非法、有效；各类互斥，人工屏蔽项无需继续读取或校验 Embedding。
-  - 因此 scanned_chunk_count = manual_exclusions.chunk_count + 四类 invalid_counts + effective_count。
-  - 统计阶段只保留容量与稳定定位信息；完成配额后才读取入选 Chunk 的完整正文和 Embedding。
-  - 按 groups 顺序分配剩余预算；每个 Group 内先按 KB 有效容量、再按文档有效容量使用最大余数法分配。
-  - 每个文档内按 chunk_id 的稳定 Hash 取前 quota 个 Chunk，再按原始 Chunk 顺序输出；相同输入、参数和知识库快照必须产生相同候选。
-  - 所有 Group 仍不足 candidate_limit 时返回全部有效候选，并记录 shortfall_count。
-  - auto_case_count>0 且 effective_count=0 时直接失败；effective_count>0 但不足目标时正常产出并交由 STEP1 Manifest 给出容量不足警告。
-  - 返回 {"build_chunk_candidates": payload}。
+  - 仅扫描 selected_docs.documents 中 included=true 的文档；groups 和 allowed_types 只决定有效性，不表达入围选择。
+  - Chunk 依次按 Type、正文、Embedding 判定有效；无效 Chunk 不写入 chunks。
+  - 对全部有效 Chunk 保留正文、Embedding、来源与稳定 discovery_index；不得在达到配额后停止读取或丢弃未入围有效 Chunk。
+  - 按 groups 优先级、知识库、文档分配初始配额；写入 quotas，并将初始入围 Chunk 标记 selected=true 和连续 selection_index。
+  - 直接修改 chunks[].selected 属于用户入围调整：Service 使用 update_artifacts() 写入完整新值，校验每条 quota 后只重算下游；不得重跑本 operation。
+  - 修改 groups、allowed_types、文档 included 或扫描上限属于有效性规则修改：更新输入 Artifact 并重跑本 operation。
+  - auto_case_count=0 时返回空 chunks、quotas 与零值 summary。
 
 tests:
-  parameter_contract:
-    # 验证用户可调筛选参数的语义、顺序性与安全扫描上限。
+  effective_chunk_snapshot:
     cases:
-      # groups 是有序后备链；前一 Group 容量足够时不得从后一 Group 取候选。
-      - ordered_groups_control_fallback_priority
-      # allowed_types 只表达允许集合，交换列表顺序不得改变容量、配额或入选结果。
-      - allowed_types_are_an_unordered_filter
-      # 命中的 (kb_id, chunk_id) 从有效容量和候选中同时移除，并归入 manual_exclusions。
-      - excluded_chunk_refs_remove_capacity_and_candidates
-      # 文档数或 Chunk 数超过显式上限时整体失败，不得返回“看似完整”的截断统计。
-      - scan_limits_fail_without_silent_truncation
-  candidate_selection:
-    # 验证一次扫描内完成分类、容量汇总、分层配额与稳定 Hash 抽样。
+      # included=false 的文档不得访问 Chunk，也不得出现在有效快照。
+      - scans_only_included_documents
+      # 所有通过有效性规则的 Chunk 都保留，顺序必须可复现，不能只输出初始入围项。
+      - retains_every_effective_chunk_in_stable_discovery_order
+      # Type、空正文、Embedding 缺失/非法任一失败时，该 Chunk 不得进入有效快照。
+      - excludes_invalid_type_empty_or_embedding_invalid_chunks_from_snapshot
+      # 每个有效 Chunk 都保存详情页与后续算法需要的正文、向量和来源字段。
+      - full_effective_snapshot_keeps_text_embedding_and_source_provenance
+      # 超过扫描上限必须整体失败，禁止返回截断的“有效快照”。
+      - scan_limits_fail_without_partial_snapshot
+  initial_selection_and_quota:
     cases:
-      # available_groups 读取轻量 Group 元数据；available_types 复用正常扫描观察结果，不额外全量扫 Chunk。
-      - lightweight_filter_options_do_not_trigger_full_group_scan
-      # 例：目标 3 个候选时先按 Group 顺序分预算，再按 KB、文档最大余数分配；同快照重复运行结果相同。
-      - deterministic_hierarchical_quota_and_hash_selection
-      # 无效 Chunk 必须互斥归入 filtered_by_type、empty_text、missing_embedding、invalid_embedding 四类之一。
-      - invalid_counts_use_four_user_facing_reasons
-      # 每个文档和 Group 的 effective/selected 汇总之和必须与顶层 summary 对账一致。
-      - document_and_group_summaries_match_candidates
-      # 有效容量小于 candidate_limit 但大于 0 时返回全部有效候选，并令 shortfall=candidate_limit-selected。
-      - positive_shortfall_returns_partial_candidates
-      # auto_case_count>0 且 effective_count=0 时失败，并提示恢复屏蔽项或调整知识库/筛选参数。
+      # 相同输入重复执行时，Group 优先级与稳定分配必须选出相同 Chunk。
+      - group_priority_and_stable_allocation_produce_deterministic_selected_chunks
+      # 每个 (KB、文档、Group) 的 selected 数量恰好等于冻结 required 配额。
+      - each_document_group_quota_matches_initial_selected_count
+      # 入围项按稳定顺序获得连续编号；未入围项的 selection_index 必须为 null。
+      - selected_chunks_have_contiguous_selection_index_and_others_are_null
+      # 容量不足但非零时仍返回所有有效 Chunk，并准确记录短缺数量。
+      - positive_shortfall_returns_all_effective_chunks_and_records_shortfall
+      # 仍需自动生成且没有任何有效 Chunk 时失败，避免产生不可用的空材料。
       - zero_effective_capacity_fails_when_auto_generation_is_required
-      # 人工屏蔽优先于 Type/正文/Embedding 校验；命中项不得再读取 Embedding，也不得重复计入 invalid_counts。
-      - manual_exclusion_precedes_invalid_classification
-      # 入选候选保留 STEP2 所需完整正文、Embedding、metadata 与原始来源 ID。
-      - candidate_chunks_keep_complete_downstream_payload_and_source_ids
-      # 同一知识库扫描出重复 chunk_id 时失败，避免稳定引用与 Hash 抽样产生歧义。
-      - duplicate_global_chunk_id_error
-      # materializer 只返回规范 output key：{"build_chunk_candidates": payload}。
-      - return_keys_match_outputs
-  imported_only_bypass:
-    # 全部 Case 已导入时验证不访问任何 Chunk 或 Group 接口。
+  manual_selection_update_contract:
     cases:
-      # auto_case_count=0 时返回空 candidates、零值 summary 和可复现 params。
-      - imported_only_skips_kb_scan
+      # 用同文档同规则下的另一个有效 Chunk 替换入围项，不改变有效 Chunk 集合。
+      - replacing_selected_ids_without_changing_effective_snapshot_is_valid
+      # 任一配额组少选、多选或选入该组外 Chunk 时，更新必须被拒绝。
+      - selected_count_must_equal_required_for_every_document_group_quota
+      # update_artifacts 修改 selected 后，只重算 build_chunks 及下游，不执行候选扫描 operation。
+      - direct_candidate_update_invalidates_downstream_without_rerunning_candidate_scan
+      # materializer 返回键必须严格等于 FixedOp 输出键。
+      - return_keys_match_outputs

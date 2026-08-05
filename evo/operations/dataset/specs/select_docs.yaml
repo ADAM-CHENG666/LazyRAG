@@ -1,9 +1,9 @@
-# STEP1 文档选择契约：只负责枚举知识库文档并应用人工屏蔽，不承担 Chunk 配额与抽样。
+# 材料文档发现：文档是否参与扫描是配置，不改变“被发现”的事实。
 operation:
   op_id: dataset.select_docs
   flow: dataset
   stage: select_docs
-  description: 枚举仍需自动生成 Case 的知识库文档，应用人工文档屏蔽，并输出后续 Chunk 扫描范围。
+  description: 枚举已选知识库的全部文档，保留稳定发现顺序并标记是否参与 Chunk 扫描。
 
 fixed_op:
   inputs:
@@ -11,13 +11,7 @@ fixed_op:
       artifact_id: corpus.source_config
       required: true
       partition: unpartitioned
-      mapping: same_partition
-    import_cases_manifest:
-      artifact_id: dataset.import_cases_manifest
-      required: true
-      partition: unpartitioned
     select_docs_params:
-      # STEP1 文档级人工筛选参数；当前代码尚未接入此 Artifact。
       artifact_id: dataset.select_docs_params
       required: true
       partition: unpartitioned
@@ -28,148 +22,80 @@ fixed_op:
 
 materializer:
   function: select_docs
-  return_keys:
-    - selected_docs
+  return_keys: [selected_docs]
 
 input_payload:
   source_config:
     fields:
       kb_ids:
-        # 本轮参与文档枚举的知识库。顺序仅用于稳定输出，不表达业务优先级。
         type: list[string]
         required: true
-        validation:
-          - non_empty
-          - non_empty_after_strip_items
-          - unique_items
-  import_cases_manifest:
-    fields:
-      stats:
-        type: object
-        required: true
-        fields:
-          case_allocation:
-            type: object
-            required: true
-            fields:
-              auto_case_count:
-                # CSV 导入后仍需自动生成的 Case 数；为 0 时无需访问知识库。
-                type: integer
-                required: true
+        validation: [non_empty, non_empty_after_strip_items, unique_items]
   select_docs_params:
     fields:
       excluded_docs:
-        # 用户人工屏蔽的文档稳定引用。使用 kb_id + doc_id，避免跨知识库 ID 歧义。
-        # 屏蔽项保留在参数中，用户可在 STEP1 恢复；不直接修改 selected_docs 输出。
+        # 用户只提交排除项；Service/Core 先校验知识库访问权限。
         type: array
         required: false
         default: []
         validation:
-          - unique_by:
-              - kb_id
-              - doc_id
+          - unique_by: [kb_id, doc_id]
         item:
           type: object
           fields:
-            kb_id:
-              type: string
-              required: true
-            doc_id:
-              type: string
-              required: true
+            kb_id: {type: string, required: true}
+            doc_id: {type: string, required: true}
 
 output_payload:
   selected_docs:
     json_compatible: true
     fields:
-      kb_ids:
-        type: list[string]
-      docs:
-        # 实际进入 Chunk 扫描的文档。
+      documents:
+        # 唯一文档列表；Service 以此列表分页、筛选并展示 included。
         type: array
         item:
           type: object
           fields:
-            kb_id:
-              type: string
-            doc_id:
-              type: string
-            filename:
-              type: string
-            file_type:
-              type: string
-            status:
-              type: string
-      excluded_docs:
-        # 在当前知识库范围内命中的人工屏蔽文档；供详情页查看与恢复。
-        type: array
-        item:
-          type: object
-          fields:
-            kb_id:
-              type: string
-            doc_id:
-              type: string
-            filename:
-              type: string
-            file_type:
-              type: string
-            status:
-              type: string
+            kb_id: {type: string}
+            doc_id: {type: string}
+            filename: {type: string}
+            file_type: {type: string}
+            status: {type: string}
+            included: {type: boolean}
+            discovery_index: {type: integer}
       stats:
-        # 文档选择只保留三个可直接展示的数量，不输出候选配额。
-        type: object
         fields:
-          discovered_count:
-            type: integer
-          selected_count:
-            type: integer
-          excluded_count:
-            type: integer
-      params:
-        # 回显实际生效参数，供复现与 STEP1 调整面板读取。
-        type: object
-        fields:
-          kb_ids:
-            type: list[string]
-          excluded_docs:
-            type: array
+          discovered_count: {type: integer}
+          included_count: {type: integer}
+          excluded_count: {type: integer}
 
 execution_flow:
-  - 读取 source_config.kb_ids、import_cases_manifest.stats.case_allocation.auto_case_count 与 select_docs_params.excluded_docs。
-  - 当 auto_case_count=0 时，不访问知识库，返回空 docs/excluded_docs 与零值统计；静态 Chunk Slot 仍由后续占位逻辑处理。
-  - 否则按 kb_ids 顺序枚举每个知识库的全部文档，并保留知识库内原始文档顺序。
-  - 使用 (kb_id, doc_id) 匹配 excluded_docs；命中项写入 excluded_docs，其余写入 docs。
-  - excluded_docs 中的 kb_id/doc_id 必须去除首尾空白后非空，且 (kb_id, doc_id) 复合键不得重复。
-  - 屏蔽参数中不存在于当前知识库范围的引用不报错，也不计入 excluded_count；参数原值仍在 params 中保留，便于重新加入知识库后继续生效。
-  - 自动生成仍需要 Case 时，如发现文档数为 0，直接失败。
-  - 如发现过文档但全部被人工屏蔽，返回合法空 docs；STEP1 后续以“有效 Chunk 为 0”失败并提示用户恢复文档或调整数据源。
-  - 要求 stats.discovered_count = stats.selected_count + stats.excluded_count；未命中的休眠屏蔽参数不计入 excluded_count。
-  - 返回 {"selected_docs": payload}。
+  - 按 source_config.kb_ids 顺序枚举每个知识库；保持知识库内的原始文档顺序。
+  - 每个文档仅出现一次，按全局顺序写入 discovery_index；使用 (kb_id, doc_id) 判断 included。
+  - excluded_docs 中未命中当前发现集的引用保留在配置中，但不写入 documents、也不影响统计。
+  - 自动生成 Case 为 0 时仍输出文档发现结果；后续 Chunk 扫描节点可依据自动生成数量跳过扫描。
+  - 要求 discovered_count = included_count + excluded_count。
 
 tests:
-  document_selection:
-    # 验证文档枚举、稳定顺序、来源字段与人工屏蔽均只影响本节点的扫描范围。
+  discovery_and_inclusion:
     cases:
-      # 多个知识库按 kb_ids 顺序拼接，同一知识库内保持 discovery 返回的原始文档顺序。
-      - enumerates_all_docs_in_stable_kb_and_document_order
-      # kb_id/doc_id/filename/file_type/status 原样保留，不生成跨知识库替代 ID。
-      - preserves_source_provenance_without_rewriting_ids
-      # 例：屏蔽第二个文档后，docs 为第 1、3 个文档，excluded_docs 为第 2 个，剩余顺序不变。
-      - applies_excluded_doc_refs_without_mutating_discovery_order
-      # 当前知识库中找不到的屏蔽引用保留在 params，但不进入 excluded_docs，也不增加 excluded_count。
-      - keeps_unmatched_exclusions_dormant
-      # 发现过文档但全部被屏蔽时返回合法空 docs，并令 discovered_count=excluded_count、selected_count=0。
-      - all_documents_excluded_returns_empty_selection
-  imported_only_bypass:
-    # CSV 已覆盖全部 Case 时验证轻量旁路，避免无意义的知识库枚举。
+      # 两个 KB 各有多份文档时，输出顺序必须先遵循 kb_ids，再遵循来源返回顺序。
+      - stable_order_is_kb_order_then_source_document_order
+      # discovery_index 从 0 连续递增，不因文档是否入选而跳号或重排。
+      - every_discovered_document_has_one_monotonic_discovery_index
+      # 被排除文档仍在 documents[] 中，只将 included 置为 false。
+      - excluded_document_remains_in_list_with_included_false
+      # 当前发现集外的排除配置不污染列表和统计，保留到其文档再次出现时生效。
+      - unmatched_exclusion_is_dormant_and_does_not_change_counts
+      # 相同 doc_id 位于不同 KB 时是两条独立记录，定位必须使用复合键。
+      - document_identity_is_composite_kb_id_and_doc_id
+  boundary_and_validation:
     cases:
-      # auto_case_count=0 时 discovery 客户端不得被调用，并返回空 docs/excluded_docs 与零值统计。
-      - no_kb_access_when_all_cases_imported
-  validation:
-    # 验证输入参数与空数据边界在进入后续 Chunk 扫描前明确失败。
-    cases:
-      # kb_ids 为空、含空字符串或重复项，以及屏蔽复合键重复时均拒绝执行。
-      - source_and_params_contract_error
-      # 仍需自动生成且知识库实际没有任何文档时失败；“发现过但全部被屏蔽”不在此处失败。
-      - empty_discovery_error
+      # 即使没有自动生成 Case，调整材料页仍可查看并修改文档参与状态。
+      - imported_only_run_still_returns_document_configuration_view
+      # 已选 KB 不含文档时返回空列表与全零统计，不把“没有材料”伪装成请求错误。
+      - empty_discovery_is_a_valid_empty_document_list
+      # KB/文档 ID 为空、含空白或出现重复复合键时拒绝参数。
+      - rejects_empty_duplicate_or_whitespace_document_selection_ids
+      # materializer 返回键必须严格等于 FixedOp 输出键。
+      - return_keys_match_outputs

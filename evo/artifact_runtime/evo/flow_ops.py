@@ -211,7 +211,11 @@ def dataset_evo_ops(spec: DatasetFlowSpec) -> tuple[type[FixedOp], ...]:
 
     class SelectDocs(FixedOp):
         op_id = 'dataset.select_docs'
-        inputs = {'source_config': ArtifactInput(C.CORPUS_SOURCE_CONFIG), 'import_cases_manifest': ArtifactInput(C.DATASET_IMPORT_CASES_MANIFEST)}
+        inputs = {
+            'source_config': ArtifactInput(C.CORPUS_SOURCE_CONFIG),
+            'import_cases_manifest': ArtifactInput(C.DATASET_IMPORT_CASES_MANIFEST),
+            'select_docs_params': ArtifactInput(C.DATASET_SELECT_DOCS_PARAMS),
+        }
         outputs = {'selected_docs': ArtifactOutput(C.DATASET_SELECTED_DOCS)}
 
     class BuildChunks(FixedOp):

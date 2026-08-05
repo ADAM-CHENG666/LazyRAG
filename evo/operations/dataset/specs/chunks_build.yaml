@@ -1,9 +1,9 @@
-# STEP1 Slot 映射契约：仅把已完成筛选的候选稳定写入静态分区，不承载用户筛选逻辑。
+# 将入围 Chunk 映射到运行时分区；有效但未入围的 Chunk 不进入后续算法。
 operation:
   op_id: dataset.build_chunks
   flow: dataset
   stage: build_chunks
-  description: 将自动生成侧的候选 chunk 映射到既有静态 runtime chunk partitions，不足部分输出占位。
+  description: 按 selection_index 将已入围 Chunk 写入 runtime chunk partitions，不足部分输出占位。
 
 fixed_op:
   inputs:
@@ -18,70 +18,43 @@ fixed_op:
 
 materializer:
   function: build_chunks
-  return_keys:
-    - chunk
+  return_keys: [chunk]
 
 input_payload:
   build_chunk_candidates:
     fields:
-      chunks:
-        type: array
-        required: true
-      params:
-        type: object
-        required: true
+      chunks: {type: array, required: true}
 
 output_payload:
   chunk:
     json_compatible: true
     fields:
-      available:
-        # false 表示静态 Slot 的占位，不应触发实体、聚类或 LLM 工作。
-        type: boolean
-      kb_id:
-        # 真实 chunk 所属知识库；不参与 ID 拼接。
-        type: string
-        required: false
-      chunk_id:
-        # Topic 详情关联键；payload chunk_id 与静态 artifact partition 不一定相同。
-        type: string
-      doc_id:
-        # Chunk 来源文档标识。
-        type: string
-      filename:
-        # Chunk 详情中面向用户展示的来源文件名。
-        type: string
-      group:
-        # Chunk 详情中展示的业务分组。
-        type: string
-      type:
-        type: string
-      text:
-        # Chunk 正文；仅在用户点击 Chunk 详情时读取。
-        type: string
-      embedding:
-        # 算法输入，STEP2 页面不读取或展示。
-        type: object
-      metadata:
-        # 原始扩展信息，第一版 STEP2 页面不读取。
-        type: object
+      available: {type: boolean}
+      kb_id: {type: string, required: false}
+      chunk_id: {type: string}
+      doc_id: {type: string}
+      filename: {type: string}
+      group: {type: string}
+      type: {type: string}
+      text: {type: string}
+      embedding: {type: object}
+      metadata: {type: object}
 
 execution_flow:
-  - 读取已完成 Group、Type、文档与 Chunk 屏蔽筛选的 build_chunk_candidates，并按 runtime output partition 的稳定 index 选择当前 Slot。
-  - index 小于候选数量时，输出 available=true 的真实 chunk，原样保留 kb_id、chunk_id、doc_id 和正文。
-  - index 超过候选数量时，输出 available=false 的空占位 Chunk；静态 partition 数量不因 CSV 导入而变化。
-  - 当没有自动生成侧候选（例如全部 case 均已导入）时，全部静态 slots 都必须输出 available=false，占位不会触发后续 LLM 调用。
-  - 返回仅包含当前 partition slot 的 {"chunk": payload}。
+  - 只消费 selected=true 的 Chunk，并按 selection_index 升序映射到稳定 runtime partition。
+  - 未入围有效 Chunk 不进入后续实体、聚类或生成流程。
+  - 没有对应入围项的 partition 输出 available=false 占位。
 
 tests:
-  static_partition_mapping:
-    # CSV 只缩减真实自动生成材料，不改变 DAG 静态声明的 chunk slot 数量。
+  partition_mapping:
     cases:
-      # 真实候选按稳定 partition index 映射，并保留 kb_id/doc_id/chunk_id、group/type 与正文/Embedding 原值。
-      - maps_candidates_with_source_provenance
-      # 例：静态声明 6 个 Slot、只有 4 个候选时，前 4 个可用，后 2 个为 available=false 占位。
-      - insufficient_chunks_placeholder
-      # import_case_count=target_case_count 时没有自动生成候选，所有 slots 均为占位。
-      - all_imported_cases_produce_only_placeholders
-      # materializer 只返回规范 output key：{"chunk": payload}，不得泄漏候选集合或中间统计。
+      # 仅 selected=true 的 Chunk 按 selection_index 升序进入对应 runtime partition。
+      - maps_only_selected_chunks_in_selection_index_order
+      # 有效但未入围的 Chunk 不得泄漏到实体提取、主题发现或生成输入。
+      - effective_but_unselected_chunks_never_reach_runtime_partitions
+      # 入围 Chunk 少于静态 partition 数时，剩余 partition 必须输出 available=false。
+      - insufficient_selected_chunks_produce_placeholders
+      # 映射后的真实 Slot 必须逐字段保留来源、正文、向量与 metadata。
+      - selected_payload_preserves_source_text_embedding_and_metadata
+      # materializer 返回键必须严格等于 FixedOp 输出键。
       - return_keys_match_outputs
