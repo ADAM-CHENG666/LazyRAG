@@ -792,17 +792,25 @@ async def _handle_chat_impl(
         ]))
         skill_config = selected_skills or False
     set_trace_context({
-        'trace_id': conversation.session_id,
-        'session_id': conversation.session_id,
-        'sampled': True,
-        'module_trace': {'default': True},
+        'trace_id': conversation.session_id, 'session_id': conversation.session_id, 'sampled': True,
+        'module_trace': {
+            'by_class': {
+                'FunctionCall': False, 'ToolManager': False,
+                'Pipeline': False, 'Diverter': False,
+            },
+            'by_name': {
+                '_build_history': False, '_post_action': False, '_safe_call': False,
+            },
+        },
         'request_tags': ['handle_chat'],
-        'task_profile_source': task_profile.source if task_profile else 'disabled',
-        'task_profile': task_profile.to_trace_dict() if task_profile else {},
-        'router_latency_ms': task_profile.router_latency_ms if task_profile else 0,
-        'router_error': task_profile.router_error if task_profile else '',
-        'prompt_modules': selected_prompt_modules(task_profile) if task_profile else [],
-        'skills_exposed': list(selected_skills or []),
+        'trace_metadata': {
+            'task_profile_source': task_profile.source if task_profile else 'disabled',
+            'task_profile': task_profile.to_trace_dict() if task_profile else {},
+            'router_latency_ms': task_profile.router_latency_ms if task_profile else 0,
+            'router_error': task_profile.router_error if task_profile else '',
+            'prompt_modules': selected_prompt_modules(task_profile) if task_profile else [],
+            'skills_exposed': list(selected_skills or []),
+        },
     })
     episode_store = None
     episode_candidates = []
