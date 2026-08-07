@@ -21,8 +21,8 @@ import {
 } from "@/api/generated/chatbot-client";
 import { AgentAppsAuth } from "@/components/auth";
 import { ChatServiceApi, decideToolLimit } from "@/modules/chat/utils/request";
-import { usePluginStore } from "@/modules/chat/store/pluginPanel";
-import { PluginPanel } from "@/modules/chat/components/PluginPanel";
+import { useWorkflowStore } from "@/modules/chat/store/workflowPanel";
+import { WorkflowPanel } from "@/modules/chat/components/WorkflowPanel";
 import MultiAnswerDisplay, { type PreferenceType } from "../MultiAnswerDisplay";
 import FeedbackModal from "../FeedbackModal";
 import AskCard from "@/modules/chat/components/AskCard";
@@ -220,8 +220,8 @@ const AssistantMessage = (props: any) => {
     targetHistoryId: undefined,
   });
 
-  const loadActiveSession = usePluginStore((s) => s.loadActiveSession);
-  // Eagerly load the plugin session so the panel appears without waiting for component mount.
+  const loadActiveSession = useWorkflowStore((s) => s.loadActiveSession);
+  // Eagerly load the workflow session so the panel appears without waiting for component mount.
   const isLast = index === length - 1;
   useEffect(() => {
     if (isLast && sessionId) {
@@ -229,7 +229,7 @@ const AssistantMessage = (props: any) => {
     }
   }, [isLast, sessionId, loadActiveSession]);
 
-  const pluginSession = usePluginStore((s) =>
+  const workflowSession = useWorkflowStore((s) =>
     sessionId ? s.sessionByConversation[sessionId] ?? null : null,
   );
 
@@ -923,7 +923,7 @@ const AssistantMessage = (props: any) => {
     // Render ask_pending card if present
     if (item.ask_pending) {
       const askPending = item.ask_pending;
-      const isReadOnly = !!item.is_history || !!item.ask_answered;
+      const isReadOnly = !!item.ask_answered;
       return (
         <AskCard
           key={askPending.ask_id}
@@ -1074,8 +1074,8 @@ const AssistantMessage = (props: any) => {
             />
           </div>
           {(item.ask_pending || index === length - 1) && renderBottom()}
-          {index === length - 1 && pluginSession && sessionId && (
-            <PluginPanel
+          {index === length - 1 && workflowSession && sessionId && (
+            <WorkflowPanel
               key={sessionId}
               conversationId={sessionId}
               onSendMessage={(text) => props.sendMessage?.(text)}
@@ -1127,8 +1127,8 @@ const AssistantMessage = (props: any) => {
             renderFooter()}
         </div>
         {(item.ask_pending || index === length - 1) && renderBottom()}
-        {index === length - 1 && pluginSession && sessionId && (
-          <PluginPanel
+        {index === length - 1 && workflowSession && sessionId && (
+          <WorkflowPanel
             key={sessionId}
             conversationId={sessionId}
             onSendMessage={(text) => props.sendMessage?.(text)}

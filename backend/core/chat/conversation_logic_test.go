@@ -123,9 +123,9 @@ func TestBuildLazyChatRequestIncludesConversationIntent(t *testing.T) {
 	}
 }
 
-func TestPluginStepParamsFromEventParamsPreservesChatSessionID(t *testing.T) {
-	params := pluginStepParamsFromEventParams(map[string]any{
-		"plugin_id":              "writer-plugin",
+func TestWorkflowStepParamsFromEventParamsPreservesChatSessionID(t *testing.T) {
+	params := workflowStepParamsFromEventParams(map[string]any{
+		"workflow_id":            "writer-workflow",
 		"step_id":                "generate_outline",
 		"session_id":             "ps-1",
 		"chat_session_id":        "conv-1_123",
@@ -138,7 +138,7 @@ func TestPluginStepParamsFromEventParamsPreservesChatSessionID(t *testing.T) {
 		"user_id":                "user-1",
 	})
 
-	if params.PluginID != "writer-plugin" || params.StepID != "generate_outline" || params.SessionID != "ps-1" {
+	if params.WorkflowID != "writer-workflow" || params.StepID != "generate_outline" || params.SessionID != "ps-1" {
 		t.Fatalf("unexpected basic params: %+v", params)
 	}
 	if params.ChatSessionID != "conv-1_123" {
@@ -870,10 +870,10 @@ func TestBuildLazyChatRequestMapsAllFields(t *testing.T) {
 			},
 		},
 		"has_subagents":   true,
-		"enable_plugin":   true,
+		"enable_workflow": true,
 		"enable_subagent": false,
-		"plugin_context": map[string]any{
-			"session_id": "plugin-session-1",
+		"workflow_context": map[string]any{
+			"session_id": "workflow-session-1",
 		},
 	})
 
@@ -938,8 +938,8 @@ func TestBuildLazyChatRequestMapsAllFields(t *testing.T) {
 	if len(req.Runtime.MCPConfig) != 1 {
 		t.Fatalf("expected mcp_config to be forwarded, got %#v", req.Runtime.MCPConfig)
 	}
-	if req.Plugin.EnablePlugin == nil || !*req.Plugin.EnablePlugin || req.Plugin.PluginContext["session_id"] != "plugin-session-1" {
-		t.Fatalf("unexpected plugin options: %#v", req.Plugin)
+	if req.Workflow.EnableWorkflow == nil || !*req.Workflow.EnableWorkflow || req.Workflow.WorkflowContext["session_id"] != "workflow-session-1" {
+		t.Fatalf("unexpected workflow options: %#v", req.Workflow)
 	}
 
 	payload, err := json.Marshal(req)
@@ -950,12 +950,12 @@ func TestBuildLazyChatRequestMapsAllFields(t *testing.T) {
 	if err := json.Unmarshal(payload, &raw); err != nil {
 		t.Fatalf("unmarshal request: %v", err)
 	}
-	for _, key := range []string{"message", "conversation", "retrieval", "runtime", "personalization", "agent", "plugin"} {
+	for _, key := range []string{"message", "conversation", "retrieval", "runtime", "personalization", "agent", "workflow"} {
 		if _, ok := raw[key]; !ok {
 			t.Fatalf("expected grouped key %q in payload: %s", key, payload)
 		}
 	}
-	for _, key := range []string{"query", "history", "session_id", "filters", "llm_config", "plugin_context", "enable_thinking"} {
+	for _, key := range []string{"query", "history", "session_id", "filters", "llm_config", "workflow_context", "enable_thinking"} {
 		if _, ok := raw[key]; ok {
 			t.Fatalf("unexpected top-level key %q in payload: %s", key, payload)
 		}
@@ -1064,24 +1064,24 @@ func TestFeedBackChatHistoryCancelsFeedback(t *testing.T) {
 	}
 }
 
-func TestPluginModeFromReqBody(t *testing.T) {
+func TestWorkflowModeFromReqBody(t *testing.T) {
 	tests := []struct {
 		name string
 		body map[string]any
 		want string
 	}{
 		{
-			name: "plugin_context auto wins",
+			name: "workflow_context auto wins",
 			body: map[string]any{
-				"plugin_context": map[string]any{"plugin_mode": "auto"},
-				"agentic_config": map[string]any{"plugin_mode": "dynamic"},
+				"workflow_context": map[string]any{"workflow_mode": "auto"},
+				"agentic_config":   map[string]any{"workflow_mode": "dynamic"},
 			},
 			want: "auto",
 		},
 		{
 			name: "agentic_config fallback",
 			body: map[string]any{
-				"agentic_config": map[string]any{"plugin_mode": "auto"},
+				"agentic_config": map[string]any{"workflow_mode": "auto"},
 			},
 			want: "auto",
 		},
@@ -1093,29 +1093,42 @@ func TestPluginModeFromReqBody(t *testing.T) {
 		{
 			name: "invalid value defaults to dynamic",
 			body: map[string]any{
-				"plugin_context": map[string]any{"plugin_mode": "invalid"},
+				"workflow_context": map[string]any{"workflow_mode": "invalid"},
 			},
 			want: "dynamic",
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := pluginModeFromReqBody(tc.body); got != tc.want {
-				t.Fatalf("pluginModeFromReqBody() = %q, want %q", got, tc.want)
+			if got := workflowModeFromReqBody(tc.body); got != tc.want {
+				t.Fatalf("workflowModeFromReqBody() = %q, want %q", got, tc.want)
 			}
 		})
 	}
 }
 
-func TestResolvePluginModeWithFallback(t *testing.T) {
-	raw := map[string]any{"plugin_mode": "auto"}
+func TestResolveWorkflowModeWithFallback(t *testing.T) {
+	raw := map[string]any{"workflow_mode": "auto"}
 	reqBody := map[string]any{
-		"agentic_config": map[string]any{"plugin_mode": "dynamic"},
+		"agentic_config": map[string]any{"workflow_mode": "dynamic"},
 	}
-	if got := resolvePluginModeWithFallback(raw, reqBody); got != "auto" {
+	if got := resolveWorkflowModeWithFallback(raw, reqBody); got != "auto" {
 		t.Fatalf("expected raw body to win, got %q", got)
 	}
-	if got := resolvePluginModeWithFallback(map[string]any{}, reqBody); got != "dynamic" {
+	if got := resolveWorkflowModeWithFallback(map[string]any{}, reqBody); got != "dynamic" {
 		t.Fatalf("expected agentic_config fallback, got %q", got)
+	}
+}
+
+func TestUserExplicitlyRequestedWorkflowRetry(t *testing.T) {
+	for _, query := range []string{"重试", "帮我重试这个失败步骤", "retry the failed step", "try again"} {
+		if !userExplicitlyRequestedWorkflowRetry(query) {
+			t.Errorf("expected explicit retry for %q", query)
+		}
+	}
+	for _, query := range []string{"继续", "不要重试", "do not retry", "分析为什么重试失败"} {
+		if userExplicitlyRequestedWorkflowRetry(query) {
+			t.Errorf("unexpected retry authorization for %q", query)
+		}
 	}
 }
