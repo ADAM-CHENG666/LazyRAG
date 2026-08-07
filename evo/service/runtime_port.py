@@ -13,11 +13,6 @@ from evo.artifact_runtime.evo.adapter import build_evo_artifact_adapter
 from evo.artifact_runtime.evo.flow import EvoFlowSpec
 from evo.artifact_runtime.evo.flow_ops import default_evo_ops
 from evo.artifact_runtime.kernel import ArtifactKey, ArtifactRef, ConcurrencyLimits, SQLiteArtifactStore
-from evo.operations.abtest import abtest_materializers
-from evo.operations.analysis import analysis_materializers
-from evo.operations.dataset import dataset_materializers
-from evo.operations.eval import eval_materializers
-from evo.operations.repair import repair_materializers
 
 CONFIG_ARTIFACTS = {
     'run_config': C.RUN_CONFIG,
@@ -55,6 +50,12 @@ class RuntimePort:
         return EvoFlowSpec(EvoFlowSpec.case_ids(num_case))
 
     def adapter(self, num_case: int):
+        from evo.operations.abtest import abtest_materializers
+        from evo.operations.analysis import analysis_materializers
+        from evo.operations.dataset import dataset_materializers
+        from evo.operations.eval import eval_materializers
+        from evo.operations.repair import repair_materializers
+
         spec = self.spec(num_case)
         store = self.store()
         return build_evo_artifact_adapter(
@@ -125,9 +126,22 @@ class RuntimePort:
             store.close()
 
     def run_config(self, run_id: str) -> Mapping[str, Any] | None:
+        return self._mapping_artifact(run_id, C.RUN_CONFIG)
+
+    def source_config(self, run_id: str) -> Mapping[str, Any] | None:
+        return self._mapping_artifact(run_id, C.CORPUS_SOURCE_CONFIG)
+
+    def target_case_count(self, run_id: str) -> int:
+        source_config = self.source_config(run_id)
+        value = None if source_config is None else source_config.get('target_case_count')
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ValueError('source_config.target_case_count must be a positive integer')
+        return value
+
+    def _mapping_artifact(self, run_id: str, artifact_id: str) -> Mapping[str, Any] | None:
         store = self.store()
         try:
-            ref = store.effective_artifacts(run_id).get(ArtifactKey.of(C.RUN_CONFIG))
+            ref = store.effective_artifacts(run_id).get(ArtifactKey.of(artifact_id))
             record = store.get(run_id, ref) if ref is not None else None
             return record.value if record is not None and isinstance(record.value, Mapping) else None
         finally:

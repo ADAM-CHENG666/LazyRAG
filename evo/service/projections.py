@@ -113,9 +113,9 @@ class ProjectionService:
         return target
 
     def steps(self, thread_id: str) -> dict[str, Any]:
-        config = self._require_thread(thread_id)
+        self._require_thread(thread_id)
         state = self.runtime.gate_state(thread_id)
-        snapshot = self.runtime.query(_num_case(config)).snapshot(thread_id)
+        snapshot = self.runtime.query(self._case_count(thread_id)).snapshot(thread_id)
         store = self.runtime.store()
         try:
             effective = store.effective_artifacts(thread_id)
@@ -134,13 +134,13 @@ class ProjectionService:
         }
 
     def events(self, thread_id: str, step_id: str = '', after_event_id: str = '') -> dict[str, Any]:
-        config = self._require_thread(thread_id)
+        self._require_thread(thread_id)
         store = self.runtime.store()
         try:
             effective = store.effective_artifacts(thread_id)
             rows = _source_event_rows(thread_id, store, effective)
             state = self.runtime.gate_state(thread_id)
-            snapshot = self.runtime.query(_num_case(config)).snapshot(thread_id)
+            snapshot = self.runtime.query(self._case_count(thread_id)).snapshot(thread_id)
             boundary_status, _ = _gate_boundary(state.status)
             boundary_step = _gate_boundary_step(state, snapshot.checkpoint.current_step, boundary_status)
             step_items = _step_items(
@@ -161,7 +161,7 @@ class ProjectionService:
             items = _display_events(
                 thread_id,
                 [row for row in _visible_rows(rows) if not step_id or row['step_id'] == step_id],
-                _num_case(config),
+                self._case_count(thread_id),
                 state,
                 boundary_step,
                 gate_step_id,
@@ -181,7 +181,7 @@ class ProjectionService:
         }
 
     def event_trace(self, thread_id: str, step_id: str, after_event_id: str = '') -> dict[str, Any]:
-        config = self._require_thread(thread_id)
+        self._require_thread(thread_id)
         step_id = _normalized_step_id(step_id)
         if not step_id:
             raise HTTPException(422, 'step_id is required')
@@ -193,7 +193,7 @@ class ProjectionService:
             visible = _visible_rows(rows)
             stages = {row['stage'] for row in visible if row['step_id'] == step_id}
             state = self.runtime.gate_state(thread_id)
-            snapshot = self.runtime.query(_num_case(config)).snapshot(thread_id)
+            snapshot = self.runtime.query(self._case_count(thread_id)).snapshot(thread_id)
             boundary_status, _ = _gate_boundary(state.status)
             boundary_step = _gate_boundary_step(state, snapshot.checkpoint.current_step, boundary_status)
             step_items = _step_items(
@@ -339,6 +339,12 @@ class ProjectionService:
         if config is None:
             raise HTTPException(404, f'thread not found: {thread_id}')
         return config
+
+    def _case_count(self, thread_id: str) -> int:
+        try:
+            return self.runtime.target_case_count(thread_id)
+        except ValueError as exc:
+            raise HTTPException(500, str(exc)) from exc
 
 
 def public_value(value: object) -> object:
@@ -1276,10 +1282,6 @@ def _clean_empty(item: dict[str, Any]) -> dict[str, Any]:
         if key != 'next_step_id' and item[key] in ({}, [], None):
             del item[key]
     return item
-
-
-def _num_case(config: Mapping[str, Any]) -> int:
-    return int(config.get('num_case') or (config.get('inputs') or {}).get('num_case') or 0)
 
 
 def _parse_candidate_id(candidate_id: str) -> tuple[str, str, int]:

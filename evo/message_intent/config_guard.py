@@ -14,9 +14,9 @@ from .schemas import ConfigValidationIssue, PlannedAction
 
 HTTP_URL = TypeAdapter(AnyHttpUrl)
 SPEC = {
-    'run_config': (['thread_id', 'mode', 'num_case', 'inputs', 'llm_config'],
-                   {'thread_id', 'mode', 'title', 'num_case', 'inputs', 'llm_config'}),
-    'source_config': ([], {'kb_id', 'csv_data', 'target_case_count', 'min_case_count'}),
+    'run_config': (['thread_id', 'mode', 'llm_config'],
+                   {'thread_id', 'mode', 'title', 'llm_config'}),
+    'source_config': (['target_case_count'], {'kb_id', 'csv_data', 'target_case_count'}),
     'target_config': (['router_chat_url', 'router_admin_url', 'algorithm_id', 'llm_config'],
                       {'router_chat_url', 'router_admin_url', 'algorithm_id', 'llm_config',
                        'case_deadline_seconds', 'first_frame_timeout_seconds',
@@ -86,20 +86,16 @@ def _semantic_issues(thread_id: str, target: str, value: object) -> list[ConfigV
     if target == 'run_config' and value.get('thread_id') != thread_id:
         issues.append(_issue('/thread_id', 'immutable_field', 'run_config.thread_id is immutable'))
     if target == 'run_config':
-        if not isinstance(value.get('num_case'), int) or value.get('num_case') < 1:
-            issues.append(_issue('/num_case', 'out_of_range', 'run_config.num_case must be a positive integer'))
-        if not isinstance(value.get('inputs'), Mapping):
-            issues.append(_issue('/inputs', 'invalid_type', 'run_config.inputs must be an object'))
         if not isinstance(value.get('llm_config'), Mapping):
             issues.append(_issue('/llm_config', 'invalid_type', 'run_config.llm_config must be an object'))
     if target == 'source_config':
         if not value.get('kb_id') and not value.get('csv_data'):
             issues.append(_issue('/', 'missing_required', 'source_config requires kb_id or csv_data'))
-        if value.get('csv_data'):
-            count = value.get('min_case_count')
-            if not isinstance(count, int) or count < 100:
-                code = 'out_of_range' if isinstance(count, int) else 'invalid_type'
-                issues.append(_issue('/min_case_count', code, 'CSV source min_case_count must be integer >= 100'))
+        count = value.get('target_case_count')
+        if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+            code = 'out_of_range' if isinstance(count, int) and not isinstance(count, bool) else 'invalid_type'
+            issues.append(_issue('/target_case_count', code,
+                                 'source_config.target_case_count must be a positive integer'))
     if target in {'target_config', 'candidate_config'}:
         issues += (
             _url_issue('/router_chat_url', value.get('router_chat_url'))

@@ -28,7 +28,7 @@ def load_corpus(source_config: Mapping[str, Any], case_ids: Iterable[str] | None
     partitions = None if case_ids is None else tuple(case_id for case_id in case_ids if as_text(case_id))
     imported = _imported_cases(source_config)
     cases, warnings, has_csv = imported['cases'], imported['warnings'], imported['has_csv']
-    raw_target = source_config.get('min_case_count') or source_config.get('target_case_count')
+    raw_target = source_config.get('target_case_count')
     target = int(raw_target) if raw_target not in (None, '') else (
         DEFAULT_MIN_CASE_COUNT if has_csv else len(partitions or ()) or 1
     )
@@ -49,7 +49,7 @@ def load_corpus(source_config: Mapping[str, Any], case_ids: Iterable[str] | None
         warnings = [*warnings, warning('csv_supplemented', f'supplementing cases to {target}')]
     return {'dataset_id': dataset_id, 'mode': mode, 'source_units': units, 'cases': cases, 'warnings': warnings,
             'case_provenance': [case_source(case) for case in cases],
-            'stats': {'case_count': len(cases), 'min_case_count': target, 'source_unit_count': len(units)}}
+            'stats': {'case_count': len(cases), 'target_case_count': target, 'source_unit_count': len(units)}}
 
 
 def build_corpus_snapshot(report: Mapping[str, Any], source_config: Mapping[str, Any]) -> dict[str, Any]:
@@ -240,7 +240,8 @@ def _direct_kb_units(config: Mapping[str, Any]) -> list[dict[str, Any]]:
     for item in config.get('documents') or ():
         if isinstance(item, Mapping) and not as_text(item.get('content') or item.get('text')):
             doc_ids.append(as_text(item.get('doc_id')))
-    if not kb_id: return []
+    if not kb_id:
+        return []
     units, kb_doc = [], _document_client()
     for doc_id in (tuple(dict.fromkeys(item for item in doc_ids if item)) or ('',)):
         for group in KB_GROUPS:

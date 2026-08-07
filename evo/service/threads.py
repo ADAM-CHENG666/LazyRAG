@@ -87,7 +87,7 @@ class ThreadService:
 
     def public_thread(self, thread_id: str, *, include_inputs: bool = True) -> dict[str, Any]:
         config = self._config(thread_id)
-        status = self._status(thread_id, config)
+        status = self._status(thread_id)
         item = {
             'thread_id': thread_id,
             'mode': str(config.get('mode') or ''),
@@ -101,7 +101,7 @@ class ThreadService:
             'last_error': status['last_error'],
         }
         if include_inputs:
-            item['inputs'] = config.get('inputs') or {}
+            item['inputs'] = self._public_inputs(thread_id)
             item['retryable'] = status['status'] == 'failed'
         return item
 
@@ -136,7 +136,7 @@ class ThreadService:
             thread_id,
             command_id,
             schedule,
-            lambda: self.runtime.flow(_num_case(config)).handle(thread_id, ContinueFlow(command_id, until)),
+            lambda: self.runtime.flow(self._case_count(thread_id)).handle(thread_id, ContinueFlow(command_id, until)),
         )
 
     def continue_thread(
@@ -159,7 +159,7 @@ class ThreadService:
             self._active.add(thread_id)
 
         def run() -> None:
-            flow = self.runtime.flow(_num_case(config))
+            flow = self.runtime.flow(self._case_count(thread_id))
             if self.runtime.gate_state(thread_id).status == 'paused':
                 flow.handle(thread_id, ResumeFlow(f'{command_id}:resume'))
             flow.handle(thread_id, ContinueFlow(f'{command_id}:continue', until))
@@ -182,7 +182,7 @@ class ThreadService:
             self._active.add(thread_id)
 
         def run() -> None:
-            flow = self.runtime.flow(_num_case(config))
+            flow = self.runtime.flow(self._case_count(thread_id))
             flow.handle(thread_id, RetryFlow(f'{command_id}:retry'))
             flow.handle(thread_id, ContinueFlow(f'{command_id}:continue', until))
 
@@ -194,7 +194,7 @@ class ThreadService:
             if not any(item.completed for item in snapshot.progress) and thread_id not in self._active:
                 raise HTTPException(409, 'thread has not been started')
             command_id = _command_id(payload, 'pause', thread_id)
-            result = self.runtime.flow(_num_case(config)).handle(thread_id, PauseFlow(command_id))
+            result = self.runtime.flow(self._case_count(thread_id)).handle(thread_id, PauseFlow(command_id))
         if result.command_status == 'conflict':
             raise HTTPException(409, 'command_id conflict')
         if result.command_status == 'failed':
@@ -203,9 +203,9 @@ class ThreadService:
 
     def cancel(self, thread_id: str, payload: Mapping[str, Any]) -> dict[str, str]:
         with self._lock:
-            config = self._config(thread_id)
+            self._config(thread_id)
             command_id = _command_id(payload, 'cancel', thread_id)
-            result = self.runtime.flow(_num_case(config)).handle(thread_id, CancelFlow(command_id))
+            result = self.runtime.flow(self._case_count(thread_id)).handle(thread_id, CancelFlow(command_id))
         if result.command_status == 'conflict':
             raise HTTPException(409, 'command_id conflict')
         if result.command_status == 'failed':
@@ -218,7 +218,7 @@ class ThreadService:
                 raise HTTPException(409, 'thread already has an active command')
             self._active.add(thread_id)
         try:
-            return self.runtime.flow(_num_case(config)).handle(thread_id, command)
+            return self.runtime.flow(self._case_count(thread_id)).handle(thread_id, command)
         finally:
             with self._lock:
                 self._active.discard(thread_id)
@@ -231,7 +231,7 @@ class ThreadService:
         schedule: Callable[[Callable[[], None]], None],
     ):
         if isinstance(command, ContinueFlow):
-            snapshot = self.runtime.query(_num_case(config)).snapshot(thread_id)
+            snapshot = self.runtime.query(self._case_count(thread_id)).snapshot(thread_id)
             payload = {'command_id': command.command_id, 'until_step': command.until_step}
             if not any(item.completed for item in snapshot.progress) and snapshot.status != 'paused':
                 return self.start(thread_id, payload, schedule)
@@ -258,13 +258,13 @@ class ThreadService:
         with self._lock:
             if thread_id in self._active:
                 raise HTTPException(409, 'thread already has an active command')
-            snapshot = self.runtime.query(_num_case(config)).snapshot(thread_id)
+            snapshot = self.runtime.query(self._case_count(thread_id)).snapshot(thread_id)
             if snapshot.status == 'cancelled':
                 raise HTTPException(409, 'cancelled thread cannot be executed')
             self._active.add(thread_id)
 
         def run() -> None:
-            flow = self.runtime.flow(_num_case(config))
+            flow = self.runtime.flow(self._case_count(thread_id))
             result = flow.handle(thread_id, command)
             if result.command_status == 'ok':
                 flow.handle(thread_id, ContinueFlow(f'{command.command_id}:continue'))
@@ -279,11 +279,33 @@ class ThreadService:
             raise HTTPException(404, f'thread not found: {thread_id}')
         return config
 
+    def _case_count(self, thread_id: str) -> int:
+        try:
+            return self.runtime.target_case_count(thread_id)
+        except ValueError as exc:
+            raise HTTPException(500, str(exc)) from exc
+
+    def _public_inputs(self, thread_id: str) -> dict[str, Any]:
+        source_config = self.runtime.source_config(thread_id)
+        target_config = self.runtime.config_artifact(thread_id, 'target_config')
+        target = target_config[1] if target_config is not None and isinstance(target_config[1], Mapping) else {}
+        if source_config is None:
+            raise HTTPException(500, 'source_config is unavailable')
+        return {
+            'kb_id': list(source_config.get('kb_id') or []),
+            'csv_data': list(source_config.get('csv_data') or []),
+            'num_case': self._case_count(thread_id),
+            'router_chat_url': str(target.get('router_chat_url') or ''),
+            'router_admin_url': str(target.get('router_admin_url') or ''),
+            'algorithm_id': str(target.get('algorithm_id') or ''),
+            'case_deadline_seconds': target.get('case_deadline_seconds'),
+        }
+
     def _ready_locked(self, thread_id: str, *, allow_active: bool = False):
         if not allow_active and thread_id in self._active:
             raise HTTPException(409, 'thread already has an active command')
         config = self._config(thread_id)
-        snapshot = self.runtime.query(_num_case(config)).snapshot(thread_id)
+        snapshot = self.runtime.query(self._case_count(thread_id)).snapshot(thread_id)
         if snapshot.status == 'cancelled':
             raise HTTPException(409, 'cancelled thread cannot be executed')
         return config, snapshot
@@ -310,8 +332,8 @@ class ThreadService:
             with self._lock:
                 self._active.discard(thread_id)
 
-    def _status(self, thread_id: str, config: Mapping[str, Any]) -> dict[str, str]:
-        snapshot = self.runtime.query(_num_case(config)).snapshot(thread_id)
+    def _status(self, thread_id: str) -> dict[str, str]:
+        snapshot = self.runtime.query(self._case_count(thread_id)).snapshot(thread_id)
         gate = self.runtime.gate_state(thread_id)
         progress = list(snapshot.progress)
         if thread_id in self._active:
@@ -426,11 +448,9 @@ def _seed(thread_id: str, mode: str, title: str, inputs: Mapping[str, Any], llm_
         'first_frame_timeout_seconds': CHAT_FIRST_FRAME_TIMEOUT_SECONDS,
     }
     return {
-        'run_config': {'thread_id': thread_id, 'mode': mode, 'title': title, 'inputs': dict(inputs),
-                       'num_case': inputs['num_case'], 'llm_config': dict(llm_config)},
+        'run_config': {'thread_id': thread_id, 'mode': mode, 'title': title, 'llm_config': dict(llm_config)},
         'source_config': {'kb_id': inputs['kb_id'], 'csv_data': inputs['csv_data'],
-                          'target_case_count': inputs['num_case'],
-                          'min_case_count': inputs['num_case']},
+                          'target_case_count': inputs['num_case']},
         'target_config': target_config,
         'eval_policy': {'judge_llm_config': dict(llm_config)},
         'repair_policy': {'llm_config': dict(llm_config), 'thread_id': thread_id,
@@ -454,10 +474,6 @@ def _mutation_should_continue(command: ApplyArtifactMutation) -> bool:
 def _validate_step(step: str) -> None:
     if step and step not in STEPS:
         raise HTTPException(422, 'until_step must be dataset, eval, analysis, repair, or abtest')
-
-
-def _num_case(config: Mapping[str, Any]) -> int:
-    return int(config.get('num_case') or (config.get('inputs') or {}).get('num_case') or 0)
 
 
 def _digest(value: object) -> str:

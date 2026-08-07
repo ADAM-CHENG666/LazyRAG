@@ -103,7 +103,7 @@ class _Turn:
         return self._dispatch(compiled, config, projection, context, plan.assistant_text)
 
     def _observe(self, config: Mapping[str, Any]):
-        num_case = _num_case(config)
+        num_case = self._case_count()
         snapshot = self.runtime.query(num_case).snapshot(self.thread_id)
         flow_snapshot = {
             'status': snapshot.status,
@@ -161,7 +161,7 @@ class _Turn:
 
     def _compile(self, action: PlannedAction, config: Mapping[str, Any],
                  source_message_id: str = '') -> dict[str, Any]:
-        num_case = _num_case(config)
+        num_case = self._case_count()
         spec = self.runtime.spec(num_case)
         source = source_message_id or self.message_id
         command_id = f'msgi:{self.thread_id}:{source}:{_hash(action.model_dump())[:24]}'
@@ -277,7 +277,7 @@ class _Turn:
                 'status_code': getattr(exc, 'status_code', 0),
                 'error': detail,
             })
-            obs = self._blob('observation', _safe(self.runtime.query(_num_case(config)).snapshot(self.thread_id)))
+            obs = self._blob('observation', _safe(self.runtime.query(self._case_count()).snapshot(self.thread_id)))
             projection.update({'last_observation_ref': obs.model_dump()})
             return self._finish('needs_input', f'操作未提交: {detail}', projection, command_id=command_id,
                                 observation_ref=obs, action_receipt_ref=receipt)
@@ -293,13 +293,13 @@ class _Turn:
         else:
             text = f'操作未完成: {getattr(result, "error", "")}'
         receipt = self._blob('action_receipt', _safe(result))
-        obs = self._blob('observation', _safe(self.runtime.query(_num_case(config)).snapshot(self.thread_id)))
+        obs = self._blob('observation', _safe(self.runtime.query(self._case_count()).snapshot(self.thread_id)))
         projection.update({'last_observation_ref': obs.model_dump()})
         return self._finish(decision, text, projection, command_id=command_id,
                             observation_ref=obs, action_receipt_ref=receipt)
 
     def _read(self, config: Mapping[str, Any], compiled: Mapping[str, Any]) -> Any:
-        query = self.runtime.query(_num_case(config))
+        query = self.runtime.query(self._case_count())
         payload = compiled['payload']
         if payload['query'] == 'progress_snapshot':
             return query.snapshot(self.thread_id)
@@ -331,6 +331,9 @@ class _Turn:
                                         payload.get('value'), command_id)
             command = F.ApplyArtifactMutation(command_id, action)
         return self.flow_runner(self.thread_id, config, command)
+
+    def _case_count(self) -> int:
+        return self.runtime.target_case_count(self.thread_id)
 
     def _clarify_or_final(self, action: PlannedAction, plan: Any,
                           projection: dict[str, Any]) -> MessageTurnResult:
@@ -377,10 +380,6 @@ def _artifact_ref(value: Any) -> ArtifactRef:
 
 def _ref_json(ref: ArtifactRef) -> list[object]:
     return [ref.key.artifact_id, ref.key.partition, ref.version]
-
-
-def _num_case(config: Mapping[str, Any]) -> int:
-    return int(config.get('num_case') or (config.get('inputs') or {}).get('num_case') or 0)
 
 
 def _issues(issues: list[Any]) -> str:
