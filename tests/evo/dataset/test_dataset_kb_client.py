@@ -213,6 +213,27 @@ def test_count_valid_chunks_returns_group_doc_capacity_and_aggregate_filter_stat
     }
 
 
+def test_layout_type_aliases_are_normalized_before_counting_and_fetching():
+    document = FakeDocument({
+        ('doc-1', 'block', 0): ([
+            node('image', chunk_type='image'),
+            node('equation', chunk_type='equation'),
+        ], 2),
+    })
+    client = KnowledgeBaseClient(document=document)
+
+    result = client.count_valid_chunks(
+        'kb-1', ['doc-1'], ['block'], ['figure', 'formula'], max_scan_chunks=10,
+    )
+    selected = client.fetch_valid_chunks(
+        'kb-1', 'doc-1', 'block', ['figure', 'formula'], 2, order_by='stable_chunk_id_hash',
+    )
+
+    assert result['effective_count'] == 2
+    assert result['observed_types'] == ['figure', 'formula']
+    assert {item.uid for item in selected} == {'image', 'equation'}
+
+
 def test_count_valid_chunks_classifies_manual_exclusions_before_content_and_embedding_validation():
     document = FakeDocument({
         ('doc-1', 'block', 0): ([

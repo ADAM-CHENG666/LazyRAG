@@ -28,13 +28,25 @@ input_payload:
   source_config:
     fields:
       kb_ids:
+        # 已纳入本轮材料配置范围的 KB；Core/Service 在写入前按当前用户 ACL 校验。
         type: list[string]
         required: true
         validation: [non_empty, non_empty_after_strip_items, unique_items]
   select_docs_params:
     fields:
+      knowledge_bases:
+        # 与 source_config.kb_ids 一一对应（包括 included=false 的 KB）；知识库级开关不丢失文档级排除。
+        type: array
+        required: true
+        validation:
+          - unique_by: [kb_id]
+        item:
+          type: object
+          fields:
+            kb_id: {type: string, required: true}
+            included: {type: boolean, required: true}
       excluded_docs:
-        # 用户只提交排除项；Service/Core 先校验知识库访问权限。
+        # 文档级排除独立于知识库 included 保存；Service/Core 先校验知识库访问权限。
         type: array
         required: false
         default: []
@@ -71,7 +83,8 @@ output_payload:
 
 execution_flow:
   - 按 source_config.kb_ids 顺序枚举每个知识库；保持知识库内的原始文档顺序。
-  - 每个文档仅出现一次，按全局顺序写入 discovery_index；使用 (kb_id, doc_id) 判断 included。
+  - 每个文档仅出现一次，按全局顺序写入 discovery_index；仅当其知识库配置 included=true 且不在 excluded_docs 中时，documents[].included=true。
+  - knowledge_bases 必须与 source_config.kb_ids 一一对应；关闭知识库时仍发现并返回其文档，以便用户重新开启或单独调整文档排除。
   - excluded_docs 中未命中当前发现集的引用保留在配置中，但不写入 documents、也不影响统计。
   - 自动生成 Case 为 0 时仍输出文档发现结果；后续 Chunk 扫描节点可依据自动生成数量跳过扫描。
   - 要求 discovered_count = included_count + excluded_count。
@@ -89,13 +102,19 @@ tests:
       - unmatched_exclusion_is_dormant_and_does_not_change_counts
       # 相同 doc_id 位于不同 KB 时是两条独立记录，定位必须使用复合键。
       - document_identity_is_composite_kb_id_and_doc_id
+      # 知识库关闭时文档仍属于稳定发现快照，但所有该 KB 文档的 included 均为 false。
+      - disabled_knowledge_base_keeps_documents_visible_and_excludes_them
+      # 重新开启 KB 后，原有 excluded_docs 仍然生效，不得被知识库级配置覆盖或清空。
+      - document_exclusion_survives_knowledge_base_toggle
+      # knowledge_bases 必须覆盖且仅覆盖 source_config.kb_ids；漏配、额外配置或重复 KB 均不得静默降级为文档排除。
+      - knowledge_base_configuration_exactly_matches_source_scope
   boundary_and_validation:
     cases:
       # 即使没有自动生成 Case，调整材料页仍可查看并修改文档参与状态。
       - imported_only_run_still_returns_document_configuration_view
       # 已选 KB 不含文档时返回空列表与全零统计，不把“没有材料”伪装成请求错误。
       - empty_discovery_is_a_valid_empty_document_list
-      # KB/文档 ID 为空、含空白或出现重复复合键时拒绝参数。
-      - rejects_empty_duplicate_or_whitespace_document_selection_ids
+      # KB 配置与 source_config 范围不一致、KB/文档 ID 为空或重复复合键时拒绝参数。
+      - rejects_invalid_knowledge_base_or_document_selection_ids
       # materializer 返回键必须严格等于 FixedOp 输出键。
       - return_keys_match_outputs

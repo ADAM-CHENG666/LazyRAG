@@ -7,6 +7,8 @@ from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from .layout_types import canonical_layout_type
+
 _DOCUMENTS: dict[tuple[str, ...], Any] = {}
 DOCS_PAGE_SIZE = 100
 CHUNK_PAGE_SIZE = 200
@@ -414,8 +416,7 @@ def _content_ineligible_reason(node: Any, allowed_types: list[str]) -> str:
 
 def _node_type(node: Any) -> str:
     metadata = getattr(node, 'metadata', {}) or {}
-    value = str(metadata.get('type') or metadata.get('node_type') or 'unknown').strip().lower()
-    return value or 'unknown'
+    return canonical_layout_type(metadata.get('type') or metadata.get('node_type'))
 
 
 def _embedding_ineligible_reason(node: Any) -> str:

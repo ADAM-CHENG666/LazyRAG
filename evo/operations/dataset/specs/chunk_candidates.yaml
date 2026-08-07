@@ -42,16 +42,18 @@ input_payload:
   build_chunks_params:
     fields:
       groups:
-        # 已选切分规则及其优先级；完整目录和展示名称由 Core/Service 提供。
+        # 已选切分规则及其优先级；Service 只提交当前材料来源均支持的标准规则 ID。
         type: list[string]
         required: false
         default: [block]
         validation: [non_empty, non_empty_after_strip_items, unique_items]
       allowed_types:
-        # 已选版面类型；完整目录和展示名称由 Core/Service 提供。
+        # 已启用的标准版面类型，是平台标准目录的子集，不等同于解析器能够产出的全部类型。
+        # Service 负责校验每项为当前材料来源 supported=true 的标准 ID；算法拒绝未知标准 ID。
+        # 当前标准 ID：text、heading、paragraph、table、formula、figure、code、list、unknown；image→figure、equation→formula。
         type: list[string]
         required: false
-        default: [text, paragraph, table, formula, equation, unknown]
+        default: [text, paragraph, table, formula, unknown]
         validation: [non_empty, non_empty_after_strip_items, unique_items]
       max_scan_docs_per_kb:
         type: integer
@@ -79,6 +81,7 @@ output_payload:
             chunk_id: {type: string}
             filename: {type: string}
             group: {type: string}
+            # Reader 原始 metadata.type 经规范化后的标准版面类型；用于详情展示和 allowed_types 过滤。
             type: {type: string}
             text: {type: string}
             embedding: {type: object}
@@ -108,7 +111,8 @@ output_payload:
 
 execution_flow:
   - 仅扫描 selected_docs.documents 中 included=true 的文档；groups 和 allowed_types 只决定有效性，不表达入围选择。
-  - Chunk 依次按 Type、正文、Embedding 判定有效；无效 Chunk 不写入 chunks。
+  - 先将各 Reader 的原始 metadata.type 规范化为标准版面类型，再按 allowed_types、正文、Embedding 判定有效；无效 Chunk 不写入 chunks。
+  - allowed_types 仅可包含平台标准版面类型 ID；当前解析链路是否支持某标准类型由 Service/Core 校验，算法不得通过扫描历史 Chunk 推断支持目录。
   - 对全部有效 Chunk 保留正文、Embedding、来源与稳定 discovery_index；不得在达到配额后停止读取或丢弃未入围有效 Chunk。
   - 按 groups 优先级、知识库、文档分配初始配额；写入 quotas，并将初始入围 Chunk 标记 selected=true 和连续 selection_index。
   - 直接修改 chunks[].selected 属于用户入围调整：Service 使用 update_artifacts() 写入完整新值，校验每条 quota 后只重算下游；不得重跑本 operation。
@@ -122,8 +126,12 @@ tests:
       - scans_only_included_documents
       # 所有通过有效性规则的 Chunk 都保留，顺序必须可复现，不能只输出初始入围项。
       - retains_every_effective_chunk_in_stable_discovery_order
-      # Type、空正文、Embedding 缺失/非法任一失败时，该 Chunk 不得进入有效快照。
+      # 原始 Reader 类型先映射为标准类型；映射后不在 allowed_types、正文为空、Embedding 缺失或非法任一失败时，该 Chunk 不得进入有效快照。
       - excludes_invalid_type_empty_or_embedding_invalid_chunks_from_snapshot
+      # MinerU、PaddleOCR、DOCX 与基础 Reader 的同义类型必须映射为同一标准 ID，再决定是否允许进入有效快照。
+      - normalizes_reader_layout_types_before_allowed_type_filtering
+      # allowed_types 含非标准 ID 时必须失败，防止绕过 Service 目录校验直接写入未知版面类型。
+      - rejects_non_standard_allowed_type_ids
       # 每个有效 Chunk 都保存详情页与后续算法需要的正文、向量和来源字段。
       - full_effective_snapshot_keeps_text_embedding_and_source_provenance
       # 超过扫描上限必须整体失败，禁止返回截断的“有效快照”。

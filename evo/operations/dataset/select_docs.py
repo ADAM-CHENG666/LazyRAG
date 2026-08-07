@@ -11,6 +11,7 @@ from .kb_client import KnowledgeBaseClient
 @dataclass(frozen=True)
 class SelectDocsParams:
     kb_ids: list[str]
+    knowledge_bases: dict[str, bool]
     excluded_docs: list[dict[str, str]]
 
     @classmethod
@@ -25,6 +26,7 @@ class SelectDocsParams:
         if len(set(kb_ids)) != len(kb_ids):
             raise ValueError('kb_ids must be unique')
         data = raw or {}
+        knowledge_bases = _knowledge_base_inclusion(data.get('knowledge_bases'), kb_ids)
         values = data.get('excluded_docs', [])
         if not isinstance(values, list):
             raise ValueError('excluded_docs must be a list')
@@ -44,7 +46,7 @@ class SelectDocsParams:
                 raise ValueError('excluded_docs must contain unique (kb_id, doc_id) references')
             seen.add(key)
             excluded.append(item)
-        return cls(kb_ids, excluded)
+        return cls(kb_ids, knowledge_bases, excluded)
 
 
 def select_docs(ctx: Any, inputs: Mapping[str, object], kb_client: KnowledgeBaseClient | None = None) -> Mapping[str, object]:
@@ -69,10 +71,32 @@ def select_docs(ctx: Any, inputs: Mapping[str, object], kb_client: KnowledgeBase
                 'filename': str(row.get('filename') or row.get('display_name') or doc_id),
                 'file_type': str(row.get('file_type') or ''),
                 'status': str(row.get('status') or row.get('upload_status') or ''),
-                'included': (kb_id, doc_id) not in excluded,
+                'included': params.knowledge_bases[kb_id] and (kb_id, doc_id) not in excluded,
                 'discovery_index': len(documents),
             })
     included = sum(item['included'] for item in documents)
     return {'selected_docs': {'documents': documents, 'stats': {
         'discovered_count': len(documents), 'included_count': included, 'excluded_count': len(documents) - included,
     }}}
+
+
+def _knowledge_base_inclusion(value: object, kb_ids: list[str]) -> dict[str, bool]:
+    if not isinstance(value, list):
+        raise ValueError('knowledge_bases must be a list')
+    configured: dict[str, bool] = {}
+    for index, item in enumerate(value):
+        if not isinstance(item, Mapping):
+            raise ValueError(f'knowledge_bases[{index}] must be a mapping')
+        try:
+            kb_id = validate_id(str(item.get('kb_id') or '').strip(), 'knowledge_bases.kb_id')
+        except ValueError as exc:
+            raise ValueError(f'knowledge_bases[{index}] contains an invalid reference') from exc
+        included = item.get('included')
+        if not isinstance(included, bool):
+            raise ValueError(f'knowledge_bases[{index}].included must be a boolean')
+        if kb_id in configured:
+            raise ValueError('knowledge_bases must contain unique kb_id values')
+        configured[kb_id] = included
+    if set(configured) != set(kb_ids):
+        raise ValueError('knowledge_bases must exactly match source_config.kb_ids')
+    return configured

@@ -64,12 +64,16 @@ def counts(capacities, scanned=None):
     }
 
 
-def documents(rows, excluded=()):
+def documents(rows, excluded=(), knowledge_bases=None):
+    knowledge_bases = knowledge_bases or [
+        {'kb_id': kb_id, 'included': True} for kb_id in rows
+    ]
     return select_docs(None, {
         'source_config': {'kb_ids': list(rows)},
-        'select_docs_params': {'excluded_docs': [
-            {'kb_id': kb_id, 'doc_id': doc_id} for kb_id, doc_id in excluded
-        ]},
+        'select_docs_params': {
+            'knowledge_bases': knowledge_bases,
+            'excluded_docs': [{'kb_id': kb_id, 'doc_id': doc_id} for kb_id, doc_id in excluded],
+        },
     }, FakeDiscoveryClient(rows))['selected_docs']
 
 
@@ -124,11 +128,34 @@ def test_docs_use_kb_and_document_as_composite_identity():
     assert [item['included'] for item in output['documents']] == [False, True]
 
 
+def test_docs_keep_disabled_knowledge_base_visible_but_excluded():
+    output = documents(
+        {'kb-a': [{'doc_id': 'one'}], 'kb-b': [{'doc_id': 'two'}]},
+        knowledge_bases=[
+            {'kb_id': 'kb-a', 'included': False},
+            {'kb_id': 'kb-b', 'included': True},
+        ],
+    )
+
+    assert [(item['kb_id'], item['included']) for item in output['documents']] == [
+        ('kb-a', False), ('kb-b', True),
+    ]
+
+
+def test_docs_knowledge_base_toggle_preserves_document_exclusions():
+    rows = {'kb-a': [{'doc_id': 'one'}, {'doc_id': 'two'}]}
+    disabled = documents(rows, [('kb-a', 'two')], [{'kb_id': 'kb-a', 'included': False}])
+    enabled = documents(rows, [('kb-a', 'two')], [{'kb_id': 'kb-a', 'included': True}])
+
+    assert [item['included'] for item in disabled['documents']] == [False, False]
+    assert [item['included'] for item in enabled['documents']] == [True, False]
+
+
 def test_docs_are_available_for_imported_only_configuration():
     client = FakeDiscoveryClient({'kb-a': [{'doc_id': 'one'}]})
     output = select_docs(None, {
         'source_config': {'kb_ids': ['kb-a']},
-        'select_docs_params': {'excluded_docs': []},
+        'select_docs_params': {'knowledge_bases': [{'kb_id': 'kb-a', 'included': True}], 'excluded_docs': []},
         'import_cases_manifest': import_manifest(1, 1),
     }, client)['selected_docs']
 
@@ -148,8 +175,24 @@ def test_docs_allow_empty_discovery():
 ])
 def test_docs_reject_invalid_selection_references(excluded):
     with pytest.raises(ValueError, match='excluded_docs'):
-        select_docs(None, {'source_config': {'kb_ids': ['kb-a']}, 'select_docs_params': {'excluded_docs': excluded}},
+        select_docs(None, {
+            'source_config': {'kb_ids': ['kb-a']},
+            'select_docs_params': {'knowledge_bases': [{'kb_id': 'kb-a', 'included': True}], 'excluded_docs': excluded},
+        },
                     FakeDiscoveryClient({'kb-a': []}))
+
+
+@pytest.mark.parametrize('knowledge_bases', [
+    [],
+    [{'kb_id': 'kb-a', 'included': True}],
+    [{'kb_id': 'kb-a', 'included': True}, {'kb_id': 'kb-b', 'included': True}, {'kb_id': 'kb-b', 'included': False}],
+])
+def test_docs_reject_knowledge_base_configuration_outside_source_scope(knowledge_bases):
+    with pytest.raises(ValueError, match='knowledge_bases'):
+        select_docs(None, {
+            'source_config': {'kb_ids': ['kb-a', 'kb-b']},
+            'select_docs_params': {'knowledge_bases': knowledge_bases, 'excluded_docs': []},
+        }, FakeDiscoveryClient({'kb-a': [], 'kb-b': []}))
 
 
 # chunk_candidates.yaml: effective_chunk_snapshot
@@ -179,6 +222,25 @@ def test_candidates_keep_full_payload_and_filter_invalid_chunks_from_snapshot():
     assert output['summary']['effective_count'] == 2
     assert output['summary']['scanned_chunk_count'] == 5
     assert set(output['chunks'][0]) >= {'text', 'embedding', 'metadata', 'kb_id', 'doc_id', 'chunk_id'}
+
+
+def test_candidates_normalize_reader_layout_types_before_allowed_type_filtering():
+    selected = documents({'kb-a': [{'doc_id': 'one'}]})
+    client = FakeCandidateClient(
+        {'kb-a': counts({'block': {'one': 2}})},
+        {('kb-a', 'one', 'block'): [node('image', kind='image', number=1), node('equation', kind='equation', number=2)]},
+    )
+
+    output = candidates(selected, client, target=1, params={
+        'groups': ['block'], 'allowed_types': ['figure', 'formula'],
+    })
+
+    assert [item['type'] for item in output['chunks']] == ['figure', 'formula']
+
+
+def test_candidates_reject_non_standard_allowed_type_ids():
+    with pytest.raises(ValueError, match='allowed_types'):
+        BuildChunksParams.from_dict({'allowed_types': ['not-a-layout-type']})
 
 
 def test_candidates_fail_on_scan_limit_without_partial_snapshot():
@@ -295,6 +357,16 @@ def test_build_chunks_maps_only_selected_chunks_in_selection_order_and_preserves
     assert first == {'available': True, **payload['chunks'][1]}
     assert second == {'available': True, **payload['chunks'][0]}
     assert placeholder['available'] is False
+
+
+def test_build_chunks_preserves_normalized_layout_type():
+    payload = {'chunks': [{
+        'kb_id': 'kb', 'doc_id': 'doc', 'chunk_id': 'figure', 'filename': 'd.pdf', 'group': 'block',
+        'type': 'figure', 'text': 'caption', 'embedding': {'default': [1.0]}, 'metadata': {},
+        'selected': True, 'selection_index': 0,
+    }]}
+
+    assert build_chunks(chunk_ctx('chunk_0001'), {'build_chunk_candidates': payload})['chunk']['type'] == 'figure'
 
 
 # chunks_manifest.yaml

@@ -6,10 +6,11 @@ from typing import Any
 
 from ... import validate_id
 from .kb_client import KnowledgeBaseClient
+from .layout_types import canonical_layout_type, validate_layout_types
 from .models import chunk_from_docnode
 
 
-DEFAULT_ALLOWED_TYPES = ('text', 'paragraph', 'table', 'formula', 'equation', 'unknown')
+DEFAULT_ALLOWED_TYPES = ('text', 'paragraph', 'table', 'formula', 'unknown')
 DEFAULT_MAX_SCAN_DOCS_PER_KB = 10_000
 DEFAULT_MAX_SCAN_CHUNKS = 100_000
 
@@ -26,7 +27,7 @@ class BuildChunksParams:
         if 'excluded_chunks' in data:
             raise ValueError('excluded_chunks is replaced by editable candidate selection')
         groups = _ids(data.get('groups', ['block']), 'groups')
-        allowed_types = _ids(data.get('allowed_types', DEFAULT_ALLOWED_TYPES), 'allowed_types')
+        allowed_types = validate_layout_types(_ids(data.get('allowed_types', DEFAULT_ALLOWED_TYPES), 'allowed_types'))
         return cls(groups, allowed_types, _positive(data.get('max_scan_docs_per_kb', DEFAULT_MAX_SCAN_DOCS_PER_KB), 'max_scan_docs_per_kb'),
                    _positive(data.get('max_scan_chunks', DEFAULT_MAX_SCAN_CHUNKS), 'max_scan_chunks'))
 
@@ -198,9 +199,12 @@ def _allocation(value):
 
 def _chunk_payload(node, kb_id, doc_id, group, doc):
     chunk = chunk_from_docnode(node, kb_id=kb_id, doc_id=doc_id, group=group, doc=doc)
+    layout_type = canonical_layout_type(chunk.type)
+    metadata = dict(chunk.source.metadata)
+    metadata['type'] = layout_type
     return {'kb_id': kb_id, 'doc_id': doc_id, 'chunk_id': chunk.chunk_id, 'filename': chunk.source.filename,
-            'group': chunk.group, 'type': str(chunk.type or 'unknown'), 'text': chunk.text,
-            'embedding': dict(chunk.embedding), 'metadata': dict(chunk.source.metadata)}
+            'group': chunk.group, 'type': layout_type, 'text': chunk.text,
+            'embedding': dict(chunk.embedding), 'metadata': metadata}
 
 
 def _manifest_chunk(partition, value):

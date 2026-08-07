@@ -55,6 +55,7 @@ input_payload:
         doc_id: {type: string, required: true}
         filename: {type: string, required: false}
         group: {type: string, required: false}
+        # 来自候选结果的标准版面类型；Manifest 仅保留定位索引，不重新过滤。
         type: {type: string, required: false}
 
 output_payload:
@@ -92,6 +93,7 @@ output_payload:
             chunk_id: {type: string}
             filename: {type: string}
             group: {type: string}
+            # 已规范化的标准版面类型。
             type: {type: string}
 
 execution_flow:
