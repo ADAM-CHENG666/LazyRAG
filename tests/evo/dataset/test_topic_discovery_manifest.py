@@ -91,6 +91,24 @@ def test_manifest_returns_a_valid_empty_topic_collection():
     }
 
 
+def test_manifest_publishes_the_available_path_when_the_other_path_is_empty():
+    manifest = topic_discovery_manifest(
+        None,
+        _inputs(
+            entity_clusters=[],
+            embedding_clusters=[_cluster('embedding_cluster_1', 'embedding', ['mobility'], ['chunk-2'])],
+        ),
+    )['topic_discovery_manifest']
+
+    assert [(topic['name'], topic['question_type']) for topic in manifest['topics']] == [
+        ('mobility', 'reasoning'),
+    ]
+    assert manifest['stats'] == {
+        'total_topic_count': 1,
+        'question_types': {'precision': {'count': 0}, 'reasoning': {'count': 1}},
+    }
+
+
 @pytest.mark.parametrize(
     ('entity_clusters', 'match'),
     [

@@ -137,7 +137,14 @@ output_payload:
         fields:
           source_chunk_count:
             type: integer
+          eligible_embedding_chunk_count:
+            # 通过 embedding 校验、但未必实际进入 UMAP/HDBSCAN 的 Chunk 数。
+            type: integer
           embedding_chunk_count:
+            # 实际进入 UMAP/HDBSCAN 的 Chunk 数；容量不足时为 0。
+            type: integer
+          required_embedding_chunk_count:
+            # 按当前参数计算的安全运行阈值。
             type: integer
           skipped_chunk_count:
             type: integer
@@ -164,8 +171,10 @@ execution_flow:
   - 读取 chunk tuple 并保持 runtime partition 稳定顺序。
   - 跳过 available=false 的 chunk。
   - 消费 build_chunks 已规范化的 embedding.model 与 embedding.vector；只校验向量非空、正范数与维度一致。
-  - 当全部 chunk 都是 available=false 时，返回 clusters=[]、完整 skipped_chunks 与零值统计的合法空结果，不执行降维或聚类。
-  - 存在 available=true 的 chunk 但有效 embedding chunk 数不足以执行该路径的降维或聚类时，仍按现有语义失败。
+  - 当全部 chunk 都是 available=false 时，返回 clusters=[]、完整 skipped_chunks 与零值的候选/实际处理统计，不执行降维或聚类。
+  - 安全运行阈值为 max(umap_n_neighbors + 1, umap_n_components + 2, min_cluster_size, min_samples)。
+  - 存在 available=true 的 chunk 但有效 embedding chunk 数低于安全运行阈值时，返回 clusters=[] 的合法空结果；不执行降维或聚类。
+  - 容量不足时，eligible_embedding_chunk_count 记录有效 embedding 数，embedding_chunk_count 为 0，required_embedding_chunk_count 记录阈值；每个未进入路径的有效 Chunk 在 skipped_chunks 中以 insufficient_embedding_capacity 标记，不得使主题发现整体失败。
   - 使用 UMAP 将 embedding 降到 umap_n_components 维；缺少 UMAP 依赖时失败。
   - 使用 HDBSCAN 聚类；缺少 HDBSCAN 依赖时失败。
   - 按 HDBSCAN label 构建 clusters；label=-1 每个 chunk 单独生成 singleton candidate。
@@ -180,9 +189,9 @@ tests:
       - success
       # 空参数输入时使用默认 umap / hdbscan 参数，并将默认值回写到 params。
       - default_params
-      # 全部 chunk unavailable 时返回合法空 candidates；存在可用 chunk 但有效 embedding 数不足时直接抛错。
-      # 例子：只有 2 个有效 embedding chunk，但 umap_n_neighbors=3 或 min_cluster_size=3 时，不足以执行当前路径，应直接失败。
-      - imported_only_empty_candidates_bypass
+      # 全部不可用或有效 embedding 数不足安全阈值时均返回合法空 candidates；后者要记录容量不足原因、实际数与阈值，且不调用降维或聚类。
+      # 例子：只有 2 个有效 embedding chunk，但 umap_n_neighbors=3 或 min_cluster_size=3 时，应正常产出空结果。
+      - empty_or_insufficient_embedding_capacity_returns_empty_candidates
       # embedding 缺少 model/vector、向量为空或 norm 为 0 的 chunk 会被跳过，并写入 skipped_chunks。
       - invalid_embedding_skipped
       # embedding 维度与首个有效向量不一致的 chunk 会被跳过，并给出 dimension_mismatch 原因。
@@ -194,7 +203,7 @@ tests:
       # candidate 顺序稳定，按 chunk 在输入 tuple 中的首次出现顺序生成。
       # 例子：即使 label 数值顺序不同，最终 candidate 的输出顺序也按各自 chunk 在输入 tuple 中首次出现的位置决定。
       - stable_cluster_order
-      # source_chunk_count、embedding_chunk_count、skipped_chunk_count、candidate_count、noise_candidate_count 与输出一致。
+      # source_chunk_count、eligible_embedding_chunk_count、embedding_chunk_count、required_embedding_chunk_count、skipped_chunk_count、candidate_count、noise_candidate_count 与输出一致。
       - stats
       # materializer 返回结构固定为 {"embedding_cluster_candidates": payload}，不混入额外字段。
       - return_keys_match_outputs

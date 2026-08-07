@@ -69,7 +69,7 @@ output_payload:
               type: string
               enum: [precision, reasoning]
             chunk_ids:
-              # 该 Topic 的稳定支撑 Chunk 顺序；详情页通过 Artifact 血缘读取同版本 Chunk。
+              # 该 Topic 的稳定支撑 Chunk 顺序；详情页读取当前有效 Chunk，任一上游变化都会使本 Manifest 失效。
               type: list[string]
             chunk_count:
               # 必须等于 chunk_ids 长度。
@@ -92,6 +92,7 @@ execution_flow:
   - 每个展开 Topic 复制所属 Cluster 的 chunk_ids/chunk_count；entity 赋值 question_type=precision，embedding 赋值 question_type=reasoning。
   - 为本次主题发现结果中的每个 Topic 创建唯一、不透明 topic_id。主题发现重新执行产生新集合时允许整体换 ID；仅用户重命名时必须保留 ID。
   - name 允许重复；Topic 的身份是 topic_id，不是名称或 Chunk 集合。
+  - 任一路 clusters=[] 时，仍正常展平并发布另一路 Topic；不得因单一路为空失败。
   - 两路均为空时输出 topics=[]、三个统计均为 0 的合法稳定空结果。
   - 返回 {"topic_discovery_manifest": payload}。
 

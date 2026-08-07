@@ -219,16 +219,29 @@ def topic_discovery_embedding_cluster(
     ))
     chunks = _chunk_tuple(inputs.get('chunk'))
     embedding_chunks, skipped = _embedding_chunks(chunks)
-    if not embedding_chunks and chunks and all(chunk.get('available') is False for chunk in chunks):
+    required_count = _required_embedding_chunk_count(params)
+    if len(embedding_chunks) < required_count:
+        capacity_skipped = [
+            {
+                'chunk_id': chunk['chunk_id'],
+                'reason': 'insufficient_embedding_capacity',
+                'detail': f'{len(embedding_chunks)} eligible embedding chunks; {required_count} required',
+            }
+            for chunk in embedding_chunks
+        ]
         return {'embedding_cluster_candidates': {
-            'clusters': [], 'skipped_chunks': skipped,
-            'stats': {'source_chunk_count': len(chunks), 'embedding_chunk_count': 0,
-                      'skipped_chunk_count': len(skipped), 'candidate_count': 0, 'noise_candidate_count': 0},
+            'clusters': [], 'skipped_chunks': [*skipped, *capacity_skipped],
+            'stats': {
+                'source_chunk_count': len(chunks),
+                'eligible_embedding_chunk_count': len(embedding_chunks),
+                'embedding_chunk_count': 0,
+                'required_embedding_chunk_count': required_count,
+                'skipped_chunk_count': len(skipped) + len(capacity_skipped),
+                'candidate_count': 0,
+                'noise_candidate_count': 0,
+            },
             'params': params.to_dict(),
         }}
-    if len(embedding_chunks) <= max(params.umap_n_neighbors, params.umap_n_components, params.min_cluster_size,
-                                    params.min_samples):
-        raise ValueError('not enough embedding chunks for topic_discovery_embedding_cluster')
 
     matrix = [chunk['vector'] for chunk in embedding_chunks]
     reduced = reducer(matrix, params) if reducer is not None else _umap_reduce(matrix, params)
@@ -242,7 +255,9 @@ def topic_discovery_embedding_cluster(
         'skipped_chunks': skipped,
         'stats': {
             'source_chunk_count': len(chunks),
+            'eligible_embedding_chunk_count': len(embedding_chunks),
             'embedding_chunk_count': len(embedding_chunks),
+            'required_embedding_chunk_count': required_count,
             'skipped_chunk_count': len(skipped),
             'candidate_count': len(clusters),
             'noise_candidate_count': noise_count,
@@ -582,6 +597,15 @@ def _embedding_chunks(chunks: tuple[Mapping[str, Any], ...]) -> tuple[list[dict[
             continue
         output.append({'chunk_id': chunk_id, 'vector': vector})
     return output, skipped
+
+
+def _required_embedding_chunk_count(params: EmbeddingClusterParams) -> int:
+    return max(
+        params.umap_n_neighbors + 1,
+        params.umap_n_components + 2,
+        params.min_cluster_size,
+        params.min_samples,
+    )
 
 
 def _embedding_vector(value: Any) -> list[float]:
