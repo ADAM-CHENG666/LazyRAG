@@ -97,6 +97,16 @@ def _references(case: Mapping[str, object]) -> list[dict[str, str]]:
     chunk_ids = _string_list(case.get('reference_chunk_ids'), 'case.reference_chunk_ids')
     if len(set(chunk_ids)) != len(chunk_ids):
         raise ValueError('case.reference_chunk_ids must be unique')
+    raw_references = case.get('references')
+    if raw_references is not None:
+        if not isinstance(raw_references, list):
+            raise ValueError('case.references must be a list')
+        for expected_id, expected_text, raw in zip(chunk_ids, (context[item] for item in chunk_ids), raw_references, strict=True):
+            item = _mapping(raw, 'case.references[]')
+            if _text(item.get('chunk_id'), 'case.references[].chunk_id') != expected_id or _text(item.get('text'), 'case.references[].text') != expected_text:
+                raise ValueError('case.references must match reference_context and reference_chunk_ids')
+            _text(item.get('kb_id'), 'case.references[].kb_id')
+            _text(item.get('doc_id'), 'case.references[].doc_id')
 
     references = []
     for chunk_id in chunk_ids:

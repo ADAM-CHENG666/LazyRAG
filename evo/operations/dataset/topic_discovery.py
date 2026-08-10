@@ -219,20 +219,33 @@ def topic_discovery_embedding_cluster(
     ))
     chunks = _chunk_tuple(inputs.get('chunk'))
     embedding_chunks, skipped = _embedding_chunks(chunks)
-    if not embedding_chunks:
+    required_count = _required_embedding_chunk_count(params)
+    if len(embedding_chunks) < required_count:
+        capacity_skipped = [
+            {
+                'chunk_id': chunk['chunk_id'],
+                'reason': 'insufficient_embedding_capacity',
+                'detail': f'{len(embedding_chunks)} eligible embedding chunks; {required_count} required',
+            }
+            for chunk in embedding_chunks
+        ]
         return {'embedding_cluster_candidates': {
-            'clusters': [], 'skipped_chunks': skipped,
-            'stats': {'source_chunk_count': len(chunks), 'embedding_chunk_count': 0,
-                      'skipped_chunk_count': len(skipped), 'candidate_count': 0, 'noise_candidate_count': 0},
+            'clusters': [], 'skipped_chunks': [*skipped, *capacity_skipped],
+            'stats': {
+                'source_chunk_count': len(chunks),
+                'eligible_embedding_chunk_count': len(embedding_chunks),
+                'embedding_chunk_count': 0,
+                'required_embedding_chunk_count': required_count,
+                'skipped_chunk_count': len(skipped) + len(capacity_skipped),
+                'candidate_count': 0,
+                'noise_candidate_count': 0,
+            },
             'params': params.to_dict(),
         }}
-    minimum = max(params.umap_n_neighbors, params.umap_n_components, params.min_cluster_size, params.min_samples)
-    if len(embedding_chunks) <= minimum:
-        labels = [0] * len(embedding_chunks)
-    else:
-        matrix = [chunk['vector'] for chunk in embedding_chunks]
-        reduced = reducer(matrix, params) if reducer is not None else _umap_reduce(matrix, params)
-        labels = clusterer(reduced, params) if clusterer is not None else _hdbscan_cluster(reduced, params)
+
+    matrix = [chunk['vector'] for chunk in embedding_chunks]
+    reduced = reducer(matrix, params) if reducer is not None else _umap_reduce(matrix, params)
+    labels = clusterer(reduced, params) if clusterer is not None else _hdbscan_cluster(reduced, params)
     if len(labels) != len(embedding_chunks):
         raise ValueError('embedding cluster labels must match embedding chunk count')
     clusters, noise_count = _embedding_candidates(embedding_chunks, labels)
@@ -242,7 +255,9 @@ def topic_discovery_embedding_cluster(
         'skipped_chunks': skipped,
         'stats': {
             'source_chunk_count': len(chunks),
+            'eligible_embedding_chunk_count': len(embedding_chunks),
             'embedding_chunk_count': len(embedding_chunks),
+            'required_embedding_chunk_count': required_count,
             'skipped_chunk_count': len(skipped),
             'candidate_count': len(clusters),
             'noise_candidate_count': noise_count,
@@ -308,29 +323,27 @@ def topic_discovery_manifest(ctx: Any, inputs: Mapping[str, object]) -> Mapping[
     entity_clusters = _final_clusters(entity.get('clusters'), 'entity')
     embedding_clusters = _final_clusters(embedding.get('clusters'), 'embedding')
 
-    clusters = []
+    topics = []
     for cluster_type, source_clusters in (('entity', entity_clusters), ('embedding', embedding_clusters)):
-        for index, cluster in enumerate(source_clusters, 1):
-            clusters.append({
-                'cluster_id': f'{cluster_type}_{index:06d}',
-                'cluster_type': cluster_type,
-                'topics': list(cluster['topics']),
-                'chunk_ids': list(cluster['chunk_ids']),
-                'chunk_count': cluster['chunk_count'],
-                'scores': dict(cluster['scores']),
-                'metadata': dict(cluster['metadata']),
-            })
-
-    unique_chunk_ids = {chunk_id for cluster in clusters for chunk_id in cluster['chunk_ids']}
+        question_type = 'precision' if cluster_type == 'entity' else 'reasoning'
+        for cluster in source_clusters:
+            for name in cluster['topics']:
+                topics.append({
+                    'topic_id': f'topic_{len(topics) + 1:06d}',
+                    'name': name,
+                    'question_type': question_type,
+                    'chunk_ids': list(cluster['chunk_ids']),
+                    'chunk_count': cluster['chunk_count'],
+                })
     return {'topic_discovery_manifest': {
-        'clusters': clusters,
+        'topics': topics,
         'stats': {
-            'entity_cluster_count': len(entity_clusters),
-            'embedding_cluster_count': len(embedding_clusters),
-            'total_cluster_count': len(clusters),
-            'unique_chunk_count': len(unique_chunk_ids),
+            'total_topic_count': len(topics),
+            'question_types': {
+                'precision': {'count': sum(topic['question_type'] == 'precision' for topic in topics)},
+                'reasoning': {'count': sum(topic['question_type'] == 'reasoning' for topic in topics)},
+            },
         },
-        'params': {},
     }}
 
 
@@ -586,6 +599,15 @@ def _embedding_chunks(chunks: tuple[Mapping[str, Any], ...]) -> tuple[list[dict[
     return output, skipped
 
 
+def _required_embedding_chunk_count(params: EmbeddingClusterParams) -> int:
+    return max(
+        params.umap_n_neighbors + 1,
+        params.umap_n_components + 2,
+        params.min_cluster_size,
+        params.min_samples,
+    )
+
+
 def _embedding_vector(value: Any) -> list[float]:
     if not isinstance(value, Mapping):
         raise ValueError('embedding must be a mapping')
@@ -663,11 +685,14 @@ def _candidate_clusters(value: Any) -> list[dict[str, Any]]:
     for item in value:
         cluster = _mapping(item, 'embedding_cluster_candidates.clusters[]')
         chunk_ids = _string_list(cluster.get('chunk_ids'), 'chunk_ids')
+        chunk_count = _positive_int(cluster.get('chunk_count'), len(chunk_ids), 'chunk_count')
+        if chunk_count != len(chunk_ids):
+            raise ValueError('chunk_count must match chunk_ids length')
         clusters.append({
             'candidate_id': _required_str(cluster, 'candidate_id'),
             'cluster_type': _required_str(cluster, 'cluster_type'),
             'chunk_ids': chunk_ids,
-            'chunk_count': _positive_int(cluster.get('chunk_count'), len(chunk_ids), 'chunk_count'),
+            'chunk_count': chunk_count,
             'scores': _optional_mapping(cluster.get('scores')),
             'metadata': _optional_mapping(cluster.get('metadata')),
         })
@@ -712,12 +737,16 @@ def _final_clusters(value: Any, cluster_type: str) -> list[dict[str, Any]]:
             raise ValueError(f'cluster_type must be {cluster_type}')
         topics = _string_list(cluster.get('topics'), 'topics')
         chunk_ids = _string_list(cluster.get('chunk_ids'), 'chunk_ids')
+        _optional_mapping(cluster.get('scores'))
+        _optional_mapping(cluster.get('metadata'))
+        chunk_count = _positive_int(cluster.get('chunk_count'), len(chunk_ids), 'chunk_count')
+        if chunk_count != len(chunk_ids):
+            raise ValueError('chunk_count must match chunk_ids length')
         clusters.append({
+            'source_cluster_id': _required_str(cluster, 'cluster_id'),
             'topics': topics,
             'chunk_ids': chunk_ids,
-            'chunk_count': _positive_int(cluster.get('chunk_count'), len(chunk_ids), 'chunk_count'),
-            'scores': _optional_mapping(cluster.get('scores')),
-            'metadata': _optional_mapping(cluster.get('metadata')),
+            'chunk_count': chunk_count,
         })
     return clusters
 

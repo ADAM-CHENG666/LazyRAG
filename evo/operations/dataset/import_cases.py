@@ -15,11 +15,7 @@ OPTIONAL_COLUMNS = {'id'}
 REFERENCE_COUNTS = {'easy': 1, 'medium': 2, 'hard': 3}
 
 
-def import_cases(
-    ctx: Any,
-    inputs: Mapping[str, object],
-    kb_client: KnowledgeBaseClient | None = None,
-) -> dict[str, object]:
+def import_cases(ctx: Any, inputs: Mapping[str, object], kb_client: KnowledgeBaseClient | None = None) -> dict[str, object]:
     config = _mapping(inputs.get('source_config'), 'source_config')
     kb_ids = _ids(config.get('kb_ids'), 'kb_ids')
     target = _positive(config.get('target_case_count'), 'target_case_count')
@@ -35,9 +31,8 @@ def import_cases(
     source_row_number = 0
     for source in sources:
         path = source['path']
-        file_path = Path(path)
         try:
-            raw = file_path.read_bytes()
+            raw = Path(path).read_bytes()
             reader = csv.DictReader(raw.decode('utf-8-sig').splitlines(), strict=True)
             headers = set(reader.fieldnames or ())
             rows = list(reader)
@@ -46,10 +41,8 @@ def import_cases(
         if not REQUIRED_COLUMNS <= headers or headers - REQUIRED_COLUMNS - OPTIONAL_COLUMNS:
             raise ValueError(f'csv header is invalid: {path}')
         source_records.append({
-            'kb_id': source['kb_id'],
-            'csv_path': path,
-            'csv_sha256': hashlib.sha256(raw).hexdigest(),
-            'csv_size_bytes': len(raw),
+            'kb_id': source['kb_id'], 'csv_path': path,
+            'csv_sha256': hashlib.sha256(raw).hexdigest(), 'csv_size_bytes': len(raw),
         })
         for csv_row_number, row in enumerate(rows, 2):
             source_row_number += 1
@@ -63,11 +56,9 @@ def import_cases(
             try:
                 case = _case(row, index, questions)
             except ValueError as exc:
-                details.append({
-                    **detail,
-                    'load_status': 'invalid',
-                    'error': {'code': str(exc).split(':', 1)[0], 'reason': str(exc)},
-                })
+                details.append({**detail, 'load_status': 'invalid', 'error': {
+                    'code': str(exc).split(':', 1)[0], 'reason': str(exc),
+                }})
             else:
                 valid.append({**detail, 'case': case})
                 details.append({**detail, 'load_status': 'pending', 'case': case})
@@ -96,33 +87,23 @@ def import_cases(
     return {'import_cases_manifest': _manifest(source_records, target, details, valid)}
 
 
-def _manifest(
-    sources: list[dict[str, object]],
-    target: int,
-    details: list[dict[str, object]],
-    valid: list[dict[str, object]],
-) -> dict[str, object]:
+def _manifest(sources: list[dict[str, object]], target: int, details: list[dict[str, object]], valid: list[dict[str, object]]) -> dict[str, object]:
     loaded = [item for item in details if item['load_status'] == 'loaded']
-    assignments = {
-        item['case_id']: {'mode': 'imported', 'source_row_number': item['source_row_number']}
-        for item in loaded
-    }
+    invalid = [item for item in details if item['load_status'] == 'invalid']
+    truncated = [item for item in details if item['load_status'] == 'truncated']
+    assignments = {item['case_id']: {'mode': 'imported', 'source_row_number': item['source_row_number']} for item in loaded}
     assignments |= {f'case_{i:04d}': {'mode': 'generated'} for i in range(len(loaded) + 1, target + 1)}
     return {
         'source': {'csv_sources': sources},
-        'stats': {
-            'csv_reading': {
-                'total_row_count': len(details),
-                'valid_row_count': len(valid),
-                'loaded_row_count': len(loaded),
-            },
-            'case_allocation': {
-                'target_case_count': target,
-                'import_case_count': len(loaded),
-                'auto_case_count': target - len(loaded),
-                'assignments': assignments,
-            },
-        },
+        'stats': {'csv_reading': {
+                      'total_row_count': len(details),
+                      'valid_row_count': len(valid),
+                      'loaded_row_count': len(loaded),
+                      'invalid_row_count': len(invalid),
+                      'truncated_row_count': len(truncated),
+                  },
+                  'case_allocation': {'target_case_count': target, 'import_case_count': len(loaded),
+                                      'auto_case_count': target - len(loaded), 'assignments': assignments}},
         'details': details,
     }
 
@@ -173,23 +154,11 @@ def _case(row: Mapping[str, str], index: Mapping[str, dict[str, str]], questions
             raise ValueError('reference_text_mismatch: csv text differs from knowledge base')
         result.append({'chunk_id': chunk_id, 'text': text, **found})
     questions.add(normalized_question)
-    return {
-        'id': '',
-        'question': question,
-        'answer': answer,
-        'question_type': question_type,
-        'difficulty': difficulty,
-        'grading_guidance': guidance,
-        'reference_context': [
-            {'chunk_id': item['chunk_id'], 'text': item['text']}
-            for item in result
-        ],
-        'reference_chunk_ids': [item['chunk_id'] for item in result],
-        'reference_doc_ids': list(dict.fromkeys(item['doc_id'] for item in result)),
-        'source_preparation': {
-            'kb_ids': list(dict.fromkeys(item['kb_id'] for item in result)),
-        },
-    }
+    return {'id': '', 'question': question, 'answer': answer, 'question_type': question_type, 'difficulty': difficulty,
+            'grading_guidance': guidance, 'references': result,
+            'reference_context': [{'chunk_id': item['chunk_id'], 'text': item['text']} for item in result],
+            'reference_chunk_ids': [item['chunk_id'] for item in result], 'reference_doc_ids': list(dict.fromkeys(item['doc_id'] for item in result)),
+            'source_preparation': {'kb_ids': list(dict.fromkeys(item['kb_id'] for item in result))}}
 
 
 def _chunk_index(client: KnowledgeBaseClient, kb_ids: list[str]) -> dict[str, dict[str, str]]:
@@ -204,47 +173,32 @@ def _chunk_index(client: KnowledgeBaseClient, kb_ids: list[str]) -> dict[str, di
                     chunk_id = str(getattr(node, 'uid', '') or getattr(node, '_uid', '') or '')
                     if chunk_id in values:
                         raise ValueError(f'ambiguous_chunk_id: {chunk_id}')
-                    values[chunk_id] = {
-                        'kb_id': kb_id,
-                        'doc_id': doc_id,
-                        'text': str(getattr(node, 'text', '') or ''),
-                    }
+                    values[chunk_id] = {'kb_id': kb_id, 'doc_id': doc_id, 'text': str(getattr(node, 'text', '') or '')}
     return values
 
 
 def _mapping(value: object, name: str) -> Mapping[str, object]:
-    if not isinstance(value, Mapping):
-        raise ValueError(f'{name} must be a mapping')
+    if not isinstance(value, Mapping): raise ValueError(f'{name} must be a mapping')
     return value
 
-
 def _ids(value: object, name: str) -> list[str]:
-    if not isinstance(value, list) or not value:
-        raise ValueError(f'{name} must be a non-empty list')
+    if not isinstance(value, list) or not value: raise ValueError(f'{name} must be a non-empty list')
     values = [_text(item, name) for item in value]
-    if len(set(values)) != len(values):
-        raise ValueError(f'{name} must be unique')
+    if len(set(values)) != len(values): raise ValueError(f'{name} must be unique')
     return values
 
-
 def _text(value: object, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f'{name} is required')
+    if not isinstance(value, str) or not value.strip(): raise ValueError(f'{name} is required')
     return value.strip()
-
 
 def _choice(value: object, values: tuple[str, ...], name: str) -> str:
     value = _text(value, name)
-    if value not in values:
-        raise ValueError(f'invalid_{name}: unsupported value')
+    if value not in values: raise ValueError(f'invalid_{name}: unsupported value')
     return value
-
 
 def _positive(value: object, name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise ValueError(f'{name} must be positive')
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1: raise ValueError(f'{name} must be positive')
     return value
-
 
 def _clean(value: str) -> str:
     return value.replace('\r\n', '\n').replace('\r', '\n').strip()

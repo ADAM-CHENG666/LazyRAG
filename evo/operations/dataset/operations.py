@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from types import SimpleNamespace
 from typing import Any
 
 from evo import artifacts as A
@@ -24,7 +25,6 @@ from .chunks_build import (
     build_chunk_candidates,
     build_chunks,
     build_chunks_manifest,
-    unavailable_chunk_payload,
 )
 from .csv_loader import normalize_eval_case
 from .entities import chunk_entities_extract, chunk_entities_extract_manifest
@@ -71,6 +71,9 @@ async def select_docs_operation(
     selected = select_docs(ctx, {
         'source_config': config,
         'import_cases_manifest': _mapping(import_manifest, 'import_manifest'),
+        'select_docs_params': {
+            'knowledge_bases': [{'kb_id': kb_id, 'included': True} for kb_id in config['kb_ids']],
+        },
     })['selected_docs']
     return await _result(ctx, 'dataset.documents_selected', {'selected_docs': selected})
 
@@ -121,9 +124,9 @@ async def build_chunk_operation(
     candidates: object,
 ) -> OperationResult:
     _mapping(request, 'request')
-    chunk = build_chunks(ctx, {
+    chunk = build_chunks(_output_context(ctx, 'chunk'), {
         'build_chunk_candidates': _mapping(candidates, 'candidates'),
-    }, partition_key=ctx.partition_key)['chunk']
+    })['chunk']
     return await _result(ctx, 'dataset.chunk_built', {'chunk': chunk}, case_id=ctx.partition_key)
 
 
@@ -150,7 +153,7 @@ async def build_chunks_manifest_operation(
         'import_cases_manifest': _mapping(import_manifest, 'import_manifest'),
         'build_chunk_candidates': _mapping(candidates, 'candidates'),
         'chunk': chunk_values,
-    }, partition_keys=partition_keys)['build_chunks_manifest']
+    })['build_chunks_manifest']
     return await _result(ctx, 'dataset.chunks_manifest_built', {'manifest': manifest}, total=len(partition_keys))
 
 
@@ -354,13 +357,13 @@ async def qaplan_plan_operation(
     imported = _mapping(import_manifest, 'import_manifest')
     case_ids = _case_ids(imported)
     values = _chunk_values_for_manifest(chunks, _mapping(chunks_manifest, 'chunks_manifest'))
-    plan = qaplan_plan(ctx, {
+    plan = qaplan_plan(_case_context(ctx, case_ids), {
         'source_config': normalize_source_config(source_config),
         'import_cases_manifest': imported,
         'topic_discovery_manifest': _mapping(topic_manifest, 'topic_manifest'),
         'chunk': values,
         'qaplan_plan_params': {},
-    }, case_ids=case_ids)['qaplan_plan']
+    })['qaplan_plan']
     return await _result(ctx, 'dataset.qaplan_built', {
         'plan': plan,
         'partitions': PartitionSet(case_ids),
@@ -374,6 +377,9 @@ async def qaplan_plan_operation(
         'request': each(A.EVAL_CASE_REQUEST, over=A.EVAL_CASE_REQUESTS),
         'plan': one(A.DATASET_QAPLAN_PLAN),
         'import_manifest': one(A.DATASET_IMPORT_CASES_MANIFEST),
+        'topic_manifest': one(A.DATASET_TOPIC_MANIFEST),
+        'chunks': all_items(A.DATASET_CHUNK, over=A.DATASET_CHUNK_REQUESTS),
+        'chunks_manifest': one(A.DATASET_BUILD_CHUNKS_MANIFEST),
     },
     outputs={'specification': partitioned(A.DATASET_QAPLAN_SPEC)},
     max_concurrency=4,
@@ -383,13 +389,18 @@ async def qaplan_spec_operation(
     request: object,
     plan: object,
     import_manifest: object,
+    topic_manifest: object,
+    chunks: object,
+    chunks_manifest: object,
 ) -> OperationResult:
     _mapping(request, 'request')
     imported = _mapping(import_manifest, 'import_manifest')
-    specification = qaplan_spec(ctx, {
+    specification = qaplan_spec(_case_context(ctx, _case_ids(imported), 'qaplan_spec'), {
         'qaplan_plan': _mapping(plan, 'plan'),
         'import_cases_manifest': imported,
-    }, case_ids=_case_ids(imported), partition_key=ctx.partition_key)['qaplan_spec']
+        'topic_discovery_manifest': _mapping(topic_manifest, 'topic_manifest'),
+        'chunk': _chunk_values_for_manifest(chunks, _mapping(chunks_manifest, 'chunks_manifest')),
+    })['qaplan_spec']
     return await _result(ctx, 'dataset.qaplan_spec_built', {'specification': specification}, case_id=ctx.partition_key)
 
 
@@ -431,10 +442,10 @@ async def generate_case_operation(
     specification: object,
     run_config: object,
 ) -> OperationResult:
-    draft = generate(ctx, {
+    draft = generate(_output_context(ctx, 'case'), {
         'qaplan_spec': _mapping(specification, 'specification'),
         'run_config': _mapping(run_config, 'run_config'),
-    }, llm_complete=_llm_complete(run_config), partition_key=ctx.partition_key)['case']
+    }, llm_complete=_llm_complete(run_config))['case']
     return await _result(ctx, 'dataset.case_generated', {'draft': draft}, case_id=ctx.partition_key)
 
 
@@ -603,11 +614,42 @@ def _mapping(value: object, name: str) -> Mapping[str, Any]:
     return value
 
 
+def _output_context(ctx: OperationContext, output_name: str) -> SimpleNamespace:
+    """Adapt the artifact runtime context to the pure dataset operation contract."""
+    return SimpleNamespace(
+        output_key_by_name={output_name: SimpleNamespace(partition=ctx.partition_key)},
+    )
+
+
+def _case_context(
+    ctx: OperationContext,
+    case_ids: tuple[str, ...],
+    output_name: str | None = None,
+) -> SimpleNamespace:
+    values: dict[str, object] = {'case_ids': case_ids}
+    if output_name is not None:
+        values['output_key_by_name'] = {output_name: SimpleNamespace(partition=ctx.partition_key)}
+    return SimpleNamespace(**values)
+
+
+def _unavailable_chunk_payload(partition: str, group: str) -> dict[str, object]:
+    return {
+        'available': False,
+        'chunk_id': f'unavailable:{partition}',
+        'doc_id': '__unavailable__',
+        'filename': '',
+        'group': group,
+        'type': 'placeholder',
+        'text': '',
+        'embedding': {},
+        'metadata': {'partition': partition, 'available': False},
+    }
+
+
 def _candidate_limit(value: object) -> int:
     candidates = _mapping(value, 'candidates')
-    stats = _mapping(candidates.get('selection_stats'), 'candidates.selection_stats')
-    target = _mapping(stats.get('target'), 'candidates.selection_stats.target')
-    limit = target.get('candidate_limit', 0)
+    summary = _mapping(candidates.get('summary'), 'candidates.summary')
+    limit = summary.get('selected_count', 0)
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
         raise ValueError('candidate_limit must be non-negative')
     return limit
@@ -649,7 +691,7 @@ def _chunks_with_failures(value: object) -> tuple[tuple[Mapping[str, Any], ...],
         if partition_key in entries:
             chunks.append(entries[partition_key])
             continue
-        placeholder = unavailable_chunk_payload(partition_key, 'block')
+        placeholder = _unavailable_chunk_payload(partition_key, 'block')
         placeholder['metadata']['failure'] = failure_map[partition_key]
         chunks.append(placeholder)
     return tuple(chunks), partition_keys
@@ -677,7 +719,7 @@ def _chunk_values_for_manifest(value: object, manifest: Mapping[str, Any]) -> tu
         if partition in entries:
             chunks.append(entries[partition])
         else:
-            placeholder = unavailable_chunk_payload(partition, str(source.get('group') or 'block'))
+            placeholder = _unavailable_chunk_payload(partition, str(source.get('group') or 'block'))
             if partition in failures:
                 placeholder['metadata']['failure'] = failures[partition]
             chunks.append(placeholder)

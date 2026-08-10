@@ -7,6 +7,8 @@ from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from .layout_types import canonical_layout_type
+
 _DOCUMENTS: dict[tuple[str, ...], Any] = {}
 DOCS_PAGE_SIZE = 100
 CHUNK_PAGE_SIZE = 200
@@ -31,6 +33,15 @@ class KnowledgeBaseClient:
     def list_documents(self, kb_id: str) -> list[dict[str, Any]]:
         return self._list_documents_from_doc_server(kb_id)
 
+    def list_groups(self, kb_id: str) -> list[str]:
+        """Return active Node Group names without scanning Chunk payloads."""
+        groups = getattr(self._get_document(), 'active_node_groups', {})
+        if callable(groups):
+            groups = groups()
+        if not isinstance(groups, Mapping):
+            return []
+        return [str(name) for name in groups if str(name).strip()]
+
     def count_valid_chunks(
         self,
         kb_id: str,
@@ -38,10 +49,16 @@ class KnowledgeBaseClient:
         groups: list[str],
         allowed_types: list[str],
         max_scan_chunks: int,
+        *,
+        excluded_chunk_ids: set[str] | None = None,
     ) -> dict[str, Any]:
         capacities = {group: {doc_id: 0 for doc_id in doc_ids} for group in groups}
         filtered: Counter[str] = Counter()
         invalid: Counter[str] = Counter()
+        excluded_ids = excluded_chunk_ids or set()
+        manual_exclusions: list[dict[str, str]] = []
+        observed_types: list[str] = []
+        seen_chunk_ids: set[str] = set()
         scanned = 0
 
         for doc_id, group, batch in self._iter_raw_chunks(kb_id, doc_ids, groups):
@@ -50,6 +67,22 @@ class KnowledgeBaseClient:
                 raise ValueError(f'max_scan_chunks exceeded: {scanned} > {max_scan_chunks}')
             embedding_candidates = []
             for node in batch:
+                node_type = _node_type(node)
+                if node_type not in observed_types:
+                    observed_types.append(node_type)
+                chunk_id = _node_uid(node)
+                if chunk_id in seen_chunk_ids:
+                    raise ValueError(f'duplicate chunk_id: {chunk_id}')
+                seen_chunk_ids.add(chunk_id)
+                if chunk_id in excluded_ids:
+                    manual_exclusions.append({
+                        'kb_id': kb_id,
+                        'doc_id': doc_id,
+                        'chunk_id': chunk_id,
+                        'group': group,
+                        'type': node_type,
+                    })
+                    continue
                 reason = _content_ineligible_reason(node, allowed_types)
                 if reason.startswith('filtered_type:'):
                     filtered[reason.partition(':')[2]] += 1
@@ -74,6 +107,8 @@ class KnowledgeBaseClient:
             'capacities': capacities,
             'filtered_count_by_type': dict(filtered),
             'invalid_count_by_reason': dict(invalid),
+            'manual_exclusions': manual_exclusions,
+            'observed_types': observed_types,
         }
 
     def fetch_valid_chunks(
@@ -85,6 +120,7 @@ class KnowledgeBaseClient:
         limit: int,
         *,
         order_by: str,
+        excluded_chunk_ids: set[str] | None = None,
     ) -> list[Any]:
         if order_by != 'stable_chunk_id_hash':
             raise ValueError('order_by must be stable_chunk_id_hash')
@@ -92,9 +128,14 @@ class KnowledgeBaseClient:
             return []
 
         nodes = []
+        excluded_ids = excluded_chunk_ids or set()
         document = self._get_document()
         for _, _, batch in self._iter_raw_chunks(kb_id, [doc_id], [group]):
-            candidates = [node for node in batch if not _content_ineligible_reason(node, allowed_types)]
+            candidates = [
+                node for node in batch
+                if _node_uid(node) not in excluded_ids
+                and not _content_ineligible_reason(node, allowed_types)
+            ]
             self._try_attach_stored_embeddings(document, candidates, kb_id, doc_id, group)
             nodes.extend(node for node in candidates if not _embedding_ineligible_reason(node))
         nodes.sort(key=lambda node: hashlib.sha256(_node_uid(node).encode()).hexdigest())
@@ -258,7 +299,7 @@ class KnowledgeBaseClient:
             for node in missing:
                 uid = str(getattr(node, 'uid', '') or getattr(node, '_uid', '') or '')
                 if embedding := embeddings.get(uid):
-                    node.embedding = embedding
+                    setattr(node, 'embedding', embedding)
         except Exception as exc:
             raise RuntimeError(
                 f'failed to read stored embeddings: kb_id={kb_id} doc_id={doc_id} group={group}'
@@ -338,7 +379,6 @@ class KnowledgeBaseClient:
             'row': {'doc': dict(doc), 'relation': dict(relation), 'snapshot': dict(snapshot)},
         }
 
-
 def _build_document() -> Any:
     from lazymind.config import config
     from lazymind.parsing.service.build_document import build_document
@@ -369,13 +409,17 @@ def _node_uid(node: Any) -> str:
 
 
 def _content_ineligible_reason(node: Any, allowed_types: list[str]) -> str:
-    metadata = getattr(node, 'metadata', {}) or {}
-    node_type = str(metadata.get('type') or metadata.get('node_type') or 'unknown').strip().lower()
+    node_type = _node_type(node)
     if node_type not in allowed_types:
         return f'filtered_type:{node_type}'
     if not str(getattr(node, 'text', '') or '').strip():
         return 'empty_text'
     return ''
+
+
+def _node_type(node: Any) -> str:
+    metadata = getattr(node, 'metadata', {}) or {}
+    return canonical_layout_type(metadata.get('type') or metadata.get('node_type'))
 
 
 def _embedding_ineligible_reason(node: Any) -> str:
