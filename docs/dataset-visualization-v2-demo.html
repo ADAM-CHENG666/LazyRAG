@@ -1,0 +1,2811 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dataset 新版可视化方案 · 交互原型</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #142339;
+      --title: #1f3550;
+      --text: #35506f;
+      --muted: #6b84a2;
+      --primary: #1e6dde;
+      --primary-dark: #1557aa;
+      --line: #d7e4f7;
+      --soft-line: #e3edf8;
+      --panel: #ffffff;
+      --soft-blue: #f5f9ff;
+      --green: #177352;
+      --amber: #9a6518;
+      --red: #b5443b;
+      --purple: #7652ad;
+      --shadow: 0 14px 36px rgba(58, 88, 131, 0.08);
+      font-family: "Alibaba PuHuiTi 3.0", "HarmonyOS Sans SC", "PingFang SC",
+        "Noto Sans SC", "Microsoft YaHei", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; }
+    body {
+      min-width: 1080px;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 8% 10%, rgba(47, 133, 255, 0.15), transparent 35%),
+        radial-gradient(circle at 92% 18%, rgba(10, 189, 184, 0.14), transparent 37%),
+        linear-gradient(180deg, #f4f8ff 0%, #f8fbff 40%, #ffffff 100%);
+      overflow: hidden;
+    }
+
+    button, input, textarea { font: inherit; }
+    button { color: inherit; }
+    button:focus-visible, input:focus-visible, textarea:focus-visible {
+      outline: 2px solid rgba(30, 109, 222, 0.35);
+      outline-offset: 2px;
+    }
+
+    .page {
+      height: 100vh;
+      padding: 14px 20px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      overflow: hidden;
+    }
+
+    .workbench {
+      flex: 1;
+      min-height: 0;
+      position: relative;
+      display: grid;
+      grid-template-columns: clamp(220px, 15vw, 280px) minmax(520px, 1fr) clamp(300px, 24vw, 380px);
+      gap: 10px;
+    }
+    .panel {
+      min-height: 0;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), #fafdff);
+      box-shadow: var(--shadow);
+    }
+
+    /* 左栏沿用现有工作台信息结构，仅作为页面环境。 */
+    .sidebar {
+      display: flex;
+      flex-direction: column;
+      background: #f6f9fe;
+    }
+    .sidebar-head {
+      padding: 14px 12px 11px;
+      border-bottom: 1px solid #e2ebf7;
+      background: rgba(255, 255, 255, 0.62);
+    }
+    .sidebar-head h1 {
+      margin: 0;
+      color: var(--title);
+      font-size: 18px;
+      line-height: 1.25;
+    }
+    .sidebar-head p { margin: 5px 0 0; color: #6784a4; font-size: 12px; }
+    .thread-id { margin-top: 7px; color: #496a90; font-size: 11px; word-break: break-all; }
+    .sidebar-body { flex: 1; min-height: 0; overflow: auto; padding: 7px 0; }
+    .nav-group {
+      border-bottom: 1px solid #dfe8f4;
+      padding: 5px 8px 9px;
+    }
+    .nav-group-title {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 6px 4px;
+      color: #24415f;
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .chev { color: #2a6dcc; font-size: 10px; }
+    .flow-list { display: grid; gap: 5px; padding: 2px 0; }
+    .flow-item {
+      display: grid;
+      grid-template-columns: 22px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 7px;
+      padding: 8px;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      color: #526d8b;
+      font-size: 12px;
+    }
+    .flow-item.active {
+      border-color: #a9caf0;
+      background: #e9f3ff;
+      color: #1c5fab;
+    }
+    .flow-item.done .flow-index { background: #dff5e9; color: var(--green); }
+    .flow-index {
+      width: 22px;
+      height: 22px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      background: #e8eff8;
+      color: #6c83a0;
+      font-size: 10px;
+      font-weight: 800;
+    }
+    .flow-item.active .flow-index { background: #1e6dde; color: #fff; }
+    .flow-state { color: #7b90a8; font-size: 10px; }
+    .sidebar-actions {
+      display: flex;
+      gap: 6px;
+      padding: 8px;
+      border-top: 1px solid #dfe8f4;
+    }
+    .sidebar-actions button {
+      flex: 1;
+      height: 30px;
+      border: 1px solid #c9dbf0;
+      border-radius: 6px;
+      background: #fff;
+      color: #315d8d;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    /* 中间是本方案唯一修改的产品区域。 */
+    .main {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 10px;
+      overflow: hidden;
+    }
+    .stage-head {
+      flex: 0 0 auto;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+      padding: 9px 10px;
+      border: 1px solid #d7e7fb;
+      border-radius: 12px;
+      background: #fff;
+    }
+    .kicker {
+      color: #1d70d3;
+      font-size: 11px;
+      font-weight: 800;
+    }
+    .stage-title-row { display: flex; align-items: center; gap: 9px; margin-top: 3px; }
+    .stage-title { color: var(--title); font-size: 18px; font-weight: 800; }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 3px 8px;
+      border: 1px solid #d5e5f6;
+      border-radius: 999px;
+      background: #f7fbff;
+      color: #315d8d;
+      font-size: 11px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    .badge.running { border-color: #f0d29c; background: #fff9ed; color: var(--amber); }
+    .badge.done { border-color: #bfe6d2; background: #f3fbf7; color: var(--green); }
+    .badge.stale { border-color: #d9c7ef; background: #faf6ff; color: var(--purple); }
+    .pulse {
+      width: 6px; height: 6px; border-radius: 50%; background: currentColor;
+      animation: pulse 1.3s ease-in-out infinite;
+    }
+    @keyframes pulse { 50% { opacity: .35; transform: scale(.7); } }
+    .btn {
+      height: 32px;
+      padding: 0 11px;
+      border: 1px solid #c6dcf6;
+      border-radius: 8px;
+      background: #fff;
+      color: #1e62b7;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .btn:hover { border-color: #8ebeff; background: #eef6ff; }
+    .btn.primary { border-color: #1f65b7; background: #1f65b7; color: #fff; }
+    .btn.primary:hover { background: #1557aa; }
+    .btn.ghost { border-color: transparent; background: transparent; }
+    .btn.danger { border-color: #efc0bb; color: #a13d34; }
+    .btn:disabled { cursor: not-allowed; opacity: .48; }
+
+    .dataset-shell {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      border: 1px solid #d7e7fb;
+      border-radius: 14px;
+      background: linear-gradient(180deg, #fbfdff, #f5f9ff);
+    }
+    .stepper {
+      flex: 0 0 auto;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      padding: 14px 14px 12px;
+      border-bottom: 1px solid #dce8f7;
+      background: rgba(255, 255, 255, 0.78);
+    }
+    .step {
+      min-width: 0;
+      position: relative;
+      display: grid;
+      grid-template-columns: 28px minmax(0, 1fr);
+      gap: 7px;
+      align-items: center;
+      border: 0;
+      background: transparent;
+      cursor: pointer;
+      text-align: left;
+      padding: 0 9px 0 0;
+    }
+    .step:not(:last-child)::after {
+      content: "";
+      position: absolute;
+      z-index: 0;
+      left: 28px;
+      right: 0;
+      top: 13px;
+      height: 1px;
+      background: #cddced;
+    }
+    .step-dot {
+      z-index: 1;
+      width: 28px;
+      height: 28px;
+      display: grid;
+      place-items: center;
+      border: 1px solid #cedceb;
+      border-radius: 50%;
+      background: #f7faff;
+      color: #7d91a9;
+      font-size: 11px;
+      font-weight: 900;
+    }
+    .step-copy { z-index: 1; min-width: 0; }
+    .step-name {
+      display: block;
+      overflow: hidden;
+      color: #49627e;
+      font-size: 12px;
+      font-weight: 800;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .step-status { color: #8497ad; font-size: 10px; white-space: nowrap; }
+    .step.done .step-dot { border-color: #9fd8b7; background: #edf9f2; color: var(--green); }
+    .step.running .step-dot { border-color: #edc87c; background: #fff7e7; color: var(--amber); }
+    .step.stale .step-dot { border-color: #cbb6e6; background: #f7f1ff; color: var(--purple); }
+    .step.selected .step-name { color: #155cac; }
+    .step.selected::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 9px;
+      bottom: -13px;
+      height: 3px;
+      border-radius: 3px 3px 0 0;
+      background: #1e6dde;
+    }
+    .step.locked { cursor: not-allowed; opacity: .56; }
+
+    .stale-banner {
+      flex: 0 0 auto;
+      margin: 10px 12px 0;
+      padding: 8px 10px;
+      display: none;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid #bdd7f7;
+      border-radius: 9px;
+      background: #eef6ff;
+      color: #315d8d;
+      font-size: 12px;
+    }
+    .stale-banner.show { display: flex; }
+    .stale-banner .btn { margin-left: auto; height: 27px; }
+    .stale-banner {
+      border-color: #d9c7ef;
+      background: #faf6ff;
+      color: #65428f;
+    }
+
+    .content-scroll {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      padding: 12px;
+    }
+    .content-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+    .content-head h2 { margin: 0; color: #24507a; font-size: 15px; }
+    .content-head p { margin: 4px 0 0; color: #7288a4; font-size: 11px; line-height: 1.45; }
+    .head-actions { display: flex; gap: 7px; }
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .metric {
+      min-width: 0;
+      padding: 10px;
+      border: 1px solid #dbe8f9;
+      border-radius: 10px;
+      background: #fff;
+    }
+    .metric-label { color: #7188a4; font-size: 10px; }
+    .metric-value { margin-top: 5px; color: #224669; font-size: 19px; font-weight: 800; }
+    .metric-unit { margin-left: 3px; color: #7a90aa; font-size: 10px; font-weight: 500; }
+    .metric-note { margin-top: 3px; color: #8b9db2; font-size: 9px; }
+    .materials-summary,
+    .overview-row {
+      flex: 0 0 170px;
+      height: 170px;
+      display: grid;
+      grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+      gap: 8px;
+    }
+    .material-card,
+    .overview-pane {
+      min-width: 0;
+      min-height: 0;
+      padding: 11px;
+      border: 1px solid #dbe8f9;
+      border-radius: 10px;
+      background: #fff;
+    }
+    .overview-pane { display: flex; flex-direction: column; }
+    .material-card-title,
+    .overview-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 9px;
+      color: #536f8c;
+      font-size: 10px;
+      font-weight: 800;
+    }
+    .overview-metrics {
+      flex: 1;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      align-items: center;
+    }
+    .overview-metric {
+      min-width: 0;
+      padding: 0 9px;
+      border-right: 1px solid #e6eef7;
+    }
+    .overview-metric:first-child { padding-left: 0; }
+    .overview-metric:last-child { padding-right: 0; border-right: 0; }
+    .overview-metric small { display: block; color: #7188a4; font-size: 9px; white-space: nowrap; }
+    .overview-metric strong { display: block; margin-top: 5px; color: #224669; font-size: 20px; }
+    .overview-metric strong span { margin-left: 2px; color: #7a90aa; font-size: 9px; font-weight: 500; }
+    .overview-metrics.single { grid-template-columns: 1fr; }
+    .overview-metrics.single .overview-metric { border-right: 0; }
+    .overview-ratio { flex: 1; display: grid; align-content: center; gap: 9px; }
+    .case-progress {
+      flex: 1;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: repeat(5, auto);
+      align-items: start;
+      justify-content: center;
+      gap: 4px;
+      padding-top: 1px;
+    }
+    .case-progress-step {
+      width: 68px;
+      min-width: 0;
+      display: grid;
+      justify-items: center;
+      text-align: center;
+    }
+    .case-progress-link {
+      width: 18px;
+      height: 1px;
+      margin-top: 31px;
+      background: #d7e2ee;
+    }
+    .progress-ring {
+      --progress: 0deg;
+      --progress-color: #93a5b8;
+      width: 58px;
+      height: 58px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      background: conic-gradient(var(--progress-color) var(--progress), #e8eef5 0);
+    }
+    .progress-ring::before {
+      content: "";
+      grid-area: 1 / 1;
+      width: 46px;
+      height: 46px;
+      border-radius: 50%;
+      background: #fff;
+    }
+    .progress-ring strong {
+      z-index: 1;
+      grid-area: 1 / 1;
+      color: #294f73;
+      font-size: 14px;
+    }
+    .progress-ring.done { --progress-color: #2fa46f; }
+    .progress-ring.running { --progress-color: #dda93d; }
+    .progress-ring.stale { --progress-color: #8d67bf; }
+    .progress-ring.failed { --progress-color: #c65349; }
+    .progress-ring.pending { --progress-color: #9aaabc; }
+    .case-progress-step b {
+      margin-top: 7px;
+      color: #315574;
+      font-size: 10px;
+      white-space: nowrap;
+    }
+    .case-progress-step small {
+      min-height: 24px;
+      margin-top: 4px;
+      color: #7188a4;
+      font-size: 8px;
+      line-height: 1.4;
+    }
+    .case-progress-step small.done { color: var(--green); }
+    .case-progress-step small.running { color: var(--amber); }
+    .case-progress-step small.stale { color: var(--purple); }
+    .case-progress-step small.failed { color: var(--red); }
+    .case-total { color: #224669; font-size: 25px; font-weight: 800; }
+    .case-total span { margin-left: 3px; color: #7a90aa; font-size: 10px; font-weight: 500; }
+    .case-split { margin-top: 9px; color: #748ba6; font-size: 10px; }
+    .funnel-list { flex: 1; display: grid; align-content: center; gap: 7px; }
+    .funnel-row {
+      display: grid;
+      grid-template-columns: 42px minmax(0, 1fr) 75px;
+      gap: 8px;
+      align-items: center;
+      color: #607994;
+      font-size: 10px;
+    }
+    .funnel-track {
+      height: 8px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: #edf2f8;
+    }
+    .funnel-fill { height: 100%; border-radius: inherit; }
+    .funnel-fill.scanned { background: #c8dbf2; }
+    .funnel-fill.effective { background: #79ace8; }
+    .funnel-fill.selected { background: #286fc1; }
+    .funnel-value { color: #385a7d; text-align: right; white-space: nowrap; }
+    .conversion-note { margin-top: 8px; color: #8295aa; font-size: 9px; text-align: right; }
+    .source-group { border-bottom: 1px solid #e7eef7; }
+    .source-group:last-child { border-bottom: 0; }
+    .source-columns {
+      display: grid;
+      grid-template-columns: minmax(145px, .9fr) minmax(210px, 1.35fr) 54px 42px;
+      gap: 10px;
+      padding: 7px 10px;
+      border-bottom: 1px solid #dfeaf6;
+      background: #f3f8ff;
+      color: #5a7492;
+      font-size: 10px;
+      font-weight: 800;
+    }
+    .source-group-title {
+      padding: 8px 10px;
+      background: #f7faff;
+      color: #526e8b;
+      font-size: 10px;
+      font-weight: 800;
+    }
+    .source-row {
+      display: grid;
+      grid-template-columns: minmax(145px, .9fr) minmax(210px, 1.35fr) 54px 42px;
+      gap: 10px;
+      align-items: center;
+      padding: 9px 10px;
+      border-top: 1px solid #edf2f8;
+    }
+    .doc-name { min-width: 0; color: #3d5b79; font-size: 11px; }
+    .doc-name small { display: block; margin-top: 2px; color: #899bb0; font-size: 9px; }
+    .doc-relation { min-width: 0; }
+    .relation-track {
+      position: relative;
+      height: 10px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: #edf2f8;
+    }
+    .relation-track span { position: absolute; inset: 0 auto 0 0; border-radius: inherit; }
+    .relation-track .effective { background: #79ace8; }
+    .relation-track .selected { background: #286fc1; }
+    .relation-values { margin-top: 4px; color: #8295aa; font-size: 9px; white-space: nowrap; }
+    .relation-track.disabled { background: repeating-linear-gradient(135deg, #edf1f6 0 5px, #e3e9f1 5px 10px); }
+    .source-row .status-text,
+    .source-row .row-button { font-size: 10px; }
+    .section-card {
+      flex: 1;
+      min-height: 0;
+      margin-top: 9px;
+      overflow: hidden;
+      border: 1px solid #dbe8f9;
+      border-radius: 10px;
+      background: #fff;
+    }
+    .filterable-list {
+      display: flex;
+      flex-direction: column;
+    }
+    .section-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 9px 11px;
+      border-bottom: 1px solid #e5eef8;
+      color: #284664;
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .section-title small { color: #7a90aa; font-size: 10px; font-weight: 500; }
+    .table-wrap { width: 100%; overflow: auto; }
+    .filterable-list .table-wrap { flex: 1; min-height: 0; overflow: hidden auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 11px; }
+    th {
+      padding: 8px 9px;
+      border-bottom: 1px solid #dfeaf6;
+      background: #f3f8ff;
+      color: #5a7492;
+      font-weight: 800;
+      text-align: left;
+      white-space: nowrap;
+    }
+    td {
+      max-width: 240px;
+      padding: 9px;
+      border-bottom: 1px solid #edf2f8;
+      color: #3e5a77;
+      line-height: 1.4;
+      vertical-align: top;
+    }
+    tr:last-child td { border-bottom: 0; }
+    .status-text { display: inline-flex; align-items: center; gap: 5px; font-weight: 700; }
+    .status-text::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #9aabc0; }
+    .status-text.ok { color: var(--green); }
+    .status-text.ok::before { background: #2fa46f; }
+    .status-text.work { color: var(--amber); }
+    .status-text.work::before { background: #dda93d; animation: pulse 1.2s ease-in-out infinite; }
+    .status-text.wait { color: #798da5; }
+    .status-text.stale { color: var(--purple); }
+    .status-text.stale::before { background: #8d67bf; }
+    .topic-list {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      padding: 10px;
+    }
+    .topic-card {
+      padding: 9px;
+      border: 1px solid #e0eaf6;
+      border-radius: 8px;
+      background: #fbfdff;
+    }
+    .topic-card strong { color: #285077; font-size: 11px; }
+    .topic-card p { margin: 5px 0 0; color: #7288a4; font-size: 10px; line-height: 1.4; }
+    .ratio-card {
+      display: grid;
+      grid-template-columns: 130px minmax(0, 1fr);
+      gap: 14px;
+      align-items: center;
+      margin-bottom: 10px;
+      padding: 11px;
+      border: 1px solid #dbe8f9;
+      border-radius: 10px;
+      background: #fff;
+    }
+    .ratio-total { color: #224669; font-size: 25px; font-weight: 800; }
+    .ratio-total small { display: block; margin-bottom: 5px; color: #7188a4; font-size: 10px; font-weight: 800; }
+    .ratio-total span { margin-left: 3px; color: #7a90aa; font-size: 10px; font-weight: 500; }
+    .stacked-bar {
+      height: 12px;
+      display: flex;
+      overflow: hidden;
+      border-radius: 999px;
+      background: #edf2f8;
+    }
+    .stacked-bar span { display: block; height: 100%; }
+    .stacked-bar .precision { background: #3d82d0; }
+    .stacked-bar .reasoning { background: #78bfc4; }
+    .stacked-bar .imported { background: #a897bc; }
+    .stacked-bar .generated { background: #3d82d0; }
+    .ratio-labels {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      margin-top: 7px;
+      color: #607994;
+      font-size: 10px;
+    }
+    .ratio-labels strong { color: #315a83; font-size: 11px; }
+    .topic-overview {
+      width: min(390px, 100%);
+      display: grid;
+      grid-template-columns: 116px minmax(0, 1fr);
+      gap: 16px;
+      align-items: center;
+      margin-bottom: 10px;
+      padding: 11px;
+      border: 1px solid #dbe8f9;
+      border-radius: 10px;
+      background: #fff;
+    }
+    .topic-distribution {
+      display: grid;
+      grid-template-columns: 64px minmax(0, 1fr);
+      gap: 11px;
+      align-items: center;
+    }
+    .topic-ring {
+      width: 64px;
+      height: 64px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      background: conic-gradient(#3d82d0 0 62.5%, #a9c9ee 62.5% 100%);
+    }
+    .topic-ring::after {
+      content: "";
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      background: #fff;
+    }
+    .topic-legend { display: grid; gap: 7px; color: #607994; font-size: 10px; }
+    .topic-legend span { display: flex; align-items: center; gap: 6px; }
+    .topic-legend i { width: 8px; height: 8px; border-radius: 50%; background: #3d82d0; }
+    .topic-legend i.reasoning { background: #a9c9ee; }
+    .topic-legend strong { margin-left: auto; color: #315a83; }
+    .typed-section { border-bottom: 1px solid #e6eef7; }
+    .typed-section:last-child { border-bottom: 0; }
+    .typed-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 10px;
+      color: #385b7e;
+      font-size: 10px;
+      font-weight: 800;
+    }
+    .typed-title.precision { background: #f0f6fe; }
+    .typed-title.reasoning { background: #f7f2fc; }
+    .typed-section table th { background: #fbfdff; }
+    .typed-section.precision table { border-left: 3px solid #79ace8; }
+    .typed-section.reasoning table { border-left: 3px solid #aa8ccb; }
+    .lane-card {
+      margin-bottom: 10px;
+      padding: 11px;
+      border: 1px solid #dbe8f9;
+      border-radius: 10px;
+      background: #fff;
+    }
+    .lane-card-title { margin-bottom: 9px; color: #536f8c; font-size: 10px; font-weight: 800; }
+    .lane-rows { flex: 1; display: grid; align-content: center; gap: 8px; }
+    .lane-row {
+      display: grid;
+      grid-template-columns: 48px minmax(0, 1fr) 34px;
+      gap: 8px;
+      align-items: center;
+      color: #56728e;
+      font-size: 10px;
+    }
+    .lane-track {
+      height: 23px;
+      display: flex;
+      overflow: hidden;
+      border-radius: 6px;
+      background: #edf2f8;
+    }
+    .lane-segment {
+      min-width: 0;
+      display: grid;
+      place-items: center;
+      color: #fff;
+      font-size: 9px;
+      white-space: nowrap;
+    }
+    .lane-segment.precision.easy { background: #72a9e5; }
+    .lane-segment.precision.medium { background: #4d8fd8; }
+    .lane-segment.precision.hard { background: #2e70bb; }
+    .lane-segment.reasoning.easy { background: #86c9cb; }
+    .lane-segment.reasoning.medium { background: #58adb3; }
+    .lane-segment.reasoning.hard { background: #34858e; }
+    .lane-scale { margin: 5px 42px 0 56px; border-top: 1px solid #d9e4f1; color: #8a9caf; font-size: 9px; text-align: right; }
+    .difficulty {
+      display: inline-flex;
+      padding: 2px 6px;
+      border-radius: 999px;
+      background: #eef4fb;
+      color: #57728f;
+      font-size: 10px;
+      white-space: nowrap;
+    }
+    .difficulty.medium { background: #fff7e9; color: #8c611d; }
+    .difficulty.hard { background: #f7effa; color: #76518e; }
+    .semantic-list { margin-top: 9px; }
+    .topic-list-row {
+      display: grid;
+      grid-template-columns: minmax(180px, 1fr) 78px 78px 42px;
+      gap: 12px;
+      align-items: center;
+      min-height: 46px;
+      padding: 8px 11px;
+      border-bottom: 1px solid #edf2f8;
+    }
+    .topic-list-row:last-child { border-bottom: 0; }
+    .topic-list-row strong { color: #315574; font-size: 11px; }
+    .topic-count { color: #7288a4; font-size: 10px; white-space: nowrap; }
+    .type-tag {
+      display: inline-flex;
+      width: fit-content;
+      padding: 2px 6px;
+      border-radius: 999px;
+      background: #eaf3fd;
+      color: #356b9f;
+      font-size: 10px;
+      white-space: nowrap;
+    }
+    .type-tag.reasoning { background: #e9f6f6; color: #397d84; }
+    .case-list-row {
+      display: grid;
+      grid-template-columns: 158px 190px minmax(300px, 1fr) 42px;
+      gap: 10px;
+      align-items: center;
+      min-height: 70px;
+      padding: 8px 11px;
+      border-bottom: 1px solid #edf2f8;
+    }
+    .case-list-row:last-child { border-bottom: 0; }
+    .case-identity,
+    .case-plan-block,
+    .case-qa-block { min-width: 0; padding: 6px; border-radius: 7px; }
+    .case-id { display: block; color: #294f73; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+    .case-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+    .case-plan-tags { display: flex; align-items: center; gap: 5px; }
+    .case-topic { display: block; overflow: hidden; margin-top: 6px; color: #607994; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+    .case-topic strong { color: #315a83; font-weight: 800; }
+    .case-qa-block { display: grid; gap: 5px; }
+    .qa-line {
+      min-width: 0;
+      display: grid;
+      grid-template-columns: 18px minmax(0, 1fr);
+      gap: 5px;
+      color: #526d89;
+      font-size: 10px;
+    }
+    .qa-line b {
+      width: 18px;
+      height: 18px;
+      display: grid;
+      place-items: center;
+      border-radius: 5px;
+      background: #edf4fc;
+      color: #356b9f;
+      font-size: 9px;
+    }
+    .qa-line span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .case-list-row.focus-plan .case-plan-block,
+    .case-list-row.focus-qa .case-qa-block,
+    .case-list-row.focus-rules .case-identity { background: #f3f8ff; }
+    .object-table { table-layout: fixed; }
+    .object-table th {
+      position: relative;
+      height: 34px;
+      padding: 7px 9px;
+      background: #f3f8ff;
+      font-size: 10px;
+      white-space: nowrap;
+    }
+    .filterable-list .object-table thead th {
+      position: sticky;
+      z-index: 5;
+      top: 0;
+    }
+    .object-table td { height: 42px; padding: 7px 9px; vertical-align: middle; }
+    .object-table .identity-main { display: block; color: #315574; font-size: 11px; }
+    .object-table .cell-tags { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; }
+    .object-table .topic-cell {
+      overflow: hidden;
+      color: #536f8c;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .column-heading { display: inline-flex; align-items: center; gap: 3px; }
+    .column-filter {
+      width: 18px;
+      height: 18px;
+      display: inline-grid;
+      place-items: center;
+      padding: 0;
+      border: 0;
+      border-radius: 4px;
+      background: transparent;
+      color: #89a0b8;
+      font-size: 9px;
+      cursor: pointer;
+    }
+    .column-filter:hover,
+    .column-filter.is-active { background: #deebfa; color: #2669b3; }
+    .column-filter-menu {
+      position: absolute;
+      z-index: 20;
+      top: calc(100% - 2px);
+      left: 8px;
+      min-width: 118px;
+      padding: 5px;
+      border: 1px solid #cbdced;
+      border-radius: 7px;
+      background: #fff;
+      box-shadow: 0 8px 20px rgba(43, 76, 111, .13);
+    }
+    .column-filter-menu[hidden] { display: none; }
+    .column-filter-menu button {
+      width: 100%;
+      display: block;
+      padding: 6px 8px;
+      border: 0;
+      border-radius: 5px;
+      background: transparent;
+      color: #526f8c;
+      font-size: 10px;
+      text-align: left;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+    .column-filter-menu button:hover,
+    .column-filter-menu button.is-selected { background: #edf5ff; color: #2467af; }
+    .status-dot,
+    .case-status-icon {
+      display: inline-grid;
+      place-items: center;
+      width: 20px;
+      height: 20px;
+      border: 1px solid #cbd6e3;
+      border-radius: 50%;
+      background: #fff;
+      color: #8a9daf;
+      font-size: 11px;
+      font-weight: 900;
+      line-height: 1;
+      vertical-align: middle;
+    }
+    .status-dot { width: 18px; height: 18px; }
+    .status-dot.done,
+    .case-status-icon.done { border-color: #9fd8b7; background: #edf9f2; color: #177352; }
+    .status-dot.running,
+    .case-status-icon.running {
+      border-color: #dda93d;
+      border-top-color: transparent;
+      background: #fff9ed;
+      color: transparent;
+      animation: spin .9s linear infinite;
+    }
+    .status-dot.stale,
+    .case-status-icon.stale { border-color: #cbb6e6; background: #f7f1ff; color: #7652ad; }
+    .case-status-icon.failed { border-color: #efb8b2; background: #fff1f0; color: #b5443b; }
+    .case-status-icon.pending { border-color: #cbd6e3; background: #fff; color: #8a9daf; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) {
+      .status-dot.running,
+      .case-status-icon.running { animation: none; }
+    }
+    .document-table th:nth-child(1) { width: 28%; }
+    .document-table th:nth-child(2) { width: 104px; }
+    .document-table th:nth-child(3) { width: 22%; }
+    .document-table th:nth-child(4) { width: auto; }
+    .topic-table th:nth-child(1) { width: 104px; }
+    .topic-table th:nth-child(2) { width: 76px; }
+    .topic-table th:nth-child(4) { width: 92px; }
+    .topic-table th:nth-child(5) { width: 72px; }
+    .unified-case-table .case-id-col { width: 100px; }
+    .unified-case-table .case-stage-col { width: 72px; }
+    .unified-case-table .case-source-col { width: 90px; }
+    .unified-case-table .case-type-col { width: 72px; }
+    .unified-case-table .case-difficulty-col { width: 68px; }
+    .unified-case-table .case-stage-head {
+      position: relative;
+      padding-inline: 3px;
+      text-align: center;
+    }
+    .unified-case-table .case-stage-head:not(.stage-last)::after {
+      content: "";
+      position: absolute;
+      z-index: 7;
+      top: 50%;
+      right: -8px;
+      width: 16px;
+      height: 1px;
+      background: #aebfd2;
+    }
+    .unified-case-table td.case-stage-cell {
+      position: relative;
+      padding-inline: 3px;
+      text-align: center;
+    }
+    .unified-case-table td.case-stage-cell::before {
+      content: "";
+      position: absolute;
+      z-index: 0;
+      top: 50%;
+      right: 0;
+      left: 0;
+      height: 2px;
+      background: #d7e1ec;
+      transform: translateY(-50%);
+    }
+    .unified-case-table td.case-stage-cell.stage-first::before { left: 50%; }
+    .unified-case-table td.case-stage-cell.stage-last::before { right: 50%; }
+    .case-status-wrap {
+      position: relative;
+      z-index: 1;
+      display: inline-grid;
+      place-items: center;
+    }
+    .manual-edit-mark {
+      position: absolute;
+      right: -8px;
+      bottom: -5px;
+      width: 14px;
+      height: 14px;
+      display: grid;
+      place-items: center;
+      border: 2px solid #fff;
+      border-radius: 50%;
+      background: #2f78c8;
+      color: #fff;
+      box-shadow: 0 1px 3px rgba(27, 82, 140, .25);
+      font-size: 8px;
+      font-style: normal;
+      line-height: 1;
+    }
+    .unified-case-table thead tr:first-child th { top: 0; }
+    .object-table tr[data-row-detail] { cursor: pointer; }
+    .object-table tr[data-row-detail] td { transition: background .16s ease; }
+    .object-table tr[data-row-detail]:hover td,
+    .object-table tr[data-row-detail]:focus-visible td { background: #f1f7ff; }
+    .object-table tr[data-row-detail] td:last-child {
+      position: relative;
+      padding-right: 24px;
+    }
+    .object-table tr[data-row-detail] td:last-child::after {
+      content: "›";
+      position: absolute;
+      right: 9px;
+      top: 50%;
+      color: #2a6dcc;
+      font-size: 17px;
+      opacity: 0;
+      transform: translate(-3px, -50%);
+      transition: opacity .16s ease, transform .16s ease;
+    }
+    .object-table tr[data-row-detail]:hover td:last-child::after,
+    .object-table tr[data-row-detail]:focus-visible td:last-child::after {
+      opacity: .7;
+      transform: translate(0, -50%);
+    }
+    .object-table tr[data-row-detail]:focus-visible {
+      outline: 2px solid rgba(30, 109, 222, .35);
+      outline-offset: -2px;
+    }
+    .case-table { min-width: 930px; table-layout: fixed; }
+    .case-table th:nth-child(1) { width: 76px; }
+    .case-table th:nth-child(2) { width: 82px; }
+    .case-table th:nth-child(3) { width: 92px; }
+    .case-table th:nth-child(4) { width: 68px; }
+    .case-table th:nth-child(5) { width: 66px; }
+    .case-table th:nth-child(6) { width: 118px; }
+    .case-table th:nth-child(7) { width: 180px; }
+    .case-table th:nth-child(8) { width: 190px; }
+    .case-table th:nth-child(9) { width: 58px; }
+    .case-table .case-excerpt {
+      display: -webkit-box;
+      overflow: hidden;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      color: #526d89;
+    }
+    .case-table.focus-plan .plan-field,
+    .case-table.focus-qa .qa-field,
+    .case-table.focus-rules .status-field {
+      background: #f3f8ff;
+      color: #285e96;
+    }
+    .case-table .pending-copy { color: #93a3b5; }
+    .case-roadmap {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      margin-bottom: 12px;
+    }
+    .roadmap-step {
+      position: relative;
+      min-width: 0;
+      padding: 8px 5px 9px;
+      border: 0;
+      border-bottom: 2px solid #dce7f3;
+      background: transparent;
+      color: #71869e;
+      cursor: pointer;
+      text-align: left;
+    }
+    .roadmap-step:not(:last-child)::after {
+      content: "";
+      position: absolute;
+      right: -3px;
+      top: 17px;
+      width: 6px;
+      height: 6px;
+      border-top: 1px solid #afc2d8;
+      border-right: 1px solid #afc2d8;
+      transform: rotate(45deg);
+    }
+    .roadmap-step strong { display: block; color: #315a83; font-size: 11px; }
+    .roadmap-step small { display: block; margin-top: 4px; font-size: 9px; line-height: 1.35; }
+    .roadmap-step.selected { border-bottom-color: #2b73c5; background: #f5f9ff; color: #315d8d; }
+    .case-stage-panel[hidden] { display: none; }
+    .case-stage-summary { margin-bottom: 9px; color: #70859d; font-size: 10px; }
+    .manual-change-card {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      margin-bottom: 10px;
+      padding: 9px 10px;
+      border: 1px solid #bcd6f3;
+      border-radius: 8px;
+      background: #f1f7ff;
+      color: #315d8d;
+      font-size: 10px;
+      line-height: 1.45;
+    }
+    .manual-change-card .edit-glyph {
+      flex: 0 0 auto;
+      width: 22px;
+      height: 22px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      background: #2f78c8;
+      color: #fff;
+      font-size: 11px;
+    }
+    .manual-change-card strong { display: block; color: #24598f; font-size: 11px; }
+    .manual-change-card button {
+      margin-left: auto;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: #1e67b5;
+      cursor: pointer;
+      font-size: 10px;
+      white-space: nowrap;
+    }
+    .chunk-card-list,
+    .topic-option-list { display: grid; gap: 8px; }
+    .chunk-info-card,
+    .topic-option {
+      padding: 10px;
+      border: 1px solid #e0eaf6;
+      border-radius: 8px;
+      background: #fbfdff;
+    }
+    .chunk-info-card strong,
+    .topic-option strong { display: block; color: #315a83; font-size: 11px; }
+    .chunk-info-card.is-pending { border-color: #aac9ed; background: #f5f9ff; }
+    .chunk-card-head,
+    .chunk-card-meta,
+    .chunk-filter-row,
+    .quota-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .chunk-card-head { justify-content: space-between; }
+    .chunk-card-head strong {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .chunk-selection {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      color: #476684;
+      font-size: 10px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    .chunk-selection input { accent-color: #1e6dde; }
+    .chunk-card-meta {
+      flex-wrap: wrap;
+      margin: 7px 0;
+    }
+    .chunk-id { margin-left: auto; color: #8496aa; font-size: 10px; }
+    .pending-chip {
+      display: none;
+      padding: 2px 6px;
+      border-radius: 999px;
+      background: #e8f2ff;
+      color: #246ab7;
+      font-size: 9px;
+      font-weight: 800;
+    }
+    .chunk-info-card.is-pending .pending-chip { display: inline-flex; }
+    .pending-label {
+      display: inline-flex;
+      margin-left: 6px;
+      padding: 1px 5px;
+      border-radius: 999px;
+      background: #e8f2ff;
+      color: #246ab7;
+      font-size: 9px;
+      font-weight: 800;
+      vertical-align: middle;
+    }
+    .chunk-preview {
+      width: 100%;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: #607994;
+      cursor: pointer;
+      display: -webkit-box;
+      overflow: hidden;
+      font-size: 10px;
+      line-height: 1.55;
+      text-align: left;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 4;
+    }
+    .chunk-preview.expanded { display: block; overflow: visible; }
+    .chunk-filter-row { margin-bottom: 9px; }
+    .chunk-filter-row label {
+      display: grid;
+      flex: 1;
+      gap: 4px;
+      color: #71869e;
+      font-size: 9px;
+      font-weight: 800;
+    }
+    .chunk-filter-row select {
+      height: 30px;
+      padding: 0 7px;
+      border: 1px solid #d6e3f2;
+      border-radius: 7px;
+      background: #fff;
+      color: #476684;
+      font-size: 10px;
+    }
+    .drawer-attributes {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 7px;
+      margin-bottom: 12px;
+    }
+    .drawer-attribute {
+      padding: 8px;
+      border: 1px solid #e2ebf5;
+      border-radius: 8px;
+      background: #f8fbff;
+    }
+    .drawer-attribute small { display: block; margin-bottom: 3px; color: #8193a7; font-size: 9px; }
+    .drawer-attribute strong { color: #315a83; font-size: 11px; }
+    .quota-list {
+      display: grid;
+      gap: 6px;
+      margin-bottom: 12px;
+      padding: 9px;
+      border: 1px solid #dce8f6;
+      border-radius: 8px;
+      background: #fbfdff;
+    }
+    .quota-list > strong { color: #284664; font-size: 11px; }
+    .quota-row { justify-content: space-between; color: #55718e; font-size: 10px; }
+    .quota-row b { color: #2d5d8c; }
+    .quota-row.invalid b { color: #b76d21; }
+    .progressive-note {
+      margin-top: 9px;
+      color: #8295aa;
+      font-size: 9px;
+      text-align: center;
+    }
+    .topic-option {
+      width: 100%;
+      cursor: pointer;
+      text-align: left;
+    }
+    .topic-option:hover { border-color: #9fc4ee; background: #f2f8ff; }
+    .topic-option.selected { border-color: #66a0df; background: #eaf4ff; }
+    .topic-option small { display: block; margin-top: 4px; color: #7f94aa; font-size: 10px; }
+    .topic-option-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-top: 5px;
+      color: #7f94aa;
+      font-size: 9px;
+    }
+    .topic-option-meta span:last-child { white-space: nowrap; }
+    .readonly-stack {
+      display: grid;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+    .readonly-item {
+      padding: 9px 10px;
+      border: 1px solid #e2ebf5;
+      border-radius: 8px;
+      background: #f8fbff;
+    }
+    .readonly-item small {
+      display: block;
+      margin-bottom: 4px;
+      color: #8193a7;
+      font-size: 9px;
+      font-weight: 800;
+    }
+    .readonly-item p {
+      margin: 0;
+      color: #476684;
+      font-size: 10px;
+      line-height: 1.55;
+    }
+    .score-point {
+      margin-bottom: 12px;
+      padding: 10px;
+      border: 1px solid #dce8f6;
+      border-radius: 9px;
+      background: #fbfdff;
+    }
+    .score-point > label {
+      display: block;
+      margin-bottom: 7px;
+      color: #284664;
+      font-size: 11px;
+      font-weight: 800;
+    }
+    .score-point .field { margin-bottom: 9px; }
+    .evidence-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin: 2px 0 7px;
+      color: #71869e;
+      font-size: 9px;
+      font-weight: 800;
+    }
+    .evidence-card .chunk-selection { margin-left: auto; }
+    .case-unsaved {
+      display: none;
+      margin-bottom: 10px;
+      padding: 7px 9px;
+      border: 1px solid #bcd6f3;
+      border-radius: 8px;
+      background: #f1f7ff;
+      color: #315d8d;
+      font-size: 10px;
+    }
+    .case-detail.is-dirty .case-unsaved { display: block; }
+    .quota-bar {
+      height: 7px;
+      margin-top: 7px;
+      overflow: hidden;
+      border-radius: 99px;
+      background: #eaf0f7;
+    }
+    .quota-bar span { display: block; height: 100%; border-radius: inherit; background: #6faaf1; }
+    .change-bar {
+      flex: 0 0 auto;
+      display: none;
+      align-items: center;
+      gap: 10px;
+      padding: 9px 12px;
+      border-top: 1px solid #c8dcf4;
+      background: #f2f8ff;
+      box-shadow: 0 -8px 18px rgba(49, 95, 150, 0.07);
+    }
+    .change-bar.show { display: flex; }
+    .change-copy { min-width: 0; flex: 1; }
+    .change-copy strong { display: block; color: #285077; font-size: 12px; }
+    .change-copy span { display: block; margin-top: 2px; color: #7188a4; font-size: 10px; }
+
+    /* 右栏沿用现有交互区域的信息层级。 */
+    .interaction {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 10px;
+    }
+    .chat-card {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      border: 1px solid #d7e7fb;
+      border-radius: 12px;
+      background: #fff;
+    }
+    .chat-head {
+      padding: 10px 12px;
+      border-bottom: 1px solid #e4eef9;
+    }
+    .chat-head strong { display: block; color: #223c5b; font-size: 13px; }
+    .chat-head small { display: block; margin-top: 3px; color: #667f9d; font-size: 11px; }
+    .messages { flex: 1; min-height: 0; overflow: auto; padding: 12px; }
+    .message {
+      max-width: 92%;
+      margin-bottom: 10px;
+      padding: 9px 10px;
+      border: 1px solid #dce8f7;
+      border-radius: 10px 10px 10px 3px;
+      background: #f6faff;
+      color: #405d7b;
+      font-size: 11px;
+      line-height: 1.55;
+    }
+    .message.system { border-color: #f0d8a7; background: #fffaf0; }
+    .message strong { display: block; margin-bottom: 3px; color: #285077; }
+    .composer {
+      padding: 10px;
+      border: 1px solid #d7e7fb;
+      border-radius: 12px;
+      background: #fff;
+      box-shadow: 0 12px 28px rgba(48, 82, 130, 0.11);
+    }
+    .composer textarea {
+      width: 100%;
+      height: 62px;
+      resize: none;
+      border: 0;
+      color: #385572;
+      background: transparent;
+      font-size: 12px;
+    }
+    .composer-foot { display: flex; justify-content: space-between; align-items: center; margin-top: 7px; }
+    .lock-note { color: #8497ad; font-size: 10px; }
+
+    .scrim {
+      position: absolute;
+      z-index: 40;
+      inset: 0;
+      display: none;
+      background: rgba(30, 49, 73, 0.24);
+      backdrop-filter: blur(1px);
+    }
+    .scrim.show { display: block; }
+    .side-drawer {
+      position: absolute;
+      z-index: 50;
+      top: 0;
+      right: 0;
+      width: min(520px, 48vw);
+      height: 100%;
+      display: none;
+      flex-direction: column;
+      overflow: hidden;
+      border: 1px solid #d7e4f7;
+      border-radius: 16px;
+      background: #fff;
+      box-shadow: -24px 0 44px rgba(36, 66, 104, 0.18);
+      animation: drawerIn .2s ease both;
+    }
+    .side-drawer.show { display: flex; }
+    @keyframes drawerIn { from { opacity: 0; transform: translateX(18px); } }
+    .drawer-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 14px;
+      border-bottom: 1px solid #e3edf8;
+    }
+    .drawer-head strong { color: #223c5b; font-size: 14px; }
+    .icon-btn {
+      width: 30px;
+      height: 30px;
+      border: 1px solid #d3e2f5;
+      border-radius: 8px;
+      background: #f7fbff;
+      color: #4e6f93;
+      cursor: pointer;
+    }
+    .drawer-body { flex: 1; min-height: 0; overflow: auto; padding: 14px; }
+    .drawer-foot {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      padding: 11px 14px;
+      border-top: 1px solid #e3edf8;
+    }
+    .form-note {
+      margin-bottom: 12px;
+      padding: 9px 10px;
+      border: 1px solid #d7e7fb;
+      border-radius: 8px;
+      background: #f5f9ff;
+      color: #5b7592;
+      font-size: 11px;
+      line-height: 1.5;
+    }
+    .form-group { margin-bottom: 15px; }
+    .form-group > label { display: block; margin-bottom: 7px; color: #284664; font-size: 12px; font-weight: 800; }
+    .check-list { display: grid; gap: 7px; }
+    .check {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 8px;
+      border: 1px solid #e0eaf6;
+      border-radius: 8px;
+      background: #fbfdff;
+      font-size: 11px;
+    }
+    .check input { margin-top: 2px; accent-color: #1e6dde; }
+    .check span { display: block; color: #385572; }
+    .check small { display: block; margin-top: 2px; color: #8396ad; }
+    .field {
+      width: 100%;
+      height: 34px;
+      padding: 0 9px;
+      border: 1px solid #ccdaea;
+      border-radius: 7px;
+      color: #385572;
+      background: #fff;
+      font-size: 12px;
+    }
+    textarea.field {
+      height: 82px;
+      padding: 8px 9px;
+      resize: vertical;
+      line-height: 1.5;
+    }
+    select.field { cursor: pointer; }
+    .summary-strip {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .distribution {
+      display: grid;
+      grid-template-columns: 92px repeat(3, minmax(0, 1fr));
+      overflow: hidden;
+      border: 1px solid #dbe8f9;
+      border-radius: 10px;
+      background: #fff;
+    }
+    .distribution > div {
+      min-width: 0;
+      padding: 9px;
+      border-right: 1px solid #e5eef8;
+      border-bottom: 1px solid #e5eef8;
+      color: #496580;
+      font-size: 11px;
+      text-align: center;
+    }
+    .distribution > div:nth-child(4n) { border-right: 0; }
+    .distribution > div:nth-last-child(-n + 4) { border-bottom: 0; }
+    .distribution .axis {
+      background: #f3f8ff;
+      color: #617b98;
+      font-weight: 800;
+    }
+    .distribution strong {
+      display: block;
+      margin-bottom: 2px;
+      color: #224669;
+      font-size: 16px;
+    }
+    .row-button {
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: #1d67bc;
+      cursor: pointer;
+      font-weight: 800;
+      text-align: left;
+    }
+    .row-button:hover { text-decoration: underline; }
+    .source-tag {
+      display: inline-flex;
+      padding: 2px 6px;
+      border-radius: 999px;
+      background: #eef5fd;
+      color: #496c92;
+      font-size: 10px;
+      white-space: nowrap;
+    }
+    .source-tag.imported { background: #f3f0f8; color: #72578f; }
+    .detail-block {
+      margin-bottom: 12px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid #e6eef7;
+    }
+    .detail-block:last-child { border-bottom: 0; }
+    .detail-block h4 { margin: 0 0 7px; color: #284664; font-size: 12px; }
+    .detail-block p { margin: 0; color: #5b7592; font-size: 11px; line-height: 1.6; }
+    .detail-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 9px;
+    }
+    .chunk-choice {
+      display: grid;
+      gap: 6px;
+      margin-top: 7px;
+    }
+    .inline-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .lane-input {
+      padding: 8px;
+      border: 1px solid #e0eaf6;
+      border-radius: 8px;
+      background: #fbfdff;
+    }
+    .lane-input label { display: block; margin-bottom: 5px; color: #58738f; font-size: 10px; }
+    .lane-input input { width: 100%; }
+    .warning-note {
+      margin-top: 10px;
+      color: #895e1a;
+      font-size: 10px;
+      line-height: 1.5;
+    }
+    .control-point {
+      margin-bottom: 12px;
+      padding: 11px;
+      border: 1px solid #dbe7f5;
+      border-radius: 9px;
+      background: #fbfdff;
+    }
+    .control-point:last-child { margin-bottom: 0; }
+    .control-heading { margin-bottom: 9px; color: #284664; font-size: 12px; font-weight: 800; }
+    .control-heading span {
+      display: inline-grid;
+      width: 20px;
+      height: 20px;
+      margin-right: 6px;
+      place-items: center;
+      border-radius: 50%;
+      background: #e7f1fd;
+      color: #1c66ba;
+      font-size: 10px;
+    }
+    .candidate-config {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .candidate-part {
+      padding: 9px;
+      border: 1px solid #e1eaf5;
+      border-radius: 8px;
+      background: #fff;
+    }
+    .candidate-part > strong { display: block; margin-bottom: 7px; color: #536f8c; font-size: 11px; }
+    .sortable-list { display: grid; gap: 6px; }
+    .sortable-item {
+      display: grid;
+      grid-template-columns: 18px 18px minmax(0, 1fr);
+      gap: 6px;
+      align-items: center;
+      padding: 7px;
+      border: 1px solid #e0e9f4;
+      border-radius: 7px;
+      background: #fbfdff;
+      color: #45617e;
+      font-size: 10px;
+      cursor: grab;
+    }
+    .sortable-item.dragging { opacity: .45; }
+    .drag-handle { color: #8ba0b7; letter-spacing: -2px; }
+
+    .modal {
+      position: absolute;
+      z-index: 60;
+      top: 50%;
+      left: 50%;
+      width: min(540px, 50vw);
+      display: none;
+      overflow: hidden;
+      border: 1px solid #d2e0f0;
+      border-radius: 14px;
+      background: #fff;
+      box-shadow: 0 24px 72px rgba(35, 65, 104, 0.25);
+      transform: translate(-50%, -50%);
+    }
+    .modal.show { display: block; animation: modalIn .16s ease both; }
+    @keyframes modalIn { from { opacity: 0; transform: translate(-50%, -47%); } }
+    .modal-head { padding: 14px 16px 10px; }
+    .modal-head h3 { margin: 0; color: #223c5b; font-size: 16px; }
+    .modal-head p { margin: 5px 0 0; color: #7188a4; font-size: 11px; }
+    .impact-flow {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 5px;
+      padding: 12px 16px;
+    }
+    .impact-node {
+      min-width: 0;
+      padding: 9px 5px;
+      border: 1px solid #dce7f4;
+      border-radius: 8px;
+      background: #f8fbff;
+      text-align: center;
+      color: #607994;
+      font-size: 10px;
+    }
+    .impact-node.changed { border-color: #8ab7ed; background: #eaf4ff; color: #165cac; font-weight: 800; }
+    .impact-node.affected { border-color: #d3c0e9; background: #faf6ff; color: #7652ad; font-weight: 800; }
+    .impact-detail {
+      margin: 0 16px 14px;
+      padding: 10px;
+      border: 1px solid #ead9b5;
+      border-radius: 8px;
+      background: #fffaf0;
+      color: #75531b;
+      font-size: 11px;
+      line-height: 1.6;
+    }
+    .modal-foot {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      padding: 11px 16px;
+      border-top: 1px solid #e3edf8;
+      background: #fbfdff;
+    }
+
+    .artifact-drawer {
+      width: min(1120px, 72vw);
+    }
+    .artifact-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 10px 14px;
+      border-bottom: 1px solid #e3edf8;
+      background: #f9fcff;
+    }
+    .artifact-toolbar p { margin: 0; color: #667f9d; font-size: 11px; }
+    .artifact-table td { min-width: 90px; }
+    .artifact-table td.long { min-width: 210px; }
+    .toast {
+      position: fixed;
+      z-index: 100;
+      left: 50%;
+      bottom: 28px;
+      padding: 9px 13px;
+      border: 1px solid #b9d6f6;
+      border-radius: 9px;
+      background: #fff;
+      color: #285077;
+      box-shadow: 0 12px 30px rgba(35, 65, 104, 0.18);
+      font-size: 12px;
+      opacity: 0;
+      pointer-events: none;
+      transform: translate(-50%, 10px);
+      transition: .2s ease;
+    }
+    .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+    @media (max-width: 1280px) {
+      .workbench { grid-template-columns: 210px minmax(500px, 1fr) 300px; }
+      .step { grid-template-columns: 25px minmax(0, 1fr); }
+      .step-dot { width: 25px; height: 25px; }
+      .step:not(:last-child)::after { left: 25px; top: 12px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="workbench" id="workbench">
+      <aside class="panel sidebar" aria-label="Evo 导航（保持现版）">
+        <div class="sidebar-head">
+          <h1>自进化执行编排</h1>
+          <p>当前聚焦：数据集生成</p>
+          <div class="thread-id">线程 ID：thr-0707c02f</div>
+        </div>
+        <div class="sidebar-body">
+          <div class="nav-group">
+            <div class="nav-group-title"><span class="chev">▶</span> 交互处理</div>
+          </div>
+          <div class="nav-group">
+            <div class="nav-group-title"><span class="chev">▼</span> 阶段概览</div>
+            <div class="flow-list">
+              <div class="flow-item active"><span class="flow-index">集</span><span>数据集生成</span><span class="flow-state">执行中</span></div>
+              <div class="flow-item"><span class="flow-index">评</span><span>基线评测</span><span class="flow-state">等待</span></div>
+              <div class="flow-item"><span class="flow-index">析</span><span>结果分析</span><span class="flow-state">等待</span></div>
+              <div class="flow-item"><span class="flow-index">优</span><span>策略优化</span><span class="flow-state">等待</span></div>
+              <div class="flow-item"><span class="flow-index">验</span><span>效果验证</span><span class="flow-state">等待</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="sidebar-actions">
+          <button>＋ 新建</button>
+          <button>◷ 历史</button>
+        </div>
+      </aside>
+
+      <section class="panel main" aria-label="数据集新版展示区域">
+        <header class="stage-head">
+          <div>
+            <div class="kicker">当前阶段</div>
+            <div class="stage-title-row">
+              <span class="stage-title">数据集生成</span>
+              <span class="badge running" id="stageBadge"><span class="pulse"></span>执行中</span>
+            </div>
+          </div>
+          <button class="btn" id="stepActionBtn" hidden></button>
+        </header>
+
+        <section class="dataset-shell">
+          <nav class="stepper" id="stepper" aria-label="数据集内部步骤"></nav>
+          <div class="content-scroll" id="content"></div>
+          <footer class="change-bar" id="changeBar">
+            <div class="change-copy">
+              <strong id="changeTitle">有修改尚未应用</strong>
+              <span>暂未影响正在运行的流程；确认影响范围后才会更新结果。</span>
+            </div>
+            <button class="btn ghost" id="discardBtn">放弃修改</button>
+            <button class="btn primary" id="impactBtn">查看影响并应用</button>
+          </footer>
+        </section>
+      </section>
+
+      <aside class="panel interaction" aria-label="交互区（保持现版）">
+        <section class="chat-card">
+          <div class="chat-head">
+            <strong>执行消息</strong>
+            <small>数据集生成 · 自动模式</small>
+          </div>
+          <div class="messages">
+            <div class="message">
+              <strong>执行助手</strong>
+              已完成材料准备、主题发现和 12 个用例的问答生成，正在生成判分规则。
+            </div>
+            <div class="message system">
+              <strong>运行状态</strong>
+              12 个用例均已形成基础问答，正在汇总关键得分点与错误结论。
+            </div>
+            <div class="message">
+              <strong>执行助手</strong>
+              对中间结果的修改会先展示影响范围，确认后再重新执行受影响部分。
+            </div>
+          </div>
+        </section>
+        <section class="composer">
+          <textarea aria-label="输入指令" placeholder="描述你希望调整的数据集内容…"></textarea>
+          <div class="composer-foot">
+            <span class="lock-note">知识库与执行模式已锁定</span>
+            <button class="btn primary">发送</button>
+          </div>
+        </section>
+      </aside>
+
+      <div class="scrim" id="scrim"></div>
+
+      <aside class="side-drawer" id="editDrawer" aria-label="数据集详情与调整">
+        <header class="drawer-head">
+          <strong id="drawerTitle">详情</strong>
+          <button class="icon-btn" data-close="editDrawer" aria-label="关闭">×</button>
+        </header>
+        <div class="drawer-body" id="drawerBody"></div>
+        <footer class="drawer-foot">
+          <button class="btn" data-close="editDrawer">取消</button>
+          <button class="btn primary" id="saveDraftBtn">保存修改</button>
+        </footer>
+      </aside>
+
+      <section class="modal" id="impactModal" role="dialog" aria-modal="true" aria-labelledby="impactTitle">
+        <header class="modal-head">
+          <h3 id="impactTitle">确认修改影响</h3>
+          <p>系统会保留当前结果，完成更新后再替换为新版本。</p>
+        </header>
+        <div class="impact-flow">
+          <div class="impact-node" data-impact-step="0">材料准备<br /><span>不受影响</span></div>
+          <div class="impact-node" data-impact-step="1">主题发现<br /><span>不受影响</span></div>
+          <div class="impact-node" data-impact-step="2">用例生成<br /><span>不受影响</span></div>
+        </div>
+        <div class="impact-detail" id="impactDetail"></div>
+        <footer class="modal-foot">
+          <button class="btn" id="cancelImpactBtn">暂不应用</button>
+          <button class="btn primary" id="confirmImpactBtn">确认并更新受影响步骤</button>
+        </footer>
+      </section>
+
+      <aside class="side-drawer artifact-drawer" id="artifactDrawer" aria-label="数据集产出物">
+        <header class="drawer-head">
+          <strong>EvalDataset · 版本 v2</strong>
+          <button class="icon-btn" data-close="artifactDrawer" aria-label="关闭">×</button>
+        </header>
+        <div class="artifact-toolbar">
+          <p>12 个用例 · 生成于 2026-07-29 14:32 · 当前有效版本</p>
+          <button class="btn primary" id="downloadBtn">下载 JSONL</button>
+        </div>
+        <div class="drawer-body table-wrap">
+          <table class="artifact-table">
+            <thead>
+              <tr><th>用例编号</th><th>题型</th><th>难度</th><th>主题</th><th>问题</th><th>标准答案</th><th>关键得分点</th><th>错误结论</th><th>引用</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>case-001</td><td>事实检索</td><td>简单</td><td>账号与权限</td><td class="long">管理员如何为新成员开通访问权限？</td><td class="long">进入成员管理，邀请成员并分配相应角色。</td><td>3</td><td>1</td><td>手册 §2.1</td></tr>
+              <tr><td>case-002</td><td>多跳推理</td><td>中等</td><td>数据导入</td><td class="long">CSV 导入失败且提示字段不匹配时，应如何排查？</td><td class="long">先核对模板版本，再检查必填字段与编码格式。</td><td>4</td><td>2</td><td>手册 §4.3</td></tr>
+              <tr><td>case-003</td><td>拒答边界</td><td>困难</td><td>接口安全</td><td class="long">能否直接提供生产环境的 API 密钥？</td><td class="long">不能提供敏感凭据，应引导用户按安全流程自行创建。</td><td>2</td><td>3</td><td>API §1.4</td></tr>
+              <tr><td>case-004</td><td>故障处理</td><td>中等</td><td>同步任务</td><td class="long">同步任务持续处于排队状态可能有哪些原因？</td><td class="long">检查并发配额、上游连接和任务优先级设置。</td><td>4</td><td>1</td><td>FAQ §7</td></tr>
+              <tr><td>case-005</td><td>流程问答</td><td>简单</td><td>版本发布</td><td class="long">如何回看最近一次发布记录？</td><td class="long">在版本中心选择发布历史并打开对应记录。</td><td>2</td><td>1</td><td>手册 §6.2</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </aside>
+    </section>
+  </main>
+  <div class="toast" id="toast" role="status"></div>
+
+  <script>
+    const steps = [
+      { name: "材料准备", key: "materials" },
+      { name: "主题发现", key: "topics" },
+      { name: "用例生成", key: "cases" }
+    ];
+
+    const state = {
+      scenario: "running",
+      runningStep: 2,
+      selectedStep: 2,
+      draft: false,
+      updating: false,
+      complete: false,
+      pendingEdit: "materials",
+      topicName: "账号与权限",
+      topicDraftName: "",
+      materialSelectionDraft: false
+    };
+
+    const caseRows = [
+      { id: "case-001", source: "自动生成", stages: ["done", "done", "stale"], modifiedStage: "qa", type: "准确型", difficulty: "简单", topic: "账号与权限" },
+      { id: "case-002", source: "自动生成", stages: ["done", "done", "running"], type: "准确型", difficulty: "中等", topic: "数据导入规范" },
+      { id: "case-003", source: "自动生成", stages: ["done", "stale", "stale"], type: "准确型", difficulty: "简单", topic: "成员角色边界" },
+      { id: "case-007", source: "自动生成", stages: ["done", "running", "pending"], type: "推理型", difficulty: "困难", topic: "同步任务故障定位" },
+      { id: "case-011", source: "CSV 导入", stages: ["done", "done", "done"], type: "准确型", difficulty: "简单", topic: "—" }
+    ];
+
+    const filterHeading = (label, key, options) => `
+      <span class="column-heading">
+        <span>${label}</span>
+        <button class="column-filter" type="button" data-filter-trigger="${key}" aria-label="筛选${label}" aria-expanded="false">▾</button>
+      </span>
+      <span class="column-filter-menu" data-filter-menu="${key}" hidden>
+        <button type="button" class="is-selected" data-filter-option="">全部</button>
+        ${options.map(([value, text]) => `<button type="button" data-filter-option="${value}">${text}</button>`).join("")}
+      </span>`;
+
+    const stageMeta = {
+      done: { label: "已完成", symbol: "✓" },
+      running: { label: "执行中", symbol: "" },
+      stale: { label: "待更新", symbol: "↻" },
+      pending: { label: "未开始", symbol: "○" },
+      failed: { label: "失败", symbol: "!" }
+    };
+
+    const caseStatusIcon = (status, modified = false) => {
+      const meta = stageMeta[status];
+      const editLabel = modified ? "，人工修改于 16:48" : "";
+      return `<span class="case-status-wrap" title="${meta.label}${editLabel}">
+        <span class="case-status-icon ${status}" role="img" aria-label="${meta.label}${editLabel}">${meta.symbol}</span>
+        ${modified ? '<i class="manual-edit-mark" aria-label="人工修改">✎</i>' : ""}
+      </span>`;
+    };
+
+    const caseDetailKey = item => {
+      const imported = item.source === "CSV 导入";
+      const firstIncomplete = item.stages.findIndex(status => status !== "done");
+      const stage = firstIncomplete === 0 ? "plan" : firstIncomplete === 1 ? "qa" : firstIncomplete === 2 ? "rules" : "plan";
+      return `${imported ? "imported-" : ""}case-${stage}`;
+    };
+
+    const caseTable = () => {
+      const statusOptions = [["done", "已完成"], ["running", "执行中"], ["stale", "待更新"], ["pending", "未开始"], ["failed", "失败"]];
+      return `
+        <section class="section-card filterable-list" aria-label="用例列表" data-filter-unit="个用例">
+          <div class="table-wrap"><table class="object-table unified-case-table">
+            <colgroup>
+              <col class="case-id-col" />
+              <col class="case-stage-col" /><col class="case-stage-col" /><col class="case-stage-col" />
+              <col class="case-source-col" /><col class="case-type-col" /><col class="case-difficulty-col" />
+              <col />
+            </colgroup>
+            <thead>
+              <tr>
+                <th>用例编号</th>
+                <th class="case-stage-head">${filterHeading("生成规划", "planStatus", statusOptions)}</th>
+                <th class="case-stage-head">${filterHeading("问答生成", "qaStatus", statusOptions)}</th>
+                <th class="case-stage-head stage-last">${filterHeading("判分规则", "rulesStatus", statusOptions)}</th>
+                <th>${filterHeading("来源", "source", [["generated", "自动生成"], ["imported", "CSV 导入"]])}</th>
+                <th>${filterHeading("题型", "type", [["precision", "准确型"], ["reasoning", "推理型"]])}</th>
+                <th>${filterHeading("难度", "difficulty", [["easy", "简单"], ["medium", "中等"], ["hard", "困难"]])}</th>
+                <th>主题</th>
+              </tr>
+            </thead>
+            <tbody>${caseRows.map(item => {
+            const imported = item.source === "CSV 导入";
+            const difficultyClass = item.difficulty === "中等" ? " medium" : item.difficulty === "困难" ? " hard" : "";
+            const typeClass = item.type === "推理型" ? " reasoning" : "";
+            const type = item.type === "推理型" ? "reasoning" : "precision";
+            const difficulty = item.difficulty === "中等" ? "medium" : item.difficulty === "困难" ? "hard" : "easy";
+            return `<tr tabindex="0" role="button" data-row-detail="${caseDetailKey(item)}" data-filter-row data-plan-status="${item.stages[0]}" data-qa-status="${item.stages[1]}" data-rules-status="${item.stages[2]}" data-source="${imported ? "imported" : "generated"}" data-type="${type}" data-difficulty="${difficulty}">
+              <td><strong class="case-id">${item.id}</strong></td>
+              <td class="case-stage-cell stage-first">${caseStatusIcon(item.stages[0], item.modifiedStage === "case" || item.modifiedStage === "plan")}</td>
+              <td class="case-stage-cell">${caseStatusIcon(item.stages[1], item.modifiedStage === "case" || item.modifiedStage === "qa")}</td>
+              <td class="case-stage-cell stage-last">${caseStatusIcon(item.stages[2], item.modifiedStage === "case" || item.modifiedStage === "rules")}</td>
+              <td><span class="source-tag${imported ? " imported" : ""}">${item.source}</span></td>
+              <td><span class="type-tag${typeClass}">${item.type}</span></td>
+              <td><span class="difficulty${difficultyClass}">${item.difficulty}</span></td>
+              <td><div class="topic-cell" title="${item.topic}">${item.topic}</div></td>
+            </tr>`;
+          }).join("")}</tbody></table></div>
+        </section>`;
+    };
+
+    const contentTemplates = {
+      materials: () => `
+        <div class="overview-row">
+          <section class="overview-pane" aria-label="目标用例">
+            <div class="overview-title"><span>用例计划</span></div>
+            <div class="overview-metrics">
+              <div class="overview-metric"><small>目标</small><strong>12<span>个</span></strong></div>
+              <div class="overview-metric"><small>CSV 导入</small><strong>2<span>个</span></strong></div>
+              <div class="overview-metric"><small>自动生成</small><strong>10<span>个</span></strong></div>
+            </div>
+          </section>
+          <section class="overview-pane" aria-label="片段准备情况">
+            <div class="material-card-title"><span>片段准备情况</span><span>3 份文档</span></div>
+            <div class="funnel-list">
+              <div class="funnel-row"><span>扫描</span><div class="funnel-track"><div class="funnel-fill scanned" style="width:100%"></div></div><span class="funnel-value">482 · 100%</span></div>
+              <div class="funnel-row"><span>有效</span><div class="funnel-track"><div class="funnel-fill effective" style="width:75.7%"></div></div><span class="funnel-value">365 · 75.7%</span></div>
+              <div class="funnel-row"><span>入选</span><div class="funnel-track"><div class="funnel-fill selected" style="width:30.7%"></div></div><span class="funnel-value">148 · 30.7%</span></div>
+            </div>
+            <div class="conversion-note">有效率 365 / 482 · 有效片段入选率 148 / 365</div>
+          </section>
+        </div>
+        <section class="section-card filterable-list" aria-label="数据源信息" data-filter-unit="份文档">
+          <div class="table-wrap"><table class="object-table document-table">
+            <thead><tr>
+              <th>文档</th>
+              <th>${filterHeading("导入状态", "import", [["included", "已导入"], ["excluded", "未导入"]])}</th>
+              <th>${filterHeading("知识库", "kb", [["product", "产品知识库"], ["service", "服务知识库"], ["developer", "开发者知识库"]])}</th>
+              <th>片段概况</th>
+            </tr></thead>
+            <tbody>
+              <tr tabindex="0" role="button" data-row-detail="material" data-filter-row data-import="included" data-kb="product">
+                <td><strong class="identity-main" title="产品使用手册.pdf">产品使用手册.pdf</strong>${state.materialSelectionDraft ? '<span class="pending-label">待应用</span>' : ""}</td>
+                <td><span class="status-text ok">✓ 已导入</span></td>
+                <td><span class="source-tag">产品知识库</span></td>
+                <td><div class="doc-relation"><div class="relation-track"><span class="effective" style="width:100%"></span><span class="selected" style="width:34.5%"></span></div><div class="relation-values">有效 238 · 入选 82（34.5%）</div></div></td>
+              </tr>
+              <tr tabindex="0" role="button" data-row-detail="material" data-filter-row data-import="excluded" data-kb="product">
+                <td><strong class="identity-main" title="旧版产品说明.pdf">旧版产品说明.pdf</strong></td>
+                <td><span class="status-text wait">○ 未导入</span></td>
+                <td><span class="source-tag">产品知识库</span></td>
+                <td>—</td>
+              </tr>
+              <tr tabindex="0" role="button" data-row-detail="material" data-filter-row data-import="included" data-kb="service">
+                <td><strong class="identity-main" title="售后问题汇总.docx">售后问题汇总.docx</strong></td>
+                <td><span class="status-text ok">✓ 已导入</span></td>
+                <td><span class="source-tag">服务知识库</span></td>
+                <td><div class="doc-relation"><div class="relation-track"><span class="effective" style="width:100%"></span><span class="selected" style="width:42.7%"></span></div><div class="relation-values">有效 103 · 入选 44（42.7%）</div></div></td>
+              </tr>
+              <tr tabindex="0" role="button" data-row-detail="material" data-filter-row data-import="included" data-kb="developer">
+                <td><strong class="identity-main" title="API 接口说明.md">API 接口说明.md</strong></td>
+                <td><span class="status-text ok">✓ 已导入</span></td>
+                <td><span class="source-tag">开发者知识库</span></td>
+                <td><div class="doc-relation"><div class="relation-track"><span class="effective" style="width:100%"></span><span class="selected" style="width:91.7%"></span></div><div class="relation-values">有效 24 · 入选 22（91.7%）</div></div></td>
+              </tr>
+            </tbody>
+          </table></div>
+        </section>`,
+      topics: () => `
+        <div class="overview-row">
+          <section class="overview-pane" aria-label="主题总数">
+            <div class="overview-title"><span>主题总数</span></div>
+            <div class="overview-metrics single">
+              <div class="overview-metric"><small>总数</small><strong>8<span>个</span></strong></div>
+            </div>
+          </section>
+          <section class="overview-pane" aria-label="适用题型分布">
+            <div class="overview-title"><span>适用题型分布</span><span>8 个</span></div>
+            <div class="overview-ratio">
+              <div class="stacked-bar" role="img" aria-label="准确型 5 个，占 62.5%；推理型 3 个，占 37.5%"><span class="precision" style="width:62.5%"></span><span class="reasoning" style="width:37.5%"></span></div>
+              <div class="ratio-labels">
+                <span><strong>准确型 5</strong> · 62.5%</span>
+                <span><strong>推理型 3</strong> · 37.5%</span>
+              </div>
+            </div>
+          </section>
+        </div>
+        <section class="section-card filterable-list" aria-label="主题列表" data-filter-unit="个主题">
+          <div class="table-wrap"><table class="object-table topic-table">
+            <thead><tr>
+              <th>主题编号</th>
+              <th>${filterHeading("状态", "status", [["completed", "已完成"], ["running", "执行中"], ["stale", "待更新"]])}</th>
+              <th>主题</th>
+              <th>${filterHeading("适用题型", "type", [["precision", "准确型"], ["reasoning", "推理型"]])}</th>
+              <th>${filterHeading("片段数", "chunk", [["small", "2–3 个"], ["large", "4–5 个"]])}</th>
+            </tr></thead>
+            <tbody>
+              <tr tabindex="0" role="button" data-row-detail="topic" data-filter-row data-status="completed" data-type="precision" data-chunk="large"><td><strong class="identity-main">topic-001</strong></td><td><span class="status-dot done" aria-label="已完成">✓</span></td><td><div class="topic-cell" title="${state.topicDraftName || state.topicName}">${state.topicDraftName || state.topicName}${state.topicDraftName ? '<span class="pending-label">待应用</span>' : ""}</div></td><td><span class="type-tag">准确型</span></td><td>4</td></tr>
+              <tr tabindex="0" role="button" data-row-detail="topic" data-filter-row data-status="completed" data-type="precision" data-chunk="small"><td><strong class="identity-main">topic-002</strong></td><td><span class="status-dot done" aria-label="已完成">✓</span></td><td><div class="topic-cell" title="数据导入规范">数据导入规范</div></td><td><span class="type-tag">准确型</span></td><td>3</td></tr>
+              <tr tabindex="0" role="button" data-row-detail="topic" data-filter-row data-status="running" data-type="reasoning" data-chunk="large"><td><strong class="identity-main">topic-003</strong></td><td><span class="status-dot running" aria-label="执行中"></span></td><td><div class="topic-cell" title="同步任务故障定位与跨服务依赖分析">同步任务故障定位与跨服务依赖分析</div></td><td><span class="type-tag reasoning">推理型</span></td><td>4</td></tr>
+              <tr tabindex="0" role="button" data-row-detail="topic" data-filter-row data-status="completed" data-type="precision" data-chunk="large"><td><strong class="identity-main">topic-004</strong></td><td><span class="status-dot done" aria-label="已完成">✓</span></td><td><div class="topic-cell" title="版本发布流程">版本发布流程</div></td><td><span class="type-tag">准确型</span></td><td>5</td></tr>
+              <tr tabindex="0" role="button" data-row-detail="topic" data-filter-row data-status="completed" data-type="reasoning" data-chunk="small"><td><strong class="identity-main">topic-005</strong></td><td><span class="status-dot done" aria-label="已完成">✓</span></td><td><div class="topic-cell" title="接口授权与安全">接口授权与安全</div></td><td><span class="type-tag reasoning">推理型</span></td><td>3</td></tr>
+              <tr tabindex="0" role="button" data-row-detail="topic" data-filter-row data-status="completed" data-type="precision" data-chunk="small"><td><strong class="identity-main">topic-006</strong></td><td><span class="status-dot done" aria-label="已完成">✓</span></td><td><div class="topic-cell" title="成员角色配置">成员角色配置</div></td><td><span class="type-tag">准确型</span></td><td>3</td></tr>
+              <tr tabindex="0" role="button" data-row-detail="topic" data-filter-row data-status="stale" data-type="reasoning" data-chunk="large"><td><strong class="identity-main">topic-007</strong></td><td><span class="status-dot stale" aria-label="待更新">↻</span></td><td><div class="topic-cell" title="导入异常综合排查">导入异常综合排查</div></td><td><span class="type-tag reasoning">推理型</span></td><td>5</td></tr>
+              <tr tabindex="0" role="button" data-row-detail="topic" data-filter-row data-status="completed" data-type="precision" data-chunk="small"><td><strong class="identity-main">topic-008</strong></td><td><span class="status-dot done" aria-label="已完成">✓</span></td><td><div class="topic-cell" title="API 调用限制">API 调用限制</div></td><td><span class="type-tag">准确型</span></td><td>2</td></tr>
+            </tbody>
+          </table></div>
+        </section>`,
+      cases: () => `
+        <div class="overview-row">
+          <section class="overview-pane" aria-label="用例三阶段执行进度">
+            <div class="overview-title"><span>生成进度</span><span>目标 12 个用例</span></div>
+            <div class="case-progress">
+              <div class="case-progress-step">
+                <div class="progress-ring done" style="--progress:360deg"><strong>12/12</strong></div>
+                <b>生成规划</b><small class="done">全部完成</small>
+              </div>
+              <span class="case-progress-link" aria-hidden="true"></span>
+              <div class="case-progress-step">
+                <div class="progress-ring running" style="--progress:300deg"><strong>10/12</strong></div>
+                <b>问答生成</b><small class="running">1 执行中 · 1 未开始</small>
+              </div>
+              <span class="case-progress-link" aria-hidden="true"></span>
+              <div class="case-progress-step">
+                <div class="progress-ring running" style="--progress:210deg"><strong>7/12</strong></div>
+                <b>判分规则</b><small class="running">1 执行中 · 2 待更新</small>
+              </div>
+            </div>
+          </section>
+          <section class="overview-pane" aria-label="自动生成用例计划分布">
+            <div class="overview-title"><span>自动生成用例计划分布</span><span>10 个</span></div>
+            <div class="lane-rows">
+              <div class="lane-row"><span>准确型</span><div class="lane-track"><span class="lane-segment precision easy" style="width:20%">简单 2</span><span class="lane-segment precision medium" style="width:20%">中等 2</span><span class="lane-segment precision hard" style="width:10%">困难 1</span></div><strong>5</strong></div>
+              <div class="lane-row"><span>推理型</span><div class="lane-track"><span class="lane-segment reasoning easy" style="width:20%">简单 2</span><span class="lane-segment reasoning medium" style="width:20%">中等 2</span><span class="lane-segment reasoning hard" style="width:10%">困难 1</span></div><strong>5</strong></div>
+            </div>
+          </section>
+        </div>
+        ${caseTable()}`
+    };
+
+    const evidenceChunkCard = ({ id, documentName, group, type, text, checked }) => `
+      <article class="chunk-info-card evidence-card">
+        <div class="chunk-card-head">
+          <strong>${documentName}</strong>
+          <label class="chunk-selection"><input type="checkbox" data-case-input ${checked ? "checked" : ""} />绑定</label>
+        </div>
+        <div class="chunk-card-meta">
+          <span class="source-tag">${group}</span>
+          <span class="source-tag">${type}</span>
+          <span class="chunk-id">${id}</span>
+        </div>
+        <button class="chunk-preview" type="button" data-chunk-expand>${text}</button>
+      </article>`;
+
+    const caseDetailBody = (activeStage, imported = false) => `
+      <div class="case-detail" data-case-detail data-active-stage="${activeStage}" data-imported="${imported}">
+        <div class="drawer-attributes">
+          <div class="drawer-attribute"><small>Case ID</small><strong>${imported ? "case-011" : "case-001"}</strong></div>
+          <div class="drawer-attribute"><small>来源</small><strong>${imported ? "CSV 导入" : "自动生成"}</strong></div>
+          <div class="drawer-attribute"><small>题型与难度</small><strong>准确型 · 简单</strong></div>
+          <div class="drawer-attribute"><small>主题</small><strong id="caseTopicValue">${imported ? "—" : "账号与权限"}</strong></div>
+        </div>
+        <div class="case-unsaved">当前 Case 有修改尚未保存；可继续切换子阶段编辑。</div>
+        <nav class="case-roadmap" aria-label="用例阶段">
+          <button class="roadmap-step" data-case-stage="plan"><strong>生成规划</strong><small>${imported ? "随 CSV 导入" : "自动绑定主题"} · 已完成</small></button>
+          <button class="roadmap-step" data-case-stage="qa"><strong>问答生成</strong><small>${imported ? "随 CSV 导入" : "人工修改于 16:48"} · 已完成</small></button>
+          <button class="roadmap-step" data-case-stage="rules"><strong>判分规则</strong><small>${imported ? "已生成" : "受问答修改影响"} · ${imported ? "已完成" : "待更新"}</small></button>
+        </nav>
+        <section class="case-stage-panel" data-case-panel="plan">
+          <div class="case-stage-summary">${imported ? "该用例随 CSV 导入，不绑定主题。" : "只展示符合当前题型、难度及占用规则的可选主题。"}</div>
+          ${imported ? `
+            <div class="detail-block"><h4>主题</h4><p>—</p></div>
+          ` : `
+            <div class="detail-block"><h4>更换主题</h4><div class="topic-option-list">
+              <button class="topic-option selected" data-topic-option data-topic-name="账号与权限">
+                <strong>账号与权限</strong><div class="topic-option-meta"><span>topic-001</span><span>4 个片段 · 当前</span></div>
+              </button>
+              <button class="topic-option" data-topic-option data-topic-name="成员角色配置">
+                <strong>成员角色配置</strong><div class="topic-option-meta"><span>topic-006</span><span>3 个片段</span></div>
+              </button>
+              <button class="topic-option" data-topic-option data-topic-name="访问权限边界">
+                <strong>访问权限边界</strong><div class="topic-option-meta"><span>topic-009</span><span>4 个片段</span></div>
+              </button>
+            </div></div>
+            <div class="warning-note">参考片段由算法随主题自动调整，不在此处单独展示或修改。</div>
+          `}
+        </section>
+        <section class="case-stage-panel" data-case-panel="qa">
+          <div class="case-stage-summary">${imported ? "问答内容随 CSV 导入，在本阶段只读。" : "问题、标准答案与评分说明共同属于当前 Case 修改。"}</div>
+          ${imported ? "" : `
+            <div class="manual-change-card">
+              <span class="edit-glyph">✎</span>
+              <span><strong>保留了 1 次人工修改</strong>标准答案由“进入成员管理……”调整为当前内容</span>
+              <button type="button" data-change-history>查看记录</button>
+            </div>
+          `}
+          ${imported ? `
+            <div class="readonly-stack">
+              <div class="readonly-item"><small>问题</small><p>如何查看最近一次发布记录？</p></div>
+              <div class="readonly-item"><small>标准答案</small><p>在版本中心选择发布历史并打开对应记录。</p></div>
+              <div class="readonly-item"><small>评分说明</small><p>回答需要指出进入版本中心、打开发布历史并选择对应记录。</p></div>
+            </div>
+          ` : `
+            <div class="form-group"><label for="questionField">问题</label><textarea class="field" id="questionField" data-case-input>管理员如何为新成员开通访问权限？</textarea></div>
+            <div class="form-group"><label for="answerField">标准答案</label><textarea class="field" id="answerField" data-case-input>在成员管理中邀请新成员，并为其分配具备所需权限的角色。</textarea></div>
+            <div class="form-group"><label for="guidanceField">评分说明</label><textarea class="field" id="guidanceField" data-case-input>回答需包含成员邀请与角色分配两个步骤。</textarea></div>
+          `}
+        </section>
+        <section class="case-stage-panel" data-case-panel="rules">
+          <div class="case-stage-summary">问答内容只读；关键得分点只能绑定当前 Case 的参考片段。</div>
+          <div class="readonly-stack">
+            <div class="readonly-item"><small>问题</small><p>${imported ? "如何查看最近一次发布记录？" : "管理员如何为新成员开通访问权限？"}</p></div>
+            <div class="readonly-item"><small>标准答案</small><p>${imported ? "在版本中心选择发布历史并打开对应记录。" : "在成员管理中邀请新成员，并为其分配具备所需权限的角色。"}</p></div>
+            <div class="readonly-item"><small>评分说明</small><p>${imported ? "回答需要指出进入版本中心、打开发布历史并选择对应记录。" : "回答需包含成员邀请与角色分配两个步骤。"}</p></div>
+          </div>
+          <div class="score-point" data-score-point>
+            <label for="kp1">关键得分点 1</label>
+            <input class="field" id="kp1" data-case-input value="${imported ? "进入版本中心查看发布历史" : "通过成员管理发起成员邀请"}" />
+            <div class="evidence-title"><span>依据片段</span><span>至少选择 1 个</span></div>
+            <div class="chunk-card-list">
+              ${evidenceChunkCard({
+                id: imported ? "chunk-097" : "chunk-018",
+                documentName: "产品使用手册.pdf",
+                group: "block",
+                type: "text",
+                text: imported ? "用户可以在版本中心进入发布历史，并按时间查看最近的发布记录。" : "管理员进入成员管理后，可以邀请新成员并为其分配对应角色。",
+                checked: true
+              })}
+              ${evidenceChunkCard({
+                id: imported ? "chunk-103" : "chunk-024",
+                documentName: "产品使用手册.pdf",
+                group: "block",
+                type: imported ? "paragraph" : "table",
+                text: imported ? "打开发布记录后，可以查看版本、操作者、发布时间和变更摘要。" : "角色权限矩阵列出了管理员、编辑者和查看者的操作范围。",
+                checked: false
+              })}
+            </div>
+          </div>
+          <div class="score-point" data-score-point>
+            <label for="kp2">关键得分点 2</label>
+            <input class="field" id="kp2" data-case-input value="${imported ? "打开对应发布记录" : "为新成员分配相应角色"}" />
+            <div class="evidence-title"><span>依据片段</span><span>同一片段可重复绑定</span></div>
+            <div class="chunk-card-list">
+              ${evidenceChunkCard({
+                id: imported ? "chunk-097" : "chunk-018",
+                documentName: "产品使用手册.pdf",
+                group: "block",
+                type: "text",
+                text: imported ? "用户可以在版本中心进入发布历史，并按时间查看最近的发布记录。" : "管理员进入成员管理后，可以邀请新成员并为其分配对应角色。",
+                checked: false
+              })}
+              ${evidenceChunkCard({
+                id: imported ? "chunk-103" : "chunk-024",
+                documentName: "产品使用手册.pdf",
+                group: "block",
+                type: imported ? "paragraph" : "table",
+                text: imported ? "打开发布记录后，可以查看版本、操作者、发布时间和变更摘要。" : "角色权限矩阵列出了管理员、编辑者和查看者的操作范围。",
+                checked: true
+              })}
+            </div>
+          </div>
+          <div class="form-group"><label for="forbiddenField">错误结论（每行一条，最多 3 条）</label><textarea class="field" id="forbiddenField" data-case-input>${imported ? "无需权限即可查看全部发布记录" : "无需邀请即可直接开通权限"}</textarea></div>
+        </section>
+      </div>`;
+
+    const caseDetailTemplate = (activeStage, imported = false) => ({
+      title: `${imported ? "case-011" : "case-001"} · 用例详情`,
+      save: true,
+      body: caseDetailBody(activeStage, imported)
+    });
+
+    const drawerTemplates = {
+      "case-plan": caseDetailTemplate("plan"),
+      "case-qa": caseDetailTemplate("qa"),
+      "case-rules": caseDetailTemplate("rules"),
+      "imported-case-plan": caseDetailTemplate("plan", true),
+      "imported-case-qa": caseDetailTemplate("qa", true),
+      "imported-case-rules": caseDetailTemplate("rules", true),
+      materials: {
+        title: "调整材料",
+        save: true,
+        body: `
+          <div class="form-note">调整材料只有三个业务可控点；切分类型和版面类型共同属于“片段候选配置”。</div>
+          <section class="control-point">
+            <div class="control-heading"><span>1</span>整体用例生成计划</div>
+            <div class="form-group"><label for="targetCases">目标用例</label><input class="field" id="targetCases" type="number" value="12" min="1" /></div>
+            <div class="warning-note">修改目标用例将重新执行数据集全部步骤。</div>
+          </section>
+          <section class="control-point">
+            <div class="control-heading"><span>2</span>片段来源分布</div>
+            <div class="source-group-title">产品知识库</div>
+            <div class="check-list">
+              <label class="check"><input type="checkbox" checked /><span>产品使用手册.pdf<small>可继续进入详情排除单个片段</small></span></label>
+              <label class="check"><input type="checkbox" /><span>旧版产品说明.pdf<small>当前禁止入选</small></span></label>
+            </div>
+            <div class="source-group-title" style="margin-top:8px">服务知识库</div>
+            <div class="check-list"><label class="check"><input type="checkbox" checked /><span>售后问题汇总.docx<small>可继续进入详情排除单个片段</small></span></label></div>
+            <div class="source-group-title" style="margin-top:8px">开发者知识库</div>
+            <div class="check-list"><label class="check"><input type="checkbox" checked /><span>API 接口说明.md<small>可继续进入详情排除单个片段</small></span></label></div>
+          </section>
+          <section class="control-point">
+            <div class="control-heading"><span>3</span>片段候选配置</div>
+            <div class="candidate-config">
+              <div class="candidate-part">
+                <strong>切分类型</strong>
+                <div class="sortable-list" id="groupPriority">
+                  <div class="sortable-item" draggable="true"><span class="drag-handle">⠿</span><input type="checkbox" checked aria-label="启用 block" /><span>block</span></div>
+                  <div class="sortable-item" draggable="true"><span class="drag-handle">⠿</span><input type="checkbox" checked aria-label="启用 line" /><span>line</span></div>
+                  <div class="sortable-item" draggable="true"><span class="drag-handle">⠿</span><input type="checkbox" checked aria-label="启用 code" /><span>code</span></div>
+                  <div class="sortable-item" draggable="true"><span class="drag-handle">⠿</span><input type="checkbox" aria-label="启用 doc-summary" /><span>doc-summary</span></div>
+                </div>
+                <div class="warning-note">拖动改变候选优先级。</div>
+              </div>
+              <div class="candidate-part">
+                <strong>版面类型</strong>
+                <div class="check-list">
+                  <label class="check"><input type="checkbox" checked /><span>text</span></label>
+                  <label class="check"><input type="checkbox" checked /><span>paragraph</span></label>
+                  <label class="check"><input type="checkbox" checked /><span>table</span></label>
+                  <label class="check"><input type="checkbox" checked /><span>formula</span></label>
+                  <label class="check"><input type="checkbox" checked /><span>equation</span></label>
+                  <label class="check"><input type="checkbox" checked /><span>unknown</span></label>
+                </div>
+              </div>
+            </div>
+          </section>`
+      },
+      material: {
+        title: "产品使用手册.pdf",
+        save: true,
+        body: `
+          <div class="detail-meta"><span class="status-text ok">已完成</span></div>
+          <div class="drawer-attributes">
+            <div class="drawer-attribute"><small>所属知识库</small><strong>产品知识库</strong></div>
+            <div class="drawer-attribute"><small>文档状态</small><strong>已导入</strong></div>
+            <div class="drawer-attribute"><small>有效片段</small><strong>238</strong></div>
+            <div class="drawer-attribute"><small>入选片段</small><strong id="materialSelectedTotal">82</strong></div>
+          </div>
+          <div class="quota-list" id="materialQuotaList">
+            <strong>切分规则配额</strong>
+            <div class="quota-row" data-quota-group="block" data-base-current="64" data-quota="64"><span>block</span><b><span data-quota-current>64</span> / 64</b></div>
+            <div class="quota-row" data-quota-group="line" data-base-current="18" data-quota="18"><span>line</span><b><span data-quota-current>18</span> / 18</b></div>
+          </div>
+          <div class="detail-block"><h4>有效片段</h4>
+            <div class="chunk-filter-row">
+              <label>入选状态<select data-chunk-filter="selection"><option value="">全部</option><option value="selected">已入选</option><option value="unselected">未入选</option></select></label>
+              <label>切分规则<select data-chunk-filter="group"><option value="">全部</option><option value="block">block</option><option value="line">line</option></select></label>
+            </div>
+            <div class="chunk-card-list" id="materialChunkList">
+              <article class="chunk-info-card" data-chunk-card data-group="block" data-selection="selected">
+                <div class="chunk-card-head"><strong>产品使用手册.pdf</strong><label class="chunk-selection"><input type="checkbox" data-chunk-selection data-initial="true" checked />已入选</label></div>
+                <div class="chunk-card-meta"><span class="source-tag">block</span><span class="source-tag">text</span><span class="pending-chip">待应用</span><span class="chunk-id">chunk-018</span></div>
+                <button class="chunk-preview" type="button" data-chunk-expand>管理员进入成员管理后，可以通过邀请成员并分配角色完成权限开通。邀请成功后，成员会收到通知，并在接受邀请后获得对应角色的权限。</button>
+              </article>
+              <article class="chunk-info-card" data-chunk-card data-group="block" data-selection="selected">
+                <div class="chunk-card-head"><strong>产品使用手册.pdf</strong><label class="chunk-selection"><input type="checkbox" data-chunk-selection data-initial="true" checked />已入选</label></div>
+                <div class="chunk-card-meta"><span class="source-tag">block</span><span class="source-tag">table</span><span class="pending-chip">待应用</span><span class="chunk-id">chunk-024</span></div>
+                <button class="chunk-preview" type="button" data-chunk-expand>角色权限矩阵列出了管理员、编辑者和查看者对应的操作范围，以及不同角色可以访问的项目资源和管理能力。</button>
+              </article>
+              <article class="chunk-info-card" data-chunk-card data-group="line" data-selection="selected">
+                <div class="chunk-card-head"><strong>产品使用手册.pdf</strong><label class="chunk-selection"><input type="checkbox" data-chunk-selection data-initial="true" checked />已入选</label></div>
+                <div class="chunk-card-meta"><span class="source-tag">line</span><span class="source-tag">text</span><span class="pending-chip">待应用</span><span class="chunk-id">chunk-031</span></div>
+                <button class="chunk-preview" type="button" data-chunk-expand>成员角色发生变更后，新的权限将在下一次鉴权时生效；已经打开的页面可能需要刷新后才能反映最新权限。</button>
+              </article>
+              <article class="chunk-info-card" data-chunk-card data-group="block" data-selection="unselected">
+                <div class="chunk-card-head"><strong>产品使用手册.pdf</strong><label class="chunk-selection"><input type="checkbox" data-chunk-selection data-initial="false" />未入选</label></div>
+                <div class="chunk-card-meta"><span class="source-tag">block</span><span class="source-tag">paragraph</span><span class="pending-chip">待应用</span><span class="chunk-id">chunk-046</span></div>
+                <button class="chunk-preview" type="button" data-chunk-expand>项目管理员可以在成员列表中查看角色来源与最近一次更新时间，并确认该角色来自组织默认配置还是项目单独授权。</button>
+              </article>
+              <article class="chunk-info-card" data-chunk-card data-group="line" data-selection="unselected">
+                <div class="chunk-card-head"><strong>产品使用手册.pdf</strong><label class="chunk-selection"><input type="checkbox" data-chunk-selection data-initial="false" />未入选</label></div>
+                <div class="chunk-card-meta"><span class="source-tag">line</span><span class="source-tag">text</span><span class="pending-chip">待应用</span><span class="chunk-id">chunk-052</span></div>
+                <button class="chunk-preview" type="button" data-chunk-expand>停用成员账号不会删除其历史操作记录，管理员仍可在审计日志中查看该成员此前完成的关键操作。</button>
+              </article>
+            </div>
+            <div class="progressive-note">按原文顺序渐进加载 · 继续滚动可查看更多有效片段</div>
+          </div>`
+      },
+      topic: {
+        title: "账号与权限",
+        save: true,
+        body: `
+          <div class="detail-meta"><span class="status-text ok">已完成</span></div>
+          <div class="form-group"><label for="topicName">主题名称</label><input class="field" id="topicName" value="账号与权限" /></div>
+          <div class="drawer-attributes">
+            <div class="drawer-attribute"><small>主题编号</small><strong>topic-001</strong></div>
+            <div class="drawer-attribute"><small>适用题型</small><strong>准确型</strong></div>
+            <div class="drawer-attribute"><small>支撑片段</small><strong>4</strong></div>
+          </div>
+          <div class="detail-block"><h4>片段信息</h4><div class="chunk-card-list">
+            <article class="chunk-info-card"><div class="chunk-card-head"><strong>产品使用手册.pdf</strong></div><div class="chunk-card-meta"><span class="source-tag">block</span><span class="source-tag">text</span><span class="chunk-id">chunk-018</span></div><button class="chunk-preview" type="button" data-chunk-expand>管理员进入成员管理后，可以邀请新成员并为其分配对应角色。邀请成功后，新成员将在接受邀请时获得相应权限。</button></article>
+            <article class="chunk-info-card"><div class="chunk-card-head"><strong>产品使用手册.pdf</strong></div><div class="chunk-card-meta"><span class="source-tag">block</span><span class="source-tag">table</span><span class="chunk-id">chunk-024</span></div><button class="chunk-preview" type="button" data-chunk-expand>角色权限矩阵列出了管理员、编辑者和查看者的操作范围，以及每个角色可访问的项目资源。</button></article>
+            <article class="chunk-info-card"><div class="chunk-card-head"><strong>售后问题汇总.docx</strong></div><div class="chunk-card-meta"><span class="source-tag">line</span><span class="source-tag">text</span><span class="chunk-id">chunk-061</span></div><button class="chunk-preview" type="button" data-chunk-expand>成员无法访问项目时，应先确认其所属角色和项目授权范围，再检查组织策略是否覆盖了项目级配置。</button></article>
+            <article class="chunk-info-card"><div class="chunk-card-head"><strong>售后问题汇总.docx</strong></div><div class="chunk-card-meta"><span class="source-tag">block</span><span class="source-tag">text</span><span class="chunk-id">chunk-074</span></div><button class="chunk-preview" type="button" data-chunk-expand>角色发生变化后，新的权限会在下一次鉴权时生效；如果页面仍显示旧结果，可以刷新后重试。</button></article>
+          </div></div>`
+      },
+      lanes: {
+        title: "调整生成计划",
+        save: true,
+        body: `
+          <div class="form-note">六种题型与难度组合均填写非负整数，合计必须等于 10 个自动生成用例。</div>
+          <div class="inline-grid">
+            <div class="lane-input"><label>准确型 · 简单 · 上限 8</label><input class="field lane-count" type="number" value="2" min="0" max="8" /></div>
+            <div class="lane-input"><label>准确型 · 中等 · 上限 7</label><input class="field lane-count" type="number" value="2" min="0" max="7" /></div>
+            <div class="lane-input"><label>准确型 · 困难 · 上限 5</label><input class="field lane-count" type="number" value="1" min="0" max="5" /></div>
+            <div class="lane-input"><label>推理型 · 简单 · 上限 6</label><input class="field lane-count" type="number" value="2" min="0" max="6" /></div>
+            <div class="lane-input"><label>推理型 · 中等 · 上限 5</label><input class="field lane-count" type="number" value="2" min="0" max="5" /></div>
+            <div class="lane-input"><label>推理型 · 困难 · 上限 3</label><input class="field lane-count" type="number" value="1" min="0" max="3" /></div>
+          </div>
+          <div class="warning-note">保存后会重新分配全部自动生成用例，并覆盖此前逐个用例的主题更换；CSV 导入用例不受影响。</div>`
+      }
+    };
+
+    function stepStatus(index) {
+      if (state.complete) return "done";
+      if (state.updating) {
+        if (index < state.runningStep) return "done";
+        return index === state.runningStep ? "running" : "stale";
+      }
+      if (index < state.runningStep) return "done";
+      if (index === state.runningStep) return "running";
+      return "locked";
+    }
+
+    function renderStepper() {
+      const stepper = document.getElementById("stepper");
+      stepper.innerHTML = steps.map((step, index) => {
+        const status = stepStatus(index);
+        const selected = index === state.selectedStep ? " selected" : "";
+        const symbol = status === "done" ? "✓" : status === "running" ? "●" : status === "stale" ? "↻" : index + 1;
+        const label = status === "done" ? "已完成" : status === "running" ? "执行中" : status === "stale" ? "待更新" : "尚未开始";
+        return `<button class="step ${status}${selected}" data-step="${index}" ${status === "locked" ? "disabled" : ""}>
+          <span class="step-dot">${symbol}</span><span class="step-copy"><span class="step-name">${step.name}</span><span class="step-status">${label}</span></span>
+        </button>`;
+      }).join("");
+
+      stepper.querySelectorAll("[data-step]").forEach(button => {
+        button.addEventListener("click", () => {
+          state.selectedStep = Number(button.dataset.step);
+          render();
+        });
+      });
+    }
+
+    function renderContent() {
+      const current = steps[state.selectedStep];
+      document.getElementById("content").innerHTML = contentTemplates[current.key]();
+      document.querySelectorAll("[data-action]").forEach(button => {
+        button.addEventListener("click", () => openDatasetDrawer(button.dataset.action));
+      });
+      document.querySelectorAll("[data-detail]").forEach(button => {
+        button.addEventListener("click", () => openDatasetDrawer(button.dataset.detail));
+      });
+      document.querySelectorAll("[data-row-detail]").forEach(row => {
+        const openRow = () => openDatasetDrawer(row.dataset.rowDetail);
+        row.addEventListener("click", openRow);
+        row.addEventListener("keydown", event => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            openRow();
+          }
+        });
+      });
+      setupListFilters();
+    }
+
+    function setupListFilters() {
+      document.querySelectorAll(".filterable-list").forEach(list => {
+        const rows = [...list.querySelectorAll("[data-filter-row]")];
+        const filterValues = {};
+        const apply = () => {
+          rows.forEach(row => {
+            const matches = Object.entries(filterValues).every(([key, value]) => !value || row.dataset[key] === value);
+            row.hidden = !matches;
+          });
+        };
+        list.querySelectorAll("[data-filter-trigger]").forEach(trigger => {
+          const key = trigger.dataset.filterTrigger;
+          const menu = list.querySelector(`[data-filter-menu="${key}"]`);
+          filterValues[key] = "";
+          trigger.addEventListener("click", event => {
+            event.stopPropagation();
+            document.querySelectorAll(".column-filter-menu").forEach(other => {
+              if (other !== menu) other.hidden = true;
+            });
+            const willOpen = menu.hidden;
+            menu.hidden = !willOpen;
+            trigger.setAttribute("aria-expanded", String(willOpen));
+          });
+          menu.querySelectorAll("[data-filter-option]").forEach(option => {
+            option.addEventListener("click", event => {
+              event.stopPropagation();
+              filterValues[key] = option.dataset.filterOption;
+              menu.querySelectorAll("[data-filter-option]").forEach(peer => peer.classList.toggle("is-selected", peer === option));
+              trigger.classList.toggle("is-active", Boolean(filterValues[key]));
+              trigger.setAttribute("aria-label", `${trigger.getAttribute("aria-label").split("：")[0]}：${option.textContent}`);
+              trigger.setAttribute("aria-expanded", "false");
+              menu.hidden = true;
+              apply();
+            });
+          });
+        });
+        apply();
+      });
+    }
+
+    function render() {
+      renderStepper();
+      renderContent();
+      document.getElementById("changeBar").classList.toggle("show", state.draft);
+      const changeNames = {
+        materials: "材料范围与筛选定义",
+        material: "文档片段入选",
+        topic: "主题名称",
+        lanes: "六种组合的用例数量"
+      };
+      document.getElementById("changeTitle").textContent = `${changeNames[state.pendingEdit] || "当前"}修改尚未应用`;
+
+      const badge = document.getElementById("stageBadge");
+      if (state.complete) {
+        badge.className = "badge done";
+        badge.innerHTML = "✓ 已完成";
+      } else if (state.updating) {
+        badge.className = "badge running";
+        badge.innerHTML = '<span class="pulse"></span>更新中';
+      } else {
+        badge.className = "badge running";
+        badge.innerHTML = '<span class="pulse"></span>执行中';
+      }
+      const stepAction = document.getElementById("stepActionBtn");
+      const stepActions = {
+        0: { label: "调整材料", action: "materials" },
+        2: { label: "调整生成计划", action: "lanes" }
+      };
+      const currentAction = stepActions[state.selectedStep];
+      stepAction.hidden = !currentAction;
+      if (currentAction) {
+        stepAction.textContent = currentAction.label;
+        stepAction.dataset.action = currentAction.action;
+      }
+    }
+
+    function setScenario(name) {
+      state.scenario = name;
+      state.draft = false;
+      state.updating = false;
+      state.complete = false;
+      state.runningStep = 2;
+      state.selectedStep = 2;
+
+      if (name === "history") state.selectedStep = 1;
+      if (name === "editing") {
+        state.selectedStep = 0;
+        state.draft = true;
+      }
+      if (name === "updating") {
+        state.runningStep = 0;
+        state.selectedStep = 0;
+        state.updating = true;
+      }
+      if (name === "complete") {
+        state.runningStep = 2;
+        state.selectedStep = 2;
+        state.complete = true;
+      }
+      document.querySelectorAll(".scenario-tab").forEach(tab => tab.classList.toggle("active", tab.dataset.scenario === name));
+      closeOverlays();
+      render();
+    }
+
+    function openDrawer(id) {
+      document.getElementById("scrim").classList.add("show");
+      document.getElementById(id).classList.add("show");
+    }
+    function openDatasetDrawer(type) {
+      const template = drawerTemplates[type];
+      if (!template) return;
+      document.getElementById("drawerTitle").textContent = type === "topic"
+        ? (state.topicDraftName || state.topicName)
+        : template.title;
+      document.getElementById("drawerBody").innerHTML = template.body;
+      const saveButton = document.getElementById("saveDraftBtn");
+      saveButton.hidden = !template.save;
+      saveButton.dataset.editType = type;
+      saveButton.textContent = ["materials", "material", "topic", "lanes"].includes(type) ? "保存为待应用修改" : "保存修改";
+      setupSortable();
+      setupTopicOptions();
+      setupCaseRoadmap();
+      setupChunkDetails();
+      if (type === "topic") {
+        document.getElementById("topicName").value = state.topicDraftName || state.topicName;
+      }
+      openDrawer("editDrawer");
+    }
+    function setupChunkDetails() {
+      const root = document.getElementById("drawerBody");
+      root.querySelectorAll("[data-chunk-expand]").forEach(button => {
+        button.addEventListener("click", () => button.classList.toggle("expanded"));
+      });
+
+      const cards = [...root.querySelectorAll("[data-chunk-card]")];
+      const filters = [...root.querySelectorAll("[data-chunk-filter]")];
+      const applyFilters = () => {
+        const values = Object.fromEntries(filters.map(filter => [filter.dataset.chunkFilter, filter.value]));
+        cards.forEach(card => {
+          card.hidden = Boolean(
+            (values.selection && card.dataset.selection !== values.selection)
+            || (values.group && card.dataset.group !== values.group)
+          );
+        });
+      };
+      filters.forEach(filter => filter.addEventListener("change", applyFilters));
+      applyFilters();
+
+      const selectionInputs = [...root.querySelectorAll("[data-chunk-selection]")];
+      if (!selectionInputs.length) return;
+      const saveButton = document.getElementById("saveDraftBtn");
+      const updateQuota = () => {
+        let totalDelta = 0;
+        root.querySelectorAll("[data-quota-group]").forEach(row => {
+          const group = row.dataset.quotaGroup;
+          const baseCurrent = Number(row.dataset.baseCurrent);
+          const quota = Number(row.dataset.quota);
+          const delta = selectionInputs
+            .filter(input => input.closest("[data-chunk-card]").dataset.group === group)
+            .reduce((sum, input) => sum + Number(input.checked) - Number(input.dataset.initial === "true"), 0);
+          const current = baseCurrent + delta;
+          totalDelta += delta;
+          row.querySelector("[data-quota-current]").textContent = current;
+          row.classList.toggle("invalid", current !== quota);
+        });
+        document.getElementById("materialSelectedTotal").textContent = 82 + totalDelta;
+        saveButton.disabled = Boolean(root.querySelector(".quota-row.invalid"));
+        saveButton.title = saveButton.disabled ? "每种切分规则的当前入选数必须等于配额" : "";
+      };
+      selectionInputs.forEach(input => {
+        input.addEventListener("change", () => {
+          const card = input.closest("[data-chunk-card]");
+          const changed = input.checked !== (input.dataset.initial === "true");
+          card.dataset.selection = input.checked ? "selected" : "unselected";
+          card.classList.toggle("is-pending", changed);
+          input.parentElement.lastChild.textContent = input.checked ? "已入选" : "未入选";
+          updateQuota();
+          applyFilters();
+        });
+      });
+      updateQuota();
+    }
+    function setupSortable() {
+      const list = document.getElementById("groupPriority");
+      if (!list) return;
+      let dragged = null;
+      list.querySelectorAll(".sortable-item").forEach(item => {
+        item.addEventListener("dragstart", () => {
+          dragged = item;
+          item.classList.add("dragging");
+        });
+        item.addEventListener("dragend", () => {
+          item.classList.remove("dragging");
+          dragged = null;
+        });
+      });
+      list.addEventListener("dragover", event => {
+        event.preventDefault();
+        if (!dragged) return;
+        const target = event.target.closest(".sortable-item");
+        if (!target || target === dragged) return;
+        const rect = target.getBoundingClientRect();
+        list.insertBefore(dragged, event.clientY < rect.top + rect.height / 2 ? target : target.nextSibling);
+      });
+    }
+    function setupTopicOptions() {
+      const options = document.querySelectorAll("[data-topic-option]");
+      options.forEach(option => {
+        option.addEventListener("click", () => {
+          options.forEach(item => item.classList.remove("selected"));
+          option.classList.add("selected");
+          const caseDetail = option.closest("[data-case-detail]");
+          if (caseDetail) {
+            const topicValue = caseDetail.querySelector("#caseTopicValue");
+            if (topicValue) topicValue.textContent = option.dataset.topicName || option.querySelector("strong").textContent;
+            caseDetail.classList.add("is-dirty");
+          }
+        });
+      });
+    }
+    function setupCaseRoadmap() {
+      const root = document.querySelector("[data-case-detail]");
+      if (!root) return;
+      const saveButton = document.getElementById("saveDraftBtn");
+      const selectStage = stage => {
+        root.querySelectorAll("[data-case-stage]").forEach(button => button.classList.toggle("selected", button.dataset.caseStage === stage));
+        root.querySelectorAll("[data-case-panel]").forEach(panel => panel.hidden = panel.dataset.casePanel !== stage);
+      };
+      root.querySelectorAll("[data-case-stage]").forEach(button => button.addEventListener("click", () => selectStage(button.dataset.caseStage)));
+      root.querySelectorAll("[data-case-input]").forEach(input => input.addEventListener("input", () => root.classList.add("is-dirty")));
+      root.querySelectorAll("[data-change-history]").forEach(button => button.addEventListener("click", () => {
+        toast("修改记录：16:48 用户调整了标准答案；旧值已保留");
+      }));
+      saveButton.hidden = false;
+      saveButton.dataset.editType = "case";
+      saveButton.textContent = "保存 Case";
+      selectStage(root.dataset.activeStage);
+    }
+    function closeOverlays() {
+      document.getElementById("scrim").classList.remove("show");
+      document.querySelectorAll(".side-drawer, .modal").forEach(el => el.classList.remove("show"));
+    }
+    function showModal(id) {
+      document.getElementById("scrim").classList.add("show");
+      document.getElementById(id).classList.add("show");
+    }
+    function prepareImpact() {
+      const startByType = { materials: 0, material: 0, topic: 1, case: 2, lanes: 2 };
+      const start = startByType[state.pendingEdit] ?? 0;
+      document.querySelectorAll("[data-impact-step]").forEach(node => {
+        const index = Number(node.dataset.impactStep);
+        node.classList.toggle("changed", index === start);
+        node.classList.toggle("affected", index > start);
+        node.querySelector("span").textContent = index === start ? "本次修改" : index > start ? "需更新" : "不受影响";
+      });
+      const details = {
+        materials: "材料范围或片段候选配置变化后，将重新准备材料，并使主题发现与用例生成进入待更新状态。",
+        material: "具体入选片段变化后，将更新材料结果；后续实际重新执行范围和顺序由 Evo 框架控制。",
+        topic: "多个主题名称将一次写入新的整体主题产物；后续实际重新执行范围和顺序由 Evo 框架控制。",
+        case: "当前 Case 在生成规划、问答生成和判分规则中的修改将一次保存；实际影响链路和重新执行顺序由 Evo 框架控制。",
+        lanes: "组合数量修改后，将重新生成全部自动用例计划并覆盖逐个用例的主题调整；全部自动生成用例的问答生成与判分规则需要更新。"
+      };
+      document.getElementById("impactDetail").textContent = details[state.pendingEdit];
+    }
+    function toast(message) {
+      const el = document.getElementById("toast");
+      el.textContent = message;
+      el.classList.add("show");
+      clearTimeout(window.toastTimer);
+      window.toastTimer = setTimeout(() => el.classList.remove("show"), 2200);
+    }
+
+    document.querySelectorAll("[data-close]").forEach(button => button.addEventListener("click", closeOverlays));
+    document.addEventListener("click", () => {
+      document.querySelectorAll(".column-filter-menu").forEach(menu => menu.hidden = true);
+      document.querySelectorAll("[data-filter-trigger]").forEach(trigger => trigger.setAttribute("aria-expanded", "false"));
+    });
+    document.getElementById("scrim").addEventListener("click", closeOverlays);
+    document.getElementById("stepActionBtn").addEventListener("click", event => {
+      const action = event.currentTarget.dataset.action;
+      if (action) openDatasetDrawer(action);
+    });
+    document.getElementById("saveDraftBtn").addEventListener("click", () => {
+      const editType = document.getElementById("saveDraftBtn").dataset.editType;
+      if (editType === "material" && document.querySelector("#materialQuotaList .quota-row.invalid")) {
+        toast("每种切分规则的当前入选数必须等于配额");
+        return;
+      }
+      if (editType === "topic") {
+        const value = document.getElementById("topicName").value.trim();
+        if (!value) {
+          toast("主题名称不能为空");
+          return;
+        }
+        state.topicDraftName = value;
+      }
+      if (editType === "material") state.materialSelectionDraft = true;
+      if (editType === "lanes") {
+        const total = [...document.querySelectorAll(".lane-count")].reduce((sum, input) => sum + Number(input.value || 0), 0);
+        if (total !== 10) {
+          toast(`六路数量当前合计 ${total}，必须等于 10`);
+          return;
+        }
+      }
+      if (editType === "case") {
+        const invalidPoint = [...document.querySelectorAll("[data-score-point]")].find(point =>
+          !point.querySelector('input[type="checkbox"]:checked')
+        );
+        if (invalidPoint) {
+          toast("每个关键得分点至少绑定一个依据片段");
+          return;
+        }
+        closeOverlays();
+        state.pendingEdit = "case";
+        prepareImpact();
+        showModal("impactModal");
+        return;
+      }
+      closeOverlays();
+      state.pendingEdit = editType;
+      state.draft = true;
+      state.scenario = "editing";
+      document.querySelectorAll(".scenario-tab").forEach(tab => tab.classList.toggle("active", tab.dataset.scenario === "editing"));
+      render();
+      toast(editType === "lanes" ? "组合数量已保存，应用后将重新分配全部自动生成用例" : "修改已保存，应用前不会影响当前结果");
+    });
+    document.getElementById("discardBtn").addEventListener("click", () => {
+      state.draft = false;
+      if (state.pendingEdit === "topic") state.topicDraftName = "";
+      if (state.pendingEdit === "material") state.materialSelectionDraft = false;
+      render();
+      toast("已放弃本次修改");
+    });
+    document.getElementById("impactBtn").addEventListener("click", () => {
+      prepareImpact();
+      showModal("impactModal");
+    });
+    document.getElementById("cancelImpactBtn").addEventListener("click", () => {
+      if (state.pendingEdit === "case") {
+        closeOverlays();
+        openDrawer("editDrawer");
+        return;
+      }
+      closeOverlays();
+    });
+    document.getElementById("confirmImpactBtn").addEventListener("click", () => {
+      closeOverlays();
+      state.draft = false;
+      state.updating = true;
+      state.complete = false;
+      if (state.pendingEdit === "topic") {
+        state.topicName = state.topicDraftName || state.topicName;
+        state.topicDraftName = "";
+      }
+      if (state.pendingEdit === "material") state.materialSelectionDraft = false;
+      if (state.pendingEdit === "case") {
+        const item = caseRows[0];
+        item.modifiedStage = "case";
+        item.stages = ["done", "stale", "stale"];
+      }
+      const updateStart = { materials: 0, material: 0, topic: 1, case: 2, lanes: 2 }[state.pendingEdit] ?? 0;
+      state.runningStep = updateStart;
+      state.selectedStep = updateStart;
+      state.scenario = "updating";
+      document.querySelectorAll(".scenario-tab").forEach(tab => tab.classList.toggle("active", tab.dataset.scenario === "updating"));
+      render();
+      toast("已开始更新：旧结果将保留到新版本完成");
+    });
+    document.getElementById("downloadBtn").addEventListener("click", () => toast("原型演示：已触发 JSONL 下载"));
+
+    render();
+  </script>
+</body>
+</html>
