@@ -339,6 +339,7 @@ async def topic_manifest_operation(
         'topic_manifest': one(A.DATASET_TOPIC_MANIFEST),
         'chunks': all_items(A.DATASET_CHUNK, over=A.DATASET_CHUNK_REQUESTS),
         'chunks_manifest': one(A.DATASET_BUILD_CHUNKS_MANIFEST),
+        'plan_params': one(A.DATASET_QAPLAN_PLAN_PARAMS),
     },
     outputs={
         'plan': scalar(A.DATASET_QAPLAN_PLAN),
@@ -353,6 +354,7 @@ async def qaplan_plan_operation(
     topic_manifest: object,
     chunks: object,
     chunks_manifest: object,
+    plan_params: object,
 ) -> OperationResult:
     imported = _mapping(import_manifest, 'import_manifest')
     case_ids = _case_ids(imported)
@@ -362,7 +364,7 @@ async def qaplan_plan_operation(
         'import_cases_manifest': imported,
         'topic_discovery_manifest': _mapping(topic_manifest, 'topic_manifest'),
         'chunk': values,
-        'qaplan_plan_params': {},
+        'qaplan_plan_params': _mapping(plan_params, 'plan_params'),
     })['qaplan_plan']
     return await _result(ctx, 'dataset.qaplan_built', {
         'plan': plan,

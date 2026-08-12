@@ -119,14 +119,37 @@ class ArtifactUpdateBody(StrictModel):
         return self
 
 
+_QAPLAN_LANES = frozenset({
+    'precision_easy', 'precision_medium', 'precision_hard',
+    'reasoning_easy', 'reasoning_medium', 'reasoning_hard',
+})
+
+
 class ConfigurationUpdateBody(StrictModel):
     request_id: str = Field(min_length=1, max_length=160)
     target: Literal[
-        'run_config', 'source_config', 'target_config', 'eval_policy',
+        'run_config', 'source_config', 'qaplan_plan_params', 'target_config', 'eval_policy',
         'repair_policy', 'candidate_config',
     ]
     base_version: int = Field(ge=1)
     value: dict[str, Any]
+
+    @model_validator(mode='after')
+    def validate_qaplan_plan_params(self) -> Self:
+        if self.target != 'qaplan_plan_params':
+            return self
+        if 'lane_ratios' in self.value:
+            raise ValueError('qaplan_plan_params uses lane_case_counts, not lane_ratios')
+        if set(self.value) - {'lane_case_counts'}:
+            raise ValueError('qaplan_plan_params only supports lane_case_counts')
+        counts = self.value.get('lane_case_counts')
+        if counts is None:
+            return self
+        if not isinstance(counts, dict) or set(counts) != _QAPLAN_LANES:
+            raise ValueError('lane_case_counts must contain exactly the six lanes')
+        if any(isinstance(count, bool) or not isinstance(count, int) or count < 0 for count in counts.values()):
+            raise ValueError('lane_case_counts values must be non-negative integers')
+        return self
 
 
 class CaseSeed(StrictModel):

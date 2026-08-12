@@ -24,6 +24,7 @@ DATASET_ENTITY_CLUSTERS = 'dataset.entity_clusters'
 DATASET_EMBEDDING_CLUSTER_CANDIDATES = 'dataset.embedding_cluster_candidates'
 DATASET_EMBEDDING_CLUSTERS = 'dataset.embedding_clusters'
 DATASET_TOPIC_MANIFEST = 'dataset.topic_manifest'
+DATASET_QAPLAN_PLAN_PARAMS = 'dataset.qaplan_plan_params'
 DATASET_QAPLAN_PLAN = 'dataset.qaplan_plan'
 DATASET_QAPLAN_SPEC = 'dataset.qaplan_spec'
 DATASET_QAPLAN_MANIFEST = 'dataset.qaplan_manifest'
@@ -60,6 +61,7 @@ STEPS = ('dataset', 'eval', 'analysis', 'repair', 'abtest')
 SEEDS = (
     RUN_CONFIG,
     CORPUS_SOURCE_CONFIG,
+    DATASET_QAPLAN_PLAN_PARAMS,
     EVAL_TARGET_CONFIG,
     EVAL_POLICY,
     REPAIR_POLICY,

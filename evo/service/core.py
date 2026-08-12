@@ -50,6 +50,7 @@ _AUTO_STOPPED = frozenset({'idle', 'cancelled', 'failed', 'completed'})
 _CONFIG_ARTIFACTS = {
     'run_config': A.RUN_CONFIG,
     'source_config': A.CORPUS_SOURCE_CONFIG,
+    'qaplan_plan_params': A.DATASET_QAPLAN_PLAN_PARAMS,
     'target_config': A.EVAL_TARGET_CONFIG,
     'eval_policy': A.EVAL_POLICY,
     'repair_policy': A.REPAIR_POLICY,
@@ -527,6 +528,7 @@ def _seed_values(thread_id: str, request: ThreadCreate) -> dict[str, object]:
             'target_case_count': request.inputs.num_case,
             'min_case_count': request.inputs.num_case,
         },
+        A.DATASET_QAPLAN_PLAN_PARAMS: {},
         A.EVAL_TARGET_CONFIG: target_config,
         A.EVAL_POLICY: {'judge_llm_config': llm_config},
         A.REPAIR_POLICY: {
