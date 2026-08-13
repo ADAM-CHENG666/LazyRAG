@@ -191,6 +191,16 @@ def create_app(root: str | Path | None = None) -> FastAPI:
             page_token=page_token,
         )
 
+    @app.get('/threads/{thread_id}/dataset/materials/overview')
+    async def dataset_materials_overview(thread_id: str, request: Request) -> dict[str, Any]:
+        _query_keys(request, set())
+        return await _service(app).projections.materials_overview(thread_id)
+
+    @app.get('/threads/{thread_id}/dataset/topics/overview')
+    async def dataset_topics_overview(thread_id: str, request: Request) -> dict[str, Any]:
+        _query_keys(request, set())
+        return await _service(app).projections.topics_overview(thread_id)
+
     @app.get('/threads/{thread_id}/dataset/materials/documents')
     async def dataset_materials_documents(thread_id: str, included: str = '', knowledge_base_id: str = '',
                                           page_size: str = '', page_token: str = '') -> dict[str, Any]:

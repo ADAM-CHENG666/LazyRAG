@@ -168,6 +168,98 @@ class ProjectionService:
             'value': public_value(await self.flow.read(thread_id, record.ref)),
         }
 
+    async def materials_overview(self, thread_id: str) -> dict[str, Any]:
+        if not await self.flow.has_run(thread_id):
+            raise ServiceError(404, f'thread not found: {thread_id}')
+        status = _overview_stage_status(
+            await self.stage_snapshot(thread_id, 'dataset.material_preparation'),
+        )
+        try:
+            artifact = await self.artifact(thread_id, A.DATASET_BUILD_CHUNKS_MANIFEST)
+        except ServiceError as error:
+            if error.status_code != 404:
+                raise
+            return {
+                'thread_id': thread_id,
+                'revision': None,
+                'status': status,
+                'case_plan': None,
+                'chunks': None,
+                'warnings': [],
+            }
+
+        value = artifact['value']
+        source = _overview_mapping(value, 'materials overview').get('source')
+        summary = _overview_mapping(value, 'materials overview').get('summary')
+        case_counts = _overview_mapping(source, 'materials overview.source').get('case_counts')
+        chunk_counts = _overview_mapping(summary, 'materials overview.summary').get('chunk_counts')
+        plan = _overview_mapping(case_counts, 'materials overview.source.case_counts')
+        chunks = _overview_mapping(chunk_counts, 'materials overview.summary.chunk_counts')
+        scanned = _overview_count(chunks.get('scanned'), 'materials overview.scanned')
+        effective = _overview_count(chunks.get('effective'), 'materials overview.effective')
+        selected = _overview_count(chunks.get('selected'), 'materials overview.selected')
+        warnings = _overview_warnings(_overview_mapping(value, 'materials overview').get('warnings'))
+        return {
+            'thread_id': thread_id,
+            'revision': self._build_revision((_public_artifact_ref(artifact['record']),)),
+            'status': status,
+            'case_plan': {
+                'target': _overview_count(plan.get('target'), 'materials overview.target'),
+                'imported': _overview_count(plan.get('imported'), 'materials overview.imported'),
+                'automatic': _overview_count(plan.get('automatic'), 'materials overview.automatic'),
+            },
+            'chunks': {
+                'scanned': scanned,
+                'effective': effective,
+                'selected': selected,
+                'effective_rate': None if not scanned else effective / scanned,
+                'selection_rate': None if not effective else selected / effective,
+            },
+            'warnings': warnings,
+        }
+
+    async def topics_overview(self, thread_id: str) -> dict[str, Any]:
+        if not await self.flow.has_run(thread_id):
+            raise ServiceError(404, f'thread not found: {thread_id}')
+        status = _overview_stage_status(
+            await self.stage_snapshot(thread_id, 'dataset.topic_discovery'),
+        )
+        try:
+            artifact = await self.artifact(thread_id, A.DATASET_TOPIC_MANIFEST)
+        except ServiceError as error:
+            if error.status_code != 404:
+                raise
+            return {
+                'thread_id': thread_id,
+                'revision': None,
+                'status': status,
+                'total_topics': None,
+                'question_types': None,
+            }
+
+        stats = _overview_mapping(_overview_mapping(artifact['value'], 'topics overview').get('stats'),
+                                  'topics overview.stats')
+        total = _overview_count(stats.get('total_topic_count'), 'topics overview.total_topic_count')
+        types = _overview_mapping(stats.get('question_types'), 'topics overview.question_types')
+        precision = _overview_count(
+            _overview_mapping(types.get('precision'), 'topics overview.question_types.precision').get('count'),
+            'topics overview.question_types.precision.count',
+        )
+        reasoning = _overview_count(
+            _overview_mapping(types.get('reasoning'), 'topics overview.question_types.reasoning').get('count'),
+            'topics overview.question_types.reasoning.count',
+        )
+        return {
+            'thread_id': thread_id,
+            'revision': self._build_revision((_public_artifact_ref(artifact['record']),)),
+            'status': status,
+            'total_topics': total,
+            'question_types': {
+                'precision': {'count': precision, 'rate': None if not total else precision / total},
+                'reasoning': {'count': reasoning, 'rate': None if not total else reasoning / total},
+            },
+        }
+
     async def topics(self, thread_id: str, *, question_type: str = '',
                      min_chunk_count: int | None = None, max_chunk_count: int | None = None,
                      page_size: int | None = None, page_token: str = '') -> dict[str, Any]:
@@ -1228,6 +1320,33 @@ def _attempt_status(status: str) -> str:
         'interrupted': 'canceled',
         'discarded': 'canceled',
     }.get(status, status)
+
+
+def _overview_stage_status(snapshot: Mapping[str, Any]) -> str:
+    value = snapshot.get('snapshot')
+    progress = value.get('progress') if isinstance(value, Mapping) else None
+    status = progress.get('status') if isinstance(progress, Mapping) else None
+    if not isinstance(status, str):
+        raise ServiceError(409, 'stage snapshot has no status')
+    return status
+
+
+def _overview_mapping(value: object, name: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ServiceError(409, f'{name} is invalid')
+    return value
+
+
+def _overview_count(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ServiceError(409, f'{name} must be a non-negative integer')
+    return value
+
+
+def _overview_warnings(value: object) -> list[str]:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ServiceError(409, 'materials overview.warnings is invalid')
+    return list(value)
 
 
 def _artifact(record: ArtifactRecord) -> dict[str, Any]:
