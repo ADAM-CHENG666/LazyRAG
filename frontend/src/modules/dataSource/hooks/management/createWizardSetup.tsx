@@ -1,6 +1,5 @@
 import { Modal, message } from "antd";
 import { WarningFilled } from "@ant-design/icons";
-import { getLocalizedErrorMessage } from "@/components/request";
 import { dataSourceScanApi } from "../../api/clients";
 import {
   clearFeishuAppSetup,
@@ -48,6 +47,13 @@ import type {
   ManagementContext,
 } from "./context";
 import type { CloudDataSourceProvider } from "@/modules/dataSource/common/feishuOAuth";
+
+type SyncCloudDataSourceProvider = Extract<CloudDataSourceProvider, SourceType>;
+
+const isSyncCloudProvider = (
+  provider: CloudDataSourceProvider,
+): provider is SyncCloudDataSourceProvider =>
+  provider === "feishu" || provider === "notion";
 
 export function createWizardSetup(ctx: ManagementContext) {
   const {
@@ -221,11 +227,7 @@ export function createWizardSetup(ctx: ManagementContext) {
         current.map((item) => (item.id === record.id ? latestRecord : item)),
       );
       applyEditRecord(latestRecord);
-    } catch (error) {
-      message.error(
-        getLocalizedErrorMessage(error, t("common.requestFailed")) ||
-          t("common.requestFailed"),
-      );
+    } catch {
     }
   };
 
@@ -374,7 +376,7 @@ export function createWizardSetup(ctx: ManagementContext) {
           : t("admin.dataSourceNotionCredentialSaved"),
       );
 
-      if (shouldStartOAuth) {
+      if (shouldStartOAuth && isSyncCloudProvider(cloudSetupProvider)) {
         resetWizard();
         setWizardMode("create");
         setEditingId(null);

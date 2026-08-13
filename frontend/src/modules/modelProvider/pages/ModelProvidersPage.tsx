@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Empty, Form, Input, Modal, Popconfirm, Select, Tag, Tooltip, message } from "antd";
 import { useTranslation } from "react-i18next";
+import { localizeErrorCode } from "@/components/request";
 import {
   CheckCircleFilled,
   DeleteOutlined,
@@ -12,7 +13,6 @@ import {
   SearchOutlined,
   UpOutlined,
 } from "@ant-design/icons";
-import { getLocalizedErrorMessage } from "@/components/request";
 import { modelProvidersApi, unwrapModelProviderData } from "../api";
 import "../index.scss";
 
@@ -24,6 +24,7 @@ type ModelCapability =
   | "ASR"
   | "TTS"
   | "TEXT_TO_IMAGE"
+  | "TEXT_TO_VIDEO"
   | "MULTIMODAL_EMBEDDING"
   | "IMAGE_EDITING"
   | "LLM_SELF_EVOLUTION";
@@ -104,6 +105,7 @@ const capabilityLabelKeys: Record<ModelCapability, string> = {
   ASR: "modelProvider.capability.asr",
   TTS: "modelProvider.capability.tts",
   TEXT_TO_IMAGE: "modelProvider.capability.textToImage",
+  TEXT_TO_VIDEO: "modelProvider.capability.textToVideo",
   MULTIMODAL_EMBEDDING: "modelProvider.capability.multimodalEmbedding",
   IMAGE_EDITING: "modelProvider.capability.imageEditing",
   LLM_SELF_EVOLUTION: "modelProvider.capability.selfEvolution",
@@ -208,6 +210,7 @@ enum ModelProviderModelType {
   Embedding = "embedding",
   MultimodalEmbedding = "multimodal_embedding",
   TextToImage = "text2image",
+  TextToVideo = "text2video",
   TTS = "tts",
   STT = "stt",
   Rerank = "rerank",
@@ -221,6 +224,7 @@ const modelTypeByCapability: Record<ModelCapability, ModelProviderModelType> = {
   ASR: ModelProviderModelType.STT,
   TTS: ModelProviderModelType.TTS,
   TEXT_TO_IMAGE: ModelProviderModelType.TextToImage,
+  TEXT_TO_VIDEO: ModelProviderModelType.TextToVideo,
   MULTIMODAL_EMBEDDING: ModelProviderModelType.MultimodalEmbedding,
   IMAGE_EDITING: ModelProviderModelType.ImageEditing,
   LLM_CHAT: ModelProviderModelType.LLM,
@@ -271,6 +275,7 @@ function mapModelTypeToCapability(modelType?: string): ModelCapability {
   if (normalized === ModelProviderModelType.TTS) return "TTS";
   if (normalized === ModelProviderModelType.ImageEditing) return "IMAGE_EDITING";
   if (normalized === ModelProviderModelType.TextToImage) return "TEXT_TO_IMAGE";
+  if (normalized === ModelProviderModelType.TextToVideo) return "TEXT_TO_VIDEO";
   if (normalized === ModelProviderModelType.VLM.toLowerCase() || normalized.includes("vision")) return "VLM";
   return "LLM_CHAT";
 }
@@ -354,6 +359,7 @@ function mapApiProvider(provider: ApiProvider, fallbacks: ModelProviderFallbacks
       "ASR",
       "TTS",
       "TEXT_TO_IMAGE",
+      "TEXT_TO_VIDEO",
       "IMAGE_EDITING",
     ],
     models: [],
@@ -386,18 +392,6 @@ function mapApiGroup(
       enabled: true,
     })),
   });
-}
-
-function getCheckFailureMessage(checkResult?: CheckModelProviderResult): string | undefined {
-  if (!checkResult || typeof checkResult !== "object") {
-    return undefined;
-  }
-
-  if (typeof checkResult.message === "string" && checkResult.message.trim()) {
-    return checkResult.message.trim();
-  }
-
-  return undefined;
 }
 
 function ProviderLogo({ provider, compact = false }: { provider: ProviderOption; compact?: boolean }) {
@@ -538,7 +532,6 @@ export default function ModelProviderPage() {
         }
       } catch (error) {
         if (providerSearchRequestIdRef.current === requestId) {
-          message.error(getLocalizedErrorMessage(error, t("modelProvider.error.searchFailed")));
         }
       } finally {
         if (providerSearchRequestIdRef.current === requestId) {
@@ -582,7 +575,6 @@ export default function ModelProviderPage() {
         return next;
       });
     } catch (error) {
-      message.error(getLocalizedErrorMessage(error, t("modelProvider.error.loadProvidersFailed")));
     } finally {
       initialProvidersLoadedRef.current = true;
       setLoading(false);
@@ -725,7 +717,6 @@ export default function ModelProviderPage() {
       providerConfigForm.resetFields();
       setSensenovaBaseUrlPreset("");
     } catch (error) {
-      message.error(getLocalizedErrorMessage(error, t("modelProvider.error.saveFailed")));
     } finally {
       setProviderConfigSaving(false);
     }
@@ -795,9 +786,8 @@ export default function ModelProviderPage() {
         message.success(t("modelProvider.message.groupVerified"));
         return;
       }
-      message.error(getCheckFailureMessage(checkResult) || t("modelProvider.message.groupVerifyFailed"));
+      message.error(localizeErrorCode("2000509"));
     } catch (error) {
-      message.error(getLocalizedErrorMessage(error, t("modelProvider.error.verifyFailed")));
     } finally {
       setVerifyingGroupIds((current) => {
         const next = { ...current };
@@ -866,7 +856,6 @@ export default function ModelProviderPage() {
       });
       message.success(t("modelProvider.message.groupRemoved", { name: group.name }));
     } catch (error) {
-      message.error(getLocalizedErrorMessage(error, t("modelProvider.error.deleteGroupFailed")));
     }
   };
 
@@ -895,7 +884,6 @@ export default function ModelProviderPage() {
       });
       message.success(t("modelProvider.message.providerRemoved", { name: provider.name }));
     } catch (error) {
-      message.error(getLocalizedErrorMessage(error, t("modelProvider.error.removeProviderFailed")));
     }
   };
 
@@ -926,7 +914,6 @@ export default function ModelProviderPage() {
         )
       );
     } catch (error) {
-      message.error(getLocalizedErrorMessage(error, t("modelProvider.error.loadModelsFailed")));
     } finally {
       setLoadingGroupModelIds((current) => {
         const next = { ...current };
@@ -1019,7 +1006,6 @@ export default function ModelProviderPage() {
       message.success(t("modelProvider.message.modelAdded"));
       closeCustomModelModal();
     } catch (error) {
-      message.error(getLocalizedErrorMessage(error, t("modelProvider.error.addModelFailed")));
     }
   };
 
@@ -1049,7 +1035,6 @@ export default function ModelProviderPage() {
       );
       message.success(t("modelProvider.message.modelDeleted"));
     } catch (error) {
-      message.error(getLocalizedErrorMessage(error, t("modelProvider.error.deleteModelFailed")));
     }
   };
 

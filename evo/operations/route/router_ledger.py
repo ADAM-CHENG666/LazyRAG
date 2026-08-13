@@ -30,26 +30,26 @@ class RouterAlgorithmLedger:
         self._db_path = self._root / 'artifact_store.sqlite3'
         self._create_schema()
 
-    def claim_algorithm(
-        self,
-        *,
-        algorithm_id: str,
-        thread_id: str,
-        run_id: str,
-        candidate_ref: str,
-        router_admin_url: str,
-        service_url: str,
-        code_path: str,
-        instance_count: int,
-        config_hash: str,
-        register_request_hash: str,
-        cleanup_policy: str = 'thread_delete',
-    ) -> tuple[dict[str, Any], str | None]:
+    def claim_algorithm(self, *, algorithm_id: str, thread_id: str, run_id: str, candidate_ref: str,
+                        router_admin_url: str, service_url: str, code_path: str, instance_count: int, config_hash: str,
+                        register_request_hash: str, cleanup_policy: str = 'thread_delete'
+                        ) -> tuple[dict[str, Any], str | None]:
         _require_cleanup_policy(cleanup_policy)
         _require_owner(thread_id, run_id)
         now = time.time()
         with self._transaction() as conn:
             self._recover_stale(conn, now)
+            published = conn.execute(
+                """
+                SELECT algorithm_id
+                FROM evo_router_algorithms
+                WHERE thread_id = ? AND algorithm_id != ? AND published_at IS NOT NULL
+                LIMIT 1
+                """,
+                (thread_id, algorithm_id),
+            ).fetchone()
+            if published is not None:
+                raise RouterLedgerError(f'thread already owns an algorithm: {thread_id}')
             foreign_router = conn.execute(
                 """
                 SELECT algorithm_id
@@ -92,6 +92,7 @@ class RouterAlgorithmLedger:
                   AND evo_router_algorithms.router_admin_url = excluded.router_admin_url
                   AND evo_router_algorithms.service_url = excluded.service_url
                   AND evo_router_algorithms.register_request_hash = excluded.register_request_hash
+                  AND evo_router_algorithms.published_at IS NULL
                 """,
                 (
                     algorithm_id,
@@ -115,14 +116,8 @@ class RouterAlgorithmLedger:
                 None if previous is None else str(previous['expected_state'])
             )
 
-    def resolve_claim(
-        self,
-        algorithm_id: str,
-        thread_id: str,
-        register_request_hash: str,
-        claimed_at: float,
-        expected_state: str | None,
-    ) -> None:
+    def resolve_claim(self, algorithm_id: str, thread_id: str, register_request_hash: str, claimed_at: float,
+                      expected_state: str | None) -> None:
         with self._transaction() as conn:
             where = """
                 algorithm_id = ? AND thread_id = ?
@@ -184,12 +179,7 @@ class RouterAlgorithmLedger:
             )
             return _row_dict(self._row(conn, algorithm_id)), previous_state
 
-    def resolve_delete(
-        self,
-        algorithm_id: str,
-        claimed_at: float,
-        expected_state: str | None,
-    ) -> None:
+    def resolve_delete(self, algorithm_id: str, claimed_at: float, expected_state: str | None) -> None:
         with self._transaction() as conn:
             params = (algorithm_id, claimed_at)
             if expected_state is None:
@@ -212,6 +202,19 @@ class RouterAlgorithmLedger:
                 ).rowcount
             if changed != 1:
                 raise RouterLedgerError(f'algorithm delete is no longer current: {algorithm_id}')
+
+    def publish_algorithm(self, algorithm_id: str) -> None:
+        now = time.time()
+        with self._transaction() as conn:
+            row = self._row(conn, algorithm_id)
+            if row is None:
+                raise RouterLedgerError(f'algorithm is not evo-owned: {algorithm_id}')
+            if row['expected_state'] != 'active':
+                raise RouterLedgerError(f'algorithm is not expected active: {algorithm_id}')
+            conn.execute(
+                'UPDATE evo_router_algorithms SET published_at = ?, updated_at = ? WHERE algorithm_id = ?',
+                (now, now, algorithm_id),
+            )
 
     def begin_manage(self, algorithm_id: str) -> tuple[dict[str, Any], str]:
         now = time.time()
@@ -247,13 +250,8 @@ class RouterAlgorithmLedger:
             if changed != 1:
                 raise RouterLedgerError(f'algorithm management is no longer current: {algorithm_id}')
 
-    def list_algorithms(
-        self,
-        *,
-        thread_id: str = '',
-        algorithm_id: str = '',
-        expected_state: str = '',
-    ) -> list[dict[str, Any]]:
+    def list_algorithms(self, *, thread_id: str = '', algorithm_id: str = '', expected_state: str = '',
+                        published: bool | None = None) -> list[dict[str, Any]]:
         query = 'SELECT * FROM evo_router_algorithms'
         clauses: list[str] = []
         params: list[str] = []
@@ -267,6 +265,8 @@ class RouterAlgorithmLedger:
             _require_state(expected_state)
             clauses.append('expected_state = ?')
             params.append(expected_state)
+        if published is not None:
+            clauses.append(f'published_at IS {"NOT " if published else ""}NULL')
         if clauses:
             query = f'{query} WHERE {" AND ".join(clauses)}'
         query = f'{query} ORDER BY updated_at DESC, algorithm_id'
@@ -318,15 +318,8 @@ class RouterAlgorithmLedger:
                 (_json(status or {}), time.time(), time.time(), algorithm_id),
             )
 
-    def record_ab_strategy(
-        self,
-        *,
-        thread_id: str,
-        candidate_ref: str,
-        previous_strategy: Mapping[str, Any] | None,
-        next_strategy: Mapping[str, Any] | None,
-        reason: str,
-    ) -> None:
+    def record_ab_strategy(self, *, thread_id: str, candidate_ref: str, previous_strategy: Mapping[str, Any] | None,
+                           next_strategy: Mapping[str, Any] | None, reason: str) -> None:
         with self._transaction() as conn:
             conn.execute(
                 """
@@ -378,7 +371,8 @@ class RouterAlgorithmLedger:
                   last_router_status TEXT NOT NULL,
                   last_seen_at REAL,
                   created_at REAL NOT NULL,
-                  updated_at REAL NOT NULL
+                  updated_at REAL NOT NULL,
+                  published_at REAL
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_evo_router_algorithms_thread
@@ -408,6 +402,15 @@ class RouterAlgorithmLedger:
             columns = {row['name'] for row in conn.execute('PRAGMA table_info(evo_router_algorithms)')}
             if 'instance_count' not in columns:
                 conn.execute('ALTER TABLE evo_router_algorithms ADD COLUMN instance_count INTEGER')
+            if 'published_at' not in columns:
+                conn.execute('ALTER TABLE evo_router_algorithms ADD COLUMN published_at REAL')
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_evo_router_algorithms_published_thread
+                ON evo_router_algorithms(thread_id)
+                WHERE published_at IS NOT NULL
+                """
+            )
             self._recover_stale(conn, time.time())
             conn.commit()
 

@@ -7,6 +7,7 @@ import { message, TreeSelect, TreeSelectProps } from "antd";
 import { DefaultOptionType } from "antd/es/select";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { localizeErrorCode } from "@/components/request";
 import { TreeNode } from "../KnowledgeTable";
 
 type ITreeData = Omit<DefaultOptionType, "label">;
@@ -24,12 +25,9 @@ function CopyMoveModal(props: CopyMoveModalProps) {
     dataset_id = "",
     data_source_type = "DATA_SOURCE_TYPE_UNSPECIFIED",
     document_id = "",
-    p_id,
   } = currentData ?? {};
   const [treeData, setTreeData] = useState<ITreeData[]>([]);
   const [selectTreeData, setSelectTreeData] = useState<ITreeData>({});
-
-  console.log(selectTreeData, currentData, t("knowledge.currentSelectionParams"));
 
   function updateTreeData(
     list: ITreeData[],
@@ -145,11 +143,7 @@ function CopyMoveModal(props: CopyMoveModalProps) {
         const tasks = createRes.data.tasks || [];
         const taskIds = tasks.map((t) => t.task_id).filter(Boolean);
         if (!taskIds.length) {
-          message.error(
-            action === "move"
-              ? t("knowledge.createMoveTaskFailed")
-              : t("knowledge.createCopyTaskFailed"),
-          );
+          message.error(localizeErrorCode("2000509"));
           return;
         }
         return TaskServiceApi()
@@ -166,11 +160,6 @@ function CopyMoveModal(props: CopyMoveModalProps) {
       })
       .catch((error) => {
         console.error(error);
-        message.error(
-          action === "move"
-            ? t("knowledge.moveFailedRetry")
-            : t("knowledge.copyFailedRetry"),
-        );
       });
   }
 

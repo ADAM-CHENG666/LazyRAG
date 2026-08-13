@@ -1,32 +1,35 @@
-import { Alert, Form, Input, Modal, Tag, Tooltip } from "antd";
+import { Alert, Form, Input, Modal, Skeleton, Tag } from "antd";
 import { ArrowRightOutlined, FolderOpenOutlined } from "@ant-design/icons";
 import { FeishuCredentialHintAlertFromForm } from "@/modules/dataSource/common/FeishuCredentialHintAlert";
 import { formatValidFeishuAccountNames } from "@/modules/dataSource/utils/feishuAccount";
-import { cloudAuthProviderOptions } from "../constants/cloudProviderOptions";
+import { cloudAuthProviderOptions, cloudProviderOptions } from "../constants/cloudProviderOptions";
 import {
   CLOUD_DOCUMENTS_FEISHU_SETUP_PATH,
   CLOUD_DOCUMENTS_NOTION_SETUP_PATH,
 } from "../utils/cloudDocumentUrls";
 import type { CloudDocumentProvidersVm } from "../hooks/useCloudDocumentProviders";
 
-function getProviderTitle(type: "feishu" | "notion" | "local", t: CloudDocumentProvidersVm["t"]) {
+function getProviderTitle(
+  type: "feishu" | "notion" | "local" | "googledrive",
+  t: CloudDocumentProvidersVm["t"],
+) {
   if (type === "local") {
     return t("modelProvider.cloudDocuments.localTitle");
   }
   if (type === "feishu") {
     return t("modelProvider.cloudDocuments.feishuTitle");
   }
+  if (type === "googledrive") {
+    return t("modelProvider.external.googleDriveTitle");
+  }
   return t("modelProvider.cloudDocuments.notionTitle");
 }
 
 function getProviderDescription(
-  type: "feishu" | "notion" | "local",
+  type: "feishu" | "notion" | "local" | "googledrive",
   t: CloudDocumentProvidersVm["t"],
   vm: CloudDocumentProvidersVm,
 ) {
-  if (type === "local") {
-    return t("modelProvider.cloudDocuments.localDesc", { count: vm.localSourceCount });
-  }
   if (type === "feishu") {
     if (vm.isFeishuAuthValid) {
       return t("modelProvider.cloudDocuments.feishuConnectedHint", {
@@ -40,6 +43,13 @@ function getProviderDescription(
       return t("modelProvider.cloudDocuments.feishuLockHint");
     }
     return t("modelProvider.cloudDocuments.feishuAuthReadyHint");
+  }
+  if (type === "googledrive") {
+    return vm.googleDriveConnection
+      ? t("admin.dataSourceGoogleDriveConnected", {
+          account: vm.googleDriveConnection.accountName,
+        })
+      : t("modelProvider.external.googleDriveDesc");
   }
 
   if (vm.isNotionAuthValid) {
@@ -57,50 +67,55 @@ export default function CloudDocumentProviderPanel({ vm }: { vm: CloudDocumentPr
   const {
     t,
     canCreateLocalSource,
-    localScanChatEnabled,
     isFeishuAuthValid,
     isNotionAuthValid,
+    isGoogleDriveAuthValid,
     isFeishuSetupReady,
     isNotionSetupReady,
     handleManageFeishuAuth,
     handleManageLocalSource,
+    handleManageGoogleDrive,
     handleOpenNotionSetup,
   } = vm;
+
+  if (vm.loading) {
+    return (
+      <div
+        className="model-provider-cloud-doc-grid"
+        aria-busy="true"
+      >
+        {cloudProviderOptions
+          .filter((item) => item.type !== "local" || canCreateLocalSource)
+          .map((item) => (
+            <div className="model-provider-cloud-doc-skeleton" key={item.type}>
+              <Skeleton active avatar={{ shape: "square", size: 44 }} paragraph={{ rows: 1 }} />
+            </div>
+          ))}
+      </div>
+    );
+  }
 
   return (
     <div className="model-provider-cloud-doc-grid">
       {canCreateLocalSource ? (
         <button
           type="button"
-          className="model-provider-service-card"
+          className="model-provider-cloud-doc-resource-row"
           onClick={handleManageLocalSource}
         >
-          <span className="model-provider-service-logo model-provider-service-logo-blue">
-            <FolderOpenOutlined className="model-provider-service-logo-icon" />
+          <span className="model-provider-cloud-doc-resource-logo">
+            <FolderOpenOutlined />
           </span>
-          <div className="model-provider-service-card-copy">
-            <div>
-              <div className="model-provider-service-title-row">
-                <h4>{getProviderTitle("local", t)}</h4>
-                <Tag
-                  className="model-provider-service-status"
-                  color={localScanChatEnabled ? "success" : "default"}
-                >
-                  {localScanChatEnabled
-                    ? t("modelProvider.cloudDocuments.localScanChatEnabledTag")
-                    : t("modelProvider.cloudDocuments.localScanChatDisabledTag")}
-                </Tag>
-              </div>
-              <Tooltip placement="topLeft" title={getProviderDescription("local", t, vm)}>
-                <span className="model-provider-service-summary-wrap">
-                  <p className="model-provider-service-summary">
-                    {getProviderDescription("local", t, vm)}
-                  </p>
-                </span>
-              </Tooltip>
-            </div>
+          <div className="model-provider-cloud-doc-resource-copy">
+            <h2>{getProviderTitle("local", t)}</h2>
+            <p>{t("modelProvider.cloudDocuments.localDetailSubtitle")}</p>
           </div>
-          <span className="model-provider-service-card-arrow" aria-hidden="true">
+          <div className="model-provider-cloud-doc-directory-count">
+            <strong>{vm.localSourceCount}</strong>
+            <span>{t("modelProvider.cloudDocuments.directoryCountUnit")}</span>
+          </div>
+          <span className="model-provider-cloud-doc-resource-action">
+            {t("modelProvider.cloudDocuments.manageLocal")}
             <ArrowRightOutlined />
           </span>
         </button>
@@ -108,9 +123,14 @@ export default function CloudDocumentProviderPanel({ vm }: { vm: CloudDocumentPr
 
       {cloudAuthProviderOptions.map((item) => {
         const isFeishu = item.type === "feishu";
-        const isAuthValid = isFeishu ? isFeishuAuthValid : isNotionAuthValid;
+        const isGoogleDrive = item.type === "googledrive";
+        const isAuthValid = isFeishu
+          ? isFeishuAuthValid
+          : isGoogleDrive
+            ? isGoogleDriveAuthValid
+            : isNotionAuthValid;
         const isSetupReady = isFeishu ? isFeishuSetupReady : isNotionSetupReady;
-        const isProviderLocked = !isAuthValid && !isSetupReady;
+        const isProviderLocked = !isGoogleDrive && !isAuthValid && !isSetupReady;
         const authStatusText = isAuthValid
           ? t("modelProvider.cloudDocuments.authValid")
           : isProviderLocked
@@ -121,16 +141,23 @@ export default function CloudDocumentProviderPanel({ vm }: { vm: CloudDocumentPr
           <button
             key={item.type}
             type="button"
-            className={`model-provider-service-card${isProviderLocked ? " is-locked" : ""}`}
+            className={`model-provider-cloud-doc-resource-row${isProviderLocked ? " is-locked" : ""}`}
             onClick={() => {
               if (isFeishu) {
                 handleManageFeishuAuth();
                 return;
               }
+              if (isGoogleDrive) {
+                handleManageGoogleDrive();
+                return;
+              }
               handleOpenNotionSetup();
             }}
           >
-            <span className="model-provider-service-logo model-provider-service-logo-blue">
+            <span className="model-provider-cloud-doc-resource-logo">
+              <span className="model-provider-cloud-doc-resource-fallback-icon">
+                {item.icon}
+              </span>
               {item.logoUrl ? (
                 <img
                   alt=""
@@ -144,36 +171,24 @@ export default function CloudDocumentProviderPanel({ vm }: { vm: CloudDocumentPr
                     event.currentTarget.style.display = "none";
                   }}
                 />
-              ) : (
-                item.icon
-              )}
+              ) : null}
             </span>
-            <div className="model-provider-service-card-copy">
-              <div>
-                <div className="model-provider-service-title-row">
-                  <h4>{getProviderTitle(item.type, t)}</h4>
-                  <Tag
-                    className="model-provider-service-status"
-                    color={
-                      isAuthValid ? "success" : isProviderLocked ? "default" : "processing"
-                    }
-                  >
-                    {authStatusText}
-                  </Tag>
-                </div>
-                <Tooltip
-                  placement="topLeft"
-                  title={getProviderDescription(item.type, t, vm)}
-                >
-                  <span className="model-provider-service-summary-wrap">
-                    <p className="model-provider-service-summary">
-                      {getProviderDescription(item.type, t, vm)}
-                    </p>
-                  </span>
-                </Tooltip>
-              </div>
+            <div className="model-provider-cloud-doc-resource-copy">
+              <h2>{getProviderTitle(item.type, t)}</h2>
+              <p>{getProviderDescription(item.type, t, vm)}</p>
             </div>
-            <span className="model-provider-service-card-arrow" aria-hidden="true">
+            <Tag
+              className="model-provider-cloud-doc-resource-status"
+              color={
+                isAuthValid ? "success" : isProviderLocked ? "default" : "processing"
+              }
+            >
+              {authStatusText}
+            </Tag>
+            <span className="model-provider-cloud-doc-resource-action">
+              {isAuthValid
+                ? t("modelProvider.cloudDocuments.manageAccount")
+                : t("modelProvider.cloudDocuments.configureConnection")}
               <ArrowRightOutlined />
             </span>
           </button>

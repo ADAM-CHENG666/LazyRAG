@@ -19,34 +19,49 @@ def import_cases(ctx: Any, inputs: Mapping[str, object], kb_client: KnowledgeBas
     config = _mapping(inputs.get('source_config'), 'source_config')
     kb_ids = _ids(config.get('kb_ids'), 'kb_ids')
     target = _positive(config.get('target_case_count'), 'target_case_count')
-    path = str(config.get('csv_path') or '').strip()
-    if not path:
-        return {'import_cases_manifest': _manifest('', '', 0, target, [], [])}
-
-    file_path = Path(path)
-    try:
-        raw = file_path.read_bytes()
-        reader = csv.DictReader(raw.decode('utf-8-sig').splitlines(), strict=True)
-        headers = set(reader.fieldnames or ())
-        rows = list(reader)
-    except Exception as exc:
-        raise ValueError(f'csv_path is unreadable: {path}') from exc
-    if not REQUIRED_COLUMNS <= headers or headers - REQUIRED_COLUMNS - OPTIONAL_COLUMNS:
-        raise ValueError('csv header is invalid')
+    sources = _sources(config)
+    if not sources:
+        return {'import_cases_manifest': _manifest([], target, [], [])}
 
     index = _chunk_index(kb_client or KnowledgeBaseClient(), kb_ids)
     details: list[dict[str, object]] = []
     valid: list[dict[str, object]] = []
     questions: set[str] = set()
-    for number, row in enumerate(rows, 2):
-        detail = {'source_row_number': number, 'source_id': str(row.get('id') or '').strip()}
+    source_records: list[dict[str, object]] = []
+    source_row_number = 0
+    for source in sources:
+        path = source['path']
         try:
-            case = _case(row, index, questions)
-        except ValueError as exc:
-            details.append({**detail, 'load_status': 'invalid', 'error': {'code': str(exc).split(':', 1)[0], 'reason': str(exc)}})
-        else:
-            valid.append({**detail, 'case': case})
-            details.append({**detail, 'load_status': 'pending', 'case': case})
+            raw = Path(path).read_bytes()
+            reader = csv.DictReader(raw.decode('utf-8-sig').splitlines(), strict=True)
+            headers = set(reader.fieldnames or ())
+            rows = list(reader)
+        except Exception as exc:
+            raise ValueError(f'csv_path is unreadable: {path}') from exc
+        if not REQUIRED_COLUMNS <= headers or headers - REQUIRED_COLUMNS - OPTIONAL_COLUMNS:
+            raise ValueError(f'csv header is invalid: {path}')
+        source_records.append({
+            'kb_id': source['kb_id'], 'csv_path': path,
+            'csv_sha256': hashlib.sha256(raw).hexdigest(), 'csv_size_bytes': len(raw),
+        })
+        for csv_row_number, row in enumerate(rows, 2):
+            source_row_number += 1
+            detail = {
+                'source_row_number': source_row_number,
+                'csv_row_number': csv_row_number,
+                'source_kb_id': source['kb_id'],
+                'source_path': path,
+                'source_id': str(row.get('id') or '').strip(),
+            }
+            try:
+                case = _case(row, index, questions)
+            except ValueError as exc:
+                details.append({**detail, 'load_status': 'invalid', 'error': {
+                    'code': str(exc).split(':', 1)[0], 'reason': str(exc),
+                }})
+            else:
+                valid.append({**detail, 'case': case})
+                details.append({**detail, 'load_status': 'pending', 'case': case})
     valid_index = 0
     for detail in details:
         if detail['load_status'] != 'pending':
@@ -55,22 +70,31 @@ def import_cases(ctx: Any, inputs: Mapping[str, object], kb_client: KnowledgeBas
             case_id = f'case_{valid_index + 1:04d}'
             case = dict(detail['case'])
             case['id'] = case_id
+            preparation = dict(_mapping(case.get('source_preparation'), 'case.source_preparation'))
+            preparation['case_source'] = {
+                'final_id': case_id,
+                'original_id': str(detail.get('source_id') or case_id),
+                'source': 'imported_csv',
+                'kb_id': str(detail.get('source_kb_id') or ''),
+                'csv_path': str(detail.get('source_path') or ''),
+            }
+            case['source_preparation'] = preparation
             detail.update({'load_status': 'loaded', 'case_id': case_id, 'case': case})
         else:
             detail.pop('case', None)
             detail['load_status'] = 'truncated'
         valid_index += 1
-    return {'import_cases_manifest': _manifest(path, hashlib.sha256(raw).hexdigest(), len(raw), target, details, valid)}
+    return {'import_cases_manifest': _manifest(source_records, target, details, valid)}
 
 
-def _manifest(path: str, digest: str, size: int, target: int, details: list[dict[str, object]], valid: list[dict[str, object]]) -> dict[str, object]:
+def _manifest(sources: list[dict[str, object]], target: int, details: list[dict[str, object]], valid: list[dict[str, object]]) -> dict[str, object]:
     loaded = [item for item in details if item['load_status'] == 'loaded']
     invalid = [item for item in details if item['load_status'] == 'invalid']
     truncated = [item for item in details if item['load_status'] == 'truncated']
     assignments = {item['case_id']: {'mode': 'imported', 'source_row_number': item['source_row_number']} for item in loaded}
     assignments |= {f'case_{i:04d}': {'mode': 'generated'} for i in range(len(loaded) + 1, target + 1)}
     return {
-        'source': {'csv_path': path, 'csv_sha256': digest, 'csv_size_bytes': size} if path else {'csv_path': ''},
+        'source': {'csv_sources': sources},
         'stats': {'csv_reading': {
                       'total_row_count': len(details),
                       'valid_row_count': len(valid),
@@ -82,6 +106,23 @@ def _manifest(path: str, digest: str, size: int, target: int, details: list[dict
                                       'auto_case_count': target - len(loaded), 'assignments': assignments}},
         'details': details,
     }
+
+
+def _sources(config: Mapping[str, object]) -> list[dict[str, str]]:
+    raw_sources = config.get('csv_sources')
+    if raw_sources is None:
+        path = str(config.get('csv_path') or '').strip()
+        raw_sources = [] if not path else [{'kb_id': _ids(config.get('kb_ids'), 'kb_ids')[0], 'path': path}]
+    if not isinstance(raw_sources, list):
+        raise ValueError('csv_sources must be a list')
+    sources = []
+    for index, raw in enumerate(raw_sources):
+        source = _mapping(raw, f'csv_sources[{index}]')
+        sources.append({
+            'kb_id': _text(source.get('kb_id'), f'csv_sources[{index}].kb_id'),
+            'path': _text(source.get('path'), f'csv_sources[{index}].path'),
+        })
+    return sources
 
 
 def _case(row: Mapping[str, str], index: Mapping[str, dict[str, str]], questions: set[str]) -> dict[str, object]:
@@ -125,7 +166,9 @@ def _chunk_index(client: KnowledgeBaseClient, kb_ids: list[str]) -> dict[str, di
     for kb_id in kb_ids:
         for doc in client.list_documents(kb_id):
             doc_id = str(doc['doc_id'])
-            for batch in client.iter_chunks(kb_id, [doc_id], ['block', 'line'], 200):
+            for batch in client.iter_chunks(
+                kb_id, [doc_id], ['block', 'line'], 200, require_embeddings=False,
+            ):
                 for node in batch:
                     chunk_id = str(getattr(node, 'uid', '') or getattr(node, '_uid', '') or '')
                     if chunk_id in values:

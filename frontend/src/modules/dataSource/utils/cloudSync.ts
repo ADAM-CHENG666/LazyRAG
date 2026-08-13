@@ -1,7 +1,6 @@
 import type { TFunction } from "i18next";
 import { CLOUD_SYNC_POLL_INTERVAL_MS, CLOUD_SYNC_TIMEOUT_MS } from "../constants/options";
 import {
-  getBindingLastError,
   type ScanV2AgentHint,
   type ScanV2Binding,
   type ScanV2Client,
@@ -13,10 +12,18 @@ export function sleep(ms: number) {
   });
 }
 
+function createCloudSyncError(code?: string) {
+  const error = new Error("Cloud sync failed") as Error & {
+    error_code: string;
+  };
+  error.error_code = `${code || "2000509"}`;
+  return error;
+}
+
 export async function waitForCloudSyncRun(
   client: ScanV2Client,
   sourceId: string,
-  t: TFunction,
+  _t: TFunction,
   runIds: string[] = [],
 ) {
   const deadline = Date.now() + CLOUD_SYNC_TIMEOUT_MS;
@@ -24,8 +31,12 @@ export async function waitForCloudSyncRun(
 
   while (Date.now() < deadline) {
     const [detailResponse, summaryResponse] = await Promise.all([
-      client.getSource({ sourceId }).catch(() => null),
-      client.getSourceSummary({ sourceId }).catch(() => null),
+      client
+        .getSource({ sourceId }, { silentError: true } as never)
+        .catch(() => null),
+      client
+        .getSourceSummary({ sourceId }, { silentError: true } as never)
+        .catch(() => null),
     ]);
     const bindings = (detailResponse?.data.bindings || []) as ScanV2Binding[];
     const summary = summaryResponse?.data as Record<string, any> | undefined;
@@ -37,13 +48,23 @@ export async function waitForCloudSyncRun(
     const summaryBindings = Array.isArray(summary?.bindings)
       ? (summary.bindings as Record<string, any>[])
       : [];
+    const deletingBindings = bindings.filter(
+      (item) => `${item.status || ""}`.toUpperCase() === "DELETING",
+    );
+    const activeBindingCount = bindings.length - deletingBindings.length;
+    const expectedSummaryRuns = Math.max(
+      Math.min(expectedRuns, activeBindingCount || 1),
+      1,
+    );
     const finishedBindings = summaryBindings.filter((item) =>
       Boolean(item.last_success_at || item.lastSuccessAt),
     );
 
     if (
-      finishedBindings.length >= expectedRuns ||
-      (expectedRuns === 1 && Boolean(summary?.last_success_at || summary?.lastSuccessAt))
+      deletingBindings.length === 0 &&
+      (finishedBindings.length >= expectedSummaryRuns ||
+        (expectedSummaryRuns === 1 &&
+          Boolean(summary?.last_success_at || summary?.lastSuccessAt)))
     ) {
       return { run_ids: runIds, status: "SUCCEEDED" };
     }
@@ -53,16 +74,18 @@ export async function waitForCloudSyncRun(
       status.includes("ERROR") ||
       status.includes("CANCEL")
     ) {
-      throw new Error(
-        getBindingLastError(errorBinding) ||
-          t("admin.dataSourceDetailCloudSyncFailedFallback"),
-      );
+      const rawError = errorBinding?.last_error || errorBinding?.lastError;
+      const errorCode =
+        typeof rawError === "string"
+          ? rawError
+          : rawError?.code || rawError?.error_code;
+      throw createCloudSyncError(errorCode);
     }
 
     await sleep(CLOUD_SYNC_POLL_INTERVAL_MS);
   }
 
-  throw new Error(t("admin.dataSourceDetailCloudSyncTimeout"));
+  throw createCloudSyncError("2000509");
 }
 
 export function pickScanAgent(agents: ScanV2AgentHint[], preferredAgentId?: string) {

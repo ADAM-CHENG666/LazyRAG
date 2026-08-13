@@ -1,10 +1,22 @@
-import { Ref, forwardRef, useImperativeHandle, useState } from "react";
-import { Modal, Form, message, TreeSelect, Select, Popover } from "antd";
+import {
+  Ref,
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+} from "react";
+import { Alert, Modal, Form, message, TreeSelect, Select, Popover } from "antd";
 import { QuestionCircleOutlined } from "@ant-design/icons";
 import { useTranslation } from "react-i18next";
 import "./index.scss";
 import type { ParserConfig } from "@/api/generated/knowledge-client";
-import { TaskServiceApi, type StartTaskResult } from "@/modules/knowledge/utils/request";
+import { TaskServiceApi } from "@/modules/knowledge/utils/request";
+import { localizeErrorCode } from "@/components/request";
+import {
+  RuntimeReadinessError,
+  waitForRuntimeCapability,
+} from "@/runtime/readiness";
 
 export const DOC_SUMMARY_GROUP = "doc-summary";
 
@@ -41,8 +53,14 @@ const RestartKnowledgeModal = (
   const { t } = useTranslation();
   const [visible, setVisible] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [runtimeWaiting, setRuntimeWaiting] = useState(false);
   const [modalInfo, setModalInfo] = useState<IData>();
+  const runtimeWaitAbortRef = useRef<AbortController | null>(null);
   const [form] = Form.useForm();
+
+  useEffect(() => {
+    return () => runtimeWaitAbortRef.current?.abort();
+  }, []);
 
   useImperativeHandle(ref, () => ({
     onOpen,
@@ -58,7 +76,10 @@ const RestartKnowledgeModal = (
   };
 
   const onCancel = () => {
+    runtimeWaitAbortRef.current?.abort();
+    runtimeWaitAbortRef.current = null;
     setVisible(false);
+    setRuntimeWaiting(false);
     form.resetFields();
   };
 
@@ -90,6 +111,14 @@ const RestartKnowledgeModal = (
         return;
       }
 
+      const controller = new AbortController();
+      runtimeWaitAbortRef.current = controller;
+      await waitForRuntimeCapability("parser", {
+        signal: controller.signal,
+        onWaiting: () => setRuntimeWaiting(true),
+      });
+      setRuntimeWaiting(false);
+
       const docNames = (modalInfo.names || []).filter(Boolean);
       const displayName =
         docNames.length === 1
@@ -119,27 +148,30 @@ const RestartKnowledgeModal = (
         .map((task: { task_id?: string }) => task.task_id)
         .filter((taskId: string | undefined): taskId is string => !!taskId);
       if (!taskIds.length) {
-        message.error(t("knowledge.createReparseTaskFailed"));
+        message.error(localizeErrorCode("2000509"));
         return;
       }
 
       const startRes = await TaskServiceApi().startTasks(dataset, { task_ids: taskIds });
       const startedCount = startRes.data.started_count ?? 0;
       if (startedCount <= 0) {
-        const failedTasks = (startRes.data.tasks || []) as StartTaskResult[];
-        const errMsg =
-          failedTasks.find((task: StartTaskResult) => task.message)?.message ||
-          t("knowledge.createReparseTaskFailed");
-        message.error(errMsg);
+        message.error(localizeErrorCode("2000509"));
         return;
       }
       message.success(t("knowledge.createReparseTaskSuccess"));
       onFinish?.();
       onCancel();
     } catch (error) {
-      console.log(error);
-      message.error(t("knowledge.createReparseTaskFailed"));
+      if ((error as Error)?.name === "AbortError") {
+        return;
+      }
+      console.error(error);
+      if (error instanceof RuntimeReadinessError) {
+        message.error(t("runtime.initializationFailed"));
+      }
     } finally {
+      runtimeWaitAbortRef.current = null;
+      setRuntimeWaiting(false);
       setLoading(false);
     }
   };
@@ -197,6 +229,14 @@ const RestartKnowledgeModal = (
       width={459}
       okButtonProps={{ disabled: loading }}
     >
+      {runtimeWaiting && (
+        <Alert
+          message={t("runtime.aiServiceInitializingDocument")}
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+        />
+      )}
       <Form form={form} layout="vertical">
         <Form.Item
           name="reparse_groups"

@@ -5,24 +5,25 @@ import {
   Ref,
   useEffect,
   useImperativeHandle,
+  useRef,
   useState,
 } from "react";
 
 import { DataSourceType } from "@/modules/knowledge/constants/common";
 import DragUpload, { ALLOWED_FILE_TYPES } from "../DragUpload";
-import {
-  DocumentServiceApi,
-  TaskServiceApi,
-  uploadLargeFileToDataset,
-} from "@/modules/knowledge/utils/request";
+import { DocumentServiceApi, TaskServiceApi } from "@/modules/knowledge/utils/request";
+import { buildUploadTaskItems } from "@/modules/knowledge/utils/uploadByHash";
 import TagSelect from "@/modules/knowledge/components/TagSelect";
 import { useDatasetPermissionStore } from "@/modules/knowledge/store/dataset_permission";
+import { localizeErrorCode } from "@/components/request";
+import {
+  RuntimeReadinessError,
+  waitForRuntimeCapability,
+} from "@/runtime/readiness";
 
 const SINGLE_FILE_MAX_SIZE = 500 * 1024 * 1024;
 const TOTAL_FILE_MAX_SIZE = 1 * 1024 * 1024 * 1024;
 const ZIP_FILE_TYPES = ["zip"];
-
-const LARGE_FILE_THRESHOLD = 10 * 1024 * 1024; // 10MB
 
 type ImportMode = "file" | "folder" | "zip";
 
@@ -59,8 +60,10 @@ const ImportKnowledgeModal = (props: IProps, ref: Ref<unknown> | undefined) => {
   const [data, setData] = useState<IData>(InitData);
   const [visible, setVisible] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [runtimeWaiting, setRuntimeWaiting] = useState(false);
   const [tags, setTags] = useState<string[]>([]);
   const [hasZipError, setHasZipError] = useState(false);
+  const runtimeWaitAbortRef = useRef<AbortController | null>(null);
   const hasOnlyReadPermission = useDatasetPermissionStore((state) =>
     state.hasOnlyReadPermission(),
   );
@@ -83,6 +86,7 @@ const ImportKnowledgeModal = (props: IProps, ref: Ref<unknown> | undefined) => {
 
   useEffect(() => {
     getTags();
+    return () => runtimeWaitAbortRef.current?.abort();
   }, []);
 
   function getTags() {
@@ -107,10 +111,13 @@ const ImportKnowledgeModal = (props: IProps, ref: Ref<unknown> | undefined) => {
   const isZipMode = importMode === "zip";
 
   function handleClose() {
+    runtimeWaitAbortRef.current?.abort();
+    runtimeWaitAbortRef.current = null;
     form.resetFields();
     setData(InitData);
     setVisible(false);
     setLoading(false);
+    setRuntimeWaiting(false);
     setHasZipError(false);
   }
 
@@ -132,178 +139,85 @@ const ImportKnowledgeModal = (props: IProps, ref: Ref<unknown> | undefined) => {
         : undefined;
 
     try {
-      if (isDirectoryMode) {
-        await submitFolderMode(fileItems, values.tags, startMode);
-      } else {
-        await submitNormalMode(fileItems, values.tags, startMode);
-      }
+      const controller = new AbortController();
+      runtimeWaitAbortRef.current = controller;
+      await waitForRuntimeCapability("parser", {
+        signal: controller.signal,
+        onWaiting: () => setRuntimeWaiting(true),
+      });
+      setRuntimeWaiting(false);
 
+      await submitWithHashReuse(fileItems, values.tags, startMode);
       message.success(t("knowledge.uploadCompleteParsingStarted"));
       handleClose();
       onOk({ pId: data.p_id });
     } catch (err) {
+      if ((err as Error)?.name === "AbortError") {
+        return;
+      }
       console.error(err);
       message.error(
-        err instanceof Error ? err.message : t("knowledge.uploadFailedRetry"),
+        err instanceof RuntimeReadinessError
+          ? t("runtime.initializationFailed")
+          : localizeErrorCode("2000509"),
       );
     } finally {
+      runtimeWaitAbortRef.current = null;
+      setRuntimeWaiting(false);
       setLoading(false);
     }
   }
 
-  function startTasksAfterUpload(taskIds: string[], startMode: string | undefined) {
+  async function startTasksAfterUpload(
+    taskIds: string[],
+    startMode: string | undefined,
+  ) {
     onParsingStart?.();
-    TaskServiceApi()
-      .startTasks(data.dataset_id, {
+    try {
+      await TaskServiceApi().startTasks(data.dataset_id, {
         task_ids: taskIds,
         ...(startMode ? { start_mode: startMode } : {}),
-      })
-      .catch((err) => {
-        console.error("Start parsing tasks failed:", err);
-        message.error(t("knowledge.startParsingFailed"));
-      })
-      .finally(() => {
-        onParsingSettled?.();
       });
+    } finally {
+      onParsingSettled?.();
+    }
   }
 
-  // Folder mode: upload each file individually with relative_path,
-  // then create tasks with relative_path so the backend creates the folder structure.
-  async function submitFolderMode(
+  /**
+   * Hash → checkHashes → upload only missing files → create tasks
+   * (content_hash for existing / duplicates, upload_file_id for newly uploaded).
+   */
+  async function submitWithHashReuse(
     fileItems: { originFile: File; path: string }[],
     tags: string[] | undefined,
     startMode: string | undefined,
   ) {
-    // { upload_file_id, relative_path } pairs collected after upload
-    const uploadedItems: { upload_file_id: string; relative_path: string }[] =
-      [];
-
-    for (const item of fileItems) {
-      if (item.originFile.size > LARGE_FILE_THRESHOLD) {
-        // Large file: multi-step upload with relative_path
-        const uploadFileId = await uploadLargeFileToDataset(
-          data.dataset_id,
-          item.originFile,
-          { documentPid: data.p_id, relativePath: item.path },
-        );
-        uploadedItems.push({
-          upload_file_id: uploadFileId,
-          relative_path: item.path,
-        });
-      } else {
-        // Small file: single upload with relative_path in form data
-        const formData = new FormData();
-        formData.append("files", item.originFile);
-        formData.append("relative_path", item.path);
-        if (data.p_id) formData.append("document_pid", data.p_id);
-
-        const uploadRes = await TaskServiceApi().uploadFiles(
-          data.dataset_id,
-          formData,
-        );
-        const uploaded = uploadRes.data.files || [];
-        if (!uploaded.length) {
-          throw new Error(t("knowledge.uploadResultMissing"));
-        }
-        uploadedItems.push({
-          upload_file_id: uploaded[0].upload_file_id!,
-          relative_path: item.path,
-        });
-      }
-    }
-
-    if (!uploadedItems.length) {
-      throw new Error(t("knowledge.uploadResultMissing"));
-    }
-
-    // Create tasks with relative_path so the backend creates the folder
-    const createRes = await TaskServiceApi().createTasks(data.dataset_id, {
-      items: uploadedItems.map(({ upload_file_id, relative_path }) => ({
-        upload_file_id,
-        task: {
-          relative_path,
-          ...(tags?.length ? { document_tags: tags } : {}),
-        },
-      })),
+    const items = await buildUploadTaskItems({
+      datasetId: data.dataset_id,
+      fileItems,
+      tags,
+      documentPid: data.p_id,
+      folderMode: isDirectoryMode,
     });
 
-    const taskIds = (createRes.data.tasks || [])
-      .map((t) => t.task_id)
-      .filter(Boolean) as string[];
-
-    if (!taskIds.length) {
-      throw new Error(t("knowledge.createTaskFailed"));
-    }
-
-    startTasksAfterUpload(taskIds, startMode);
-  }
-
-  // Normal mode (plain files / zip): batch upload small files, multi-step for large files.
-  async function submitNormalMode(
-    fileItems: { originFile: File; path: string }[],
-    tags: string[] | undefined,
-    startMode: string | undefined,
-  ) {
-    const smallItems = fileItems.filter(
-      (f) => f.originFile.size <= LARGE_FILE_THRESHOLD,
-    );
-    const largeItems = fileItems.filter(
-      (f) => f.originFile.size > LARGE_FILE_THRESHOLD,
-    );
-
-    const allUploadFileIds: string[] = [];
-
-    if (smallItems.length > 0) {
-      const formData = new FormData();
-      smallItems.forEach(({ originFile }) => formData.append("files", originFile));
-      if (data.p_id) formData.append("document_pid", data.p_id);
-      if (tags?.length) formData.append("document_tags", JSON.stringify(tags));
-
-      const uploadRes = await TaskServiceApi().uploadFiles(
-        data.dataset_id,
-        formData,
-      );
-      const uploadedFiles = uploadRes.data.files || [];
-      if (!uploadedFiles.length) {
-        throw new Error(t("knowledge.uploadResultMissing"));
-      }
-      uploadedFiles.forEach((f) => allUploadFileIds.push(f.upload_file_id!));
-    }
-
-    for (const item of largeItems) {
-      const uploadFileId = await uploadLargeFileToDataset(
-        data.dataset_id,
-        item.originFile,
-        { documentPid: data.p_id },
-      );
-      allUploadFileIds.push(uploadFileId);
-    }
-
-    if (!allUploadFileIds.length) {
+    if (!items.length) {
       throw new Error(t("knowledge.uploadResultMissing"));
     }
 
     const createRes = await TaskServiceApi().createTasks(data.dataset_id, {
-      items: allUploadFileIds.map((upload_file_id) => ({
-        upload_file_id,
-        task: tags?.length ? { document_tags: tags } : {},
-      })),
+      items,
     });
 
     const taskIds = (createRes.data.tasks || [])
-      .map((t) => t.task_id)
+      .map((task) => task.task_id)
       .filter(Boolean) as string[];
 
     if (!taskIds.length) {
-      throw new Error(t("knowledge.createTaskFailed"));
+      throw new Error(localizeErrorCode("2000509"));
     }
 
-    startTasksAfterUpload(taskIds, startMode);
+    await startTasksAfterUpload(taskIds, startMode);
   }
-
-  // function changeSourceType() {
-  //   form.resetFields(['fileList', 'urlList', 'notionAccount', 'notionPages'])
-  // }
 
   return (
     <Modal
@@ -334,8 +248,12 @@ const ImportKnowledgeModal = (props: IProps, ref: Ref<unknown> | undefined) => {
     >
       {loading && (
         <Alert
-          message={t("knowledge.documentParsingKeepTabOpen")}
-          type="warning"
+          message={
+            runtimeWaiting
+              ? t("runtime.aiServiceInitializingDocument")
+              : t("knowledge.documentParsingKeepTabOpen")
+          }
+          type={runtimeWaiting ? "info" : "warning"}
           showIcon
           style={{ marginBottom: 16 }}
         />

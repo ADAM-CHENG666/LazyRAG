@@ -105,8 +105,10 @@ def build_chunks_manifest(ctx: Any, inputs: Mapping[str, object]) -> Mapping[str
     if allocation['automatic'] and counts['effective'] and counts['shortfall']:
         warning.append(f"chunk candidate capacity is short by {counts['shortfall']}; selected {counts['selected']}")
     source = _mapping(_mapping(inputs.get('import_cases_manifest'), 'import_cases_manifest').get('source'), 'source')
+    csv_sources = source.get('csv_sources')
+    csv_present = bool(str(source.get('csv_path') or '').strip()) or bool(csv_sources)
     return {'build_chunks_manifest': {
-        'source': {'csv_present': bool(str(source.get('csv_path') or '').strip()), 'case_counts': allocation},
+        'source': {'csv_present': csv_present, 'case_counts': allocation},
         'summary': {'chunk_counts': {'scanned': counts['scanned_chunk'], 'effective': counts['effective'],
                                      'selected': counts['selected'], 'shortfall': counts['shortfall']}},
         'warnings': warning, 'chunks': items,

@@ -1,5 +1,6 @@
 import { FC, type ReactNode, useRef, useState, useEffect, useCallback } from "react";
 import { useTranslation } from "react-i18next";
+import { localizeErrorCode } from "@/components/request";
 import { message } from "antd";
 import { AgentAppsAuth } from "@/components/auth";
 import {
@@ -29,6 +30,8 @@ import { allowedUploadTypes } from "@/modules/chat/components/ImageUpload";
 import {
   CHAT_RESUME_CONVERSATION_KEY,
   CHAT_SELECT_CONVERSATION_EVENT,
+  PLUGIN_PANEL_EXPANDED_EVENT,
+  PLUGIN_PANEL_EXPANDED_STORAGE_PREFIX,
 } from "@/modules/chat/constants/chat";
 import { buildChatMessageListFromHistory } from "@/modules/chat/utils/message";
 import { buildEnvironmentContext } from "@/modules/chat/utils/environment";
@@ -36,11 +39,31 @@ import TaskCenter from "@/modules/chat/components/TaskCenter";
 import { useTaskCenterStore } from "@/modules/chat/store/taskCenter";
 import type { SubAgentTask } from "@/modules/chat/store/taskCenter";
 import { useChatInputStore } from "@/modules/chat/store/chatInput";
+import { useChatThinkStore } from "@/modules/chat/store/chatThink";
 
 // Stable empty reference to avoid returning a fresh array from the zustand
 // selector on every render, which (with useSyncExternalStore) would trigger an
 // infinite re-render loop (React error #185).
 const EMPTY_TASKS: SubAgentTask[] = [];
+const CONVERSATION_HISTORY_RETRY_DELAYS_MS = [0, 500, 1500];
+
+async function loadConversationHistory(conversationId: string) {
+  let lastError: unknown;
+  for (const delayMs of CONVERSATION_HISTORY_RETRY_DELAYS_MS) {
+    if (delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    try {
+      return await ChatServiceApi()
+        .conversationServiceGetConversationHistory({
+          name: conversationId,
+        });
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
 
 interface IChatLayoutProps {
   setIsChatContent: (isChatContent: boolean) => void;
@@ -51,7 +74,7 @@ interface IChatLayoutProps {
   multimodalEmbeddingReady?: boolean | null;
   rerankReady?: boolean | null;
   chatDisabledReason?: string;
-  chatDisabledDescription?: string;
+  chatDisabledDescription?: ReactNode;
   chatDisabledAction?: ReactNode;
   /** Plugin settings selected on the welcome screen before the first message is sent. */
   initPendingPluginSettings?: ConversationPluginSettings | null;
@@ -86,6 +109,31 @@ const ChatLayout: FC<IChatLayoutProps> = (props) => {
   const [knowledgeRefreshKey, setKnowledgeRefreshKey] = useState(0);
   const [isTaskPanelCollapsed, setIsTaskPanelCollapsed] = useState(false);
   const [panelWidth, setPanelWidth] = useState<number>(0); // 0 = use CSS default
+  const [pluginPanelExpanded, setPluginPanelExpanded] = useState(false);
+  const [expandedRailTab, setExpandedRailTab] = useState<"chat" | "tasks">("chat");
+
+  useEffect(() => {
+    let restoredExpanded = false;
+    try {
+      restoredExpanded = localStorage.getItem(
+        `${PLUGIN_PANEL_EXPANDED_STORAGE_PREFIX}${sessionId}`,
+      ) === "true";
+    } catch {
+      // Keep the default compact layout when browser storage is unavailable.
+    }
+    setPluginPanelExpanded(restoredExpanded);
+    if (restoredExpanded) setExpandedRailTab("chat");
+
+    const handleExpandedChange = (event: Event) => {
+      const detail = (event as CustomEvent<{ conversationId: string; expanded: boolean }>).detail;
+      if (detail.conversationId === sessionId) {
+        setPluginPanelExpanded(detail.expanded);
+        if (detail.expanded) setExpandedRailTab("chat");
+      }
+    };
+    window.addEventListener(PLUGIN_PANEL_EXPANDED_EVENT, handleExpandedChange);
+    return () => window.removeEventListener(PLUGIN_PANEL_EXPANDED_EVENT, handleExpandedChange);
+  }, [sessionId]);
 
   // Keep pendingPluginSettingsRef in sync with the welcome screen while no conversation is active.
   useEffect(() => {
@@ -205,6 +253,9 @@ const ChatLayout: FC<IChatLayoutProps> = (props) => {
   const loadConversationTasks = useTaskCenterStore(
     (s) => s.loadConversationTasks,
   );
+  const loadConversationArtifacts = useTaskCenterStore(
+    (s) => s.loadConversationArtifacts,
+  );
   const subscribeConvEvents = useTaskCenterStore((s) => s.subscribeConvEvents);
   const unsubscribeConvEvents = useTaskCenterStore((s) => s.unsubscribeConvEvents);
 
@@ -217,6 +268,7 @@ const ChatLayout: FC<IChatLayoutProps> = (props) => {
     // already-finished task would look "new" and we would re-subscribe to its
     // task stream, causing the full execution log to be appended again.
     let cancelled = false;
+    void loadConversationArtifacts(sessionId);
     loadConversationTasks(sessionId).then(() => {
       if (!cancelled) {
         subscribeConvEvents(sessionId);
@@ -226,7 +278,7 @@ const ChatLayout: FC<IChatLayoutProps> = (props) => {
       cancelled = true;
       unsubscribeConvEvents(sessionId);
     };
-  }, [sessionId, loadConversationTasks, subscribeConvEvents, unsubscribeConvEvents]);
+  }, [sessionId, loadConversationTasks, loadConversationArtifacts, subscribeConvEvents, unsubscribeConvEvents]);
 
   // Auto-expand the task panel the first time a SubAgent task appears.
   // In developer mode: auto-expand; otherwise: keep collapsed (user expands manually).
@@ -258,7 +310,7 @@ const ChatLayout: FC<IChatLayoutProps> = (props) => {
   }, [initchatConfig]);
 
   useEffect(() => {
-    if (pendingMessage) {
+    if (pendingMessage && chatEnabled) {
       const timer = setTimeout(() => {
         chatRef.current?.sendMessage(pendingMessage);
         clearPendingMessage();
@@ -267,7 +319,7 @@ const ChatLayout: FC<IChatLayoutProps> = (props) => {
       return () => clearTimeout(timer);
     }
     return undefined;
-  }, [pendingMessage, clearPendingMessage]);
+  }, [pendingMessage, chatEnabled, clearPendingMessage]);
 
   useEffect(() => {
     const conversationId = sessionStorage.getItem(CHAT_RESUME_CONVERSATION_KEY);
@@ -309,16 +361,12 @@ const ChatLayout: FC<IChatLayoutProps> = (props) => {
             conversation: resolvedId,
           })
           .then((detailRes) =>
-            ChatServiceApi()
-              .conversationServiceGetConversationHistory({
-                name: resolvedId,
-              })
-              .then((historyRes) => ({
-                detailRes,
-                historyRes,
-                resolvedId,
-                isGenerating,
-              })),
+            loadConversationHistory(resolvedId).then((historyRes) => ({
+              detailRes,
+              historyRes,
+              resolvedId,
+              isGenerating,
+            })),
           );
       })
       .then(({ detailRes, historyRes, resolvedId, isGenerating }) => {
@@ -349,8 +397,9 @@ const ChatLayout: FC<IChatLayoutProps> = (props) => {
         setIsRestoringConversation(false);
       })
       .catch(() => {
-        sessionStorage.removeItem(CHAT_RESUME_CONVERSATION_KEY);
         setIsRestoringConversation(false);
+        setIsChatContent(false);
+        message.error(localizeErrorCode("2000509"));
       });
   }, []);
 
@@ -428,6 +477,8 @@ const ChatLayout: FC<IChatLayoutProps> = (props) => {
           },
         },
         models: [t("chat.lazyMindModel")],
+        thinking_depth:
+          extras?.thinking_depth ?? useChatThinkStore.getState().thinkingDepth,
         // enable_thinking: think ? true : false,
         stream: true,
         input,
@@ -440,6 +491,9 @@ const ChatLayout: FC<IChatLayoutProps> = (props) => {
         ...(pluginUIState ? { plugin_ui_state: pluginUIState } : {}),
         ...(artifactRefs.length > 0 ? { artifact_refs: artifactRefs } : {}),
         ...(extras?.run_in_background ? { run_in_background: true } : {}),
+        ...(Array.isArray(extras?.mentions) && extras.mentions.length > 0
+          ? { mentions: extras.mentions }
+          : {}),
         // If the user changed plugin settings before a conversation was created,
         // carry them in the first request so Go can persist them on ensureConversation.
         // Only send the three known fields to avoid polluting the payload with API response leftovers.
@@ -505,16 +559,12 @@ const ChatLayout: FC<IChatLayoutProps> = (props) => {
             conversation: resolvedId,
           })
           .then((detailRes) =>
-            ChatServiceApi()
-              .conversationServiceGetConversationHistory({
-                name: resolvedId,
-              })
-              .then((historyRes) => ({
-                detailRes,
-                historyRes,
-                resolvedId,
-                isGenerating,
-              })),
+            loadConversationHistory(resolvedId).then((historyRes) => ({
+              detailRes,
+              historyRes,
+              resolvedId,
+              isGenerating,
+            })),
           ),
       )
       .then(({ detailRes, historyRes, resolvedId, isGenerating }) => {
@@ -547,17 +597,21 @@ const ChatLayout: FC<IChatLayoutProps> = (props) => {
           chatRef.current?.openResumeSSE?.(resolvedId);
         }
       })
+      .catch(() => {
+        setIsChatContent(false);
+        message.error(localizeErrorCode("2000509"));
+      })
       .finally(() => {
         setIsRestoringConversation(false);
       });
-  }, [setConversationId, setChatConfigFn]);
+  }, [setConversationId, setChatConfigFn, setIsChatContent]);
 
   useEffect(() => {
     const handleConversationSelect = (event: Event) => {
       const detail =
         (event as CustomEvent<{ conversationId?: string; source?: string }>)
           .detail || {};
-      if (detail.source !== "sidebar") {
+      if (detail.source !== "sidebar" && detail.source !== "mention") {
         return;
       }
       const conversationId = detail.conversationId || "";
@@ -574,7 +628,7 @@ const ChatLayout: FC<IChatLayoutProps> = (props) => {
         chatRef.current?.createNewChat();
         return;
       }
-      if (conversationId === sessionId) {
+      if (conversationId === sessionIdRef.current) {
         return;
       }
       if (sessionIdRef.current) {
@@ -596,11 +650,14 @@ const ChatLayout: FC<IChatLayoutProps> = (props) => {
         handleConversationSelect,
       );
     };
-  }, [sessionId, setIsChatContent, loadConversation]);
+  }, [setIsChatContent, loadConversation, setChatConfigFn]);
 
   function parseErrorData(data: string) {
     const dataObject = UIUtils.jsonParser(data) || {};
-    return dataObject.message;
+    return localizeErrorCode(
+      `${dataObject.error_code || dataObject.code || ""}`,
+      localizeErrorCode("2000509"),
+    );
   }
 
   const isFileTypeSupported = (file: File): boolean => {
@@ -669,7 +726,7 @@ const ChatLayout: FC<IChatLayoutProps> = (props) => {
 
   return (
     <div
-      className="detail-container"
+      className={`detail-container${pluginPanelExpanded ? " detail-container--plugin-expanded" : ""}`}
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}
@@ -685,6 +742,13 @@ const ChatLayout: FC<IChatLayoutProps> = (props) => {
           </div>
         </div>
       )}
+      {pluginPanelExpanded && (
+        <div className="expanded-rail-tabs" role="tablist">
+          <button type="button" role="tab" aria-selected={expandedRailTab === "chat"} className={expandedRailTab === "chat" ? "active" : ""} onClick={() => setExpandedRailTab("chat")}>{t("chat.pluginRailConversation")}</button>
+          <button type="button" role="tab" aria-selected={expandedRailTab === "tasks"} className={expandedRailTab === "tasks" ? "active" : ""} onClick={() => setExpandedRailTab("tasks")}>{t("taskCenter.panelTitle")} {tasks.length > 0 && <span>{tasks.length}</span>}</button>
+        </div>
+      )}
+      <div className={`chat-conversation-pane${pluginPanelExpanded && expandedRailTab !== "chat" ? " chat-conversation-pane--hidden" : ""}`}>
       <ChatContainerComponent
         ref={chatRef}
         canChat={chatEnabled}
@@ -726,7 +790,8 @@ const ChatLayout: FC<IChatLayoutProps> = (props) => {
           autoRunning || pluginDefinitionChanged ? undefined : chatDisabledAction
         }
       />
-      {tasks.length > 0 && isTaskPanelCollapsed && (
+      </div>
+      {!pluginPanelExpanded && tasks.length > 0 && isTaskPanelCollapsed && (
         <button
           type="button"
           className="task-panel-restore-btn"
@@ -737,15 +802,17 @@ const ChatLayout: FC<IChatLayoutProps> = (props) => {
           <span className="task-panel-restore-label">{t("taskCenter.panelTitle")} ({tasks.length})</span>
         </button>
       )}
-      {tasks.length > 0 && !isTaskPanelCollapsed && (
+      {((tasks.length > 0 && !pluginPanelExpanded && !isTaskPanelCollapsed) || pluginPanelExpanded) && (
         <div
-          className="right-box"
-          style={panelWidth ? { width: panelWidth, minWidth: panelWidth } : undefined}
+          className={`right-box${pluginPanelExpanded ? " right-box--expanded-tab" : ""}${pluginPanelExpanded && expandedRailTab !== "tasks" ? " right-box--tab-hidden" : ""}`}
+          style={!pluginPanelExpanded && panelWidth ? { width: panelWidth, minWidth: panelWidth } : undefined}
+          aria-hidden={pluginPanelExpanded && expandedRailTab !== "tasks"}
         >
           <div className="right-box-resize-handle" onMouseDown={onPanelResizeStart} />
           <TaskCenter
             sessionId={sessionId}
-            onClose={() => setIsTaskPanelCollapsed(true)}
+            onClose={pluginPanelExpanded ? undefined : () => setIsTaskPanelCollapsed(true)}
+            showHeader={!pluginPanelExpanded}
           />
         </div>
       )}

@@ -51,7 +51,7 @@ import { ListPageTable } from "@/components/ui";
 import EditTags from "@/modules/knowledge/pages/detail/components/KnowledgeTable/editTags";
 import type { TreeNode } from "@/modules/knowledge/pages/detail/components/KnowledgeTable";
 import { useTranslation } from "react-i18next";
-import { axiosInstance, BASE_URL, getLocalizedErrorMessage } from "@/components/request";
+import { axiosInstance, BASE_URL } from "@/components/request";
 import { AgentAppsAuth } from "@/components/auth";
 import {
   fetchModelFeatures,
@@ -154,6 +154,7 @@ const KnowledgePage: FC = () => {
   const syncCreateVm = useSyncKnowledgeBaseCreation({
     onSuccess: () => {
       getTableData();
+      createKnowledgeRef.current?.onClose();
     },
   });
   const cloudSourceRequestSeqRef = useRef(0);
@@ -288,10 +289,6 @@ const KnowledgePage: FC = () => {
           pageSize,
           total: 0,
         });
-        message.error(
-          getLocalizedErrorMessage(error, t("common.requestFailed")) ||
-            t("common.requestFailed"),
-        );
       } finally {
         if (cloudSourceRequestSeqRef.current === requestSeq) {
           setLoading(false);
@@ -346,11 +343,8 @@ const KnowledgePage: FC = () => {
           bindings,
         );
         syncCreateVm.openEditWizard(mappedRecord);
-      } catch (error) {
-        message.error(
-          getLocalizedErrorMessage(error, t("common.requestFailed")) ||
-            t("common.requestFailed"),
-        );
+      } catch {
+        // API errors are reported by the shared request interceptor.
       }
     },
     [syncCreateVm, t],
@@ -755,7 +749,7 @@ const KnowledgePage: FC = () => {
             return relArr?.[0];
           }
           if (
-            ["pdf", "docx", "doc", "pptx"].includes(
+            ["pdf", "docx", "doc", "pptx", "pptm"].includes(
               rel_path?.split(".")?.at(-1) ?? "",
             )
           ) {
@@ -881,6 +875,8 @@ const KnowledgePage: FC = () => {
           pageSize: pageSize,
           keyword: values.keyword,
           tags: values?.tags && values.tags !== ALL_TAGS ? [values.tags] : [],
+        }, {
+          params: { source: "manual" },
         })
         .then((res) => {
           handleSuccess(

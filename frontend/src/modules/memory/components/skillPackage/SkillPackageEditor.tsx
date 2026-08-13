@@ -245,22 +245,21 @@ export default function SkillPackageEditor({
 
       const files = flattenSkillTree(tree);
       const defaultPath = pickDefaultFilePath(files);
-      if (defaultPath) {
-        setSelectedPath((previous) => previous || defaultPath);
-      }
+      setSelectedPath((previous) =>
+        files.some((file) => file.path === previous) ? previous : defaultPath,
+      );
 
       if (agentReview && nextDiffFiles.length) {
-        const firstChanged = collectChangedFilePaths(nextDiffFiles)[0];
+        const firstChanged = collectChangedFilePaths(nextDiffFiles).find((path) =>
+          files.some((file) => file.path === path),
+        );
         if (firstChanged) {
           setSelectedPath(firstChanged);
         }
       }
     } catch (error) {
       console.error("Load skill package failed:", error);
-      setErrorMessage(
-        getLocalizedErrorMessage(error, t("admin.memorySkillPackageLoadFailed")) ||
-          t("admin.memorySkillPackageLoadFailed"),
-      );
+      setErrorMessage(getLocalizedErrorMessage(error));
     } finally {
       setLoading(false);
     }
@@ -346,10 +345,6 @@ export default function SkillPackageEditor({
         setFileBinary(file.binary);
       } catch (error) {
         console.error("Load skill file failed:", error);
-        message.error(
-          getLocalizedErrorMessage(error, t("admin.memorySkillPackageFileLoadFailed")) ||
-            t("admin.memorySkillPackageFileLoadFailed"),
-        );
       } finally {
         setFileLoading(false);
       }
@@ -358,11 +353,11 @@ export default function SkillPackageEditor({
   );
 
   useEffect(() => {
-    if (!selectedPath || loading) {
+    if (!selectedPath || !selectedFile || loading) {
       return;
     }
     void loadFileView(selectedPath);
-  }, [loadFileView, loading, selectedPath]);
+  }, [loadFileView, loading, selectedFile, selectedPath]);
 
   const treeData = useMemo<DataNode[]>(() => {
     if (!treeRoot) {
@@ -412,14 +407,13 @@ export default function SkillPackageEditor({
       });
       setIsEditing(false);
 
+      const tree = await getSkillTree(skillId);
+      setTreeRoot(tree);
       const treeDiff = await compareSkillTreeDiff(skillId);
       setDiffFiles(treeDiff.files);
       message.success(t("common.saveSuccess"));
     } catch (error) {
       console.error("Save skill file failed:", error);
-      message.error(
-        getLocalizedErrorMessage(error, t("common.saveFailed")) || t("common.saveFailed"),
-      );
     } finally {
       setSaving(false);
     }
@@ -437,10 +431,6 @@ export default function SkillPackageEditor({
       await onSkillUpdated?.();
     } catch (error) {
       console.error("Commit skill draft failed:", error);
-      message.error(
-        getLocalizedErrorMessage(error, t("admin.memorySkillDraftCommitFailed")) ||
-          t("admin.memorySkillDraftCommitFailed"),
-      );
     } finally {
       setCommitting(false);
     }
@@ -450,10 +440,16 @@ export default function SkillPackageEditor({
     if (!selectedPath) {
       return;
     }
+    const tree = await getSkillTree(skillId);
+    const files = flattenSkillTree(tree);
+    const nextSelectedPath = files.some((file) => file.path === selectedPath)
+      ? selectedPath
+      : pickDefaultFilePath(files);
+    setTreeRoot(tree);
+    setSelectedPath(nextSelectedPath);
     const treeDiff = await compareSkillTreeDiff(skillId);
     setDiffFiles(treeDiff.files);
-    await loadFileView(selectedPath);
-  }, [loadFileView, selectedPath, skillId]);
+  }, [selectedPath, skillId]);
 
   const handleHunkDecision = async (
     hunkId: string,
@@ -488,10 +484,6 @@ export default function SkillPackageEditor({
       await refreshCurrentFileDiff();
     } catch (error) {
       console.error("Submit skill draft review action failed:", error);
-      message.error(
-        getLocalizedErrorMessage(error, t("admin.memorySkillHunkActionFailed")) ||
-          t("admin.memorySkillHunkActionFailed"),
-      );
     } finally {
       setHunkSubmitting((previous) => {
         const next = { ...previous };
@@ -528,15 +520,8 @@ export default function SkillPackageEditor({
       setFileHunkSummaries({});
       setReviewedPaths(new Set());
       await refreshPackage();
-      if (selectedPath) {
-        await loadFileView(selectedPath);
-      }
     } catch (error) {
       console.error("Undo skill draft review failed:", error);
-      message.error(
-        getLocalizedErrorMessage(error, t("admin.memorySkillDraftReviewUndoFailed")) ||
-          t("admin.memorySkillDraftReviewUndoFailed"),
-      );
     } finally {
       setUndoing(false);
     }
@@ -566,10 +551,6 @@ export default function SkillPackageEditor({
       await onSkillUpdated?.();
     } catch (error) {
       console.error("Confirm skill draft failed:", error);
-      message.error(
-        getLocalizedErrorMessage(error, t("admin.memorySkillDraftConfirmFailed")) ||
-          t("admin.memorySkillDraftConfirmFailed"),
-      );
     } finally {
       setCommitting(false);
     }
@@ -594,10 +575,6 @@ export default function SkillPackageEditor({
           await onSkillUpdated?.();
         } catch (error) {
           console.error("Discard skill draft failed:", error);
-          message.error(
-            getLocalizedErrorMessage(error, t("admin.memorySkillDraftDiscardFailed")) ||
-              t("admin.memorySkillDraftDiscardFailed"),
-          );
         }
       },
     });
@@ -644,13 +621,16 @@ export default function SkillPackageEditor({
       );
       closeCreateModal();
       await refreshPackage();
-      setSelectedPath(trimmedPath);
+      if (!isDirectory) {
+        contentCacheRef.current.set(trimmedPath, {
+          content: "",
+          binary: false,
+        });
+        setSelectedPath(trimmedPath);
+      }
       message.success(t("common.saveSuccess"));
     } catch (error) {
       console.error("Create skill path failed:", error);
-      message.error(
-        getLocalizedErrorMessage(error, t("common.saveFailed")) || t("common.saveFailed"),
-      );
     }
   };
 
@@ -714,10 +694,6 @@ export default function SkillPackageEditor({
           message.success(t("admin.memorySkillPackageDeleteSuccess"));
         } catch (error) {
           console.error("Delete skill file failed:", error);
-          message.error(
-            getLocalizedErrorMessage(error, t("admin.memorySkillPackageDeleteFailed")) ||
-              t("admin.memorySkillPackageDeleteFailed"),
-          );
         }
       },
     });
@@ -752,9 +728,6 @@ export default function SkillPackageEditor({
       message.success(t("common.saveSuccess"));
     } catch (error) {
       console.error("Upload skill file failed:", error);
-      message.error(
-        getLocalizedErrorMessage(error, t("common.saveFailed")) || t("common.saveFailed"),
-      );
     }
     return false;
   };

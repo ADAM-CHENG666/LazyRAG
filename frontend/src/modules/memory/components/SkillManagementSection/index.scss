@@ -24,6 +24,61 @@
   padding-bottom: 8px;
 }
 
+.memory-skill-market-toolbar-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+
+  .memory-skill-market-search {
+    width: clamp(200px, 17vw, 260px);
+  }
+
+}
+
+.memory-skill-market-category-popover,
+.memory-skill-market-search-popover {
+  position: relative;
+  flex: 0 0 32px;
+}
+
+.memory-skill-market-category-popover {
+  > .ant-btn.is-active {
+    border-color: #1677ff;
+    color: #1677ff;
+    background: #e6f4ff;
+  }
+
+  .memory-skill-category-bar.is-popover {
+    position: absolute;
+    top: 40px;
+    right: 0;
+    z-index: 20;
+    width: max-content;
+    max-width: 420px;
+    padding: 8px;
+    border: 1px solid #e5eaf2;
+    border-radius: 8px;
+    background: #fff;
+    box-shadow: 0 8px 24px rgba(31, 35, 41, 0.12);
+  }
+}
+
+.memory-skill-market-search-popover {
+  .memory-skill-market-search {
+    position: absolute;
+    top: 40px;
+    right: 0;
+    z-index: 20;
+    padding: 8px;
+    border: 1px solid #e5eaf2;
+    border-radius: 8px;
+    background: #fff;
+    box-sizing: content-box;
+    box-shadow: 0 8px 24px rgba(31, 35, 41, 0.12);
+  }
+}
+
 .memory-skill-create-split {
   display: inline-flex;
   align-items: stretch;
@@ -34,6 +89,8 @@
 
   &.is-single {
     border: 0;
+    padding: 0;
+    background: transparent;
   }
 
   &__main {
@@ -51,27 +108,6 @@
     font-weight: 500;
     line-height: 1;
     white-space: nowrap;
-    cursor: pointer;
-
-    &:hover {
-      background: #4096ff;
-      border-color: #4096ff;
-    }
-  }
-
-  &__trigger {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 28px;
-    height: 32px;
-    padding: 0;
-    border: 1px solid #1677ff;
-    border-left: 1px solid rgba(255, 255, 255, 0.28);
-    border-radius: 0 6px 6px 0;
-    background: #1677ff;
-    color: #fff;
-    font-size: 10px;
     cursor: pointer;
 
     &:hover {
@@ -178,12 +214,11 @@
 .memory-skill-insight-card {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
-  min-width: 168px;
-  height: 56px;
-  padding: 8px 12px;
+  gap: 8px;
+  height: 32px;
+  padding: 0 10px 0 6px;
   border: 1px solid #f0f0f0;
-  border-radius: 8px;
+  border-radius: 6px;
   background: #fff;
   text-align: left;
   cursor: pointer;
@@ -193,7 +228,7 @@
 
   &:hover:not(:disabled) {
     border-color: #d9d9d9;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04);
   }
 
   &:disabled {
@@ -203,61 +238,68 @@
 
   &__icon {
     position: relative;
-    width: 32px;
-    height: 32px;
-    border-radius: 8px;
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
     background: #e6f4ff;
     color: #1677ff;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
-    font-size: 15px;
-  }
-
-  &__body {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    min-width: 0;
+    font-size: 12px;
   }
 
   &__title {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
     color: rgba(0, 0, 0, 0.88);
     font-size: 13px;
-    font-weight: 600;
-    line-height: 1.4;
+    font-weight: 500;
+    line-height: 1;
     white-space: nowrap;
   }
 
   &__count {
     position: absolute;
-    top: -4px;
-    right: -4px;
+    top: -5px;
+    right: -5px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    min-width: 16px;
-    height: 16px;
-    padding: 0 4px;
+    min-width: 14px;
+    height: 14px;
+    padding: 0 3px;
     border-radius: 999px;
     background: #ff4d4f;
     color: #fff;
-    font-size: 11px;
+    font-size: 10px;
     font-weight: 600;
     line-height: 1;
     border: 1.5px solid #fff;
     box-sizing: border-box;
   }
 
-  &__hint {
-    color: rgba(0, 0, 0, 0.45);
-    font-size: 12px;
-    line-height: 1.4;
-    white-space: nowrap;
+  &.is-organize.is-active {
+    border-color: #91caff;
+    background: #e6f4ff;
+  }
+
+  &.is-organize:focus-visible {
+    outline: 2px solid #1677ff;
+    outline-offset: 2px;
+  }
+}
+
+.memory-skill-insight-card-tooltip {
+  display: inline-flex;
+
+  .memory-skill-insight-card:disabled {
+    pointer-events: none;
+  }
+
+  &:focus-visible {
+    border-radius: 6px;
+    outline: 2px solid #1677ff;
+    outline-offset: 2px;
   }
 }
 
@@ -300,39 +342,6 @@
       height: 2px;
       background: #1677ff;
     }
-  }
-}
-
-.memory-skill-view-market-desc {
-  display: flex;
-  flex-shrink: 0;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 10px 12px;
-  border-radius: 10px;
-  background: #f8fafc;
-
-  &__icon {
-    flex: 0 0 auto;
-    width: 24px;
-    height: 24px;
-    margin-top: 1px;
-    border-radius: 999px;
-    background: #eef4ff;
-    color: #2f6bff;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 13px;
-  }
-
-  &__text {
-    margin: 0;
-    flex: 1;
-    min-width: 0;
-    font-size: 13px;
-    line-height: 1.6;
-    color: #667085;
   }
 }
 
@@ -417,6 +426,66 @@
   flex-shrink: 0;
   height: 32px;
   border-radius: 6px;
+}
+
+.memory-skill-organize-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 48px;
+  padding: 8px 10px;
+  border: 1px solid #91caff;
+  border-radius: 6px;
+  background: #e6f4ff;
+
+  &__summary,
+  &__actions {
+    display: flex;
+    align-items: center;
+  }
+
+  &__summary {
+    gap: 10px;
+    min-width: 0;
+  }
+
+  &__icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    flex: 0 0 28px;
+    border-radius: 6px;
+    background: #fff;
+    color: #1677ff;
+  }
+
+  &__copy {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+
+    strong {
+      color: rgba(0, 0, 0, 0.88);
+      font-size: 13px;
+      font-weight: 500;
+      line-height: 1.4;
+    }
+
+    span {
+      color: rgba(0, 0, 0, 0.45);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+  }
+
+  &__actions {
+    flex-shrink: 0;
+    gap: 8px;
+  }
 }
 
 .memory-skill-filter-meta-row {
@@ -633,6 +702,7 @@
 
 .memory-skill-tile-desc {
   margin: 0;
+  min-height: calc(2em * 1.55);
   color: #667085;
   font-size: 13px;
   line-height: 1.55;
@@ -766,13 +836,30 @@
   gap: 12px;
 }
 
+.memory-skill-admin-publish-form {
+  .ant-tabs-nav {
+    margin-bottom: 16px;
+  }
+}
+
+.memory-skill-admin-package-panel {
+  display: grid;
+  gap: 10px;
+}
+
 .memory-skill-field {
+  min-width: 0;
+
   label {
     display: block;
     margin-bottom: 6px;
     color: #344054;
     font-size: 13px;
     font-weight: 600;
+  }
+
+  .ant-select {
+    width: 100%;
   }
 }
 
@@ -855,6 +942,16 @@
     padding-bottom: 0;
   }
 
+  .memory-skill-market-toolbar-filters {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+
+    .memory-skill-market-search {
+      flex: 1 1 240px;
+      width: auto;
+    }
+  }
+
   .memory-skill-view-tabs {
     flex-wrap: wrap;
     gap: 20px;
@@ -863,6 +960,15 @@
   .memory-skill-filter-controls,
   .memory-skill-installed-filters {
     flex-wrap: wrap;
+  }
+
+  .memory-skill-organize-bar {
+    align-items: stretch;
+    flex-direction: column;
+
+    &__actions {
+      justify-content: flex-end;
+    }
   }
 
   .memory-skill-recommend-grid {
@@ -883,6 +989,10 @@
 
   .memory-skill-insight-card {
     max-width: none;
+    width: 100%;
+  }
+
+  .memory-skill-insight-card-tooltip {
     width: 100%;
   }
 

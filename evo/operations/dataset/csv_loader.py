@@ -74,8 +74,10 @@ def normalize_eval_case(raw: Mapping[str, Any], *, default_id: str = '') -> dict
     if not isinstance(raw, Mapping):
         raise ValueError('eval case must be an object')
     prep = raw.get('source_preparation')
-    prep = json_object(prep, message='source_preparation must be valid JSON') if isinstance(prep, str) and prep.strip() \
-        else prep if isinstance(prep, Mapping) else {}
+    prep = (
+        json_object(prep, message='source_preparation must be valid JSON')
+        if isinstance(prep, str) and prep.strip() else prep if isinstance(prep, Mapping) else {}
+    )
     row = {field: raw.get(field, '') for field in CASE_FIELDS}
     row.update({'id': as_text(row['id'] or default_id), 'question_type': as_text(row['question_type']),
                 'difficulty': as_text(row['difficulty']), 'source_message_id': as_text(row['source_message_id']),

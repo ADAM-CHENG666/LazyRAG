@@ -19,6 +19,8 @@ import {
   UnorderedListOutlined,
   HistoryOutlined,
   BookOutlined,
+  CloudOutlined,
+  LinkOutlined,
 } from "@ant-design/icons";
 import { Navigate, Outlet, useLocation, useNavigate } from "react-router-dom";
 import type { UserDetailResponse } from "@/api/generated/auth-client";
@@ -41,12 +43,17 @@ import {
 } from "@/utils/developerMode";
 import RecordList from "@/modules/chat/components/RecordList";
 import {
+  CHAT_NEW_RUN_IN_BACKGROUND_KEY,
   CHAT_RESUME_CONVERSATION_KEY,
   CHAT_SELECT_CONVERSATION_EVENT,
+  selectChatConversationFilter,
 } from "@/modules/chat/constants/chat";
 import { runtimeFeatures } from "@/runtime/features";
 import { shouldHideLocalUserControls } from "@/runtime/localSession";
 import { useLocalSessionGate } from "@/runtime/useLocalSessionGate";
+import UserAgreementConsentModal, {
+  useUserAgreementConsentGate,
+} from "@/components/UserAgreementConsentModal";
 import "./index.scss";
 
 const { Content, Sider } = Layout;
@@ -129,6 +136,11 @@ export default function MainLayout() {
   const pathname = location.pathname || "/agent/chat";
 
   const settingsMenuItems = [
+    {
+      key: "/model-providers/default-services",
+      label: t("layout.modelProviderManagement"),
+      icon: <ApiOutlined className="settings-popover-icon" />,
+    },
     ...(!runtimeFeatures.hideCloudAdmin
       ? [
           {
@@ -162,9 +174,14 @@ export default function MainLayout() {
       icon: <DatabaseOutlined />,
     },
     {
-      key: "/model-providers/default-services",
-      label: t("layout.modelProviderManagement"),
-      icon: <ApiOutlined />,
+      key: "/cloud-documents",
+      label: t("layout.cloudDocuments"),
+      icon: <CloudOutlined />,
+    },
+    {
+      key: "/databases",
+      label: t("layout.database"),
+      icon: <DatabaseOutlined />,
     },
   ];
   const hideEvo = runtimeFeatures.hideEvo;
@@ -174,6 +191,8 @@ export default function MainLayout() {
       .VITE_APP_LOGO || "";
   const needsRestoreButtonSafeArea =
     pathname.startsWith("/model-providers") ||
+    pathname.startsWith("/cloud-documents") ||
+    pathname.startsWith("/channels") ||
     pathname.startsWith("/lib/knowledge/detail") ||
     pathname.startsWith("/memory-management") ||
     pathname.startsWith("/self-evolution");
@@ -204,6 +223,8 @@ export default function MainLayout() {
     }
   }, []);
   const localSessionGate = useLocalSessionGate(refreshLayoutUser);
+  const { needsConsent, markAccepted, loading: agreementLoading } =
+    useUserAgreementConsentGate(isLoggedIn);
 
   useEffect(() => {
     if (!localSessionGate.enabled) {
@@ -310,22 +331,30 @@ export default function MainLayout() {
     setIsMenuCollapsed((prev) => !prev);
   };
 
-  const emitConversationSelection = (conversationId: string) => {
+  const emitConversationSelection = (
+    conversationId: string,
+    runInBackground = false,
+  ) => {
     window.dispatchEvent(
       new CustomEvent(CHAT_SELECT_CONVERSATION_EVENT, {
-        detail: { conversationId, source: "sidebar" },
+        detail: { conversationId, runInBackground, source: "sidebar" },
       }),
     );
   };
 
-  const handleNewChat = () => {
+  const handleNewChat = (runInBackground = false) => {
+    selectChatConversationFilter(runInBackground ? "task" : "normal");
     try {
       sessionStorage.removeItem(CHAT_RESUME_CONVERSATION_KEY);
+      sessionStorage.setItem(
+        CHAT_NEW_RUN_IN_BACKGROUND_KEY,
+        runInBackground ? "1" : "0",
+      );
     } catch {
       // ignore storage errors
     }
     setCurrentSidebarConversationId("");
-    emitConversationSelection("");
+    emitConversationSelection("", runInBackground);
     navigate("/agent/chat/home");
   };
 
@@ -658,6 +687,20 @@ export default function MainLayout() {
     return <Navigate to="/login" replace />;
   }
 
+  if (agreementLoading) {
+    return (
+      <div className="local-session-gate">
+        <div className="local-session-panel">
+          <Spin />
+          <div className="local-session-title">LazyMind</div>
+          <div className="local-session-message">
+            {t("legal.consentChecking")}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <Layout hasSider className="main-layout">
       <Sider
@@ -673,7 +716,7 @@ export default function MainLayout() {
             <button
               type="button"
               className="sider-brand"
-              onClick={handleNewChat}
+              onClick={() => handleNewChat(false)}
               aria-label="LazyMind"
               title="LazyMind"
             >
@@ -700,9 +743,17 @@ export default function MainLayout() {
                   type="text"
                   className="sider-new-chat-button"
                   icon={<PlusOutlined />}
-                  onClick={handleNewChat}
+                  onClick={() => handleNewChat(false)}
                 >
                   {t("layout.newChat")}
+                </Button>
+                <Button
+                  type="primary"
+                  className="sider-new-chat-button sider-new-task-button"
+                  icon={<PlusOutlined />}
+                  onClick={() => handleNewChat(true)}
+                >
+                  {t("layout.newTask")}
                 </Button>
               </div>
               <div className="sider-module-actions">
@@ -780,10 +831,6 @@ export default function MainLayout() {
             </div>
           )}
           <div className="sider-bar-bottom">
-            <div className="bottom-item language-item">
-              <GlobalOutlined className="bottom-icon" />
-              {shouldRenderMenuContent && <LanguageSwitcher />}
-            </div>
             {showSettingsTrigger && (
               <Popover
                 content={
@@ -799,9 +846,15 @@ export default function MainLayout() {
                           onClick={() => handleSettingsNavigate(item.key)}
                         >
                           {item.icon}
-                          <span>{item.label}</span>
+                          <span className="settings-popover-label">{item.label}</span>
                           {item.key === "developer-toggle" && developerActive && (
                             <span className="settings-active-badge">{t("admin.developerActiveTag")}</span>
+                          )}
+                          {[
+                            "/model-providers/default-services",
+                            "/admin",
+                          ].includes(item.key) && (
+                            <RightOutlined className="settings-popover-accessory" />
                           )}
                         </Button>
                       );
@@ -822,6 +875,10 @@ export default function MainLayout() {
                       }
                       return btn;
                     })}
+                    <div className="settings-popover-language">
+                      <GlobalOutlined className="settings-popover-icon" />
+                      <LanguageSwitcher />
+                    </div>
                     {!hideLocalUserControls && (
                       isLoggedIn ? (
                         <Button
@@ -844,6 +901,7 @@ export default function MainLayout() {
                   </div>
                 }
                 arrow={false}
+                overlayClassName="settings-popover-overlay"
                 placement="top"
                 trigger="click"
                 open={settingsOpen}
@@ -865,6 +923,25 @@ export default function MainLayout() {
                 </div>
               </Popover>
             )}
+            <div
+              className={`bottom-item terminal-entry${
+                pathname.startsWith("/channels") ? " is-active" : ""
+              }`}
+              role="button"
+              tabIndex={0}
+              onClick={() => handleModuleNavigate("/channels")}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  handleModuleNavigate("/channels");
+                }
+              }}
+            >
+              <LinkOutlined className="bottom-icon" />
+              {shouldRenderMenuContent && (
+                <span className="bottom-text">{t("layout.terminalConnection")}</span>
+              )}
+            </div>
             {userName && !hideLocalUserControls && (
               <div
                 className="bottom-item user-item"
@@ -1044,6 +1121,10 @@ export default function MainLayout() {
           </Form.Item>
         </Form>
       </Modal>
+      <UserAgreementConsentModal
+        open={needsConsent}
+        onAccepted={markAccepted}
+      />
     </Layout>
   );
 }

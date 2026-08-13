@@ -57,6 +57,11 @@ def select_docs(ctx: Any, inputs: Mapping[str, object], kb_client: KnowledgeBase
     if not isinstance(raw, Mapping):
         raise ValueError('select_docs_params must be a mapping')
     params = SelectDocsParams.from_dict(source, raw)
+    allocation = _allocation(inputs.get('import_cases_manifest'))
+    if allocation['auto_case_count'] == 0:
+        return {'selected_docs': {'documents': [], 'stats': {
+            'discovered_count': 0, 'included_count': 0, 'excluded_count': 0,
+        }}}
     excluded = {(item['kb_id'], item['doc_id']) for item in params.excluded_docs}
     client = kb_client or KnowledgeBaseClient()
     documents = []
@@ -78,6 +83,22 @@ def select_docs(ctx: Any, inputs: Mapping[str, object], kb_client: KnowledgeBase
     return {'selected_docs': {'documents': documents, 'stats': {
         'discovered_count': len(documents), 'included_count': included, 'excluded_count': len(documents) - included,
     }}}
+
+
+def _allocation(value: object) -> Mapping[str, object]:
+    manifest = _mapping(value, 'import_cases_manifest')
+    stats = _mapping(manifest.get('stats'), 'import_cases_manifest.stats')
+    allocation = _mapping(stats.get('case_allocation'), 'import_cases_manifest.stats.case_allocation')
+    auto_case_count = allocation.get('auto_case_count')
+    if isinstance(auto_case_count, bool) or not isinstance(auto_case_count, int) or auto_case_count < 0:
+        raise ValueError('import_cases_manifest.stats.case_allocation.auto_case_count must be non-negative')
+    return allocation
+
+
+def _mapping(value: object, name: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f'{name} must be a mapping')
+    return value
 
 
 def _knowledge_base_inclusion(value: object, kb_ids: list[str]) -> dict[str, bool]:

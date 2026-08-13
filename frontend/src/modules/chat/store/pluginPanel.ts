@@ -281,6 +281,30 @@ export interface TabDef {
   composite_layout?: CompositePanelNode | CompositeLayoutNode[];
   /** Composite mode: global tab-bar position. */
   composite_tab_position?: 'top' | 'bottom' | 'left' | 'right';
+  /**
+   * Generic composite display rules declared by the plugin.
+   * PluginPanel must not special-case plugin IDs; it only executes these rules.
+   */
+  composite_behavior?: CompositeBehavior;
+}
+
+/** Mutually exclusive column group: keep the first preferred slot that has data. */
+export interface CompositeMutuallyExclusiveGroup {
+  slots: string[];
+  /** Preference order when multiple group members have data. Defaults to `slots`. */
+  prefer?: string[];
+}
+
+/**
+ * Plugin-declared composite display behavior (UI schema).
+ * - hide_empty_columns: drop columns with no matching revisions
+ * - empty_column_scope: which revisions count as non-empty
+ * - mutually_exclusive: among a group, show only one winner column
+ */
+export interface CompositeBehavior {
+  hide_empty_columns?: boolean;
+  empty_column_scope?: 'selected' | 'tab';
+  mutually_exclusive?: CompositeMutuallyExclusiveGroup[];
 }
 
 export interface PluginUI {
@@ -319,7 +343,10 @@ interface PluginStore {
 
   setSession: (conversationId: string, session: PluginSession | null) => void;
   updateSlot: (conversationId: string, slot: SlotRevision) => void;
-  loadActiveSession: (conversationId: string) => Promise<void>;
+  loadActiveSession: (
+    conversationId: string,
+    options?: { silentError?: boolean },
+  ) => Promise<void>;
   refreshSlots: (conversationId: string, sessionId: string) => Promise<void>;
   patchSlot: (conversationId: string, sessionId: string, slotId: string, revision: number) => Promise<void>;
   syncSessionSearchConfig: (conversationId: string, sessionId: string, searchConfig: Record<string, unknown>) => Promise<void>;
@@ -329,7 +356,14 @@ interface PluginStore {
   fetchDismissedSessions: (conversationId: string) => Promise<void>;
   // Phase 3: slot item management.
   deleteSlotItem: (sessionId: string, slotId: string, listIndex: number, orderVersion?: number) => Promise<void>;
-  patchSlotItemValue: (sessionId: string, slotId: string, listIndex: number, value: any, contentType?: string) => Promise<void>;
+  patchSlotItemValue: (
+    sessionId: string,
+    slotId: string,
+    listIndex: number,
+    value: any,
+    contentType?: string,
+    mode?: 'draft' | 'checkpoint',
+  ) => Promise<number | undefined>;
   reorderSlotItems: (sessionId: string, slotId: string, newSortOrderSeq: number[], version: number) => Promise<void>;
   getSlotVersions: (sessionId: string, slotId: string, listIndex: number) => Promise<SlotVersionEntry[]>;
   rollbackSlotItem: (sessionId: string, slotId: string, listIndex: number, revision: number) => Promise<void>;
@@ -418,7 +452,7 @@ export const usePluginStore = create<PluginStore>()((set, get) => ({
     });
   },
 
-  loadActiveSession: async (conversationId) => {
+  loadActiveSession: async (conversationId, options) => {
     if (!conversationId) return;
     // Deduplicate concurrent calls for the same conversation.
     if (get().loadingByConversation[conversationId]) return;
@@ -426,14 +460,20 @@ export const usePluginStore = create<PluginStore>()((set, get) => ({
       loadingByConversation: { ...s.loadingByConversation, [conversationId]: true },
     }));
     try {
-      const res = await PluginSessionApi().getLatestSession(conversationId);
+      const requestOptions = options?.silentError
+        ? ({ silentError: true } as never)
+        : undefined;
+      const res = await PluginSessionApi().getLatestSession(
+        conversationId,
+        requestOptions,
+      );
       const session: PluginSession | null = res?.data?.data?.session ?? null;
       // Runtime controls and rollback candidates come from Go's projection.
       // Steps are attempt history only; they never define Past/Ready locally.
       if (session?.session_id) {
         try {
           const [stepsRes, projectionRes] = await Promise.all([
-            PluginSessionApi().getSteps(session.session_id),
+            PluginSessionApi().getSteps(session.session_id, requestOptions),
             PluginSessionApi().getProjection(
               session.session_id,
               { silentError: true } as never,
@@ -530,8 +570,12 @@ export const usePluginStore = create<PluginStore>()((set, get) => ({
     await PluginSessionApi().deleteSlotItem(sessionId, slotId, listIndex, orderVersion);
   },
 
-  patchSlotItemValue: async (sessionId, slotId, listIndex, value, contentType) => {
-    await PluginSessionApi().patchSlotItem(sessionId, slotId, listIndex, value, contentType);
+  patchSlotItemValue: async (sessionId, slotId, listIndex, value, contentType, mode) => {
+    const res = await PluginSessionApi().patchSlotItem(
+      sessionId, slotId, listIndex, value, contentType, mode,
+    );
+    const revision = res?.data?.data?.revision;
+    return typeof revision === 'number' ? revision : undefined;
   },
 
   reorderSlotItems: async (sessionId, slotId, newSortOrderSeq, version) => {

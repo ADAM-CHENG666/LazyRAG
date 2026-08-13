@@ -14,8 +14,8 @@ import {
 } from "@ant-design/icons";
 import { useTranslation } from "react-i18next";
 import { AgentAppsAuth } from "@/components/auth";
-import { getLocalizedErrorMessage } from "@/components/request";
 import { useModelFeatures } from "@/hooks/useModelFeatures";
+import { runtimeFeatures } from "@/runtime/features";
 import {
   modelProvidersApi,
   modelProvidersDefaultApi,
@@ -31,6 +31,7 @@ type ModelCapability =
   | "speech_to_text"
   | "tts"
   | "image_generator"
+  | "video_generator"
   | "embed_image"
   | "image_editor"
   | "evo_llm";
@@ -228,6 +229,11 @@ const moduleConfigs: ModuleConfig[] = [
     subtitleKey: "modelProvider.module.textToImageSubtitle",
   },
   {
+    key: "video_generator",
+    titleKey: "modelProvider.module.textToVideoTitle",
+    subtitleKey: "modelProvider.module.textToVideoSubtitle",
+  },
+  {
     key: "image_editor",
     titleKey: "modelProvider.module.imageEditingTitle",
     subtitleKey: "modelProvider.module.imageEditingSubtitle",
@@ -266,6 +272,7 @@ const selectedCapabilityByModelType: Record<string, ModelCapability> = {
   evo_llm: "evo_llm",
   stt: "speech_to_text",
   text2image: "image_generator",
+  text2video: "video_generator",
   image_editing: "image_editor",
 };
 
@@ -769,13 +776,7 @@ export default function DefaultModelConfigPanel() {
         });
         setCloudServiceReadyStatus(nextCloudReadyStatus);
       }
-    } catch (error) {
-      message.error(
-        getLocalizedErrorMessage(
-          error,
-          t("modelProvider.error.loadProvidersFailed"),
-        ),
-      );
+    } catch {
     }
   }, [currentLanguage, isAdmin, localizedFallbacks, t]);
 
@@ -871,13 +872,7 @@ export default function DefaultModelConfigPanel() {
         ...current,
         [capability]: options,
       }));
-    } catch (error) {
-      message.error(
-        getLocalizedErrorMessage(
-          error,
-          t("modelProvider.error.loadModelsFailed"),
-        ),
-      );
+    } catch {
     } finally {
       setModuleModelLoading((current) => ({ ...current, [capability]: false }));
     }
@@ -940,13 +935,7 @@ export default function DefaultModelConfigPanel() {
           ? t("modelProvider.shareEnabled")
           : t("modelProvider.shareDisabled"),
       );
-    } catch (error) {
-      message.error(
-        getLocalizedErrorMessage(
-          error,
-          t("modelProvider.error.shareUpdateFailed"),
-        ),
-      );
+    } catch {
     }
   };
 
@@ -988,14 +977,7 @@ export default function DefaultModelConfigPanel() {
           }
         });
       })
-      .catch((error) => {
-        message.error(
-          getLocalizedErrorMessage(
-            error,
-            t("modelProvider.error.saveDefaultModelFailed"),
-          ),
-        );
-      });
+      .catch(() => {});
   };
 
   const handleModelSelection = (
@@ -1101,13 +1083,7 @@ export default function DefaultModelConfigPanel() {
           [service.key]: false,
         }));
       }
-    } catch (error) {
-      message.error(
-        getLocalizedErrorMessage(
-          error,
-          t("modelProvider.error.loadProvidersFailed"),
-        ),
-      );
+    } catch {
     } finally {
       setCloudServiceLoading((current) => ({
         ...current,
@@ -1145,13 +1121,7 @@ export default function DefaultModelConfigPanel() {
           }
         });
       })
-      .catch((error) => {
-        message.error(
-          getLocalizedErrorMessage(
-            error,
-            t("modelProvider.error.saveDefaultModelFailed"),
-          ),
-        );
+      .catch(() => {
         const config = cloudServiceConfigs.find((item) => item.key === service);
         if (config) {
           void loadVerifiedCloudService(config);
@@ -1187,14 +1157,7 @@ export default function DefaultModelConfigPanel() {
             : t("modelProvider.shareDisabled"),
         );
       })
-      .catch((error) => {
-        message.error(
-          getLocalizedErrorMessage(
-            error,
-            t("modelProvider.error.shareUpdateFailed"),
-          ),
-        );
-      });
+      .catch(() => {});
   };
 
   return (
@@ -1271,7 +1234,7 @@ export default function DefaultModelConfigPanel() {
                     </span>
                   </Tooltip>
                 ) : null}
-                {isAdmin ? (
+                {isAdmin && !runtimeFeatures.hideUserGroupSurfaces ? (
                   <Tooltip
                     title={
                       shareStatus[module.key]
@@ -1421,7 +1384,7 @@ export default function DefaultModelConfigPanel() {
                     <QuestionCircleOutlined />
                   </button>
                 </Tooltip>
-                {isAdmin ? (
+                {isAdmin && !runtimeFeatures.hideUserGroupSurfaces ? (
                   <Tooltip
                     title={
                       cloudServiceShareStatus[service.key]

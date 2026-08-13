@@ -1,5 +1,10 @@
-import { AgentApi as CoreAgentApi, Configuration as CoreConfiguration, DefaultApi as CoreDefaultApi, type Dataset } from "@/api/generated/core-client";
-import { BASE_URL, axiosInstance } from "@/components/request";
+import { AgentApi as CoreAgentApi, Configuration as CoreConfiguration, DefaultApi as CoreDefaultApi, EvalSetsApi as CoreEvalSetsApi, type Dataset } from "@/api/generated/core-client";
+import {
+  BASE_URL,
+  axiosInstance,
+  extractErrorCode,
+  localizeErrorCode,
+} from "@/components/request";
 import { t } from "./i18n";
 
 export function getSelfEvolutionWorkflowImageSrc(language?: string) {
@@ -34,6 +39,15 @@ export function createCoreAgentGeneratedApiClient() {
   );
 }
 
+export function createCoreEvalSetsApiClient() {
+  const baseUrl = BASE_URL || window.location.origin;
+  return new CoreEvalSetsApi(
+    new CoreConfiguration({ basePath: baseUrl }),
+    baseUrl,
+    axiosInstance,
+  );
+}
+
 export const getKnowledgeBaseName = (dataset: Dataset) =>
   dataset.display_name || dataset.name || dataset.dataset_id || t("selfEvolutionRun.unnamedKnowledgeBase");
 
@@ -55,3 +69,11 @@ export const isCanceledRequest = (error: unknown) => {
     messageText.includes("aborted")
   );
 };
+
+export const getCatalogApiErrorMessage = (
+  error: unknown,
+) =>
+  localizeErrorCode(
+    extractErrorCode(error),
+    localizeErrorCode("2000509"),
+  );
