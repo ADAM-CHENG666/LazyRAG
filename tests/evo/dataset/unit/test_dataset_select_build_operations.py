@@ -64,12 +64,12 @@ def counts(capacities, scanned=None):
     }
 
 
-def documents(rows, excluded=(), knowledge_bases=None, *, target=2, imported=0):
+def documents(rows, excluded=(), knowledge_bases=None, *, target=2, imported=0, knowledge_base_names=None):
     knowledge_bases = knowledge_bases or [
         {'kb_id': kb_id, 'included': True} for kb_id in rows
     ]
     return select_docs(None, {
-        'source_config': {'kb_ids': list(rows)},
+        'source_config': {'kb_ids': list(rows), 'knowledge_base_names': knowledge_base_names or {}},
         'select_docs_params': {
             'knowledge_bases': knowledge_bases,
             'excluded_docs': [{'kb_id': kb_id, 'doc_id': doc_id} for kb_id, doc_id in excluded],
@@ -107,6 +107,15 @@ def test_docs_keep_kb_then_source_order_and_monotonic_discovery_index():
         ('kb-a', 'a-1'), ('kb-a', 'a-2'), ('kb-b', 'b-1'),
     ]
     assert [item['discovery_index'] for item in output['documents']] == [0, 1, 2]
+
+
+def test_docs_persist_core_authoritative_knowledge_base_display_name():
+    output = documents(
+        {'kb-a': [{'doc_id': 'a-1', 'knowledge_base_name': 'untrusted doc server name'}]},
+        knowledge_base_names={'kb-a': '产品知识库'},
+    )
+
+    assert output['documents'][0]['knowledge_base_name'] == '产品知识库'
 
 
 def test_docs_keep_excluded_document_in_unified_list():

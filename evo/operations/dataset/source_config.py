@@ -48,6 +48,14 @@ def normalize_source_config(value: object) -> dict[str, Any]:
     if not kb_ids:
         raise ValueError('source_config requires at least one knowledge base')
 
+    raw_names = value.get('knowledge_base_names', {})
+    if not isinstance(raw_names, Mapping):
+        raise ValueError('source_config.knowledge_base_names must be a mapping')
+    knowledge_base_names = {
+        kb_id: _text(raw_names.get(kb_id, kb_id), f'source_config.knowledge_base_names.{kb_id}')
+        for kb_id in kb_ids
+    }
+
     target = value.get('target_case_count')
     if isinstance(target, bool) or not isinstance(target, int) or target < 1:
         raise ValueError('source_config.target_case_count must be a positive integer')
@@ -62,6 +70,7 @@ def normalize_source_config(value: object) -> dict[str, Any]:
 
     return {
         'kb_ids': kb_ids,
+        'knowledge_base_names': knowledge_base_names,
         'csv_sources': deduplicated,
         'target_case_count': target,
     }

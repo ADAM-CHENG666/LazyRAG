@@ -18,6 +18,7 @@ class StrictModel(BaseModel):
 
 class ThreadInputs(StrictModel):
     kb_id: list[str] = Field(default_factory=list)
+    knowledge_base_names: dict[str, str] = Field(default_factory=dict)
     csv_data: list[dict[str, str]] = Field(default_factory=list)
     router_chat_url: str = Field(min_length=1)
     router_admin_url: str = Field(min_length=1)
@@ -28,6 +29,11 @@ class ThreadInputs(StrictModel):
     @model_validator(mode='after')
     def validate_sources(self) -> Self:
         self.kb_id = [item.strip() for item in self.kb_id if item.strip()]
+        self.knowledge_base_names = {
+            key.strip(): value.strip()
+            for key, value in self.knowledge_base_names.items()
+            if isinstance(key, str) and isinstance(value, str) and key.strip() and value.strip()
+        }
         rows: list[dict[str, str]] = []
         for row in self.csv_data:
             if len(row) != 1:

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import math
 import uuid
 from collections.abc import Mapping
 from typing import Any
@@ -25,6 +27,101 @@ class ProjectionService:
     def __init__(self, flow: Any, definition: FlowDefinition) -> None:
         self.flow = flow
         self.definition = definition
+
+    @staticmethod
+    def _validate_page_size(value: object) -> int:
+        if value is None:
+            return 50
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 200:
+            raise ServiceError(400, 'page_size must be an integer between 1 and 200')
+        return value
+
+    @staticmethod
+    def _normalize_filters(filters: Mapping[object, object]) -> tuple[tuple[str, object], ...]:
+        normalized: list[tuple[str, object]] = []
+        for key, value in filters.items():
+            if not isinstance(key, str) or not key:
+                raise ServiceError(400, 'filter keys must be non-empty strings')
+            if not isinstance(value, (str, int, float, bool)) and value is not None:
+                raise ServiceError(400, f'filter {key} must be a scalar value')
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ServiceError(400, f'filter {key} must be finite')
+            normalized.append((key, value))
+        return tuple(sorted(normalized))
+
+    @staticmethod
+    def _build_revision(refs: tuple[ArtifactRef, ...]) -> str:
+        if not refs or any(not isinstance(ref, ArtifactRef) for ref in refs):
+            raise ServiceError(400, 'revision requires one or more artifact refs')
+        payload = [[ref.key.artifact_id, ref.key.partition_key, ref.version] for ref in sorted(refs)]
+        return _encode_context('r1', {'refs': payload})
+
+    @staticmethod
+    def _resolve_revision(revision: str) -> tuple[ArtifactRef, ...]:
+        payload = _decode_context(revision, 'r1', 'revision')
+        refs = payload.get('refs')
+        if not isinstance(refs, list) or not refs:
+            raise ServiceError(400, 'revision is invalid')
+        try:
+            result = tuple(sorted(
+                ArtifactRef(ArtifactKey(str(item[0]), str(item[1])), item[2])
+                for item in refs
+                if isinstance(item, list) and len(item) == 3
+            ))
+        except (TypeError, ValueError):
+            raise ServiceError(400, 'revision is invalid') from None
+        if len(result) != len(refs) or len({ref.key for ref in result}) != len(result):
+            raise ServiceError(400, 'revision is invalid')
+        return result
+
+    @staticmethod
+    def _build_page_token(*, thread_id: str, list_name: str, revision: str,
+                          filters: tuple[tuple[str, object], ...], page_size: int, next_offset: int) -> str:
+        ProjectionService._resolve_revision(revision)
+        size = ProjectionService._validate_page_size(page_size)
+        if not isinstance(next_offset, int) or isinstance(next_offset, bool) or next_offset < 0:
+            raise ServiceError(400, 'next page offset must be a non-negative integer')
+        normalized = ProjectionService._normalize_filters(dict(filters))
+        if normalized != filters or not isinstance(thread_id, str) or not thread_id or not isinstance(list_name, str) or not list_name:
+            raise ServiceError(400, 'page token context is invalid')
+        return _encode_context('p1', {
+            'thread_id': thread_id,
+            'list_name': list_name,
+            'revision': revision,
+            'filters': [list(item) for item in normalized],
+            'page_size': size,
+            'next_offset': next_offset,
+        })
+
+    @staticmethod
+    def _resolve_page_token(token: str, *, thread_id: str, list_name: str,
+                            filters: tuple[tuple[str, object], ...], page_size: int) -> dict[str, Any]:
+        payload = _decode_context(token, 'p1', 'page_token')
+        normalized = ProjectionService._normalize_filters(dict(filters))
+        size = ProjectionService._validate_page_size(page_size)
+        token_filters = payload.get('filters')
+        if not isinstance(token_filters, list):
+            raise ServiceError(400, 'page_token is invalid')
+        try:
+            decoded_filters = tuple((item[0], item[1]) for item in token_filters if isinstance(item, list) and len(item) == 2)
+        except (TypeError, IndexError):
+            raise ServiceError(400, 'page_token is invalid') from None
+        offset = payload.get('next_offset')
+        if (
+            len(decoded_filters) != len(token_filters)
+            or payload.get('thread_id') != thread_id
+            or payload.get('list_name') != list_name
+            or decoded_filters != normalized
+            or payload.get('page_size') != size
+            or not isinstance(offset, int)
+            or isinstance(offset, bool)
+            or offset < 0
+        ):
+            raise ServiceError(400, 'page_token does not match this query')
+        revision = payload.get('revision')
+        if not isinstance(revision, str):
+            raise ServiceError(400, 'page_token is invalid')
+        return {'revision': revision, 'next_offset': offset}
 
     async def gates(self, thread_id: str) -> dict[str, Any]:
         history = await self.flow.run_history(thread_id)
@@ -69,6 +166,175 @@ class ProjectionService:
             'thread_id': thread_id,
             'record': public_value(record),
             'value': public_value(await self.flow.read(thread_id, record.ref)),
+        }
+
+    async def topics(self, thread_id: str, *, question_type: str = '',
+                     min_chunk_count: int | None = None, max_chunk_count: int | None = None,
+                     page_size: int | None = None, page_token: str = '') -> dict[str, Any]:
+        if not await self.flow.has_run(thread_id):
+            raise ServiceError(404, f'thread not found: {thread_id}')
+        size = self._validate_page_size(page_size)
+        filters = _topic_filters(question_type, min_chunk_count, max_chunk_count)
+        normalized_filters = self._normalize_filters(filters)
+        version: int | None = None
+        if page_token:
+            context = self._resolve_page_token(
+                page_token,
+                thread_id=thread_id,
+                list_name='dataset.topics',
+                filters=normalized_filters,
+                page_size=size,
+            )
+            refs = self._resolve_revision(context['revision'])
+            if len(refs) != 1 or refs[0].key != ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST):
+                raise ServiceError(400, 'page_token is invalid')
+            revision = context['revision']
+            version = refs[0].version
+            offset = context['next_offset']
+        else:
+            revision = ''
+            offset = 0
+
+        try:
+            artifact = await self.artifact(thread_id, A.DATASET_TOPIC_MANIFEST, version=version)
+        except ServiceError as error:
+            if page_token and error.status_code == 404:
+                raise ServiceError(409, 'page_token pagination snapshot is unavailable') from None
+            if not page_token and error.status_code == 404:
+                return {
+                    'thread_id': thread_id,
+                    'revision': None,
+                    'items': [],
+                    'next_page_token': '',
+                }
+            raise
+        ref = _public_artifact_ref(artifact['record'])
+        if not page_token:
+            revision = self._build_revision((ref,))
+
+        manifest = artifact['value']
+        source_topics = manifest.get('topics', ()) if isinstance(manifest, Mapping) else ()
+        rows = [
+            {
+                'topic_id': topic.get('topic_id'),
+                'name': topic.get('name'),
+                'question_type': topic.get('question_type'),
+                'chunk_count': topic.get('chunk_count'),
+            }
+            for topic in source_topics
+            if isinstance(topic, Mapping) and _topic_matches(topic, filters)
+        ]
+        rows.sort(key=lambda item: (str(item['name']), str(item['topic_id'])))
+        page = _page(rows, size, str(offset))
+        next_offset = page['next_page_token']
+        return {
+            'thread_id': thread_id,
+            'revision': revision,
+            'items': page['items'],
+            'next_page_token': (
+                '' if not next_offset else self._build_page_token(
+                    thread_id=thread_id,
+                    list_name='dataset.topics',
+                    revision=revision,
+                    filters=normalized_filters,
+                    page_size=size,
+                    next_offset=int(next_offset),
+                )
+            ),
+        }
+
+    async def materials_documents(self, thread_id: str, *, included: bool | None = None,
+                                  knowledge_base_id: str = '', page_size: int | None = None,
+                                  page_token: str = '') -> dict[str, Any]:
+        if not await self.flow.has_run(thread_id):
+            raise ServiceError(404, f'thread not found: {thread_id}')
+        size = self._validate_page_size(page_size)
+        filters = _document_filters(included, knowledge_base_id)
+        normalized_filters = self._normalize_filters(filters)
+        refs: tuple[ArtifactRef, ...] = ()
+        revision = ''
+        offset = 0
+        if page_token:
+            context = self._resolve_page_token(
+                page_token,
+                thread_id=thread_id,
+                list_name='dataset.materials_documents',
+                filters=normalized_filters,
+                page_size=size,
+            )
+            refs = self._resolve_revision(context['revision'])
+            allowed_keys = {
+                ArtifactKey.scalar(A.DATASET_SELECTED_DOCS),
+                ArtifactKey.scalar(A.DATASET_BUILD_CHUNK_CANDIDATES),
+            }
+            if (not {ref.key for ref in refs}.issubset(allowed_keys)
+                    or ArtifactKey.scalar(A.DATASET_SELECTED_DOCS) not in {ref.key for ref in refs}):
+                raise ServiceError(400, 'page_token is invalid')
+            revision, offset = context['revision'], context['next_offset']
+
+        refs_by_key = {ref.key: ref for ref in refs}
+        selected_version = refs_by_key.get(ArtifactKey.scalar(A.DATASET_SELECTED_DOCS))
+        candidate_version = refs_by_key.get(ArtifactKey.scalar(A.DATASET_BUILD_CHUNK_CANDIDATES))
+        try:
+            selected = await self.artifact(
+                thread_id, A.DATASET_SELECTED_DOCS,
+                version=None if selected_version is None else selected_version.version,
+            )
+        except ServiceError as error:
+            if page_token and error.status_code == 404:
+                raise ServiceError(409, 'page_token pagination snapshot is unavailable') from None
+            if not page_token and error.status_code == 404:
+                return {'thread_id': thread_id, 'revision': None, 'items': [], 'next_page_token': ''}
+            raise
+
+        candidates = None
+        if not page_token or candidate_version is not None:
+            try:
+                candidates = await self.artifact(
+                    thread_id, A.DATASET_BUILD_CHUNK_CANDIDATES,
+                    version=None if candidate_version is None else candidate_version.version,
+                )
+            except ServiceError as error:
+                if page_token and candidate_version is not None and error.status_code == 404:
+                    raise ServiceError(409, 'page_token pagination snapshot is unavailable') from None
+                if not page_token and error.status_code == 404:
+                    candidates = None
+                else:
+                    raise
+
+        if not page_token:
+            refs = (_public_artifact_ref(selected['record']),)
+            if candidates is not None:
+                refs += (_public_artifact_ref(candidates['record']),)
+            revision = self._build_revision(refs)
+
+        counts = _document_chunk_counts(None if candidates is None else candidates['value'])
+        source = selected['value'] if isinstance(selected['value'], Mapping) else {}
+        documents = source.get('documents', ()) if isinstance(source, Mapping) else ()
+        rows = [
+            _document_dto(document, counts, has_candidates=candidates is not None)
+            for document in documents
+            if isinstance(document, Mapping) and _document_matches(document, filters)
+        ]
+        rows.sort(key=lambda item: (item['_discovery_index'], item['knowledge_base']['id'], item['document_id']))
+        for row in rows:
+            row.pop('_discovery_index')
+        page = _page(rows, size, str(offset))
+        next_offset = page['next_page_token']
+        return {
+            'thread_id': thread_id,
+            'revision': revision,
+            'items': page['items'],
+            'next_page_token': (
+                '' if not next_offset else self._build_page_token(
+                    thread_id=thread_id,
+                    list_name='dataset.materials_documents',
+                    revision=revision,
+                    filters=normalized_filters,
+                    page_size=size,
+                    next_offset=int(next_offset),
+                )
+            ),
         }
 
     async def artifact_history(self, thread_id: str, artifact_id: str, partition_key: str = '') -> dict[str, Any]:
@@ -272,6 +538,109 @@ def _filter(rows: list[dict[str, Any]], keyword: str, fields: tuple[str, ...]) -
     ]
 
 
+def _topic_filters(question_type: str, min_chunk_count: int | None,
+                   max_chunk_count: int | None) -> dict[str, object]:
+    if question_type not in ('', 'precision', 'reasoning'):
+        raise ServiceError(400, 'question_type must be precision or reasoning')
+    for name, value in (('min_chunk_count', min_chunk_count), ('max_chunk_count', max_chunk_count)):
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+            raise ServiceError(400, f'{name} must be a non-negative integer')
+    if min_chunk_count is not None and max_chunk_count is not None and min_chunk_count > max_chunk_count:
+        raise ServiceError(400, 'min_chunk_count must not exceed max_chunk_count')
+    return {
+        **({'question_type': question_type} if question_type else {}),
+        **({'min_chunk_count': min_chunk_count} if min_chunk_count is not None else {}),
+        **({'max_chunk_count': max_chunk_count} if max_chunk_count is not None else {}),
+    }
+
+
+def _topic_matches(topic: Mapping[str, object], filters: Mapping[str, object]) -> bool:
+    chunk_count = topic.get('chunk_count')
+    if not isinstance(chunk_count, int) or isinstance(chunk_count, bool):
+        return False
+    return (
+        (not filters.get('question_type') or topic.get('question_type') == filters['question_type'])
+        and ('min_chunk_count' not in filters or chunk_count >= filters['min_chunk_count'])
+        and ('max_chunk_count' not in filters or chunk_count <= filters['max_chunk_count'])
+    )
+
+
+def _document_filters(included: bool | None, knowledge_base_id: str) -> dict[str, object]:
+    if included is not None and not isinstance(included, bool):
+        raise ServiceError(400, 'included must be a boolean')
+    if not isinstance(knowledge_base_id, str) or (knowledge_base_id and not knowledge_base_id.strip()):
+        raise ServiceError(400, 'knowledge_base_id must not be blank')
+    return {
+        **({'included': included} if included is not None else {}),
+        **({'knowledge_base_id': knowledge_base_id} if knowledge_base_id else {}),
+    }
+
+
+def _document_matches(document: Mapping[str, object], filters: Mapping[str, object]) -> bool:
+    return (
+        ('included' not in filters or document.get('included') is filters['included'])
+        and ('knowledge_base_id' not in filters or document.get('kb_id') == filters['knowledge_base_id'])
+    )
+
+
+def _document_chunk_counts(value: object) -> dict[tuple[str, str], dict[str, int]]:
+    source = value if isinstance(value, Mapping) else {}
+    chunks = source.get('chunks', ()) if isinstance(source, Mapping) else ()
+    result: dict[tuple[str, str], dict[str, int]] = {}
+    for chunk in chunks:
+        if not isinstance(chunk, Mapping):
+            continue
+        kb_id, doc_id = chunk.get('kb_id'), chunk.get('doc_id')
+        if not isinstance(kb_id, str) or not isinstance(doc_id, str):
+            continue
+        counts = result.setdefault((kb_id, doc_id), {'effective': 0, 'selected': 0})
+        counts['effective'] += 1
+        counts['selected'] += int(chunk.get('selected') is True)
+    return result
+
+
+def _document_dto(document: Mapping[str, object], counts: Mapping[tuple[str, str], Mapping[str, int]], *,
+                  has_candidates: bool) -> dict[str, object]:
+    kb_id = str(document.get('kb_id') or '')
+    doc_id = str(document.get('doc_id') or '')
+    included = document.get('included') is True
+    count = counts.get((kb_id, doc_id))
+    chunks: dict[str, object] | None = None
+    if included and has_candidates:
+        effective = int((count or {}).get('effective', 0))
+        selected = int((count or {}).get('selected', 0))
+        chunks = {
+            'effective': effective,
+            'selected': selected,
+            'selection_rate': selected / effective if effective else None,
+        }
+    discovery_index = document.get('discovery_index')
+    return {
+        'document_id': doc_id,
+        'name': str(document.get('filename') or doc_id),
+        'included': included,
+        'knowledge_base': {'id': kb_id, 'name': str(document.get('knowledge_base_name') or kb_id)},
+        'chunks': chunks,
+        '_discovery_index': discovery_index if isinstance(discovery_index, int) else 0,
+    }
+
+
+def _public_artifact_ref(record: object) -> ArtifactRef:
+    if not isinstance(record, Mapping):
+        raise ServiceError(503, 'artifact record projection is invalid')
+    ref = record.get('ref')
+    if not isinstance(ref, Mapping) or not isinstance(ref.get('key'), Mapping):
+        raise ServiceError(503, 'artifact record projection is invalid')
+    key = ref['key']
+    try:
+        return ArtifactRef(
+            ArtifactKey(key['artifact_id'], key.get('partition_key', '')),
+            ref['version'],
+        )
+    except (KeyError, TypeError, ValueError):
+        raise ServiceError(503, 'artifact record projection is invalid') from None
+
+
 def _page(rows: list[dict[str, Any]], size: int, token: str) -> dict[str, Any]:
     if not str(token or '0').isdigit():
         raise ServiceError(422, 'page_token must be a non-negative integer offset')
@@ -282,6 +651,25 @@ def _page(rows: list[dict[str, Any]], size: int, token: str) -> dict[str, Any]:
         'next_page_token': str(offset + size) if offset + size < len(rows) else '',
         'total_size': len(rows),
     }
+
+
+def _encode_context(prefix: str, payload: Mapping[str, Any]) -> str:
+    encoded = json.dumps(payload, ensure_ascii=True, separators=(',', ':'), sort_keys=True).encode('utf-8')
+    return f'{prefix}.{base64.urlsafe_b64encode(encoded).decode("ascii").rstrip("=")}'
+
+
+def _decode_context(value: str, prefix: str, field: str) -> dict[str, Any]:
+    if not isinstance(value, str) or not value.startswith(f'{prefix}.'):
+        raise ServiceError(400, f'{field} is invalid')
+    encoded = value[len(prefix) + 1:]
+    try:
+        decoded = base64.b64decode(encoded + '=' * (-len(encoded) % 4), altchars=b'-_', validate=True)
+        payload = json.loads(decoded)
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        raise ServiceError(400, f'{field} is invalid') from None
+    if not isinstance(payload, dict):
+        raise ServiceError(400, f'{field} is invalid')
+    return payload
 
 
 _TERMINAL_ATTEMPTS = frozenset({

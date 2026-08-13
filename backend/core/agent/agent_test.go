@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -189,6 +190,35 @@ func TestBuildThreadCreateTitleFallsBackToPayloadTitle(t *testing.T) {
 	got := buildThreadCreateTitle(context.Background(), nil, payload, now)
 	if got != "前端传入名称-2026-05-13" {
 		t.Fatalf("unexpected fallback thread title: %q", got)
+	}
+}
+
+func TestAttachThreadCreateKnowledgeBaseNamesUsesCoreDatasetNames(t *testing.T) {
+	db := newAgentTestDB(t)
+	if err := db.DB.AutoMigrate(&orm.Dataset{}); err != nil {
+		t.Fatalf("auto migrate dataset: %v", err)
+	}
+	now := time.Date(2026, 5, 13, 9, 30, 0, 0, time.UTC)
+	for _, dataset := range []orm.Dataset{
+		{ID: "dataset-1", KbID: "kb-1", DisplayName: "产品知识库", BaseModel: orm.BaseModel{CreatedAt: now, UpdatedAt: now}},
+		{ID: "dataset-2", KbID: "kb-2", DisplayName: "研究资料库", BaseModel: orm.BaseModel{CreatedAt: now, UpdatedAt: now}},
+	} {
+		if err := db.DB.Create(&dataset).Error; err != nil {
+			t.Fatalf("create dataset: %v", err)
+		}
+	}
+	payload := map[string]any{
+		"inputs": map[string]any{"kb_id": []any{"kb-2", "kb-1", "missing-kb"}},
+	}
+
+	attachThreadCreateKnowledgeBaseNames(context.Background(), db.DB, payload)
+	upstream := buildEvoThreadCreatePayload(payload)
+	inputs := upstream["inputs"].(map[string]any)
+
+	if got := inputs["knowledge_base_names"]; !reflect.DeepEqual(got, map[string]string{
+		"kb-1": "产品知识库", "kb-2": "研究资料库",
+	}) {
+		t.Fatalf("unexpected Core-authoritative knowledge base names: %#v", got)
 	}
 }
 

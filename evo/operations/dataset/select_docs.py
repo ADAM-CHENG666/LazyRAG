@@ -64,6 +64,7 @@ def select_docs(ctx: Any, inputs: Mapping[str, object], kb_client: KnowledgeBase
         }}}
     excluded = {(item['kb_id'], item['doc_id']) for item in params.excluded_docs}
     client = kb_client or KnowledgeBaseClient()
+    names = _knowledge_base_names(source, params.kb_ids)
     documents = []
     for kb_id in params.kb_ids:
         for row in client.list_documents(kb_id):
@@ -74,6 +75,7 @@ def select_docs(ctx: Any, inputs: Mapping[str, object], kb_client: KnowledgeBase
                 'kb_id': kb_id,
                 'doc_id': doc_id,
                 'filename': str(row.get('filename') or row.get('display_name') or doc_id),
+                'knowledge_base_name': names[kb_id],
                 'file_type': str(row.get('file_type') or ''),
                 'status': str(row.get('status') or row.get('upload_status') or ''),
                 'included': params.knowledge_bases[kb_id] and (kb_id, doc_id) not in excluded,
@@ -121,3 +123,16 @@ def _knowledge_base_inclusion(value: object, kb_ids: list[str]) -> dict[str, boo
     if set(configured) != set(kb_ids):
         raise ValueError('knowledge_bases must exactly match source_config.kb_ids')
     return configured
+
+
+def _knowledge_base_names(source: Mapping[str, object], kb_ids: list[str]) -> dict[str, str]:
+    raw = source.get('knowledge_base_names', {})
+    if not isinstance(raw, Mapping):
+        raise ValueError('knowledge_base_names must be a mapping')
+    names = {}
+    for kb_id in kb_ids:
+        value = raw.get(kb_id, kb_id)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f'knowledge_base_names.{kb_id} must be a non-empty string')
+        names[kb_id] = value.strip()
+    return names

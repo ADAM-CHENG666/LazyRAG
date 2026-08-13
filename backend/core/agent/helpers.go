@@ -164,6 +164,7 @@ func buildEvoThreadCreatePayload(payload map[string]any) map[string]any {
 		"llm_config": payload["llm_config"],
 		"inputs": map[string]any{
 			"kb_id":                 stringListFromAny(firstNonNilAny(inputs["kb_id"], inputs["knowledge_base_id"], inputs["dataset_id"])),
+			"knowledge_base_names": stringMapFromAny(inputs["knowledge_base_names"]),
 			"csv_data":              csvDataListFromAny(inputs["csv_data"]),
 			"router_chat_url":       routerChatURL,
 			"router_admin_url":      routerAdminURL,
@@ -172,6 +173,59 @@ func buildEvoThreadCreatePayload(payload map[string]any) map[string]any {
 			"case_deadline_seconds": deadlineSeconds,
 		},
 	}
+}
+
+func attachThreadCreateKnowledgeBaseNames(ctx context.Context, db *gorm.DB, payload map[string]any) {
+	inputs, _ := payload["inputs"].(map[string]any)
+	if db == nil || inputs == nil {
+		return
+	}
+	delete(inputs, "knowledge_base_names")
+	kbIDs := stringListFromAny(firstNonNilAny(inputs["kb_id"], inputs["knowledge_base_id"], inputs["dataset_id"]))
+	if len(kbIDs) == 0 {
+		return
+	}
+	var datasets []orm.Dataset
+	if err := db.WithContext(ctx).Where("(id IN ? OR kb_id IN ?) AND deleted_at IS NULL", kbIDs, kbIDs).Find(&datasets).Error; err != nil {
+		return
+	}
+	namesByID := make(map[string]string, len(datasets)*2)
+	for _, dataset := range datasets {
+		if name := strings.TrimSpace(dataset.DisplayName); name != "" {
+			namesByID[dataset.ID] = name
+			namesByID[dataset.KbID] = name
+		}
+	}
+	names := make(map[string]string, len(kbIDs))
+	for _, kbID := range kbIDs {
+		if name := namesByID[kbID]; name != "" {
+			names[kbID] = name
+		}
+	}
+	if len(names) > 0 {
+		inputs["knowledge_base_names"] = names
+	}
+}
+
+func stringMapFromAny(value any) map[string]string {
+	raw, ok := value.(map[string]any)
+	if !ok {
+		if values, typed := value.(map[string]string); typed {
+			raw = make(map[string]any, len(values))
+			for key, name := range values {
+				raw[key] = name
+			}
+		} else {
+			return map[string]string{}
+		}
+	}
+	result := make(map[string]string, len(raw))
+	for key, value := range raw {
+		if normalizedKey, normalizedValue := strings.TrimSpace(key), strings.TrimSpace(agentScalarString(value)); normalizedKey != "" && normalizedValue != "" {
+			result[normalizedKey] = normalizedValue
+		}
+	}
+	return result
 }
 
 func cloneJSONMap(payload map[string]any) map[string]any {

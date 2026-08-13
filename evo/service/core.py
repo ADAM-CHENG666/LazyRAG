@@ -524,6 +524,7 @@ def _seed_values(thread_id: str, request: ThreadCreate) -> dict[str, object]:
         },
         A.CORPUS_SOURCE_CONFIG: {
             'kb_id': request.inputs.kb_id,
+            'knowledge_base_names': request.inputs.knowledge_base_names,
             'csv_data': request.inputs.csv_data,
             'target_case_count': request.inputs.num_case,
             'min_case_count': request.inputs.num_case,

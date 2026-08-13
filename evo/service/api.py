@@ -178,6 +178,30 @@ def create_app(root: str | Path | None = None) -> FastAPI:
     async def steps(thread_id: str) -> dict[str, Any]:
         return await _service(app).projections.steps(thread_id)
 
+    @app.get('/threads/{thread_id}/dataset/topics')
+    async def dataset_topics(thread_id: str, question_type: str = '', min_chunk_count: str = '',
+                             max_chunk_count: str = '', page_size: str = '',
+                             page_token: str = '') -> dict[str, Any]:
+        return await _service(app).projections.topics(
+            thread_id,
+            question_type=question_type,
+            min_chunk_count=_optional_query_int(min_chunk_count, 'min_chunk_count'),
+            max_chunk_count=_optional_query_int(max_chunk_count, 'max_chunk_count'),
+            page_size=_optional_query_int(page_size, 'page_size'),
+            page_token=page_token,
+        )
+
+    @app.get('/threads/{thread_id}/dataset/materials/documents')
+    async def dataset_materials_documents(thread_id: str, included: str = '', knowledge_base_id: str = '',
+                                          page_size: str = '', page_token: str = '') -> dict[str, Any]:
+        return await _service(app).projections.materials_documents(
+            thread_id,
+            included=_optional_query_bool(included, 'included'),
+            knowledge_base_id=knowledge_base_id,
+            page_size=_optional_query_int(page_size, 'page_size'),
+            page_token=page_token,
+        )
+
     @app.get('/threads/{thread_id}/gates/{step}/versions/{version}:download')
     async def gate_download(thread_id: str, step: str, version: int,
                             format: str = 'json'  # noqa: A002
@@ -329,6 +353,25 @@ def _query_keys(request: Request, allowed: set[str]) -> None:
     unsupported = set(request.query_params) - allowed
     if unsupported:
         raise ServiceError(422, f'unsupported query param: {min(unsupported)}')
+
+
+def _optional_query_int(value: str, field: str) -> int | None:
+    if value == '':
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ServiceError(400, f'{field} must be an integer') from None
+
+
+def _optional_query_bool(value: str, field: str) -> bool | None:
+    if value == '':
+        return None
+    if value == 'true':
+        return True
+    if value == 'false':
+        return False
+    raise ServiceError(400, f'{field} must be a boolean')
 
 
 def _service_root() -> Path:

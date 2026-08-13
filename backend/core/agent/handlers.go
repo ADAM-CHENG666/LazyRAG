@@ -122,6 +122,7 @@ func CreateThread(w http.ResponseWriter, r *http.Request) {
 	}
 	delete(requestPayload, "llm_config")
 	applyThreadCreateTitle(r.Context(), db, requestPayload, time.Now())
+	attachThreadCreateKnowledgeBaseNames(r.Context(), db, requestPayload)
 	localThreadPayload := cloneJSONMap(requestPayload)
 	if err := attachThreadModelConfig(r.Context(), db, store.UserID(r), requestPayload); err != nil {
 		common.ReplyErr(w, fmt.Sprintf("%s: %v", "load llm config failed", err), http.StatusInternalServerError)
