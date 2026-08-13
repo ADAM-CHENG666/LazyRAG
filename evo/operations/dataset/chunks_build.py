@@ -81,7 +81,10 @@ def build_chunks(ctx: Any, inputs: Mapping[str, object]) -> Mapping[str, object]
     values = _mapping(inputs.get('build_chunk_candidates'), 'build_chunk_candidates')
     selected = [dict(item) for item in _list(values.get('chunks'), 'build_chunk_candidates.chunks') if item.get('selected')]
     selected.sort(key=lambda item: _integer(item.get('selection_index'), 'selection_index'))
-    partition = str(getattr(getattr(ctx, 'output_key_by_name', {}).get('chunk'), 'partition', '') or '')
+    output_key = getattr(ctx, 'output_key_by_name', {}).get('chunk')
+    partition = str(
+        getattr(output_key, 'partition_key', getattr(output_key, 'partition', '')) or ''
+    )
     index = _partition_index(partition)
     if index < len(selected):
         return {'chunk': {'available': True, **selected[index]}}
@@ -215,7 +218,14 @@ def _manifest_chunk(partition, value):
 
 def _partitions(ctx, size):
     refs = getattr(ctx, 'input_ref_by_key', {})
-    values = sorted((key.partition for key in refs if getattr(key, 'artifact_id', '') == 'dataset.chunk'), key=_partition_index)
+    values = sorted(
+        (
+            getattr(key, 'partition_key', getattr(key, 'partition', ''))
+            for key in refs
+            if getattr(key, 'artifact_id', '') == 'dataset.chunk'
+        ),
+        key=_partition_index,
+    )
     return values or [f'chunk_{index + 1:04d}' for index in range(size)]
 
 

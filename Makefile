@@ -278,6 +278,18 @@ lint: lint-python lint-go lint-state-backend-boundary
 test:
 	@./tests/run-all.sh
 
+test-dataset-unit:
+	@$(PYTHON) -m pytest tests/dataset/unit -m dataset_unit -q
+
+test-dataset-runtime:
+	@$(PYTHON) -m pytest tests/dataset/runtime -m dataset_runtime -q
+
+test-dataset-integration:
+	@$(PYTHON) -m pytest tests/dataset/integration -m dataset_integration -q
+
+test-dataset:
+	@$(PYTHON) -m pytest tests/dataset -q
+
 test-hermetic-setup:
 	@./tests/test-hermetic-env.sh setup
 

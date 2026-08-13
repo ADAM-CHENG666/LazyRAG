@@ -195,6 +195,7 @@ def test_import_only_pipeline_runs_on_new_artifact_runtime(monkeypatch, tmp_path
             keys = (
                 ArtifactKey.scalar(A.RUN_CONFIG),
                 ArtifactKey.scalar(A.CORPUS_SOURCE_CONFIG),
+                ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN_PARAMS),
             )
             await flow.create('run-imported', ArtifactCommit(
                 'seed:run-imported',
@@ -206,6 +207,7 @@ def test_import_only_pipeline_runs_on_new_artifact_runtime(monkeypatch, tmp_path
                         'csv_data': [],
                         'target_case_count': 1,
                     }),
+                    ArtifactDraft(keys[2], {}),
                 ),
                 {key: None for key in keys},
             ))
@@ -262,6 +264,7 @@ def test_generated_pipeline_runs_with_dynamic_chunk_and_case_partitions(monkeypa
             keys = (
                 ArtifactKey.scalar(A.RUN_CONFIG),
                 ArtifactKey.scalar(A.CORPUS_SOURCE_CONFIG),
+                ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN_PARAMS),
             )
             await flow.create('run-generated', ArtifactCommit(
                 'seed:run-generated',
@@ -273,6 +276,7 @@ def test_generated_pipeline_runs_with_dynamic_chunk_and_case_partitions(monkeypa
                         'csv_data': [],
                         'target_case_count': 1,
                     }),
+                    ArtifactDraft(keys[2], {}),
                 ),
                 {key: None for key in keys},
             ))

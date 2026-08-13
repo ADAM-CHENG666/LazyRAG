@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from evo.artifact_runtime.kernel import ArtifactKey, ArtifactRef
+from evo.artifact_runtime import ArtifactKey, ArtifactRef
 from evo.operations.dataset import BuildChunksParams, build_chunk_candidates, build_chunks, build_chunks_manifest, select_docs
 from evo.operations.dataset.chunks_build import validate_chunk_selection
 
@@ -64,7 +64,7 @@ def counts(capacities, scanned=None):
     }
 
 
-def documents(rows, excluded=(), knowledge_bases=None):
+def documents(rows, excluded=(), knowledge_bases=None, *, target=2, imported=0):
     knowledge_bases = knowledge_bases or [
         {'kb_id': kb_id, 'included': True} for kb_id in rows
     ]
@@ -74,6 +74,7 @@ def documents(rows, excluded=(), knowledge_bases=None):
             'knowledge_bases': knowledge_bases,
             'excluded_docs': [{'kb_id': kb_id, 'doc_id': doc_id} for kb_id, doc_id in excluded],
         },
+        'import_cases_manifest': import_manifest(target, imported),
     }, FakeDiscoveryClient(rows))['selected_docs']
 
 
@@ -151,7 +152,7 @@ def test_docs_knowledge_base_toggle_preserves_document_exclusions():
     assert [item['included'] for item in enabled['documents']] == [True, False]
 
 
-def test_docs_are_available_for_imported_only_configuration():
+def test_docs_are_skipped_for_imported_only_configuration():
     client = FakeDiscoveryClient({'kb-a': [{'doc_id': 'one'}]})
     output = select_docs(None, {
         'source_config': {'kb_ids': ['kb-a']},
@@ -159,8 +160,11 @@ def test_docs_are_available_for_imported_only_configuration():
         'import_cases_manifest': import_manifest(1, 1),
     }, client)['selected_docs']
 
-    assert output['documents'][0]['doc_id'] == 'one'
-    assert client.calls == ['kb-a']
+    assert output == {
+        'documents': [],
+        'stats': {'discovered_count': 0, 'included_count': 0, 'excluded_count': 0},
+    }
+    assert client.calls == []
 
 
 def test_docs_allow_empty_discovery():

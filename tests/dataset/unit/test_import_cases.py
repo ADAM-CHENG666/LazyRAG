@@ -32,7 +32,7 @@ class FakeKBClient:
     def list_documents(self, kb_id):
         return self.docs[kb_id]
 
-    def iter_chunks(self, kb_id, doc_ids, groups, page_size):
+    def iter_chunks(self, kb_id, doc_ids, groups, page_size, *, require_embeddings=False):
         for doc_id in doc_ids:
             yield from self.chunks.get((kb_id, doc_id), [])
 
@@ -43,7 +43,8 @@ class FailingKBClient:
 
 
 def _source_config(csv_path, target=2):
-    return {'kb_ids': ['kb-a', 'kb-b'], 'csv_path': str(csv_path), 'target_case_count': target}
+    sources = [] if not csv_path else [{'kb_id': 'kb-a', 'path': str(csv_path)}]
+    return {'kb_ids': ['kb-a', 'kb-b'], 'csv_sources': sources, 'target_case_count': target}
 
 
 def _row(**overrides):
@@ -80,7 +81,7 @@ def test_absent_csv_creates_all_generated_assignments_without_kb_access():
     result = _manifest('', target=3, client=FailingKBClient())
 
     assert result == {
-        'source': {'csv_path': ''},
+        'source': {'csv_sources': []},
         'stats': {
             'csv_reading': {
                 'total_row_count': 0,
@@ -201,8 +202,8 @@ def test_assigns_selected_rows_to_stable_case_partitions(tmp_path):
 
     result = _manifest(source)
     assert result['stats']['case_allocation']['assignments'] == {
-        'case_0001': {'mode': 'imported', 'source_row_number': 2},
-        'case_0002': {'mode': 'imported', 'source_row_number': 4},
+        'case_0001': {'mode': 'imported', 'source_row_number': 1},
+        'case_0002': {'mode': 'imported', 'source_row_number': 3},
     }
     assert [detail['load_status'] for detail in result['details']] == ['loaded', 'invalid', 'loaded']
 
@@ -239,7 +240,7 @@ def test_invalid_details_do_not_consume_capacity_and_generated_slots_fill_gap(tm
         'import_case_count': 1,
         'auto_case_count': 2,
         'assignments': {
-            'case_0001': {'mode': 'imported', 'source_row_number': 3},
+            'case_0001': {'mode': 'imported', 'source_row_number': 2},
             'case_0002': {'mode': 'generated'},
             'case_0003': {'mode': 'generated'},
         },
@@ -251,17 +252,26 @@ def test_records_reproducible_audit_metadata_without_raw_csv_blob(tmp_path):
     raw = source.read_bytes()
 
     result = _manifest(source)
-    assert result['source'] == {
+    assert result['source'] == {'csv_sources': [{
+        'kb_id': 'kb-a',
         'csv_path': str(source),
         'csv_sha256': hashlib.sha256(raw).hexdigest(),
         'csv_size_bytes': len(raw),
-    }
+    }]}
     detail = result['details'][0]
-    assert detail['source_row_number'] == 2
+    assert detail['source_row_number'] == 1
     assert detail['source_id'] == 'external-7'
     assert detail['case']['reference_chunk_ids'] == ['chunk-1']
     assert detail['case']['reference_doc_ids'] == ['doc-a']
-    assert detail['case']['source_preparation'] == {'kb_ids': ['kb-a']}
+    preparation = detail['case']['source_preparation']
+    assert preparation['kb_ids'] == ['kb-a']
+    assert preparation['case_source'] == {
+        'final_id': 'case_0001',
+        'original_id': 'external-7',
+        'source': 'imported_csv',
+        'kb_id': 'kb-a',
+        'csv_path': str(source),
+    }
     assert 'csv_content' not in result['source']
 
 

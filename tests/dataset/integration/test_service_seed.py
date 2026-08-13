@@ -1,0 +1,50 @@
+from __future__ import annotations
+
+import pytest
+
+from evo import artifacts as A
+from evo.service.contracts import ThreadCreate
+from evo.service.core import _seed_values
+
+
+def _request(*, count: int = 3, kb_ids: list[str] | None = None,
+             csv_data: list[dict[str, str]] | None = None) -> ThreadCreate:
+    return ThreadCreate.model_validate({
+        'title': 'dataset test',
+        'inputs': {
+            'kb_id': ['kb-1'] if kb_ids is None else kb_ids,
+            'csv_data': csv_data or [],
+            'router_chat_url': 'http://router-chat',
+            'router_admin_url': 'http://router-admin',
+            'algorithm_id': 'algo-1',
+            'num_case': count,
+        },
+        'llm_config': {'llm': {}, 'evo_llm': {}, 'embed_main': {}},
+    })
+
+
+def test_service_seed_contains_every_runtime_seed_and_dataset_defaults() -> None:
+    seed = _seed_values('thr-1', _request())
+
+    assert set(seed) == set(A.SEEDS)
+    assert seed[A.RUN_CONFIG]['num_case'] == 3
+    assert seed[A.CORPUS_SOURCE_CONFIG] == {
+        'kb_id': ['kb-1'],
+        'csv_data': [],
+        'target_case_count': 3,
+        'min_case_count': 3,
+    }
+    assert seed[A.DATASET_QAPLAN_PLAN_PARAMS] == {}
+
+
+def test_service_seed_preserves_csv_source_mapping_for_dataset_normalization() -> None:
+    seed = _seed_values('thr-1', _request(csv_data=[{'kb-2': '/tmp/cases.csv'}]))
+
+    assert seed[A.CORPUS_SOURCE_CONFIG]['csv_data'] == [
+        {'kb-2': '/tmp/cases.csv'},
+    ]
+
+
+def test_thread_create_rejects_missing_dataset_sources() -> None:
+    with pytest.raises(ValueError, match='inputs.kb_id or inputs.csv_data is required'):
+        _request(kb_ids=[], csv_data=[])
