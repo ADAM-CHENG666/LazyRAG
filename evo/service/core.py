@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import time
 import uuid
@@ -33,10 +34,12 @@ from .contracts import (
     CommandRequest,
     ConfigurationUpdateBody,
     ControlRequest,
+    DatasetApplyBody,
     ExternalResultBody,
     RetryRequest,
     ServiceError,
     ThreadCreate,
+    TopicApplyBody,
 )
 from .projections import ProjectionService
 from .public import public_message_history, public_thread_state, public_value
@@ -303,6 +306,164 @@ class EvoService:
         await self._continue_automatic(thread_id)
         return await self.public_thread(thread_id, include_inputs=False)
 
+    async def apply_materials(self, thread_id: str, request: DatasetApplyBody | Mapping[str, Any]) -> dict[str, Any]:
+        request = request if isinstance(request, DatasetApplyBody) else DatasetApplyBody.model_validate(request)
+        if 'chunk_selection_changes' in request.changes:
+            if set(request.changes) != {'chunk_selection_changes'}:
+                raise ServiceError(400, 'chunk_selection_changes cannot be combined with scan configuration')
+            return await self.apply_material_chunk_selection(thread_id, request.model_dump())
+        return await self.apply_material_scan_config(thread_id, request.model_dump())
+
+    async def apply_material_scan_config(self, thread_id: str, request: Mapping[str, Any]) -> dict[str, Any]:
+        request_id, revision, changes = _dataset_apply_request(request)
+        scan_fields = {'target_case_count', 'knowledge_bases', 'documents', 'split_rule_ids', 'layout_type_ids'}
+        if not changes or set(changes) - scan_fields:
+            raise ServiceError(400, 'changes must contain only scan configuration fields')
+        source_key = ArtifactKey.scalar(A.CORPUS_SOURCE_CONFIG)
+        selection_key = ArtifactKey.scalar(A.DATASET_SELECT_DOCS_PARAMS)
+        chunks_key = ArtifactKey.scalar(A.DATASET_BUILD_CHUNKS_PARAMS)
+        refs = _revision_refs(revision, (source_key, selection_key, chunks_key))
+        source, selection, params = await self._read_expected_values(thread_id, refs)
+        source = _copy_mapping(source, 'source_config')
+        selection = _copy_mapping(selection, 'select_docs_params')
+        params = _copy_mapping(params, 'build_chunks_params')
+        source_ids = _source_ids(source)
+        if 'target_case_count' in changes:
+            target = changes['target_case_count']
+            if isinstance(target, bool) or not isinstance(target, int) or target < 1:
+                raise ServiceError(422, 'target_case_count must be a positive integer')
+            source['target_case_count'] = target
+            source['min_case_count'] = target
+        if 'knowledge_bases' in changes:
+            enabled = _selection_map(selection, source_ids)
+            for item in _list_value(changes['knowledge_bases'], 'knowledge_bases'):
+                entry = _mapping_value(item, 'knowledge_bases[]')
+                kb_id = _text_value(entry.get('id'), 'knowledge_bases[].id')
+                included = entry.get('included')
+                if kb_id not in enabled:
+                    raise ServiceError(404, 'knowledge base not found')
+                if not isinstance(included, bool):
+                    raise ServiceError(422, 'knowledge base change is invalid')
+                enabled[kb_id] = included
+            selection['knowledge_bases'] = [{'kb_id': key, 'included': enabled[key]} for key in source_ids]
+        if 'documents' in changes:
+            documents = await self._current_documents(thread_id)
+            excluded = _excluded_document_keys(selection)
+            for item in _list_value(changes['documents'], 'documents'):
+                entry = _mapping_value(item, 'documents[]')
+                key = (_text_value(entry.get('knowledge_base_id'), 'documents[].knowledge_base_id'),
+                       _text_value(entry.get('document_id'), 'documents[].document_id'))
+                included = entry.get('included')
+                if key not in documents:
+                    raise ServiceError(404, 'document not found')
+                if not isinstance(included, bool):
+                    raise ServiceError(422, 'document change is invalid')
+                (excluded.discard if included else excluded.add)(key)
+            selection['excluded_docs'] = [{'kb_id': kb_id, 'doc_id': doc_id} for kb_id, doc_id in sorted(excluded)]
+        if 'split_rule_ids' in changes:
+            params['groups'] = _id_list(changes['split_rule_ids'], 'split_rule_ids')
+        if 'layout_type_ids' in changes:
+            params['allowed_types'] = _id_list(changes['layout_type_ids'], 'layout_type_ids')
+        return await self._commit_changed_values(
+            thread_id, f'dataset-materials-scan:{request_id}', 'user:dataset-materials-scan', refs,
+            {source_key: source, selection_key: selection, chunks_key: params},
+        )
+
+    async def apply_material_chunk_selection(self, thread_id: str, request: Mapping[str, Any]) -> dict[str, Any]:
+        request_id, revision, changes = _dataset_apply_request(request)
+        if set(changes) != {'chunk_selection_changes'}:
+            raise ServiceError(400, 'changes must contain only chunk_selection_changes')
+        updates = _list_value(changes['chunk_selection_changes'], 'chunk_selection_changes')
+        if not updates:
+            raise ServiceError(400, 'chunk_selection_changes must not be empty')
+        docs_key = ArtifactKey.scalar(A.DATASET_SELECTED_DOCS)
+        candidates_key = ArtifactKey.scalar(A.DATASET_BUILD_CHUNK_CANDIDATES)
+        refs = _revision_refs(revision, (docs_key, candidates_key))
+        _, candidates = await self._read_expected_values(thread_id, refs)
+        candidates = _copy_mapping(candidates, 'build_chunk_candidates')
+        chunks = _list_value(candidates.get('chunks', ()), 'build_chunk_candidates.chunks')
+        by_identity = {(item.get('kb_id'), item.get('doc_id'), item.get('chunk_id')): item for item in chunks if isinstance(item, dict)}
+        seen: set[tuple[str, str, str]] = set()
+        for item in updates:
+            entry = _mapping_value(item, 'chunk_selection_changes[]')
+            identity = (_text_value(entry.get('knowledge_base_id'), 'chunk_selection_changes[].knowledge_base_id'),
+                        _text_value(entry.get('document_id'), 'chunk_selection_changes[].document_id'),
+                        _text_value(entry.get('chunk_id'), 'chunk_selection_changes[].chunk_id'))
+            selected = entry.get('selected')
+            if identity in seen or not isinstance(selected, bool):
+                raise ServiceError(422, 'chunk selection change is invalid')
+            if identity not in by_identity:
+                raise ServiceError(404, 'chunk not found')
+            seen.add(identity)
+            by_identity[identity]['selected'] = selected
+        _validate_candidate_quotas(chunks, candidates.get('quotas', ()))
+        return await self._commit_changed_values(
+            thread_id, f'dataset-materials-selection:{request_id}', 'user:dataset-materials-selection', refs,
+            {candidates_key: candidates},
+        )
+
+    async def apply_topic_names(self, thread_id: str, request: TopicApplyBody | Mapping[str, Any]) -> dict[str, Any]:
+        request = request if isinstance(request, TopicApplyBody) else TopicApplyBody.model_validate(request)
+        topic_key = ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST)
+        refs = _revision_refs(request.expected_revision, (topic_key,))
+        (manifest,) = await self._read_expected_values(thread_id, refs)
+        manifest = _copy_mapping(manifest, 'topic_manifest')
+        topics = _list_value(manifest.get('topics', ()), 'topic_manifest.topics')
+        by_id = {item.get('topic_id'): item for item in topics if isinstance(item, dict)}
+        seen: set[str] = set()
+        for item in request.changes:
+            entry = _mapping_value(item, 'changes[]')
+            topic_id = _text_value(entry.get('topic_id'), 'changes[].topic_id')
+            name = _text_value(entry.get('name'), 'changes[].name')
+            if topic_id in seen:
+                raise ServiceError(422, 'topic name change is invalid')
+            if topic_id not in by_id:
+                raise ServiceError(404, 'topic not found')
+            seen.add(topic_id)
+            by_id[topic_id]['name'] = name
+        return await self._commit_changed_values(
+            thread_id, f'dataset-topic-names:{request.request_id}', 'user:dataset-topic-names', refs,
+            {topic_key: manifest},
+        )
+
+    async def _read_expected_values(self, thread_id: str, refs: tuple[ArtifactRef, ...]) -> tuple[object, ...]:
+        if not await self.flow.has_run(thread_id):
+            raise ServiceError(404, f'thread not found: {thread_id}')
+        try:
+            return await asyncio.gather(*(self.flow.read(thread_id, ref) for ref in refs))
+        except (DefinitionError, KeyError) as error:
+            raise ServiceError(409, 'expected_revision is unavailable') from error
+
+    async def _current_documents(self, thread_id: str) -> set[tuple[str, str]]:
+        key = ArtifactKey.scalar(A.DATASET_SELECTED_DOCS)
+        record = await self.flow.head(thread_id, key)
+        if record is None:
+            raise ServiceError(404, 'selected documents are unavailable')
+        value = _mapping_value(await self.flow.read(thread_id, record.ref), 'selected_docs')
+        return {(item.get('kb_id'), item.get('doc_id')) for item in _list_value(value.get('documents', ()), 'selected_docs.documents')
+                if isinstance(item, Mapping) and isinstance(item.get('kb_id'), str) and isinstance(item.get('doc_id'), str)}
+
+    async def _commit_changed_values(self, thread_id: str, commit_id: str, producer: str,
+                                     refs: tuple[ArtifactRef, ...], values: Mapping[ArtifactKey, object]) -> dict[str, Any]:
+        current_values = await asyncio.gather(*(self.flow.read(thread_id, ref) for ref in refs))
+        writes = tuple(
+            ArtifactDraft(ref.key, values[ref.key])
+            for ref, current in zip(refs, current_values, strict=True)
+            if ref.key in values and values[ref.key] != current
+        )
+        if not writes:
+            raise ServiceError(422, 'changes do not alter the current value')
+        try:
+            await self.flow.commit(thread_id, ArtifactCommit(commit_id, producer, writes, {ref.key: ref for ref in refs}))
+        except DefinitionError as error:
+            raise ServiceError(409, str(error)) from error
+        await self._continue_automatic(thread_id)
+        heads = await asyncio.gather(*(self.flow.head(thread_id, ref.key) for ref in refs))
+        if any(record is None for record in heads):
+            raise ServiceError(503, 'committed configuration is unavailable')
+        return {'request_id': commit_id.rsplit(':', 1)[-1], 'status': 'applied',
+                'revision': ProjectionService._build_revision(tuple(record.ref for record in heads if record is not None))}
+
     async def set_automatic(self, thread_id: str, request: AutomaticUpdateBody | Mapping[str, Any]) -> dict[str, Any]:
         request = request if isinstance(request, AutomaticUpdateBody) else AutomaticUpdateBody.model_validate(request)
         async with self._control_locks.setdefault(thread_id, asyncio.Lock()):
@@ -502,6 +663,98 @@ class EvoService:
             return
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+def _dataset_apply_request(request: Mapping[str, Any]) -> tuple[str, str, Mapping[str, Any]]:
+    request_id = _text_value(request.get('request_id'), 'request_id')
+    revision = _text_value(request.get('expected_revision'), 'expected_revision')
+    changes = request.get('changes')
+    if not isinstance(changes, Mapping):
+        raise ServiceError(400, 'changes must be an object')
+    return request_id, revision, changes
+
+
+def _revision_refs(revision: str, keys: tuple[ArtifactKey, ...]) -> tuple[ArtifactRef, ...]:
+    refs = ProjectionService._resolve_revision(revision)
+    if {ref.key for ref in refs} != set(keys):
+        raise ServiceError(400, 'expected_revision does not match this operation')
+    return tuple(next(ref for ref in refs if ref.key == key) for key in keys)
+
+
+def _copy_mapping(value: object, name: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ServiceError(503, f'{name} is invalid')
+    return copy.deepcopy(dict(value))
+
+
+def _mapping_value(value: object, name: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ServiceError(422, f'{name} must be an object')
+    return value
+
+
+def _list_value(value: object, name: str) -> list[Any]:
+    if not isinstance(value, list):
+        raise ServiceError(422, f'{name} must be an array')
+    return value
+
+
+def _text_value(value: object, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ServiceError(422, f'{name} must be a non-empty string')
+    return value.strip()
+
+
+def _source_ids(source: Mapping[str, Any]) -> list[str]:
+    try:
+        return normalize_source_config(source)['kb_ids']
+    except ValueError as error:
+        raise ServiceError(503, 'source_config knowledge bases are invalid') from error
+
+
+def _selection_map(selection: Mapping[str, Any], source_ids: list[str]) -> dict[str, bool]:
+    entries = _list_value(selection.get('knowledge_bases'), 'select_docs_params.knowledge_bases')
+    values = {
+        _text_value(_mapping_value(item, 'knowledge_bases[]').get('kb_id'), 'knowledge_bases[].kb_id'):
+        _mapping_value(item, 'knowledge_bases[]').get('included')
+        for item in entries
+    }
+    if set(values) != set(source_ids) or not all(isinstance(value, bool) for value in values.values()):
+        raise ServiceError(503, 'select_docs_params knowledge bases are invalid')
+    return values
+
+
+def _excluded_document_keys(selection: Mapping[str, Any]) -> set[tuple[str, str]]:
+    return {
+        (_text_value(entry.get('kb_id'), 'excluded_docs[].kb_id'), _text_value(entry.get('doc_id'), 'excluded_docs[].doc_id'))
+        for item in _list_value(selection.get('excluded_docs', []), 'select_docs_params.excluded_docs')
+        for entry in (_mapping_value(item, 'excluded_docs[]'),)
+    }
+
+
+def _id_list(value: object, name: str) -> list[str]:
+    values = [_text_value(item, f'{name}[]') for item in _list_value(value, name)]
+    if not values or len(set(values)) != len(values):
+        raise ServiceError(422, f'{name} must contain unique non-empty values')
+    return values
+
+
+def _validate_candidate_quotas(chunks: list[Any], quotas: object) -> None:
+    rows = _list_value(quotas, 'build_chunk_candidates.quotas')
+    for item in rows:
+        quota = _mapping_value(item, 'quotas[]')
+        key = (_text_value(quota.get('kb_id'), 'quotas[].kb_id'), _text_value(quota.get('doc_id'), 'quotas[].doc_id'),
+               _text_value(quota.get('group'), 'quotas[].group'))
+        required = quota.get('required')
+        if isinstance(required, bool) or not isinstance(required, int) or required < 0:
+            raise ServiceError(503, 'chunk quota is invalid')
+        selected = sum(
+            row.get('selected') is True
+            for row in chunks
+            if isinstance(row, Mapping) and (row.get('kb_id'), row.get('doc_id'), row.get('group')) == key
+        )
+        if selected != required:
+            raise ServiceError(422, 'chunk selection does not satisfy quota')
 
 
 def _seed_values(thread_id: str, request: ThreadCreate) -> dict[str, object]:

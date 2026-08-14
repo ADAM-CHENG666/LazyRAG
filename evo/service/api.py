@@ -27,12 +27,14 @@ from .contracts import (
     CommandRequest,
     ConfigurationUpdateBody,
     ControlRequest,
+    DatasetApplyBody,
     ExternalResultBody,
     MessageBody,
     RegisterAlgorithmBody,
     RetryRequest,
     ServiceError,
     ThreadCreate,
+    TopicApplyBody,
 )
 from .core import EvoService
 from .events import execution_stream, message_stream
@@ -217,6 +219,10 @@ def create_app(root: str | Path | None = None) -> FastAPI:
         _query_keys(request, set())
         return await _service(app).projections.material_adjustment_options(thread_id)
 
+    @app.post('/threads/{thread_id}/dataset/materials:apply')
+    async def apply_dataset_materials(thread_id: str, payload: DatasetApplyBody) -> dict[str, Any]:
+        return await _service(app).apply_materials(thread_id, payload)
+
     @app.get('/threads/{thread_id}/dataset/materials/knowledge-bases/{knowledge_base_id}/documents/{document_id}')
     async def dataset_material_document_detail(thread_id: str, knowledge_base_id: str, document_id: str,
                                                selected: str = '', split_rule: str = '', page_size: str = '',
@@ -240,6 +246,10 @@ def create_app(root: str | Path | None = None) -> FastAPI:
             page_size=_optional_query_int(page_size, 'page_size'),
             page_token=page_token,
         )
+
+    @app.post('/threads/{thread_id}/dataset/topics:apply')
+    async def apply_dataset_topic_names(thread_id: str, payload: TopicApplyBody) -> dict[str, Any]:
+        return await _service(app).apply_topic_names(thread_id, payload)
 
     @app.get('/threads/{thread_id}/dataset/cases/{case_id}/topic-options')
     async def dataset_case_topic_options(thread_id: str, case_id: str, page_size: str = '',

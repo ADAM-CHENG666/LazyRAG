@@ -125,6 +125,18 @@ class ArtifactUpdateBody(StrictModel):
         return self
 
 
+class DatasetApplyBody(StrictModel):
+    request_id: str = Field(min_length=1, max_length=160)
+    expected_revision: str = Field(min_length=1)
+    changes: dict[str, Any]
+
+
+class TopicApplyBody(StrictModel):
+    request_id: str = Field(min_length=1, max_length=160)
+    expected_revision: str = Field(min_length=1)
+    changes: list[dict[str, Any]] = Field(min_length=1)
+
+
 _QAPLAN_LANES = frozenset({
     'precision_easy', 'precision_medium', 'precision_hard',
     'reasoning_easy', 'reasoning_medium', 'reasoning_hard',
@@ -229,7 +241,7 @@ class AbStrategyBody(StrictModel):
 __all__ = [
     'AbStrategyBody', 'AlgorithmActionBody', 'AlgorithmOwner', 'ArtifactUpdateBody', 'ArtifactValue',
     'AutomaticUpdateBody', 'CaseRerunBody', 'CaseSeed', 'CaseStructureBody', 'CommandRequest',
-    'ConfigurationUpdateBody', 'ControlRequest', 'ExternalResultBody', 'MessageBody', 'RegisterAlgorithmBody',
+    'ConfigurationUpdateBody', 'ControlRequest', 'DatasetApplyBody', 'ExternalResultBody', 'MessageBody', 'RegisterAlgorithmBody',
     'RetryRequest',
-    'ServiceError', 'StrictModel', 'ThreadCreate', 'ThreadInputs',
+    'ServiceError', 'StrictModel', 'ThreadCreate', 'ThreadInputs', 'TopicApplyBody',
 ]
