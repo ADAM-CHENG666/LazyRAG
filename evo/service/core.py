@@ -24,6 +24,7 @@ from evo.artifact_runtime import (
 from evo.message_intent import MessageIntent, MessageRequest, MessageTurnResult
 from evo.operations import evo_flow_definition
 from evo.operations.dataset.source_config import normalize_source_config
+from evo.operations.dataset.kb_client import KnowledgeBaseClient
 from evo.repair_model import EvoModelConfigError, resolve_evo_model
 
 from .contracts import (
@@ -72,7 +73,8 @@ class EvoService:
         self.definition = definition
         self.flow = flow
         self.messages = MessageIntent(self.root, flow)
-        self.projections = ProjectionService(flow, definition)
+        self.capability_client = KnowledgeBaseClient()
+        self.projections = ProjectionService(flow, definition, capability_client=self.capability_client)
         self.router = RouterService(self.root, flow)
         self._control_locks: dict[str, asyncio.Lock] = {}
         self._message_locks: dict[str, asyncio.Lock] = {}
@@ -364,6 +366,9 @@ class EvoService:
             params['groups'] = _id_list(changes['split_rule_ids'], 'split_rule_ids')
         if 'layout_type_ids' in changes:
             params['allowed_types'] = _id_list(changes['layout_type_ids'], 'layout_type_ids')
+        _validate_material_parser_capabilities(
+            getattr(self, 'capability_client', None), source_ids, _selection_map(selection, source_ids), params,
+        )
         return await self._commit_changed_values(
             thread_id, f'dataset-materials-scan:{request_id}', 'user:dataset-materials-scan', refs,
             {source_key: source, selection_key: selection, chunks_key: params},
@@ -737,6 +742,46 @@ def _id_list(value: object, name: str) -> list[str]:
     if not values or len(set(values)) != len(values):
         raise ServiceError(422, f'{name} must contain unique non-empty values')
     return values
+
+
+def _validate_material_parser_capabilities(client: object | None, source_ids: list[str], enabled: Mapping[str, bool],
+                                           params: Mapping[str, object]) -> None:
+    if client is None:
+        return
+    parser_capabilities = getattr(client, 'parser_capabilities', None)
+    if not callable(parser_capabilities):
+        raise ServiceError(503, 'parser capabilities are unavailable')
+    try:
+        capabilities = parser_capabilities(source_ids)
+    except Exception as exc:
+        raise ServiceError(503, 'parser capabilities are unavailable') from exc
+    active_sources = [kb_id for kb_id in source_ids if enabled.get(kb_id) is True]
+    for field, param in (('split_rules', 'groups'), ('layout_types', 'allowed_types')):
+        requested = _list_value(params.get(param, ()), f'build_chunks_params.{param}')
+        supported = _supported_capability_ids(capabilities, active_sources, field)
+        if not active_sources or any(item not in supported for item in requested):
+            raise ServiceError(422, f'{param} contains a capability unsupported by current material sources')
+
+
+def _supported_capability_ids(capabilities: object, active_sources: list[str], field: str) -> set[str]:
+    if not isinstance(capabilities, Mapping):
+        raise ServiceError(503, 'parser capabilities are invalid')
+    common: set[str] | None = None
+    for kb_id in active_sources:
+        capability = capabilities.get(kb_id)
+        if not isinstance(capability, Mapping):
+            raise ServiceError(503, 'parser capabilities are invalid')
+        values = capability.get(field)
+        if not isinstance(values, list):
+            raise ServiceError(503, 'parser capabilities are invalid')
+        identifiers = {
+            item.get('id') for item in values
+            if isinstance(item, Mapping) and isinstance(item.get('id'), str) and item.get('id')
+        }
+        if len(identifiers) != len(values):
+            raise ServiceError(503, 'parser capabilities are invalid')
+        common = identifiers if common is None else common & identifiers
+    return common or set()
 
 
 def _validate_candidate_quotas(chunks: list[Any], quotas: object) -> None:

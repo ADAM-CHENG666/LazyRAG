@@ -18,15 +18,17 @@ from evo.artifact_runtime import (
     PartitionSet,
     RecordedOperationEvent,
 )
+from evo.operations.dataset.kb_client import KnowledgeBaseClient
 
 from .contracts import ServiceError
 from .public import public_thread_state, public_value
 
 
 class ProjectionService:
-    def __init__(self, flow: Any, definition: FlowDefinition) -> None:
+    def __init__(self, flow: Any, definition: FlowDefinition, *, capability_client: KnowledgeBaseClient | Any | None = None) -> None:
         self.flow = flow
         self.definition = definition
+        self.capability_client = capability_client
 
     @staticmethod
     def _validate_page_size(value: object) -> int:
@@ -642,6 +644,7 @@ class ProjectionService:
         )
         source = _mapping_value(artifacts[source_key]['value'], 'source_config')
         selection = _mapping_value(artifacts[selection_key]['value'], 'select_docs_params')
+        params = _mapping_value(artifacts[chunks_key]['value'], 'build_chunks_params')
         source_ids = _source_knowledge_base_ids(source)
         names = source.get('knowledge_base_names')
         names = names if isinstance(names, Mapping) else {}
@@ -653,6 +656,13 @@ class ProjectionService:
         refs = tuple(_public_artifact_ref(artifacts[key]['record']) for key in (
             source_key, selection_key, chunks_key,
         ))
+        try:
+            capabilities = (
+                self.capability_client.parser_capabilities(source_ids)
+                if self.capability_client is not None and source_ids else {}
+            )
+        except Exception as exc:
+            raise ServiceError(503, 'parser capabilities are unavailable') from exc
         return {
             'thread_id': thread_id,
             'revision': self._build_revision(refs),
@@ -665,9 +675,12 @@ class ProjectionService:
                 }
                 for kb_id in source_ids
             ],
-            # P0: parser capability directories have not yet been supplied by Core/Parser.
-            'split_rules': [],
-            'layout_types': [],
+            'split_rules': _project_capability_directory(
+                capabilities, source_ids, enabled, 'split_rules', params.get('groups', ()), priority=True,
+            ),
+            'layout_types': _project_capability_directory(
+                capabilities, source_ids, enabled, 'layout_types', params.get('allowed_types', ()), priority=False,
+            ),
         }
 
     async def case_topic_options(
@@ -986,6 +999,38 @@ def _topic_filters(question_type: str, min_chunk_count: int | None,
 
 
 _TOPIC_OPTION_MIN_CHUNKS = {'easy': 1, 'medium': 2, 'hard': 3}
+
+
+def _project_capability_directory(capabilities: Mapping[str, Any], source_ids: list[str], enabled: Mapping[str, bool],
+                                  field: str, selected: object, *, priority: bool) -> list[dict[str, object]]:
+    configured = list(selected) if isinstance(selected, (list, tuple)) else []
+    active_sources = [kb_id for kb_id in source_ids if enabled.get(kb_id) is True]
+    rows: dict[str, str] = {}
+    for kb_id in source_ids:
+        capability = capabilities.get(kb_id, {})
+        values = capability.get(field, ()) if isinstance(capability, Mapping) else ()
+        if not isinstance(values, (list, tuple)):
+            raise ServiceError(503, 'parser capabilities are invalid')
+        for item in values:
+            if not isinstance(item, Mapping) or not isinstance(item.get('id'), str) or not item.get('id'):
+                raise ServiceError(503, 'parser capabilities are invalid')
+            identifier = item['id']
+            rows.setdefault(identifier, str(item.get('name') or identifier))
+    result = []
+    for identifier in sorted(rows):
+        supported = bool(active_sources) and all(
+            any(isinstance(item, Mapping) and item.get('id') == identifier
+                for item in (capabilities.get(kb_id, {}) or {}).get(field, ()))
+            for kb_id in active_sources
+        )
+        enabled_now = identifier in configured
+        row: dict[str, object] = {
+            'id': identifier, 'name': rows[identifier], 'supported': supported, 'enabled': enabled_now,
+        }
+        if priority:
+            row['priority'] = configured.index(identifier) + 1 if enabled_now else None
+        result.append(row)
+    return result
 
 
 def _mapping_value(value: object, name: str) -> Mapping[str, object]:

@@ -4,10 +4,10 @@ import hashlib
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
-from .layout_types import canonical_layout_type
+from .layout_types import LAYOUT_TYPE_NAMES, PARSER_LAYOUT_TYPES_BY_ALGORITHM, canonical_layout_type
 
 _DOCUMENTS: dict[tuple[str, ...], Any] = {}
 DOCS_PAGE_SIZE = 100
@@ -24,14 +24,57 @@ class KnowledgeBaseClient:
         http_get_json: Callable[[str], dict[str, Any]] | None = None,
         document: Any | None = None,
         document_factory: Callable[[], Any] | None = None,
+        parser_layout_profiles: Mapping[str, tuple[str, ...]] | None = None,
     ) -> None:
         self.base_url = base_url
         self._http_get_json = http_get_json
         self._document = document
         self._document_factory = document_factory
+        self._parser_layout_profiles = dict(parser_layout_profiles or PARSER_LAYOUT_TYPES_BY_ALGORITHM)
 
     def list_documents(self, kb_id: str) -> list[dict[str, Any]]:
         return self._list_documents_from_doc_server(kb_id)
+
+    def parser_capabilities(self, kb_ids: list[str]) -> dict[str, dict[str, list[dict[str, str]]]]:
+        if not isinstance(kb_ids, list) or not kb_ids or any(not isinstance(item, str) or not item for item in kb_ids):
+            raise ValueError('kb_ids must be a non-empty list')
+        if len(set(kb_ids)) != len(kb_ids):
+            raise ValueError('kb_ids must not contain duplicates')
+        groups_by_algorithm: dict[str, list[dict[str, str]]] = {}
+        result: dict[str, dict[str, list[dict[str, str]]]] = {}
+        for kb_id in kb_ids:
+            kb = self._get_json(f'{self._doc_server_base_url()}/v1/kbs/{quote(kb_id, safe="")}')
+            if _int(kb.get('code')) != 200:
+                raise RuntimeError(f'parser capabilities request failed: {kb.get("msg") or kb}')
+            data = kb.get('data')
+            algo_ids = data.get('algo_ids') if isinstance(data, Mapping) else None
+            if not isinstance(algo_ids, list) or not algo_ids or any(not isinstance(item, str) or not item for item in algo_ids):
+                raise RuntimeError('parser capabilities response is invalid')
+            split_rules: dict[str, str] = {}
+            layout_types: dict[str, str] = {}
+            for algo_id in algo_ids:
+                groups = groups_by_algorithm.get(algo_id)
+                if groups is None:
+                    payload = self._get_json(f'{self._doc_server_base_url()}/v1/algo/{quote(algo_id, safe="")}/groups')
+                    if _int(payload.get('code')) != 200:
+                        raise RuntimeError(f'parser capabilities request failed: {payload.get("msg") or payload}')
+                    groups = _scannable_groups(payload.get('data'))
+                    groups_by_algorithm[algo_id] = groups
+                for item in groups:
+                    split_rules.setdefault(item['id'], item['name'])
+                profile = self._parser_layout_profiles.get(algo_id)
+                if profile is None:
+                    raise RuntimeError(f'parser capabilities profile is unavailable: {algo_id}')
+                for identifier in profile:
+                    name = LAYOUT_TYPE_NAMES.get(identifier)
+                    if name is None:
+                        raise RuntimeError(f'parser capabilities profile is invalid: {algo_id}')
+                    layout_types.setdefault(identifier, name)
+            result[kb_id] = {
+                'split_rules': [{'id': key, 'name': split_rules[key]} for key in sorted(split_rules)],
+                'layout_types': [{'id': key, 'name': layout_types[key]} for key in sorted(layout_types)],
+            }
+        return result
 
     def list_groups(self, kb_id: str) -> list[str]:
         """Return active Node Group names without scanning Chunk payloads."""
@@ -397,6 +440,27 @@ def _int(value: Any) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _scannable_groups(value: object) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        raise RuntimeError('parser capabilities response is invalid')
+    result = []
+    seen = set()
+    for item in value:
+        if not isinstance(item, Mapping):
+            raise RuntimeError('parser capabilities response is invalid')
+        if item.get('active') is not True:
+            continue
+        if str(item.get('type') or '').strip().lower() not in {'chunk', 'code'}:
+            continue
+        identifier = item.get('name')
+        name = item.get('display_name') or identifier
+        if not isinstance(identifier, str) or not identifier or not isinstance(name, str) or not name or identifier in seen:
+            raise RuntimeError('parser capabilities response is invalid')
+        seen.add(identifier)
+        result.append({'id': identifier, 'name': name})
+    return result
 
 
 def _has_embedding(node: Any) -> bool:

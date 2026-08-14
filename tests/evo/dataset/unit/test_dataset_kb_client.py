@@ -114,6 +114,50 @@ class FakeDocServer:
         }
 
 
+def test_parser_capabilities_composes_existing_core_kb_and_algorithm_group_endpoints():
+    urls = []
+
+    def http(url):
+        urls.append(url)
+        if url.endswith('/v1/kbs/kb-a'):
+            return {'code': 200, 'msg': 'success', 'data': {'kb_id': 'kb-a', 'algo_ids': ['general']}}
+        return {
+            'code': 200,
+            'msg': 'success',
+            'data': [
+                {'name': 'block', 'display_name': '段落切分', 'type': 'Chunk', 'active': True},
+                {'name': 'doc-summary', 'display_name': '摘要', 'type': 'Summary', 'active': True},
+            ],
+        }
+
+    client = KnowledgeBaseClient(
+        base_url='http://doc-server:8000', http_get_json=http, document=FakeDocument(),
+        parser_layout_profiles={'general': ('text',)},
+    )
+
+    assert client.parser_capabilities(['kb-a']) == {
+        'kb-a': {
+            'split_rules': [{'id': 'block', 'name': '段落切分'}],
+            'layout_types': [{'id': 'text', 'name': '文本'}],
+        },
+    }
+    assert urls == [
+        'http://doc-server:8000/v1/kbs/kb-a',
+        'http://doc-server:8000/v1/algo/general/groups',
+    ]
+
+
+def test_parser_capabilities_rejects_a_malformed_core_response():
+    client = KnowledgeBaseClient(
+        base_url='http://doc-server:8000',
+        http_get_json=lambda _url: {'code': 200, 'data': {'kb_id': 'kb-a', 'algo_ids': []}},
+        document=FakeDocument(),
+    )
+
+    with pytest.raises(RuntimeError, match='parser capabilities'):
+        client.parser_capabilities(['kb-a'])
+
+
 def test_list_documents_uses_doc_server_and_normalizes_rows_without_real_db():
     http = FakeDocServer({
         1: {

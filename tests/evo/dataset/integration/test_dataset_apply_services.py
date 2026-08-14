@@ -44,6 +44,14 @@ def _service(values: dict[ArtifactKey, tuple[int, object]]) -> tuple[EvoService,
     return service, flow
 
 
+class _CapabilityClient:
+    def __init__(self, values: dict[str, dict]) -> None:
+        self.values = values
+
+    def parser_capabilities(self, kb_ids: list[str]) -> dict[str, dict]:
+        return {kb_id: self.values[kb_id] for kb_id in kb_ids}
+
+
 def _revision(*refs: ArtifactRef) -> str:
     return ProjectionService._build_revision(tuple(refs))
 
@@ -109,6 +117,28 @@ def test_material_apply_rejects_mixing_scan_configuration_and_chunk_selection() 
             'changes': {'target_case_count': 5, 'chunk_selection_changes': []},
         }))
     assert error.value.status_code == 400
+
+
+def test_material_apply_rejects_enabling_a_capability_not_supported_by_current_sources() -> None:
+    service, _ = _service(_material_values())
+    service.capability_client = _CapabilityClient({
+        'kb-a': {
+            'split_rules': [{'id': 'block', 'name': '段落'}],
+            'layout_types': [{'id': 'text', 'name': '文本'}],
+        },
+    })
+    source = ArtifactRef(ArtifactKey.scalar(A.CORPUS_SOURCE_CONFIG), 3)
+    selection = ArtifactRef(ArtifactKey.scalar(A.DATASET_SELECT_DOCS_PARAMS), 4)
+    chunks = ArtifactRef(ArtifactKey.scalar(A.DATASET_BUILD_CHUNKS_PARAMS), 5)
+
+    with pytest.raises(ServiceError) as error:
+        asyncio.run(service.apply_material_scan_config('thr-1', {
+            'request_id': 'unsupported-capability',
+            'expected_revision': _revision(source, selection, chunks),
+            'changes': {'split_rule_ids': ['line']},
+        }))
+
+    assert error.value.status_code == 422
 
 
 def test_apply_material_chunk_selection_preserves_quota_and_uses_document_snapshot_cas() -> None:

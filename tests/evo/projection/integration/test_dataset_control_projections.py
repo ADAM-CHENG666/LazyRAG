@@ -38,8 +38,20 @@ class _ControlFlow:
         return ArtifactRecord(ArtifactRef(key, version), producer='test')
 
 
-def _service(values: dict[ArtifactKey, dict[int, object]], *, has_thread: bool = True) -> ProjectionService:
-    return ProjectionService(_ControlFlow(values, has_thread=has_thread), definition=None)
+def _service(values: dict[ArtifactKey, dict[int, object]], *, has_thread: bool = True,
+             capability_client: object | None = None) -> ProjectionService:
+    kwargs = {} if capability_client is None else {'capability_client': capability_client}
+    return ProjectionService(_ControlFlow(values, has_thread=has_thread), definition=None, **kwargs)
+
+
+class _CapabilityClient:
+    def __init__(self, values: dict[str, dict]) -> None:
+        self.values = values
+        self.calls: list[list[str]] = []
+
+    def parser_capabilities(self, kb_ids: list[str]) -> dict[str, dict]:
+        self.calls.append(kb_ids)
+        return {kb_id: self.values[kb_id] for kb_id in kb_ids}
 
 
 def _topic(topic_id: str, *, question_type: str = 'precision', chunk_count: int = 1) -> dict:
@@ -102,6 +114,79 @@ def test_material_adjustment_options_requires_all_current_configuration_artifact
     with pytest.raises(ServiceError) as error:
         asyncio.run(service.material_adjustment_options('thr-1'))
     assert error.value.status_code == 404
+
+
+def test_material_adjustment_options_intersects_enabled_kb_capabilities_and_projects_current_state() -> None:
+    source_key = ArtifactKey.scalar(A.CORPUS_SOURCE_CONFIG)
+    selection_key = ArtifactKey.scalar(A.DATASET_SELECT_DOCS_PARAMS)
+    chunks_key = ArtifactKey.scalar(A.DATASET_BUILD_CHUNKS_PARAMS)
+    capabilities = _CapabilityClient({
+        'kb-a': {
+            'split_rules': [{'id': 'block', 'name': '段落'}, {'id': 'line', 'name': '句子'}],
+            'layout_types': [{'id': 'text', 'name': '文本'}, {'id': 'table', 'name': '表格'}],
+        },
+        'kb-b': {
+            'split_rules': [{'id': 'block', 'name': '段落'}],
+            'layout_types': [{'id': 'text', 'name': '文本'}],
+        },
+    })
+    service = _service({
+        source_key: {1: {'kb_id': ['kb-a', 'kb-b'], 'csv_data': [], 'target_case_count': 2}},
+        selection_key: {1: {'knowledge_bases': [{'kb_id': 'kb-a', 'included': True}, {'kb_id': 'kb-b', 'included': True}]}},
+        chunks_key: {1: {'groups': ['block', 'line'], 'allowed_types': ['text', 'table']}},
+    }, capability_client=capabilities)
+
+    result = asyncio.run(service.material_adjustment_options('thr-1'))
+
+    assert capabilities.calls == [['kb-a', 'kb-b']]
+    assert result['split_rules'] == [
+        {'id': 'block', 'name': '段落', 'supported': True, 'enabled': True, 'priority': 1},
+        {'id': 'line', 'name': '句子', 'supported': False, 'enabled': True, 'priority': 2},
+    ]
+    assert result['layout_types'] == [
+        {'id': 'table', 'name': '表格', 'supported': False, 'enabled': True},
+        {'id': 'text', 'name': '文本', 'supported': True, 'enabled': True},
+    ]
+
+
+def test_material_adjustment_options_marks_every_capability_unsupported_without_an_enabled_kb() -> None:
+    source_key = ArtifactKey.scalar(A.CORPUS_SOURCE_CONFIG)
+    selection_key = ArtifactKey.scalar(A.DATASET_SELECT_DOCS_PARAMS)
+    chunks_key = ArtifactKey.scalar(A.DATASET_BUILD_CHUNKS_PARAMS)
+    capabilities = _CapabilityClient({
+        'kb-a': {'split_rules': [{'id': 'block', 'name': '段落'}], 'layout_types': [{'id': 'text', 'name': '文本'}]},
+    })
+    service = _service({
+        source_key: {1: {'kb_id': ['kb-a'], 'csv_data': [], 'target_case_count': 2}},
+        selection_key: {1: {'knowledge_bases': [{'kb_id': 'kb-a', 'included': False}]}},
+        chunks_key: {1: {'groups': ['block'], 'allowed_types': ['text']}},
+    }, capability_client=capabilities)
+
+    result = asyncio.run(service.material_adjustment_options('thr-1'))
+
+    assert result['split_rules'][0]['supported'] is False
+    assert result['layout_types'][0]['supported'] is False
+
+
+def test_material_adjustment_options_maps_core_capability_failure_to_503() -> None:
+    source_key = ArtifactKey.scalar(A.CORPUS_SOURCE_CONFIG)
+    selection_key = ArtifactKey.scalar(A.DATASET_SELECT_DOCS_PARAMS)
+    chunks_key = ArtifactKey.scalar(A.DATASET_BUILD_CHUNKS_PARAMS)
+
+    class _UnavailableCapabilities:
+        def parser_capabilities(self, _kb_ids: list[str]) -> dict:
+            raise RuntimeError('core unavailable')
+
+    service = _service({
+        source_key: {1: {'kb_id': ['kb-a'], 'csv_data': [], 'target_case_count': 2}},
+        selection_key: {1: {'knowledge_bases': [{'kb_id': 'kb-a', 'included': True}]}},
+        chunks_key: {1: {'groups': ['block'], 'allowed_types': ['text']}},
+    }, capability_client=_UnavailableCapabilities())
+
+    with pytest.raises(ServiceError) as error:
+        asyncio.run(service.material_adjustment_options('thr-1'))
+
+    assert error.value.status_code == 503
 
 
 def test_case_topic_options_filters_by_case_lane_and_excludes_current_and_occupied_topics() -> None:
