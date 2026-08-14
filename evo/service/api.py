@@ -212,6 +212,11 @@ def create_app(root: str | Path | None = None) -> FastAPI:
             page_token=page_token,
         )
 
+    @app.get('/threads/{thread_id}/dataset/materials/adjustment-options')
+    async def dataset_material_adjustment_options(thread_id: str, request: Request) -> dict[str, Any]:
+        _query_keys(request, set())
+        return await _service(app).projections.material_adjustment_options(thread_id)
+
     @app.get('/threads/{thread_id}/dataset/materials/knowledge-bases/{knowledge_base_id}/documents/{document_id}')
     async def dataset_material_document_detail(thread_id: str, knowledge_base_id: str, document_id: str,
                                                selected: str = '', split_rule: str = '', page_size: str = '',
@@ -234,6 +239,13 @@ def create_app(root: str | Path | None = None) -> FastAPI:
             topic_id,
             page_size=_optional_query_int(page_size, 'page_size'),
             page_token=page_token,
+        )
+
+    @app.get('/threads/{thread_id}/dataset/cases/{case_id}/topic-options')
+    async def dataset_case_topic_options(thread_id: str, case_id: str, page_size: str = '',
+                                         page_token: str = '') -> dict[str, Any]:
+        return await _service(app).projections.case_topic_options(
+            thread_id, case_id, page_size=_optional_query_int(page_size, 'page_size'), page_token=page_token,
         )
 
     @app.get('/threads/{thread_id}/gates/{step}/versions/{version}:download')

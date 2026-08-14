@@ -22,6 +22,7 @@ from evo.artifact_runtime import (
 )
 from evo.message_intent import MessageIntent, MessageRequest, MessageTurnResult
 from evo.operations import evo_flow_definition
+from evo.operations.dataset.source_config import normalize_source_config
 from evo.repair_model import EvoModelConfigError, resolve_evo_model
 
 from .contracts import (
@@ -514,6 +515,14 @@ def _seed_values(thread_id: str, request: ThreadCreate) -> dict[str, object]:
         'case_deadline_seconds': request.inputs.case_deadline_seconds,
         'first_frame_timeout_seconds': _FIRST_FRAME_TIMEOUT,
     }
+    source_config = {
+        'kb_id': request.inputs.kb_id,
+        'knowledge_base_names': request.inputs.knowledge_base_names,
+        'csv_data': request.inputs.csv_data,
+        'target_case_count': request.inputs.num_case,
+        'min_case_count': request.inputs.num_case,
+    }
+    source_ids = normalize_source_config(source_config)['kb_ids']
     return {
         A.RUN_CONFIG: {
             'thread_id': thread_id,
@@ -522,13 +531,15 @@ def _seed_values(thread_id: str, request: ThreadCreate) -> dict[str, object]:
             'num_case': request.inputs.num_case,
             'llm_config': llm_config,
         },
-        A.CORPUS_SOURCE_CONFIG: {
-            'kb_id': request.inputs.kb_id,
-            'knowledge_base_names': request.inputs.knowledge_base_names,
-            'csv_data': request.inputs.csv_data,
-            'target_case_count': request.inputs.num_case,
-            'min_case_count': request.inputs.num_case,
+        A.CORPUS_SOURCE_CONFIG: source_config,
+        A.DATASET_SELECT_DOCS_PARAMS: {
+            'knowledge_bases': [
+                {'kb_id': kb_id, 'included': True}
+                for kb_id in source_ids
+            ],
+            'excluded_docs': [],
         },
+        A.DATASET_BUILD_CHUNKS_PARAMS: {},
         A.DATASET_QAPLAN_PLAN_PARAMS: {},
         A.EVAL_TARGET_CONFIG: target_config,
         A.EVAL_POLICY: {'judge_llm_config': llm_config},

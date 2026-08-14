@@ -631,6 +631,131 @@ class ProjectionService:
             },
         }
 
+    async def material_adjustment_options(self, thread_id: str) -> dict[str, Any]:
+        if not await self.flow.has_run(thread_id):
+            raise ServiceError(404, f'thread not found: {thread_id}')
+        source_key = ArtifactKey.scalar(A.CORPUS_SOURCE_CONFIG)
+        selection_key = ArtifactKey.scalar(A.DATASET_SELECT_DOCS_PARAMS)
+        chunks_key = ArtifactKey.scalar(A.DATASET_BUILD_CHUNKS_PARAMS)
+        artifacts = await self._read_artifact_batch(
+            thread_id, (source_key, selection_key, chunks_key), {},
+        )
+        source = _mapping_value(artifacts[source_key]['value'], 'source_config')
+        selection = _mapping_value(artifacts[selection_key]['value'], 'select_docs_params')
+        source_ids = _source_knowledge_base_ids(source)
+        names = source.get('knowledge_base_names')
+        names = names if isinstance(names, Mapping) else {}
+        enabled = {
+            item.get('kb_id'): item.get('included') is True
+            for item in selection.get('knowledge_bases', ())
+            if isinstance(item, Mapping) and isinstance(item.get('kb_id'), str)
+        }
+        refs = tuple(_public_artifact_ref(artifacts[key]['record']) for key in (
+            source_key, selection_key, chunks_key,
+        ))
+        return {
+            'thread_id': thread_id,
+            'revision': self._build_revision(refs),
+            'target_case_count': source.get('target_case_count'),
+            'knowledge_bases': [
+                {
+                    'id': kb_id,
+                    'name': str(names.get(kb_id) or kb_id),
+                    'included': enabled.get(kb_id, False),
+                }
+                for kb_id in source_ids
+            ],
+            # P0: parser capability directories have not yet been supplied by Core/Parser.
+            'split_rules': [],
+            'layout_types': [],
+        }
+
+    async def case_topic_options(
+        self, thread_id: str, case_id: str, *, page_size: int | None = None, page_token: str = '',
+    ) -> dict[str, Any]:
+        if not await self.flow.has_run(thread_id):
+            raise ServiceError(404, f'thread not found: {thread_id}')
+        size = self._validate_page_size(page_size)
+        filters = self._normalize_filters({'case_id': _required_id(case_id, 'case_id')})
+        plan_key = ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN)
+        topic_key = ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST)
+        refs: tuple[ArtifactRef, ...] = ()
+        revision = ''
+        offset = 0
+        if page_token:
+            context = self._resolve_page_token(
+                page_token, thread_id=thread_id, list_name='dataset.case_topic_options',
+                filters=filters, page_size=size,
+            )
+            refs = self._resolve_revision(context['revision'])
+            if {ref.key for ref in refs} != {plan_key, topic_key}:
+                raise ServiceError(400, 'page_token is invalid')
+            revision, offset = context['revision'], context['next_offset']
+        refs_by_key = {ref.key: ref for ref in refs}
+        try:
+            artifacts = await self._read_artifact_batch(
+                thread_id, (plan_key, topic_key), refs_by_key,
+            )
+        except ServiceError as error:
+            if page_token and error.status_code == 404:
+                raise ServiceError(409, 'page_token pagination snapshot is unavailable') from None
+            raise
+        if not page_token:
+            revision = self._build_revision(tuple(
+                _public_artifact_ref(artifacts[key]['record']) for key in (plan_key, topic_key)
+            ))
+
+        plan = _mapping_value(artifacts[plan_key]['value'], 'qaplan_plan')
+        items = plan.get('items') if isinstance(plan.get('items'), list) else []
+        current = next(
+            (item for item in items if isinstance(item, Mapping) and item.get('case_id') == case_id), None,
+        )
+        if current is None:
+            raise ServiceError(404, 'generated case plan not found')
+        question_type = current.get('question_type')
+        difficulty = current.get('difficulty')
+        current_topic_id = current.get('topic_id')
+        required_chunks = _TOPIC_OPTION_MIN_CHUNKS.get(difficulty)
+        if question_type not in {'precision', 'reasoning'} or required_chunks is None or not isinstance(current_topic_id, str):
+            raise ServiceError(503, 'qaplan plan projection is invalid')
+        occupied = {
+            item.get('topic_id')
+            for item in items
+            if isinstance(item, Mapping)
+            and item.get('case_id') != case_id
+            and item.get('question_type') == question_type
+            and item.get('difficulty') == difficulty
+            and isinstance(item.get('topic_id'), str)
+        }
+        topics = _mapping_value(artifacts[topic_key]['value'], 'topic_manifest').get('topics')
+        topics = topics if isinstance(topics, list) else ()
+        rows = [
+            {
+                'topic_id': topic.get('topic_id'),
+                'name': str(topic.get('name') or ''),
+                'chunk_count': topic.get('chunk_count'),
+            }
+            for topic in topics if isinstance(topic, Mapping)
+            and topic.get('question_type') == question_type
+            and isinstance(topic.get('chunk_count'), int)
+            and topic['chunk_count'] >= required_chunks
+            and topic.get('topic_id') not in occupied | {current_topic_id}
+        ]
+        rows.sort(key=lambda row: (row['name'], str(row['topic_id'])))
+        page = _page(rows, size, str(offset))
+        next_offset = page['next_page_token']
+        return {
+            'thread_id': thread_id,
+            'case_id': case_id,
+            'items': page['items'],
+            'next_page_token': (
+                '' if not next_offset else self._build_page_token(
+                    thread_id=thread_id, list_name='dataset.case_topic_options', revision=revision,
+                    filters=filters, page_size=size, next_offset=int(next_offset),
+                )
+            ),
+        }
+
     async def _read_artifact_batch(
         self, thread_id: str, keys: tuple[ArtifactKey, ...], refs_by_key: Mapping[ArtifactKey, ArtifactRef],
     ) -> dict[ArtifactKey, dict[str, Any]]:
@@ -858,6 +983,28 @@ def _topic_filters(question_type: str, min_chunk_count: int | None,
         **({'min_chunk_count': min_chunk_count} if min_chunk_count is not None else {}),
         **({'max_chunk_count': max_chunk_count} if max_chunk_count is not None else {}),
     }
+
+
+_TOPIC_OPTION_MIN_CHUNKS = {'easy': 1, 'medium': 2, 'hard': 3}
+
+
+def _mapping_value(value: object, name: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise ServiceError(503, f'{name} projection is invalid')
+    return value
+
+
+def _source_knowledge_base_ids(source: Mapping[str, object]) -> list[str]:
+    raw_ids = source.get('kb_ids', source.get('kb_id', ()))
+    ids = [item for item in raw_ids if isinstance(item, str)] if isinstance(raw_ids, list) else []
+    raw_csv = source.get('csv_sources', source.get('csv_data', ()))
+    if isinstance(raw_csv, list):
+        for item in raw_csv:
+            if isinstance(item, Mapping):
+                csv_id = item.get('kb_id') if 'kb_id' in item else next(iter(item), None) if len(item) == 1 else None
+                if isinstance(csv_id, str) and csv_id not in ids:
+                    ids.append(csv_id)
+    return ids
 
 
 def _required_id(value: object, name: str) -> str:

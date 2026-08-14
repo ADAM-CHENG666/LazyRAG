@@ -46,6 +46,14 @@ def test_service_seed_preserves_csv_source_mapping_for_dataset_normalization() -
     assert seed[A.CORPUS_SOURCE_CONFIG]['csv_data'] == [
         {'kb-2': '/tmp/cases.csv'},
     ]
+    assert seed['dataset.select_docs_params'] == {
+        'knowledge_bases': [
+            {'kb_id': 'kb-1', 'included': True},
+            {'kb_id': 'kb-2', 'included': True},
+        ],
+        'excluded_docs': [],
+    }
+    assert seed['dataset.build_chunks_params'] == {}
 
 
 def test_service_seed_preserves_core_authoritative_knowledge_base_names() -> None:

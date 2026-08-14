@@ -59,6 +59,7 @@ async def import_cases_operation(ctx: OperationContext, source_config: object) -
     inputs={
         'source_config': one(A.CORPUS_SOURCE_CONFIG),
         'import_manifest': one(A.DATASET_IMPORT_CASES_MANIFEST),
+        'select_docs_params': one(A.DATASET_SELECT_DOCS_PARAMS),
     },
     outputs={'selected_docs': scalar(A.DATASET_SELECTED_DOCS)},
 )
@@ -66,14 +67,13 @@ async def select_docs_operation(
     ctx: OperationContext,
     source_config: object,
     import_manifest: object,
+    select_docs_params: object,
 ) -> OperationResult:
     config = normalize_source_config(source_config)
     selected = select_docs(ctx, {
         'source_config': config,
         'import_cases_manifest': _mapping(import_manifest, 'import_manifest'),
-        'select_docs_params': {
-            'knowledge_bases': [{'kb_id': kb_id, 'included': True} for kb_id in config['kb_ids']],
-        },
+        'select_docs_params': _mapping(select_docs_params, 'select_docs_params'),
     })['selected_docs']
     return await _result(ctx, 'dataset.documents_selected', {'selected_docs': selected})
 
@@ -83,6 +83,7 @@ async def select_docs_operation(
     inputs={
         'selected_docs': one(A.DATASET_SELECTED_DOCS),
         'import_manifest': one(A.DATASET_IMPORT_CASES_MANIFEST),
+        'build_chunks_params': one(A.DATASET_BUILD_CHUNKS_PARAMS),
     },
     outputs={
         'candidates': scalar(A.DATASET_BUILD_CHUNK_CANDIDATES),
@@ -94,11 +95,12 @@ async def build_chunk_candidates_operation(
     ctx: OperationContext,
     selected_docs: object,
     import_manifest: object,
+    build_chunks_params: object,
 ) -> OperationResult:
     candidates = build_chunk_candidates(ctx, {
         'selected_docs': _mapping(selected_docs, 'selected_docs'),
         'import_cases_manifest': _mapping(import_manifest, 'import_manifest'),
-        'build_chunks_params': {},
+        'build_chunks_params': _mapping(build_chunks_params, 'build_chunks_params'),
     })['build_chunk_candidates']
     partition_keys = tuple(
         str(chunk['chunk_id'])

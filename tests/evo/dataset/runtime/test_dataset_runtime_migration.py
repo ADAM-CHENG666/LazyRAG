@@ -226,6 +226,8 @@ def test_import_only_pipeline_runs_on_new_artifact_runtime(monkeypatch, tmp_path
             keys = (
                 ArtifactKey.scalar(A.RUN_CONFIG),
                 ArtifactKey.scalar(A.CORPUS_SOURCE_CONFIG),
+                ArtifactKey.scalar(A.DATASET_SELECT_DOCS_PARAMS),
+                ArtifactKey.scalar(A.DATASET_BUILD_CHUNKS_PARAMS),
                 ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN_PARAMS),
                 ArtifactKey.scalar(A.APPROVAL_DATASET_MATERIAL_PREPARATION),
                 ArtifactKey.scalar(A.APPROVAL_DATASET_TOPIC_DISCOVERY),
@@ -241,10 +243,15 @@ def test_import_only_pipeline_runs_on_new_artifact_runtime(monkeypatch, tmp_path
                         'csv_data': [],
                         'target_case_count': 1,
                     }),
-                    ArtifactDraft(keys[2], {}),
+                    ArtifactDraft(keys[2], {
+                        'knowledge_bases': [{'kb_id': 'kb-a', 'included': True}],
+                        'excluded_docs': [],
+                    }),
                     ArtifactDraft(keys[3], {}),
                     ArtifactDraft(keys[4], {}),
                     ArtifactDraft(keys[5], {}),
+                    ArtifactDraft(keys[6], {}),
+                    ArtifactDraft(keys[7], {}),
                 ),
                 {key: None for key in keys},
             ))
@@ -301,6 +308,8 @@ def test_generated_pipeline_runs_with_dynamic_chunk_and_case_partitions(monkeypa
             keys = (
                 ArtifactKey.scalar(A.RUN_CONFIG),
                 ArtifactKey.scalar(A.CORPUS_SOURCE_CONFIG),
+                ArtifactKey.scalar(A.DATASET_SELECT_DOCS_PARAMS),
+                ArtifactKey.scalar(A.DATASET_BUILD_CHUNKS_PARAMS),
                 ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN_PARAMS),
                 ArtifactKey.scalar(A.APPROVAL_DATASET_MATERIAL_PREPARATION),
                 ArtifactKey.scalar(A.APPROVAL_DATASET_TOPIC_DISCOVERY),
@@ -316,10 +325,15 @@ def test_generated_pipeline_runs_with_dynamic_chunk_and_case_partitions(monkeypa
                         'csv_data': [],
                         'target_case_count': 1,
                     }),
-                    ArtifactDraft(keys[2], {}),
+                    ArtifactDraft(keys[2], {
+                        'knowledge_bases': [{'kb_id': 'kb-a', 'included': True}],
+                        'excluded_docs': [],
+                    }),
                     ArtifactDraft(keys[3], {}),
                     ArtifactDraft(keys[4], {}),
                     ArtifactDraft(keys[5], {}),
+                    ArtifactDraft(keys[6], {}),
+                    ArtifactDraft(keys[7], {}),
                 ),
                 {key: None for key in keys},
             ))
