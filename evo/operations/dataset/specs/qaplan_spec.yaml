@@ -68,6 +68,7 @@ input_payload:
       fields:
         available: {type: boolean, required: true}
         kb_id: {type: string, required: false}
+        # 全局唯一 KnowledgeBase DocNode.uid；同时是 dataset.chunk 的 partition_key。
         chunk_id: {type: string, required: true}
         doc_id: {type: string, required: true}
         text: {type: string, required: true}
@@ -117,7 +118,7 @@ execution_flow:
   - 从当前输出分区在 assignments 中取得唯一 mode；imported 分区直接输出已校验的 imported_case，不读取 qaplan_plan 或 Topic。
   - generated 分区必须以 case_id 在 qaplan_plan.items 中唯一匹配计划项；计划项的 topic_id 是唯一可编辑选题事实。
   - 用 topic_id 在当前 topic_discovery_manifest.topics 中唯一查找 Topic，校验其 question_type 和 chunk_count 满足计划项题型、难度。
-  - 依 Topic.chunk_ids 原顺序从当前 available Chunk 解析完整 {kb_id, doc_id, chunk_id, text} references；禁止保留旧 Topic、旧 Chunk 或只存 chunk_id/text 的引用。
+  - 依 Topic.chunk_ids 原顺序直接读取同名 dataset.chunk partition 的当前 available Chunk，解析完整 {kb_id, doc_id, chunk_id, text} references；禁止保留旧 Topic、旧 Chunk 或只存 chunk_id/text 的引用。
   - 由题型派生 instruction，并物化 topic={topic_id,name}、完整 references 与 qaplan 跟踪信息；这些均为只读派生字段。引用本身已包含实际 KB 来源，不再冗余保存 source.kb_ids。
   - Service 的 PATCH 只接收新 topic_id：解析后完整替换该 Case qaplan_spec。若同次显式提交 generate/grading，则在校验新 references 后原子保存，自动派生不得覆盖显式内容。
 

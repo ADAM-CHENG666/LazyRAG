@@ -212,6 +212,30 @@ def create_app(root: str | Path | None = None) -> FastAPI:
             page_token=page_token,
         )
 
+    @app.get('/threads/{thread_id}/dataset/materials/knowledge-bases/{knowledge_base_id}/documents/{document_id}')
+    async def dataset_material_document_detail(thread_id: str, knowledge_base_id: str, document_id: str,
+                                               selected: str = '', split_rule: str = '', page_size: str = '',
+                                               page_token: str = '') -> dict[str, Any]:
+        return await _service(app).projections.material_document_detail(
+            thread_id,
+            knowledge_base_id,
+            document_id,
+            selected=_optional_query_bool(selected, 'selected'),
+            split_rule=split_rule,
+            page_size=_optional_query_int(page_size, 'page_size'),
+            page_token=page_token,
+        )
+
+    @app.get('/threads/{thread_id}/dataset/topics/{topic_id}')
+    async def dataset_topic_detail(thread_id: str, topic_id: str, page_size: str = '',
+                                   page_token: str = '') -> dict[str, Any]:
+        return await _service(app).projections.topic_detail(
+            thread_id,
+            topic_id,
+            page_size=_optional_query_int(page_size, 'page_size'),
+            page_token=page_token,
+        )
+
     @app.get('/threads/{thread_id}/gates/{step}/versions/{version}:download')
     async def gate_download(thread_id: str, step: str, version: int,
                             format: str = 'json'  # noqa: A002

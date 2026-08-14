@@ -1,4 +1,4 @@
-# 材料阶段稳定快照：只承载概览与下游需要的已入围 Slot 索引。
+# 材料阶段稳定快照：只承载概览与下游需要的已入围 Chunk 轻量索引。
 operation:
   op_id: dataset.build_chunks_manifest
   flow: dataset
@@ -81,7 +81,7 @@ output_payload:
       warnings:
         type: list[string]
       chunks:
-        # 下游只需定位已入围 Slot；正文/Embedding 保留在 dataset.chunk。
+        # 下游只需定位已入围 Chunk；partition 必须等于其全局唯一 chunk_id。正文/Embedding 保留在 dataset.chunk。
         type: array
         item:
           type: object
@@ -99,7 +99,7 @@ output_payload:
 execution_flow:
   - 将导入、目标与自动生成 Case 数投影为 source.case_counts；仅暴露 csv_present，不复制 csv_path。
   - 从候选结果复制 scanned/effective/selected/shortfall；材料概览的比率由 Service 计算。
-  - 按 runtime partition 顺序输出 chunks 轻量索引；available 数必须等于 selected。
+  - 按当前 runtime Chunk 输出 chunks 轻量索引；每项 partition=chunk_id，available 数必须等于 selected。
   - automatic>0、effective>0 且 shortfall>0 时输出容量不足 warning。
   - 文档列表、完整有效 Chunk、配额和 selected 由上游 Artifact 提供，不在 Manifest 重复保存。
 
@@ -110,19 +110,19 @@ tests:
       - exposes_case_counts_chunk_counts_and_warnings_in_one_stable_result
       # Manifest 不得泄露 CSV 本地路径，也不得复制正文、向量等重字段。
       - never_exposes_csv_path_or_chunk_heavy_fields
-      # 轻量 Slot 中 available=true 的数量必须和候选结果的 selected_count 相等。
-      - selected_slot_count_matches_candidate_selected_count
+      # 轻量 Chunk 中 available=true 的数量必须和候选结果的 selected_count 相等。
+      - selected_chunk_count_matches_candidate_selected_count
       # 仅自动生成仍需材料且有效容量不足时才产生容量不足告警。
       - shortfall_warning_only_when_automatic_generation_needs_materials
-  lightweight_slot_index:
+  lightweight_chunk_index:
     cases:
-      # 每个静态 Slot 都保留 partition 与来源定位字段，供下游按相同快照读取。
-      - preserves_partition_and_source_locator_for_every_slot
-      # Slot 索引必须保持轻量，正文、Embedding、metadata 只能在 dataset.chunk 中读取。
+      # 每个入围 Chunk 都保留 partition=chunk_id 与来源定位字段，供下游按相同快照读取。
+      - preserves_chunk_id_partition_and_source_locator_for_every_selected_chunk
+      # Chunk 索引必须保持轻量，正文、Embedding、metadata 只能在 dataset.chunk 中读取。
       - excludes_text_embedding_and_metadata_from_manifest
-      # 全部 Case 已导入时允许所有 Slot 为占位，不将其视为材料阶段失败。
-      - imported_only_run_allows_placeholder_slots
-      # 静态声明与实际 Chunk tuple 数不一致时失败，避免形成不完整稳定快照。
-      - rejects_static_partition_tuple_mismatch
+      # 全部 Case 已导入时允许 chunks=[]，不将其视为材料阶段失败。
+      - imported_only_run_has_an_empty_chunk_index
+      # selected_count 与实际 Chunk tuple 数不一致时失败，避免形成不完整稳定快照。
+      - rejects_selected_chunk_tuple_mismatch
       # materializer 返回键必须严格等于 FixedOp 输出键。
       - return_keys_match_outputs

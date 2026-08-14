@@ -21,29 +21,57 @@ chunks_module = importlib.import_module('evo.operations.dataset.chunks_build')
 select_docs_module = importlib.import_module('evo.operations.dataset.select_docs')
 
 
-def test_current_flow_keeps_one_dataset_stage() -> None:
+def test_current_flow_splits_dataset_before_eval() -> None:
     definition = evo_flow_definition()
-    dataset_ids = {
-        operation.spec.op_id
-        for operation in definition.stage_operations(0)
-    }
 
     assert tuple(stage.name for stage in definition.stages) == A.STEPS
     assert tuple(stage.name for stage in definition.stages) == (
-        'dataset', 'eval', 'analysis', 'repair', 'abtest',
+        'dataset.material_preparation',
+        'dataset.topic_discovery',
+        'dataset.case_generation',
+        'eval',
+        'analysis',
+        'repair',
+        'abtest',
     )
-    assert len(definition.stage_operations(0)) == 21
-    assert dataset_ids == {
-        operation.spec.op_id
-        for operation in dataset_module.dataset_operations()
+    assert definition.stages[0].result_key == ArtifactKey.scalar(
+        A.DATASET_BUILD_CHUNKS_MANIFEST,
+    )
+    assert definition.stages[1].result_key == ArtifactKey.scalar(
+        A.DATASET_TOPIC_MANIFEST,
+    )
+    assert definition.stages[2].result_key == ArtifactKey.scalar(
+        A.DATASET_ENHANCE_MANIFEST,
+    )
+
+    assert {operation.spec.op_id for operation in definition.stage_operations(0)} == {
+        'dataset.import_cases',
+        'dataset.select_docs',
+        'dataset.build_chunk_candidates',
+        'dataset.build_chunk',
+        'dataset.build_chunks_manifest',
     }
-    assert dataset_ids.isdisjoint({
-        'dataset.load_corpus',
-        'dataset.build_corpus_snapshot',
-        'dataset.case_requests',
-        'dataset.prepare_case',
-    })
-    assert definition.stages[0].result_key == ArtifactKey.scalar(A.EVAL_DATASET)
+    assert {operation.spec.op_id for operation in definition.stage_operations(1)} == {
+        'dataset.extract_chunk_entities',
+        'dataset.chunk_entities_manifest',
+        'dataset.build_entity_graph',
+        'dataset.cluster_entities',
+        'dataset.cluster_embeddings',
+        'dataset.label_embedding_clusters',
+        'dataset.topic_manifest',
+    }
+    assert {operation.spec.op_id for operation in definition.stage_operations(2)} == {
+        'dataset.qaplan_plan',
+        'dataset.qaplan_spec',
+        'dataset.qaplan_manifest',
+        'dataset.generate_case',
+        'dataset.generate_manifest',
+        'dataset.enhance_case',
+        'dataset.enhance_manifest',
+    }
+    assert {'dataset.finalize_case', 'dataset.assemble'} <= {
+        operation.spec.op_id for operation in definition.stage_operations(3)
+    }
 
 
 def test_source_config_adapts_current_service_shape() -> None:
@@ -53,15 +81,18 @@ def test_source_config_adapts_current_service_shape() -> None:
         'target_case_count': 3,
     }) == {
         'kb_ids': ['kb-a', 'kb-b'],
+        'knowledge_base_names': {'kb-a': 'kb-a', 'kb-b': 'kb-b'},
         'csv_sources': [{'kb_id': 'kb-b', 'path': '/tmp/b.csv'}],
         'target_case_count': 3,
     }
     assert normalize_source_config({
         'kb_ids': ['kb-a'],
+        'knowledge_base_names': {'kb-a': 'kb-a'},
         'csv_sources': [{'kb_id': 'kb-a', 'path': '/tmp/a.csv'}],
         'target_case_count': 1,
     }) == {
         'kb_ids': ['kb-a'],
+        'knowledge_base_names': {'kb-a': 'kb-a'},
         'csv_sources': [{'kb_id': 'kb-a', 'path': '/tmp/a.csv'}],
         'target_case_count': 1,
     }
@@ -196,6 +227,9 @@ def test_import_only_pipeline_runs_on_new_artifact_runtime(monkeypatch, tmp_path
                 ArtifactKey.scalar(A.RUN_CONFIG),
                 ArtifactKey.scalar(A.CORPUS_SOURCE_CONFIG),
                 ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN_PARAMS),
+                ArtifactKey.scalar(A.APPROVAL_DATASET_MATERIAL_PREPARATION),
+                ArtifactKey.scalar(A.APPROVAL_DATASET_TOPIC_DISCOVERY),
+                ArtifactKey.scalar(A.APPROVAL_DATASET),
             )
             await flow.create('run-imported', ArtifactCommit(
                 'seed:run-imported',
@@ -208,6 +242,9 @@ def test_import_only_pipeline_runs_on_new_artifact_runtime(monkeypatch, tmp_path
                         'target_case_count': 1,
                     }),
                     ArtifactDraft(keys[2], {}),
+                    ArtifactDraft(keys[3], {}),
+                    ArtifactDraft(keys[4], {}),
+                    ArtifactDraft(keys[5], {}),
                 ),
                 {key: None for key in keys},
             ))
@@ -265,6 +302,9 @@ def test_generated_pipeline_runs_with_dynamic_chunk_and_case_partitions(monkeypa
                 ArtifactKey.scalar(A.RUN_CONFIG),
                 ArtifactKey.scalar(A.CORPUS_SOURCE_CONFIG),
                 ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN_PARAMS),
+                ArtifactKey.scalar(A.APPROVAL_DATASET_MATERIAL_PREPARATION),
+                ArtifactKey.scalar(A.APPROVAL_DATASET_TOPIC_DISCOVERY),
+                ArtifactKey.scalar(A.APPROVAL_DATASET),
             )
             await flow.create('run-generated', ArtifactCommit(
                 'seed:run-generated',
@@ -277,19 +317,28 @@ def test_generated_pipeline_runs_with_dynamic_chunk_and_case_partitions(monkeypa
                         'target_case_count': 1,
                     }),
                     ArtifactDraft(keys[2], {}),
+                    ArtifactDraft(keys[3], {}),
+                    ArtifactDraft(keys[4], {}),
+                    ArtifactDraft(keys[5], {}),
                 ),
                 {key: None for key in keys},
             ))
             await flow.start('run-generated')
             snapshot = await flow.wait_until_boundary('run-generated', timeout=10)
 
-            assert snapshot.status == 'completed'
+            assert snapshot.status == 'completed', snapshot.runtime.error
             chunk_set_record = await flow.head(
                 'run-generated', ArtifactKey.scalar(A.DATASET_CHUNK_REQUESTS),
             )
             assert chunk_set_record is not None
             chunk_set = await flow.read('run-generated', chunk_set_record.ref)
-            assert chunk_set.keys == ('chunk_0001', 'chunk_0002')
+            assert chunk_set.keys == ('chunk-source-1', 'chunk-source-2')
+            for chunk_id in chunk_set.keys:
+                record = await flow.head(
+                    'run-generated', ArtifactKey.partition(A.DATASET_CHUNK, chunk_id),
+                )
+                assert record is not None
+                assert (await flow.read('run-generated', record.ref))['chunk_id'] == chunk_id
 
             case_set_record = await flow.head(
                 'run-generated', ArtifactKey.scalar(A.EVAL_CASE_REQUESTS),

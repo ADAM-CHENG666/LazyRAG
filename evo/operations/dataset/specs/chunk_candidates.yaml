@@ -78,7 +78,10 @@ output_payload:
           fields:
             kb_id: {type: string}
             doc_id: {type: string}
-            chunk_id: {type: string}
+            chunk_id:
+              # KnowledgeBase DocNode.uid；在本 Thread 配置的全部知识库中全局唯一。
+              # 入围后它同时是 dataset.chunk_requests、dataset.chunk 分区及 Topic.chunk_ids 的共同标识。
+              type: string
             filename: {type: string}
             group: {type: string}
             # Reader 原始 metadata.type 经规范化后的标准版面类型；用于详情展示和 allowed_types 过滤。
@@ -88,10 +91,6 @@ output_payload:
             metadata: {type: object}
             discovery_index: {type: integer}
             selected: {type: boolean}
-            selection_index:
-              # 未入围为 null；入围项按稳定顺序连续编号。
-              type: integer
-              nullable: true
       quotas:
         # 冻结的精确入围数；直接编辑 selected 后必须仍满足此约束。
         type: array
@@ -114,7 +113,7 @@ execution_flow:
   - 先将各 Reader 的原始 metadata.type 规范化为标准版面类型，再按 allowed_types、正文、Embedding 判定有效；无效 Chunk 不写入 chunks。
   - allowed_types 仅可包含平台标准版面类型 ID；当前解析链路是否支持某标准类型由 Service/Core 校验，算法不得通过扫描历史 Chunk 推断支持目录。
   - 对全部有效 Chunk 保留正文、Embedding、来源与稳定 discovery_index；不得在达到配额后停止读取或丢弃未入围有效 Chunk。
-  - 按 groups 优先级、知识库、文档分配初始配额；写入 quotas，并将初始入围 Chunk 标记 selected=true 和连续 selection_index。
+  - 按 groups 优先级、知识库、文档分配初始配额；写入 quotas，并将初始入围 Chunk 标记 selected=true。没有 selection_index 或运行时 Slot。
   - 直接修改 chunks[].selected 属于用户入围调整：Service 使用 update_artifacts() 写入完整新值，校验每条 quota 后只重算下游；不得重跑本 operation。
   - 修改 groups、allowed_types、文档 included 或扫描上限属于有效性规则修改：更新输入 Artifact 并重跑本 operation。
   - auto_case_count=0 时返回空 chunks、quotas 与零值 summary。
@@ -142,8 +141,8 @@ tests:
       - group_priority_and_stable_allocation_produce_deterministic_selected_chunks
       # 每个 (KB、文档、Group) 的 selected 数量恰好等于冻结 required 配额。
       - each_document_group_quota_matches_initial_selected_count
-      # 入围项按稳定顺序获得连续编号；未入围项的 selection_index 必须为 null。
-      - selected_chunks_have_contiguous_selection_index_and_others_are_null
+      # 入围 Chunk 以其全局唯一 chunk_id 作为唯一身份；不得生成额外顺序编号。
+      - selected_chunks_use_chunk_id_as_the_only_runtime_identity
       # 容量不足但非零时仍返回所有有效 Chunk，并准确记录短缺数量。
       - positive_shortfall_returns_all_effective_chunks_and_records_shortfall
       # 仍需自动生成且没有任何有效 Chunk 时失败，避免产生不可用的空材料。

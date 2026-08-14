@@ -45,7 +45,7 @@ input_payload:
               validation:
                 - non_empty_after_strip
             available:
-              # false 表示占位 Chunk，不应作为有效 Topic 支撑材料展示。
+              # 失败恢复时可为 false；正常已入围 Chunk 均为 true。
               type: boolean
               required: false
               default: true
@@ -63,6 +63,7 @@ input_payload:
               validation:
                 - non_empty_after_strip
             partition:
+              # 正常路径必须等于全局唯一 chunk_id。
               type: string
               required: false
         validation:

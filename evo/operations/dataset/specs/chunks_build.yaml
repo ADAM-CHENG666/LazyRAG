@@ -3,7 +3,7 @@ operation:
   op_id: dataset.build_chunks
   flow: dataset
   stage: build_chunks
-  description: 按 selection_index 将已入围 Chunk 写入 runtime chunk partitions，不足部分输出占位。
+  description: 将每个已入围 Chunk 以其 chunk_id 直接写入同名 runtime partition。
 
 fixed_op:
   inputs:
@@ -42,20 +42,20 @@ output_payload:
       metadata: {type: object}
 
 execution_flow:
-  - 只消费 selected=true 的 Chunk，并按 selection_index 升序映射到稳定 runtime partition。
+  - 只消费 selected=true 的 Chunk；每个输出 runtime partition_key 必须等于该 Chunk 的 chunk_id。
   - 未入围有效 Chunk 不进入后续实体、聚类或生成流程。
-  - 没有对应入围项的 partition 输出 available=false 占位。
+  - 不创建静态 Slot 或 available=false 占位；已入围 Chunk 的集合就是运行时分区集合。
 
 tests:
   partition_mapping:
     cases:
-      # 仅 selected=true 的 Chunk 按 selection_index 升序进入对应 runtime partition。
-      - maps_only_selected_chunks_in_selection_index_order
+      # 仅 selected=true 的 Chunk 进入与自身 chunk_id 同名的 runtime partition。
+      - maps_selected_chunks_to_their_chunk_id_partitions
       # 有效但未入围的 Chunk 不得泄漏到实体提取、主题发现或生成输入。
       - effective_but_unselected_chunks_never_reach_runtime_partitions
-      # 入围 Chunk 少于静态 partition 数时，剩余 partition 必须输出 available=false。
-      - insufficient_selected_chunks_produce_placeholders
-      # 映射后的真实 Slot 必须逐字段保留来源、标准版面类型、正文、向量与 metadata。
+      # 没有额外 Slot 或占位分区；未入围 Chunk 不创建 runtime 输出。
+      - never_creates_placeholder_partitions_for_unselected_chunks
+      # 映射后的真实 Chunk 必须逐字段保留来源、标准版面类型、正文、向量与 metadata。
       - selected_payload_preserves_source_text_embedding_and_metadata
       # materializer 返回键必须严格等于 FixedOp 输出键。
       - return_keys_match_outputs

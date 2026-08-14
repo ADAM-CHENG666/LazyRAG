@@ -51,12 +51,22 @@ ABTEST_CANDIDATE_JUDGE_RESULT = 'abtest.candidate_judge_results'
 ABTEST_CANDIDATE_EVAL_SUMMARY = 'abtest.candidate_eval_summary'
 ABTEST_COMPARISON = 'abtest.comparison'
 
+APPROVAL_DATASET_MATERIAL_PREPARATION = 'approval.dataset.material_preparation'
+APPROVAL_DATASET_TOPIC_DISCOVERY = 'approval.dataset.topic_discovery'
 APPROVAL_DATASET = 'approval.dataset'
 APPROVAL_EVAL = 'approval.eval'
 APPROVAL_ANALYSIS = 'approval.analysis'
 APPROVAL_REPAIR = 'approval.repair'
 
-STEPS = ('dataset', 'eval', 'analysis', 'repair', 'abtest')
+STEPS = (
+    'dataset.material_preparation',
+    'dataset.topic_discovery',
+    'dataset.case_generation',
+    'eval',
+    'analysis',
+    'repair',
+    'abtest',
+)
 
 SEEDS = (
     RUN_CONFIG,
@@ -69,7 +79,9 @@ SEEDS = (
 )
 
 ROOTS = MappingProxyType({
-    'dataset': EVAL_DATASET,
+    'dataset.material_preparation': DATASET_BUILD_CHUNKS_MANIFEST,
+    'dataset.topic_discovery': DATASET_TOPIC_MANIFEST,
+    'dataset.case_generation': DATASET_ENHANCE_MANIFEST,
     'eval': EVAL_SUMMARY,
     'analysis': ANALYSIS_SUMMARY,
     'repair': REPAIR_VERIFIED_PATCH,
@@ -77,7 +89,9 @@ ROOTS = MappingProxyType({
 })
 
 APPROVALS = MappingProxyType({
-    'dataset': APPROVAL_DATASET,
+    'dataset.material_preparation': APPROVAL_DATASET_MATERIAL_PREPARATION,
+    'dataset.topic_discovery': APPROVAL_DATASET_TOPIC_DISCOVERY,
+    'dataset.case_generation': APPROVAL_DATASET,
     'eval': APPROVAL_EVAL,
     'analysis': APPROVAL_ANALYSIS,
     'repair': APPROVAL_REPAIR,

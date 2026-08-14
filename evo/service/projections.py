@@ -429,6 +429,220 @@ class ProjectionService:
             ),
         }
 
+    async def material_document_detail(
+        self,
+        thread_id: str,
+        knowledge_base_id: str,
+        document_id: str,
+        *,
+        selected: bool | None = None,
+        split_rule: str = '',
+        page_size: int | None = None,
+        page_token: str = '',
+    ) -> dict[str, Any]:
+        if not await self.flow.has_run(thread_id):
+            raise ServiceError(404, f'thread not found: {thread_id}')
+        size = self._validate_page_size(page_size)
+        filters = _document_detail_filters(knowledge_base_id, document_id, selected, split_rule)
+        normalized_filters = self._normalize_filters(filters)
+        selected_key = ArtifactKey.scalar(A.DATASET_SELECTED_DOCS)
+        candidates_key = ArtifactKey.scalar(A.DATASET_BUILD_CHUNK_CANDIDATES)
+        refs: tuple[ArtifactRef, ...] = ()
+        revision = ''
+        offset = 0
+        if page_token:
+            context = self._resolve_page_token(
+                page_token, thread_id=thread_id, list_name='dataset.material_document_detail',
+                filters=normalized_filters, page_size=size,
+            )
+            refs = self._resolve_revision(context['revision'])
+            if (not {ref.key for ref in refs}.issubset({selected_key, candidates_key})
+                    or selected_key not in {ref.key for ref in refs}):
+                raise ServiceError(400, 'page_token is invalid')
+            revision, offset = context['revision'], context['next_offset']
+        refs_by_key = {ref.key: ref for ref in refs}
+        try:
+            selected_artifact = await self.artifact(
+                thread_id, selected_key.artifact_id,
+                version=None if selected_key not in refs_by_key else refs_by_key[selected_key].version,
+            )
+        except ServiceError as error:
+            if page_token and error.status_code == 404:
+                raise ServiceError(409, 'page_token pagination snapshot is unavailable') from None
+            raise
+        candidates_artifact = None
+        if not page_token or candidates_key in refs_by_key:
+            try:
+                candidates_artifact = await self.artifact(
+                    thread_id, candidates_key.artifact_id,
+                    version=None if candidates_key not in refs_by_key else refs_by_key[candidates_key].version,
+                )
+            except ServiceError as error:
+                if page_token and error.status_code == 404:
+                    raise ServiceError(409, 'page_token pagination snapshot is unavailable') from None
+                if not page_token and error.status_code == 404:
+                    candidates_artifact = None
+                else:
+                    raise
+        if not page_token:
+            refs = (_public_artifact_ref(selected_artifact['record']),)
+            if candidates_artifact is not None:
+                refs += (_public_artifact_ref(candidates_artifact['record']),)
+            revision = self._build_revision(refs)
+
+        selected_value = selected_artifact['value']
+        source_documents = selected_value.get('documents', ()) if isinstance(selected_value, Mapping) else ()
+        document = next(
+            (
+                item for item in source_documents
+                if isinstance(item, Mapping)
+                and item.get('kb_id') == knowledge_base_id
+                and item.get('doc_id') == document_id
+            ),
+            None,
+        )
+        if document is None:
+            raise ServiceError(404, 'knowledge base or document not found')
+        candidate_value = None if candidates_artifact is None else candidates_artifact['value']
+        all_chunks = _document_candidate_chunks(candidate_value, knowledge_base_id, document_id)
+        quotas = _document_quotas(candidate_value, all_chunks, knowledge_base_id, document_id)
+        rows = [
+            _document_chunk_dto(chunk)
+            for chunk in all_chunks
+            if _document_chunk_matches(chunk, filters)
+        ]
+        rows.sort(key=lambda item: (item['_discovery_index'], item['chunk_id']))
+        for row in rows:
+            row.pop('_discovery_index')
+        page = _page(rows, size, str(offset))
+        next_offset = page['next_page_token']
+        return {
+            'thread_id': thread_id,
+            'revision': revision,
+            'document': {
+                'id': document_id,
+                'name': str(document.get('filename') or document_id),
+                'included': document.get('included') is True,
+                'knowledge_base': {
+                    'id': knowledge_base_id,
+                    'name': str(document.get('knowledge_base_name') or knowledge_base_id),
+                },
+            },
+            'chunk_summary': (
+                None if candidates_artifact is None else {
+                    'effective': len(all_chunks),
+                    'selected': sum(chunk.get('selected') is True for chunk in all_chunks),
+                }
+            ),
+            'quotas': quotas,
+            'chunks': {
+                'items': page['items'],
+                'next_page_token': (
+                    '' if not next_offset else self._build_page_token(
+                        thread_id=thread_id,
+                        list_name='dataset.material_document_detail',
+                        revision=revision,
+                        filters=normalized_filters,
+                        page_size=size,
+                        next_offset=int(next_offset),
+                    )
+                ),
+            },
+        }
+
+    async def topic_detail(
+        self, thread_id: str, topic_id: str, *, page_size: int | None = None, page_token: str = '',
+    ) -> dict[str, Any]:
+        if not await self.flow.has_run(thread_id):
+            raise ServiceError(404, f'thread not found: {thread_id}')
+        size = self._validate_page_size(page_size)
+        filters = self._normalize_filters({'topic_id': _required_id(topic_id, 'topic_id')})
+        manifest_key = ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST)
+        documents_key = ArtifactKey.scalar(A.DATASET_SELECTED_DOCS)
+        refs: tuple[ArtifactRef, ...] = ()
+        revision = ''
+        offset = 0
+        if page_token:
+            context = self._resolve_page_token(
+                page_token, thread_id=thread_id, list_name='dataset.topic_detail', filters=filters, page_size=size,
+            )
+            refs = self._resolve_revision(context['revision'])
+            if ({ref.key for ref in refs if ref.key in {manifest_key, documents_key}} != {manifest_key, documents_key}
+                    or any(ref.key.artifact_id not in {A.DATASET_TOPIC_MANIFEST, A.DATASET_SELECTED_DOCS, A.DATASET_CHUNK}
+                           for ref in refs)):
+                raise ServiceError(400, 'page_token is invalid')
+            revision, offset = context['revision'], context['next_offset']
+        refs_by_key = {ref.key: ref for ref in refs}
+        try:
+            basics = await self._read_artifact_batch(thread_id, (manifest_key, documents_key), refs_by_key)
+        except ServiceError as error:
+            if page_token and error.status_code == 404:
+                raise ServiceError(409, 'page_token pagination snapshot is unavailable') from None
+            raise
+        manifest = basics[manifest_key]['value']
+        topics = manifest.get('topics', ()) if isinstance(manifest, Mapping) else ()
+        topic = next((item for item in topics if isinstance(item, Mapping) and item.get('topic_id') == topic_id), None)
+        if topic is None:
+            raise ServiceError(404, 'topic not found')
+        chunk_ids = _topic_chunk_ids(topic)
+        chunk_keys = tuple(ArtifactKey(A.DATASET_CHUNK, chunk_id) for chunk_id in chunk_ids)
+        if page_token:
+            if {ref.key for ref in refs} != {manifest_key, documents_key, *chunk_keys}:
+                raise ServiceError(400, 'page_token is invalid')
+        try:
+            chunks = await self._read_artifact_batch(thread_id, chunk_keys, refs_by_key)
+        except ServiceError as error:
+            if page_token and error.status_code == 404:
+                raise ServiceError(409, 'page_token pagination snapshot is unavailable') from None
+            raise
+        if not page_token:
+            refs = (
+                _public_artifact_ref(basics[manifest_key]['record']),
+                _public_artifact_ref(basics[documents_key]['record']),
+                *(_public_artifact_ref(chunks[key]['record']) for key in chunk_keys),
+            )
+            revision = self._build_revision(refs)
+
+        document_names = _document_names(basics[documents_key]['value'])
+        rows = [_topic_chunk_dto(chunks[key]['value'], document_names) for key in chunk_keys]
+        page = _page(rows, size, str(offset))
+        next_offset = page['next_page_token']
+        return {
+            'thread_id': thread_id,
+            'revision': revision,
+            'topic': {
+                'topic_id': topic_id,
+                'name': str(topic.get('name') or ''),
+                'question_type': str(topic.get('question_type') or ''),
+                'chunk_count': topic.get('chunk_count'),
+            },
+            'chunks': {
+                'items': page['items'],
+                'next_page_token': (
+                    '' if not next_offset else self._build_page_token(
+                        thread_id=thread_id,
+                        list_name='dataset.topic_detail',
+                        revision=revision,
+                        filters=filters,
+                        page_size=size,
+                        next_offset=int(next_offset),
+                    )
+                ),
+            },
+        }
+
+    async def _read_artifact_batch(
+        self, thread_id: str, keys: tuple[ArtifactKey, ...], refs_by_key: Mapping[ArtifactKey, ArtifactRef],
+    ) -> dict[ArtifactKey, dict[str, Any]]:
+        if len(set(keys)) != len(keys):
+            raise ServiceError(503, 'duplicate artifact key in projection')
+        values = await asyncio.gather(*(
+            self.artifact(thread_id, key.artifact_id, key.partition_key,
+                          version=None if key not in refs_by_key else refs_by_key[key].version)
+            for key in keys
+        ))
+        return dict(zip(keys, values, strict=True))
+
     async def artifact_history(self, thread_id: str, artifact_id: str, partition_key: str = '') -> dict[str, Any]:
         records = await self.flow.history(thread_id, ArtifactKey(artifact_id, partition_key))
         return {
@@ -643,6 +857,123 @@ def _topic_filters(question_type: str, min_chunk_count: int | None,
         **({'question_type': question_type} if question_type else {}),
         **({'min_chunk_count': min_chunk_count} if min_chunk_count is not None else {}),
         **({'max_chunk_count': max_chunk_count} if max_chunk_count is not None else {}),
+    }
+
+
+def _required_id(value: object, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ServiceError(400, f'{name} must be a non-empty string')
+    return value
+
+
+def _document_detail_filters(knowledge_base_id: str, document_id: str, selected: bool | None,
+                             split_rule: str) -> dict[str, object]:
+    if selected is not None and not isinstance(selected, bool):
+        raise ServiceError(400, 'selected must be a boolean')
+    if not isinstance(split_rule, str) or (split_rule and not split_rule.strip()):
+        raise ServiceError(400, 'split_rule must not be blank')
+    return {
+        'knowledge_base_id': _required_id(knowledge_base_id, 'knowledge_base_id'),
+        'document_id': _required_id(document_id, 'document_id'),
+        **({'selected': selected} if selected is not None else {}),
+        **({'split_rule': split_rule} if split_rule else {}),
+    }
+
+
+def _document_candidate_chunks(value: object, knowledge_base_id: str, document_id: str) -> list[Mapping[str, object]]:
+    source = value if isinstance(value, Mapping) else {}
+    chunks = source.get('chunks', ()) if isinstance(source, Mapping) else ()
+    return [
+        item for item in chunks
+        if isinstance(item, Mapping)
+        and item.get('kb_id') == knowledge_base_id
+        and item.get('doc_id') == document_id
+    ]
+
+
+def _document_quotas(value: object, chunks: list[Mapping[str, object]], knowledge_base_id: str,
+                     document_id: str) -> list[dict[str, object]]:
+    source = value if isinstance(value, Mapping) else {}
+    quotas = source.get('quotas', ()) if isinstance(source, Mapping) else ()
+    selected_by_group: dict[str, int] = {}
+    for chunk in chunks:
+        group = str(chunk.get('group') or '')
+        selected_by_group[group] = selected_by_group.get(group, 0) + int(chunk.get('selected') is True)
+    rows = [
+        {
+            'split_rule': str(quota.get('group') or ''),
+            'required': quota.get('required'),
+            'selected': selected_by_group.get(str(quota.get('group') or ''), 0),
+        }
+        for quota in quotas
+        if isinstance(quota, Mapping)
+        and quota.get('kb_id') == knowledge_base_id
+        and quota.get('doc_id') == document_id
+    ]
+    return sorted(rows, key=lambda item: str(item['split_rule']))
+
+
+def _document_chunk_matches(chunk: Mapping[str, object], filters: Mapping[str, object]) -> bool:
+    return (
+        ('selected' not in filters or chunk.get('selected') is filters['selected'])
+        and ('split_rule' not in filters or chunk.get('group') == filters['split_rule'])
+    )
+
+
+def _document_chunk_dto(chunk: Mapping[str, object]) -> dict[str, object]:
+    discovery_index = chunk.get('discovery_index')
+    return {
+        'chunk_id': str(chunk.get('chunk_id') or ''),
+        'split_rule': str(chunk.get('group') or ''),
+        'layout_type': str(chunk.get('type') or ''),
+        'text': str(chunk.get('text') or ''),
+        'selected': chunk.get('selected') is True,
+        '_discovery_index': discovery_index if isinstance(discovery_index, int) else 0,
+    }
+
+
+def _topic_chunk_ids(topic: Mapping[str, object]) -> tuple[str, ...]:
+    raw = topic.get('chunk_ids')
+    if not isinstance(raw, list) or not raw:
+        raise ServiceError(503, 'topic chunk_ids are invalid')
+    values = tuple(_required_id(value, 'topic.chunk_id') for value in raw)
+    if len(set(values)) != len(values):
+        raise ServiceError(503, 'topic chunk_ids are duplicated')
+    return values
+
+
+def _document_names(value: object) -> dict[tuple[str, str], tuple[str, str]]:
+    source = value if isinstance(value, Mapping) else {}
+    documents = source.get('documents', ()) if isinstance(source, Mapping) else ()
+    result: dict[tuple[str, str], tuple[str, str]] = {}
+    for document in documents:
+        if not isinstance(document, Mapping):
+            continue
+        kb_id, doc_id = document.get('kb_id'), document.get('doc_id')
+        if isinstance(kb_id, str) and kb_id and isinstance(doc_id, str) and doc_id:
+            result[kb_id, doc_id] = (
+                str(document.get('knowledge_base_name') or kb_id),
+                str(document.get('filename') or doc_id),
+            )
+    return result
+
+
+def _topic_chunk_dto(chunk: object, document_names: Mapping[tuple[str, str], tuple[str, str]]) -> dict[str, object]:
+    if not isinstance(chunk, Mapping):
+        raise ServiceError(503, 'topic chunk artifact is invalid')
+    kb_id, doc_id = chunk.get('kb_id'), chunk.get('doc_id')
+    if not isinstance(kb_id, str) or not kb_id or not isinstance(doc_id, str) or not doc_id:
+        raise ServiceError(503, 'topic chunk source is invalid')
+    names = document_names.get((kb_id, doc_id))
+    if names is None:
+        raise ServiceError(503, 'topic chunk source document is unavailable')
+    return {
+        'chunk_id': str(chunk.get('chunk_id') or ''),
+        'knowledge_base': {'id': kb_id, 'name': names[0]},
+        'document': {'id': doc_id, 'name': names[1]},
+        'split_rule': str(chunk.get('group') or ''),
+        'layout_type': str(chunk.get('type') or ''),
+        'text': str(chunk.get('text') or ''),
     }
 
 

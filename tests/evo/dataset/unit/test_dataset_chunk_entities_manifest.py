@@ -6,8 +6,8 @@ from evo.operations.dataset.entities import chunk_entities_extract_manifest
 def _built_chunks(chunks=None):
     return {
         'chunks': chunks or [
-            {'available': True, 'chunk_id': 'chunk-1', 'doc_id': 'doc-1', 'group': 'block', 'partition': 'chunk_0001'},
-            {'available': False, 'chunk_id': 'chunk-2', 'doc_id': 'doc-2', 'group': 'line', 'partition': 'chunk_0002'},
+            {'available': True, 'chunk_id': 'chunk-1', 'doc_id': 'doc-1', 'group': 'block', 'partition': 'chunk-1'},
+            {'available': False, 'chunk_id': 'chunk-2', 'doc_id': 'doc-2', 'group': 'line', 'partition': 'chunk-2'},
         ],
     }
 
@@ -34,9 +34,9 @@ def test_chunk_entities_extract_manifest_preserves_built_chunk_order():
         'chunk_entities_extract_manifest': {
             'chunks': [
                 {'available': True, 'chunk_id': 'chunk-1', 'doc_id': 'doc-1', 'group': 'block',
-                 'partition': 'chunk_0001', 'entities': ['Tesla']},
+                 'partition': 'chunk-1', 'entities': ['Tesla']},
                 {'available': False, 'chunk_id': 'chunk-2', 'doc_id': 'doc-2', 'group': 'line',
-                 'partition': 'chunk_0002', 'entities': []},
+                 'partition': 'chunk-2', 'entities': []},
             ],
             'stats': {
                 'slot_count': 2,
@@ -106,11 +106,11 @@ def test_chunk_entities_extract_manifest_reports_stats_for_multiple_available_ch
             built_chunks={
                 'chunks': [
                     {'available': True, 'chunk_id': 'chunk-1', 'doc_id': 'doc-1', 'group': 'block',
-                     'partition': 'chunk_0001'},
+                     'partition': 'chunk-1'},
                     {'available': True, 'chunk_id': 'chunk-2', 'doc_id': 'doc-1', 'group': 'block',
-                     'partition': 'chunk_0002'},
+                     'partition': 'chunk-2'},
                     {'available': True, 'chunk_id': 'chunk-3', 'doc_id': 'doc-2', 'group': 'table',
-                     'partition': 'chunk_0003'},
+                     'partition': 'chunk-3'},
                 ],
             },
             chunk_entities=(

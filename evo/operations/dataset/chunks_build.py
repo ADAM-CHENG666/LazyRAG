@@ -61,14 +61,12 @@ def build_chunk_candidates(ctx: Any, inputs: Mapping[str, object], kb_client: Kn
     full = _read_effective_chunks(client, docs, counts, params)
     limit = (auto_count * 3 + 1) // 2
     quotas, selected_keys = _initial_selection(docs, counts, full, params.groups, limit)
-    selected_index = {key: index for index, key in enumerate(selected_keys)}
     chunks = []
     for doc in docs:
         for group in params.groups:
             for item in full.get((doc['kb_id'], doc['doc_id'], group), []):
                 key = item['kb_id'], item['chunk_id']
-                chunks.append({**item, 'discovery_index': len(chunks), 'selected': key in selected_index,
-                               'selection_index': selected_index.get(key)})
+                chunks.append({**item, 'discovery_index': len(chunks), 'selected': key in selected_keys})
     return {'build_chunk_candidates': {
         'chunks': chunks,
         'quotas': quotas,
@@ -79,17 +77,15 @@ def build_chunk_candidates(ctx: Any, inputs: Mapping[str, object], kb_client: Kn
 
 def build_chunks(ctx: Any, inputs: Mapping[str, object]) -> Mapping[str, object]:
     values = _mapping(inputs.get('build_chunk_candidates'), 'build_chunk_candidates')
-    selected = [dict(item) for item in _list(values.get('chunks'), 'build_chunk_candidates.chunks') if item.get('selected')]
-    selected.sort(key=lambda item: _integer(item.get('selection_index'), 'selection_index'))
     output_key = getattr(ctx, 'output_key_by_name', {}).get('chunk')
     partition = str(
         getattr(output_key, 'partition_key', getattr(output_key, 'partition', '')) or ''
     )
-    index = _partition_index(partition)
-    if index < len(selected):
-        return {'chunk': {'available': True, **selected[index]}}
-    return {'chunk': {'available': False, 'chunk_id': f'unavailable:{partition}', 'doc_id': '__unavailable__',
-                      'filename': '', 'group': '', 'type': 'placeholder', 'text': '', 'embedding': {}, 'metadata': {}}}
+    selected = [dict(item) for item in _list(values.get('chunks'), 'build_chunk_candidates.chunks')
+                if item.get('selected') and item.get('chunk_id') == partition]
+    if len(selected) != 1:
+        raise ValueError(f'selected chunk partition must resolve exactly one chunk: {partition}')
+    return {'chunk': {'available': True, **selected[0]}}
 
 
 def build_chunks_manifest(ctx: Any, inputs: Mapping[str, object]) -> Mapping[str, object]:
@@ -97,13 +93,17 @@ def build_chunks_manifest(ctx: Any, inputs: Mapping[str, object]) -> Mapping[str
     summary = _mapping(_mapping(inputs.get('build_chunk_candidates'), 'build_chunk_candidates').get('summary'), 'summary')
     counts = {key: _integer(summary.get(f'{key}_count'), f'{key}_count')
               for key in ('scanned_chunk', 'effective', 'selected', 'shortfall')}
-    slots = _list(inputs.get('chunk'), 'chunk')
-    partitions = _partitions(ctx, len(slots))
-    if len(partitions) != len(slots):
-        raise ValueError('chunk partition tuple mismatch')
-    items = [_manifest_chunk(partition, _mapping(slot, 'chunk item')) for partition, slot in zip(partitions, slots, strict=True)]
+    chunks = [_mapping(slot, 'chunk item') for slot in _list(inputs.get('chunk'), 'chunk')]
+    items = []
+    for chunk in chunks:
+        partition = str(chunk.get('chunk_id') or '').strip()
+        if not partition:
+            raise ValueError('chunk.chunk_id must be non-empty')
+        items.append(_manifest_chunk(partition, chunk))
+    if len({item['partition'] for item in items}) != len(items):
+        raise ValueError('chunk manifest partitions must be unique')
     if sum(item['available'] for item in items) != counts['selected']:
-        raise ValueError('available slot count does not match selected count')
+        raise ValueError('available chunk count does not match selected count')
     warning = []
     if allocation['automatic'] and counts['effective'] and counts['shortfall']:
         warning.append(f"chunk candidate capacity is short by {counts['shortfall']}; selected {counts['selected']}")
@@ -122,9 +122,6 @@ def validate_chunk_selection(value: Mapping[str, object]) -> None:
     chunks = _list(value.get('chunks'), 'chunks')
     quotas = _list(value.get('quotas'), 'quotas')
     selected = [item for item in chunks if isinstance(item, Mapping) and item.get('selected')]
-    indexes = [item.get('selection_index') for item in selected]
-    if sorted(indexes) != list(range(len(selected))):
-        raise ValueError('selection_index must be contiguous')
     actual = {}
     for item in selected:
         key = (str(item.get('kb_id') or ''), str(item.get('doc_id') or ''), str(item.get('group') or ''))
@@ -148,7 +145,7 @@ def _read_effective_chunks(client: Any, docs: list[dict[str, Any]], counts: Mapp
             values = []
             for node in nodes:
                 payload = _chunk_payload(node, kb_id, doc_id, group, doc)
-                key = payload['kb_id'], payload['chunk_id']
+                key = payload['chunk_id']
                 if key in seen:
                     raise ValueError(f'duplicate chunk id: {payload["chunk_id"]}')
                 seen.add(key)
@@ -214,26 +211,6 @@ def _chunk_payload(node, kb_id, doc_id, group, doc):
 
 def _manifest_chunk(partition, value):
     return {key: value.get(key, '') for key in ('available', 'kb_id', 'doc_id', 'chunk_id', 'filename', 'group', 'type')} | {'partition': partition}
-
-
-def _partitions(ctx, size):
-    refs = getattr(ctx, 'input_ref_by_key', {})
-    values = sorted(
-        (
-            getattr(key, 'partition_key', getattr(key, 'partition', ''))
-            for key in refs
-            if getattr(key, 'artifact_id', '') == 'dataset.chunk'
-        ),
-        key=_partition_index,
-    )
-    return values or [f'chunk_{index + 1:04d}' for index in range(size)]
-
-
-def _partition_index(value):
-    try:
-        return int(str(value).rsplit('_', 1)[1]) - 1
-    except (IndexError, ValueError):
-        return 0
 
 
 def _empty_candidates():

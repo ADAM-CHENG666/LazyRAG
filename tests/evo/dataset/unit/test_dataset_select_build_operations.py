@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from evo.artifact_runtime import ArtifactKey, ArtifactRef
+from evo.artifact_runtime import ArtifactKey
 from evo.operations.dataset import BuildChunksParams, build_chunk_candidates, build_chunks, build_chunks_manifest, select_docs
 from evo.operations.dataset.chunks_build import validate_chunk_selection
 
@@ -88,12 +88,6 @@ def candidates(selected, client, target=2, params=None):
 
 def chunk_ctx(partition):
     return SimpleNamespace(output_key_by_name={'chunk': ArtifactKey('dataset.chunk', partition)})
-
-
-def manifest_ctx(partitions):
-    refs = {ArtifactKey('dataset.chunk', partition): ArtifactRef(ArtifactKey('dataset.chunk', partition), 1)
-            for partition in partitions}
-    return SimpleNamespace(input_ref_by_key=refs)
 
 
 # select_docs.yaml: discovery_and_inclusion
@@ -279,15 +273,28 @@ def test_candidates_select_deterministically_and_freeze_document_group_quota():
     assert sum(item['selected'] for item in first['chunks']) == 3
 
 
-def test_candidates_assign_selection_index_only_to_selected_chunks():
+def test_candidates_use_chunk_id_as_the_only_selected_chunk_identity():
     selected = documents({'kb-a': [{'doc_id': 'one'}]})
     client = FakeCandidateClient({'kb-a': counts({'block': {'one': 5}})}, {
         ('kb-a', 'one', 'block'): [node(str(index), number=index) for index in range(5)],
     })
 
     output = candidates(selected, client, target=2)
-    assert [item['selection_index'] for item in output['chunks'] if item['selected']] == [0, 1, 2]
-    assert all(item['selection_index'] is None for item in output['chunks'] if not item['selected'])
+    assert all('selection_index' not in item for item in output['chunks'])
+
+
+def test_candidates_reject_duplicate_chunk_id_across_knowledge_bases():
+    selected = documents({'kb-a': [{'doc_id': 'one'}], 'kb-b': [{'doc_id': 'two'}]})
+    client = FakeCandidateClient(
+        {'kb-a': counts({'block': {'one': 1}}), 'kb-b': counts({'block': {'two': 1}})},
+        {
+            ('kb-a', 'one', 'block'): [node('shared-chunk', doc_id='one')],
+            ('kb-b', 'two', 'block'): [node('shared-chunk', doc_id='two')],
+        },
+    )
+
+    with pytest.raises(ValueError, match='duplicate chunk id: shared-chunk'):
+        candidates(selected, client, target=1)
 
 
 def test_candidates_return_all_effective_chunks_when_capacity_is_short():
@@ -315,21 +322,18 @@ def test_manual_selection_replacement_keeps_effective_snapshot_and_is_valid():
     }), target=1)
     edited = {**payload, 'chunks': [dict(item) for item in payload['chunks']]}
     chosen, replacement = [item for item in edited['chunks'] if item['selected']][0], [item for item in edited['chunks'] if not item['selected']][0]
-    chosen.update(selected=False, selection_index=None)
-    replacement.update(selected=True, selection_index=0)
+    chosen.update(selected=False)
+    replacement.update(selected=True)
 
     validate_chunk_selection(edited)
     assert {item['chunk_id'] for item in edited['chunks']} == {item['chunk_id'] for item in payload['chunks']}
 
 
-def test_manual_selection_rejects_quota_mismatch_and_bad_selection_index():
+def test_manual_selection_rejects_quota_mismatch_without_a_selection_order():
     payload = {
-        'chunks': [{'kb_id': 'kb', 'doc_id': 'doc', 'chunk_id': 'one', 'group': 'block', 'selected': True, 'selection_index': 1}],
+        'chunks': [{'kb_id': 'kb', 'doc_id': 'doc', 'chunk_id': 'one', 'group': 'block', 'selected': True}],
         'quotas': [{'kb_id': 'kb', 'doc_id': 'doc', 'group': 'block', 'required': 1}],
     }
-    with pytest.raises(ValueError, match='selection_index'):
-        validate_chunk_selection(payload)
-    payload['chunks'][0]['selection_index'] = 0
     payload['quotas'][0]['required'] = 2
     with pytest.raises(ValueError, match='quota'):
         validate_chunk_selection(payload)
@@ -339,51 +343,48 @@ def test_direct_candidate_value_update_changes_only_build_chunks_downstream_inpu
     payload = {
         'chunks': [
             {'kb_id': 'kb', 'doc_id': 'doc', 'chunk_id': 'one', 'filename': 'd.pdf', 'group': 'block', 'type': 'text',
-             'text': 'one', 'embedding': {'default': [1.0]}, 'metadata': {}, 'selected': True, 'selection_index': 0},
+             'text': 'one', 'embedding': {'default': [1.0]}, 'metadata': {}, 'selected': True},
             {'kb_id': 'kb', 'doc_id': 'doc', 'chunk_id': 'two', 'filename': 'd.pdf', 'group': 'block', 'type': 'text',
-             'text': 'two', 'embedding': {'default': [1.0]}, 'metadata': {}, 'selected': False, 'selection_index': None},
+             'text': 'two', 'embedding': {'default': [1.0]}, 'metadata': {}, 'selected': False},
         ],
         'quotas': [{'kb_id': 'kb', 'doc_id': 'doc', 'group': 'block', 'required': 1}],
     }
-    assert build_chunks(chunk_ctx('chunk_0001'), {'build_chunk_candidates': payload})['chunk']['chunk_id'] == 'one'
-    payload['chunks'][0].update(selected=False, selection_index=None)
-    payload['chunks'][1].update(selected=True, selection_index=0)
+    assert build_chunks(chunk_ctx('one'), {'build_chunk_candidates': payload})['chunk']['chunk_id'] == 'one'
+    payload['chunks'][0]['selected'] = False
+    payload['chunks'][1]['selected'] = True
     validate_chunk_selection(payload)
-    assert build_chunks(chunk_ctx('chunk_0001'), {'build_chunk_candidates': payload})['chunk']['chunk_id'] == 'two'
+    assert build_chunks(chunk_ctx('two'), {'build_chunk_candidates': payload})['chunk']['chunk_id'] == 'two'
 
 
 # chunks_build.yaml
-def test_build_chunks_maps_only_selected_chunks_in_selection_order_and_preserves_payload():
+def test_build_chunks_reads_the_selected_chunk_with_its_chunk_id_partition_key():
     payload = {'chunks': [
         {'kb_id': 'kb', 'doc_id': 'doc', 'chunk_id': 'later', 'filename': 'd.pdf', 'group': 'block', 'type': 'text',
-         'text': 'later', 'embedding': {'default': [1.0]}, 'metadata': {'page': 2}, 'selected': True, 'selection_index': 1},
+         'text': 'later', 'embedding': {'default': [1.0]}, 'metadata': {'page': 2}, 'selected': True},
         {'kb_id': 'kb', 'doc_id': 'doc', 'chunk_id': 'first', 'filename': 'd.pdf', 'group': 'block', 'type': 'text',
-         'text': 'first', 'embedding': {'default': [1.0]}, 'metadata': {'page': 1}, 'selected': True, 'selection_index': 0},
+         'text': 'first', 'embedding': {'default': [1.0]}, 'metadata': {'page': 1}, 'selected': True},
         {'kb_id': 'kb', 'doc_id': 'doc', 'chunk_id': 'hidden', 'filename': 'd.pdf', 'group': 'block', 'type': 'text',
-         'text': 'hidden', 'embedding': {'default': [1.0]}, 'metadata': {}, 'selected': False, 'selection_index': None},
+         'text': 'hidden', 'embedding': {'default': [1.0]}, 'metadata': {}, 'selected': False},
     ]}
 
-    first = build_chunks(chunk_ctx('chunk_0001'), {'build_chunk_candidates': payload})['chunk']
-    second = build_chunks(chunk_ctx('chunk_0002'), {'build_chunk_candidates': payload})['chunk']
-    placeholder = build_chunks(chunk_ctx('chunk_0003'), {'build_chunk_candidates': payload})['chunk']
-
+    first = build_chunks(chunk_ctx('first'), {'build_chunk_candidates': payload})['chunk']
+    second = build_chunks(chunk_ctx('later'), {'build_chunk_candidates': payload})['chunk']
     assert first == {'available': True, **payload['chunks'][1]}
     assert second == {'available': True, **payload['chunks'][0]}
-    assert placeholder['available'] is False
 
 
 def test_build_chunks_preserves_normalized_layout_type():
     payload = {'chunks': [{
         'kb_id': 'kb', 'doc_id': 'doc', 'chunk_id': 'figure', 'filename': 'd.pdf', 'group': 'block',
         'type': 'figure', 'text': 'caption', 'embedding': {'default': [1.0]}, 'metadata': {},
-        'selected': True, 'selection_index': 0,
+        'selected': True,
     }]}
 
-    assert build_chunks(chunk_ctx('chunk_0001'), {'build_chunk_candidates': payload})['chunk']['type'] == 'figure'
+    assert build_chunks(chunk_ctx('figure'), {'build_chunk_candidates': payload})['chunk']['type'] == 'figure'
 
 
 # chunks_manifest.yaml
-def test_manifest_is_lightweight_stable_overview_and_slot_index():
+def test_manifest_is_lightweight_stable_overview_and_uses_chunk_id_partition():
     chosen = {'available': True, 'kb_id': 'kb', 'doc_id': 'doc', 'chunk_id': 'one', 'filename': 'd.pdf',
               'group': 'block', 'type': 'text', 'text': 'secret', 'embedding': {'default': [1.0]}, 'metadata': {}}
     inputs = {
@@ -391,14 +392,14 @@ def test_manifest_is_lightweight_stable_overview_and_slot_index():
         'build_chunk_candidates': {'summary': {
             'scanned_chunk_count': 4, 'effective_count': 2, 'selected_count': 1, 'shortfall_count': 1,
         }},
-        'chunk': (chosen, {'available': False, 'chunk_id': 'unavailable:chunk_0002', 'doc_id': '__unavailable__',
-                            'filename': '', 'group': '', 'type': 'placeholder'}),
+        'chunk': (chosen,),
     }
-    output = build_chunks_manifest(manifest_ctx(('chunk_0001', 'chunk_0002')), inputs)['build_chunks_manifest']
+    output = build_chunks_manifest(None, inputs)['build_chunks_manifest']
 
     assert output['source'] == {'csv_present': False, 'case_counts': {'target': 2, 'imported': 1, 'automatic': 1}}
     assert output['summary']['chunk_counts'] == {'scanned': 4, 'effective': 2, 'selected': 1, 'shortfall': 1}
     assert output['warnings']
+    assert output['chunks'][0]['partition'] == 'one'
     assert all('text' not in item and 'embedding' not in item and 'metadata' not in item for item in output['chunks'])
 
 
@@ -406,22 +407,21 @@ def test_manifest_rejects_selected_slot_count_mismatch():
     inputs = {
         'import_cases_manifest': import_manifest(1),
         'build_chunk_candidates': {'summary': {'scanned_chunk_count': 1, 'effective_count': 1, 'selected_count': 1, 'shortfall_count': 0}},
-        'chunk': ({'available': False, 'chunk_id': 'unavailable:chunk_0001', 'doc_id': '__unavailable__',
-                   'filename': '', 'group': '', 'type': 'placeholder'},),
+        'chunk': (),
     }
     with pytest.raises(ValueError, match='available|selected'):
-        build_chunks_manifest(manifest_ctx(('chunk_0001',)), inputs)
+        build_chunks_manifest(None, inputs)
 
 
-def test_manifest_imported_only_allows_placeholder_slots_without_warning():
+def test_manifest_imported_only_has_no_chunks_and_no_warning():
     inputs = {
         'import_cases_manifest': import_manifest(1, 1),
         'build_chunk_candidates': {'summary': {'scanned_chunk_count': 0, 'effective_count': 0, 'selected_count': 0, 'shortfall_count': 0}},
-        'chunk': ({'available': False, 'chunk_id': 'unavailable:chunk_0001', 'doc_id': '__unavailable__',
-                   'filename': '', 'group': '', 'type': 'placeholder'},),
+        'chunk': (),
     }
-    output = build_chunks_manifest(manifest_ctx(('chunk_0001',)), inputs)['build_chunks_manifest']
+    output = build_chunks_manifest(None, inputs)['build_chunks_manifest']
     assert output['warnings'] == []
+    assert output['chunks'] == []
 
 
 def test_build_chunks_params_reject_legacy_excluded_chunks_and_invalid_limits():

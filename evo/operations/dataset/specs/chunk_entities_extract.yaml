@@ -2,7 +2,7 @@ operation:
   op_id: dataset.chunk_entities_extract
   flow: dataset
   stage: chunk_entities_extract
-  description: 为单个 dataset chunk 抽取命名实体；占位 chunk 直接生成占位 chunk entity。
+  description: 为单个 dataset.chunk 分区抽取命名实体；分区键直接等于 chunk_id。
 
 fixed_op:
   inputs:
@@ -37,6 +37,7 @@ input_payload:
         type: string
         required: false
       chunk_id:
+        # 全局唯一 KnowledgeBase DocNode.uid，且必须等于本次 runtime partition_key。
         type: string
         required: true
         validation:
@@ -101,9 +102,9 @@ output_payload:
 
 
 execution_flow:
-  - 读取并校验 chunk input payload。
+  - 读取并校验 chunk input payload；runtime partition_key 必须与 chunk_id 相同。
   - 读取并归一化 chunk_entities_extract_params。
-  - 当 chunk.available=false 时，跳过 LLM 调用并返回 available=false、entities=[] 的占位 chunk_entity。
+  - 运行时失败恢复场景下，若 chunk.available=false，跳过 LLM 调用并返回 available=false、entities=[] 的失败占位 chunk_entity。
   - 使用 max_entities_per_chunk 和 chunk.text 构造实体抽取 prompt。
   - 调用 LLM 获取实体抽取结果。
   - 解析 LLM 返回 JSON，并校验 entities 字段。

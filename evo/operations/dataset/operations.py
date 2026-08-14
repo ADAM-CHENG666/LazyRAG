@@ -100,13 +100,16 @@ async def build_chunk_candidates_operation(
         'import_cases_manifest': _mapping(import_manifest, 'import_manifest'),
         'build_chunks_params': {},
     })['build_chunk_candidates']
-    target = _candidate_limit(candidates)
-    partition_keys = tuple(f'chunk_{index:04d}' for index in range(1, target + 1))
+    partition_keys = tuple(
+        str(chunk['chunk_id'])
+        for chunk in candidates.get('chunks', ())
+        if isinstance(chunk, Mapping) and chunk.get('selected') is True
+    )
     return await _result(ctx, 'dataset.chunk_candidates_built', {
         'candidates': candidates,
         'partitions': PartitionSet(partition_keys),
         'requests': {key: {'partition_key': key} for key in partition_keys},
-    }, total=target)
+    }, total=len(partition_keys))
 
 
 @operation(
@@ -163,6 +166,7 @@ async def build_chunks_manifest_operation(
         'chunk': each(A.DATASET_CHUNK, over=A.DATASET_CHUNK_REQUESTS),
         'chunks_manifest': one(A.DATASET_BUILD_CHUNKS_MANIFEST),
         'run_config': one(A.RUN_CONFIG),
+        'material_approval': one(A.APPROVAL_DATASET_MATERIAL_PREPARATION),
     },
     outputs={'entity': partitioned(A.DATASET_CHUNK_ENTITY)},
     max_concurrency=4,
@@ -172,7 +176,9 @@ async def extract_chunk_entities_operation(
     chunk: object,
     chunks_manifest: object,
     run_config: object,
+    material_approval: object,
 ) -> OperationResult:
+    del material_approval
     _mapping(chunks_manifest, 'chunks_manifest')
     entity = chunk_entities_extract(ctx, {
         'chunk': _mapping(chunk, 'chunk'),
@@ -267,6 +273,7 @@ async def cluster_entities_operation(ctx: OperationContext, graph: object) -> Op
     inputs={
         'chunks': all_items(A.DATASET_CHUNK, over=A.DATASET_CHUNK_REQUESTS),
         'chunks_manifest': one(A.DATASET_BUILD_CHUNKS_MANIFEST),
+        'material_approval': one(A.APPROVAL_DATASET_MATERIAL_PREPARATION),
     },
     outputs={'candidates': scalar(A.DATASET_EMBEDDING_CLUSTER_CANDIDATES)},
 )
@@ -274,7 +281,9 @@ async def cluster_embeddings_operation(
     ctx: OperationContext,
     chunks: object,
     chunks_manifest: object,
+    material_approval: object,
 ) -> OperationResult:
+    del material_approval
     values = _chunk_values_for_manifest(chunks, _mapping(chunks_manifest, 'chunks_manifest'))
     candidates = topic_discovery_embedding_cluster(ctx, {
         'chunk': values,
@@ -340,6 +349,7 @@ async def topic_manifest_operation(
         'chunks': all_items(A.DATASET_CHUNK, over=A.DATASET_CHUNK_REQUESTS),
         'chunks_manifest': one(A.DATASET_BUILD_CHUNKS_MANIFEST),
         'plan_params': one(A.DATASET_QAPLAN_PLAN_PARAMS),
+        'topic_approval': one(A.APPROVAL_DATASET_TOPIC_DISCOVERY),
     },
     outputs={
         'plan': scalar(A.DATASET_QAPLAN_PLAN),
@@ -355,7 +365,9 @@ async def qaplan_plan_operation(
     chunks: object,
     chunks_manifest: object,
     plan_params: object,
+    topic_approval: object,
 ) -> OperationResult:
+    del topic_approval
     imported = _mapping(import_manifest, 'import_manifest')
     case_ids = _case_ids(imported)
     values = _chunk_values_for_manifest(chunks, _mapping(chunks_manifest, 'chunks_manifest'))
@@ -499,10 +511,21 @@ async def enhance_case_operation(
 
 @operation(
     op_id='dataset.enhance_manifest',
-    inputs={'enhancements': all_items(A.DATASET_CASE_ENHANCEMENT, over=A.EVAL_CASE_REQUESTS)},
+    inputs={
+        'enhancements': all_items(A.DATASET_CASE_ENHANCEMENT, over=A.EVAL_CASE_REQUESTS),
+        'qaplan_manifest': one(A.DATASET_QAPLAN_MANIFEST),
+        'generate_manifest': one(A.DATASET_GENERATE_MANIFEST),
+    },
     outputs={'manifest': scalar(A.DATASET_ENHANCE_MANIFEST)},
 )
-async def enhance_manifest_operation(ctx: OperationContext, enhancements: object) -> OperationResult:
+async def enhance_manifest_operation(
+    ctx: OperationContext,
+    enhancements: object,
+    qaplan_manifest: object,
+    generate_manifest: object,
+) -> OperationResult:
+    _mapping(qaplan_manifest, 'qaplan_manifest')
+    _mapping(generate_manifest, 'generate_manifest')
     values = _successful_values(enhancements)
     failures = _failures(enhancements)
     if failures:
@@ -517,6 +540,7 @@ async def enhance_manifest_operation(ctx: OperationContext, enhancements: object
     inputs={
         'draft': each(A.DATASET_CASE_DRAFT, over=A.EVAL_CASE_REQUESTS),
         'enhancement': keyed(A.DATASET_CASE_ENHANCEMENT),
+        'case_approval': one(A.APPROVAL_DATASET),
     },
     outputs={'case': partitioned(A.EVAL_CASE)},
     max_concurrency=4,
@@ -525,7 +549,9 @@ async def finalize_case_operation(
     ctx: OperationContext,
     draft: object,
     enhancement: object,
+    case_approval: object,
 ) -> OperationResult:
+    del case_approval
     case = _finalize_case(
         _mapping(draft, 'draft'),
         _mapping(enhancement, 'enhancement'),
@@ -646,15 +672,6 @@ def _unavailable_chunk_payload(partition: str, group: str) -> dict[str, object]:
         'embedding': {},
         'metadata': {'partition': partition, 'available': False},
     }
-
-
-def _candidate_limit(value: object) -> int:
-    candidates = _mapping(value, 'candidates')
-    summary = _mapping(candidates.get('summary'), 'candidates.summary')
-    limit = summary.get('selected_count', 0)
-    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
-        raise ValueError('candidate_limit must be non-negative')
-    return limit
 
 
 def _successful_entries(value: object) -> tuple[tuple[str, object], ...]:
