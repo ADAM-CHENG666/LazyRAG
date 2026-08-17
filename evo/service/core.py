@@ -25,11 +25,13 @@ from evo.message_intent import MessageIntent, MessageRequest, MessageTurnResult
 from evo.operations import evo_flow_definition
 from evo.operations.dataset.source_config import normalize_source_config
 from evo.operations.dataset.kb_client import KnowledgeBaseClient
+from evo.operations.dataset.qaplan import build_qaplan_spec
 from evo.repair_model import EvoModelConfigError, resolve_evo_model
 
 from .contracts import (
     ArtifactUpdateBody,
     AutomaticUpdateBody,
+    CasePatchBody,
     CaseRerunBody,
     CaseStructureBody,
     CommandRequest,
@@ -37,6 +39,7 @@ from .contracts import (
     ControlRequest,
     DatasetApplyBody,
     ExternalResultBody,
+    GenerationPlanApplyBody,
     RetryRequest,
     ServiceError,
     ThreadCreate,
@@ -431,6 +434,146 @@ class EvoService:
             {topic_key: manifest},
         )
 
+    async def apply_generation_plan(self, thread_id: str,
+                                    request: GenerationPlanApplyBody | Mapping[str, Any]) -> dict[str, Any]:
+        request = (
+            request
+            if isinstance(request, GenerationPlanApplyBody)
+            else GenerationPlanApplyBody.model_validate(request)
+        )
+        params_key = ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN_PARAMS)
+        (params_ref,) = _revision_refs(request.expected_revision, (params_key,))
+        (params,) = await self._read_expected_values(thread_id, (params_ref,))
+        _copy_mapping(params, 'qaplan_plan_params')
+
+        plan_key = ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN)
+        plan_record = await self.flow.head(thread_id, plan_key)
+        if plan_record is None:
+            raise ServiceError(409, 'qaplan plan is unavailable')
+        try:
+            plan = await self.flow.read(thread_id, plan_record.ref)
+        except (DefinitionError, KeyError) as error:
+            raise ServiceError(409, 'qaplan plan is unavailable') from error
+        auto_case_count, eligible_counts = _qaplan_plan_capacity(plan)
+        lane_case_counts = _lane_case_counts(request.distribution)
+        if sum(lane_case_counts.values()) != auto_case_count:
+            raise ServiceError(422, 'lane_case_counts total must equal auto_case_count')
+        if any(lane_case_counts[lane] > eligible_counts[lane] for lane in lane_case_counts):
+            raise ServiceError(422, 'lane_case_counts exceed eligible topic capacity')
+        return await self._commit_changed_values(
+            thread_id,
+            f'dataset-generation-plan:{request.request_id}',
+            'user:dataset-generation-plan',
+            (params_ref,),
+            {params_key: {'lane_case_counts': lane_case_counts}},
+        )
+
+    async def patch_case(self, thread_id: str, case_id: str,
+                         request: CasePatchBody | Mapping[str, Any]) -> dict[str, Any]:
+        request = request if isinstance(request, CasePatchBody) else CasePatchBody.model_validate(request)
+        case_id = _text_value(case_id, 'case_id')
+        base_keys = (
+            ArtifactKey.scalar(A.EVAL_CASE_REQUESTS),
+            ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST),
+            ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN),
+            ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST),
+            ArtifactKey.scalar(A.DATASET_SELECTED_DOCS),
+        )
+        partition_keys = tuple(
+            ArtifactKey.partition(artifact_id, case_id)
+            for artifact_id in (A.DATASET_QAPLAN_SPEC, A.DATASET_CASE_DRAFT, A.DATASET_CASE_ENHANCEMENT)
+        )
+        optional_records = await asyncio.gather(*(self.flow.head(thread_id, key) for key in partition_keys))
+        current_keys = base_keys + tuple(record.ref.key for record in optional_records if record is not None)
+        refs = _revision_refs(request.expected_revision, current_keys)
+        values = await self._read_expected_values(thread_id, refs)
+        value_by_key = dict(zip((ref.key for ref in refs), values, strict=True))
+
+        requests = value_by_key[base_keys[0]]
+        if not isinstance(requests, PartitionSet) or case_id not in requests.keys:
+            raise ServiceError(404, f'case not found: {case_id}')
+        import_manifest = _copy_mapping(value_by_key[base_keys[1]], 'import_cases_manifest')
+        plan = _copy_mapping(value_by_key[base_keys[2]], 'qaplan_plan')
+        topic_manifest = _copy_mapping(value_by_key[base_keys[3]], 'topic_manifest')
+        spec_key, draft_key, enhancement_key = partition_keys
+        if spec_key not in value_by_key:
+            raise ServiceError(409, 'case plan is unavailable')
+        spec = _copy_mapping(value_by_key[spec_key], 'qaplan_spec')
+        draft = None if draft_key not in value_by_key else _copy_mapping(value_by_key[draft_key], 'case_draft')
+
+        source = _case_source(import_manifest, case_id)
+        changes = request.changes
+        if 'grading' in changes and 'plan' in changes and 'generate' not in changes:
+            raise ServiceError(422, 'grading with a new topic requires generate in the same request')
+
+        writes: dict[ArtifactKey, object] = {}
+        extra_refs: tuple[ArtifactRef, ...] = ()
+        effective_spec = spec
+        if 'plan' in changes:
+            if source != 'generated':
+                raise ServiceError(422, 'imported case cannot change topic')
+            topic_id = _patch_topic_id(changes['plan'])
+            item = _case_plan_item(plan, case_id)
+            _validate_topic_change(plan, topic_manifest, item, case_id, topic_id)
+            item['topic_id'] = topic_id
+            chunk_refs, chunks = await self._topic_chunk_values(thread_id, topic_manifest, topic_id, item['difficulty'])
+            try:
+                effective_spec = build_qaplan_spec(case_id, import_manifest, plan, topic_manifest, chunks)
+            except ValueError as error:
+                raise ServiceError(422, str(error)) from error
+            extra_refs = chunk_refs
+            writes[base_keys[2]] = plan
+            writes[spec_key] = effective_spec
+
+        effective_draft = draft
+        if 'generate' in changes:
+            if effective_draft is None:
+                raise ServiceError(409, 'case draft is unavailable')
+            effective_draft = _patched_case_draft(effective_draft, effective_spec, changes['generate'])
+            writes[draft_key] = effective_draft
+
+        if 'grading' in changes:
+            if effective_draft is None:
+                raise ServiceError(409, 'case draft is unavailable')
+            writes[enhancement_key] = _patched_case_enhancement(effective_draft, changes['grading'])
+
+        all_refs = refs + extra_refs
+        await self._commit_changed_values(
+            thread_id,
+            f'dataset-case-patch:{case_id}:{request.request_id}',
+            'user:dataset-case-patch',
+            all_refs,
+            writes,
+        )
+        heads = await asyncio.gather(*(self.flow.head(thread_id, key) for key in current_keys))
+        if any(record is None for record in heads):
+            raise ServiceError(503, 'committed case is unavailable')
+        return {
+            'request_id': request.request_id,
+            'status': 'applied',
+            'revision': ProjectionService._build_revision(tuple(record.ref for record in heads if record is not None)),
+        }
+
+    async def _topic_chunk_values(self, thread_id: str, topic_manifest: Mapping[str, Any], topic_id: str,
+                                  difficulty: object) -> tuple[tuple[ArtifactRef, ...], tuple[object, ...]]:
+        topics = topic_manifest.get('topics')
+        if not isinstance(topics, list):
+            raise ServiceError(409, 'topic manifest is invalid')
+        topic = next((item for item in topics if isinstance(item, Mapping) and item.get('topic_id') == topic_id), None)
+        if topic is None:
+            raise ServiceError(404, 'topic not found')
+        required = {'easy': 1, 'medium': 2, 'hard': 3}.get(difficulty)
+        chunk_ids = topic.get('chunk_ids')
+        if required is None or not isinstance(chunk_ids, list) or len(chunk_ids) < required:
+            raise ServiceError(422, 'topic does not satisfy case difficulty')
+        keys = tuple(ArtifactKey.partition(A.DATASET_CHUNK, chunk_id) for chunk_id in chunk_ids[:required])
+        records = await asyncio.gather(*(self.flow.head(thread_id, key) for key in keys))
+        if any(record is None for record in records):
+            raise ServiceError(404, 'topic chunk not found')
+        refs = tuple(record.ref for record in records if record is not None)
+        values = await asyncio.gather(*(self.flow.read(thread_id, ref) for ref in refs))
+        return refs, tuple(values)
+
     async def _read_expected_values(self, thread_id: str, refs: tuple[ArtifactRef, ...]) -> tuple[object, ...]:
         if not await self.flow.has_run(thread_id):
             raise ServiceError(404, f'thread not found: {thread_id}')
@@ -684,6 +827,154 @@ def _revision_refs(revision: str, keys: tuple[ArtifactKey, ...]) -> tuple[Artifa
     if {ref.key for ref in refs} != set(keys):
         raise ServiceError(400, 'expected_revision does not match this operation')
     return tuple(next(ref for ref in refs if ref.key == key) for key in keys)
+
+
+def _lane_case_counts(distribution: Mapping[str, Mapping[str, int]]) -> dict[str, int]:
+    return {
+        f'{question_type}_{difficulty}': distribution[question_type][difficulty]
+        for question_type in ('precision', 'reasoning')
+        for difficulty in ('easy', 'medium', 'hard')
+    }
+
+
+def _qaplan_plan_capacity(value: object) -> tuple[int, dict[str, int]]:
+    plan = _mapping_value(value, 'qaplan_plan')
+    stats = _mapping_value(plan.get('stats'), 'qaplan_plan.stats')
+    auto_case_count = stats.get('auto_case_count')
+    if isinstance(auto_case_count, bool) or not isinstance(auto_case_count, int) or auto_case_count < 0:
+        raise ServiceError(409, 'qaplan plan is invalid')
+    summaries = stats.get('lane_summaries')
+    if not isinstance(summaries, list):
+        raise ServiceError(409, 'qaplan plan is invalid')
+    capacities: dict[str, int] = {}
+    for item in summaries:
+        summary = _mapping_value(item, 'qaplan_plan.stats.lane_summaries[]')
+        lane = summary.get('lane')
+        capacity = summary.get('eligible_topic_count')
+        if not isinstance(lane, str) or isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 0:
+            raise ServiceError(409, 'qaplan plan is invalid')
+        if lane in capacities:
+            raise ServiceError(409, 'qaplan plan is invalid')
+        capacities[lane] = capacity
+    expected_lanes = {
+        'precision_easy', 'precision_medium', 'precision_hard',
+        'reasoning_easy', 'reasoning_medium', 'reasoning_hard',
+    }
+    if set(capacities) != expected_lanes:
+        raise ServiceError(409, 'qaplan plan is invalid')
+    return auto_case_count, capacities
+
+
+def _case_source(import_manifest: Mapping[str, Any], case_id: str) -> str:
+    stats = _mapping_value(import_manifest.get('stats'), 'import_cases_manifest.stats')
+    allocation = _mapping_value(stats.get('case_allocation'), 'import_cases_manifest.stats.case_allocation')
+    assignments = _mapping_value(allocation.get('assignments'), 'import_cases_manifest assignments')
+    assignment = _mapping_value(assignments.get(case_id), 'case assignment')
+    source = assignment.get('mode')
+    if source not in {'generated', 'imported'}:
+        raise ServiceError(409, 'case assignment is invalid')
+    return source
+
+
+def _patch_topic_id(value: object) -> str:
+    change = _mapping_value(value, 'changes.plan')
+    if set(change) != {'topic_id'}:
+        raise ServiceError(422, 'changes.plan must only contain topic_id')
+    return _text_value(change.get('topic_id'), 'changes.plan.topic_id')
+
+
+def _case_plan_item(plan: Mapping[str, Any], case_id: str) -> dict[str, Any]:
+    items = plan.get('items')
+    if not isinstance(items, list):
+        raise ServiceError(409, 'qaplan plan is invalid')
+    matches = [item for item in items if isinstance(item, dict) and item.get('case_id') == case_id]
+    if len(matches) != 1:
+        raise ServiceError(409, 'case plan is unavailable')
+    return matches[0]
+
+
+def _validate_topic_change(plan: Mapping[str, Any], topic_manifest: Mapping[str, Any], item: Mapping[str, Any],
+                           case_id: str, topic_id: str) -> None:
+    question_type = item.get('question_type')
+    difficulty = item.get('difficulty')
+    if question_type not in {'precision', 'reasoning'} or difficulty not in {'easy', 'medium', 'hard'}:
+        raise ServiceError(409, 'case plan is invalid')
+    topics = topic_manifest.get('topics')
+    if not isinstance(topics, list):
+        raise ServiceError(409, 'topic manifest is invalid')
+    matches = [topic for topic in topics if isinstance(topic, Mapping) and topic.get('topic_id') == topic_id]
+    if len(matches) != 1:
+        raise ServiceError(404, 'topic not found')
+    topic = matches[0]
+    required = {'easy': 1, 'medium': 2, 'hard': 3}[difficulty]
+    if topic.get('question_type') != question_type or topic.get('chunk_count') != len(topic.get('chunk_ids', ())) or topic.get('chunk_count') < required:
+        raise ServiceError(422, 'topic does not satisfy case requirements')
+    items = plan.get('items')
+    assert isinstance(items, list)
+    if any(
+        other.get('case_id') != case_id
+        and other.get('question_type') == question_type
+        and other.get('difficulty') == difficulty
+        and other.get('topic_id') == topic_id
+        for other in items if isinstance(other, Mapping)
+    ):
+        raise ServiceError(409, 'topic is already occupied')
+
+
+def _patched_case_draft(current: Mapping[str, Any], spec: Mapping[str, Any], value: object) -> dict[str, Any]:
+    change = _mapping_value(value, 'changes.generate')
+    if set(change) != {'question', 'answer', 'grading_guidance'}:
+        raise ServiceError(422, 'changes.generate must contain question, answer and grading_guidance')
+    result = copy.deepcopy(dict(current))
+    result.update({name: _text_value(change.get(name), f'changes.generate.{name}')
+                   for name in ('question', 'answer', 'grading_guidance')})
+    if spec.get('mode') == 'generated':
+        references = spec.get('references')
+        if not isinstance(references, list) or not all(isinstance(item, Mapping) for item in references):
+            raise ServiceError(409, 'qaplan spec references are invalid')
+        result.update({
+            'id': _text_value(spec.get('id'), 'qaplan_spec.id'),
+            'question_type': spec.get('question_type'),
+            'difficulty': spec.get('difficulty'),
+            'references': copy.deepcopy(references),
+            'reference_context': [{'chunk_id': item.get('chunk_id'), 'text': item.get('text')} for item in references],
+            'reference_chunk_ids': [item.get('chunk_id') for item in references],
+            'reference_doc_ids': list(dict.fromkeys(item.get('doc_id') for item in references)),
+            'source_preparation': {'kb_ids': list(dict.fromkeys(item.get('kb_id') for item in references))},
+        })
+    return result
+
+
+def _patched_case_enhancement(draft: Mapping[str, Any], value: object) -> dict[str, Any]:
+    change = _mapping_value(value, 'changes.grading')
+    if set(change) != {'key_points', 'forbidden_claims'}:
+        raise ServiceError(422, 'changes.grading must contain key_points and forbidden_claims')
+    references = draft.get('reference_chunk_ids')
+    if not isinstance(references, list) or not all(isinstance(item, str) and item for item in references):
+        raise ServiceError(409, 'case draft references are invalid')
+    allowed = set(references)
+    raw_points = change.get('key_points')
+    if not isinstance(raw_points, list) or not 1 <= len(raw_points) <= 5:
+        raise ServiceError(422, 'key_points must contain 1 to 5 items')
+    points = []
+    for index, raw in enumerate(raw_points, 1):
+        point = _mapping_value(raw, 'changes.grading.key_points[]')
+        if set(point) != {'statement', 'evidence_chunk_ids'}:
+            raise ServiceError(422, 'key_points item is invalid')
+        evidence = point.get('evidence_chunk_ids')
+        if not isinstance(evidence, list) or not evidence or not all(isinstance(item, str) and item for item in evidence):
+            raise ServiceError(422, 'evidence_chunk_ids is invalid')
+        if len(set(evidence)) != len(evidence) or not set(evidence).issubset(allowed):
+            raise ServiceError(422, 'evidence_chunk_ids must belong to case references')
+        points.append({
+            'id': f'key_point_{index}',
+            'statement': _text_value(point.get('statement'), 'changes.grading.key_points[].statement'),
+            'evidence_chunk_ids': evidence,
+        })
+    claims = change.get('forbidden_claims')
+    if not isinstance(claims, list) or len(claims) > 3 or not all(isinstance(item, str) and item.strip() for item in claims):
+        raise ServiceError(422, 'forbidden_claims is invalid')
+    return {'key_points': points, 'forbidden_claims': claims}
 
 
 def _copy_mapping(value: object, name: str) -> dict[str, Any]:

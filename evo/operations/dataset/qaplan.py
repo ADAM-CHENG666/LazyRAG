@@ -60,8 +60,20 @@ def qaplan_spec(ctx: Any, inputs: Mapping[str, object]) -> dict[str, object]:
     case_id = _text(getattr(output, 'partition', None), 'qaplan_spec output partition')
     if case_id not in case_ids:
         raise ValueError('preparation output partition must belong to runtime case partitions')
-    imported = _mapping(inputs.get('import_cases_manifest'), 'import_cases_manifest')
-    _, _, _, assignments = _allocation(inputs)
+    return {'qaplan_spec': build_qaplan_spec(
+        case_id,
+        inputs.get('import_cases_manifest'),
+        inputs.get('qaplan_plan'),
+        inputs.get('topic_discovery_manifest'),
+        inputs.get('chunk'),
+    )}
+
+
+def build_qaplan_spec(case_id: str, import_cases_manifest: object, qaplan_plan_value: object,
+                      topic_manifest: object, chunks_value: object) -> dict[str, object]:
+    """Build one Case specification from the same facts used by the qaplan operation."""
+    imported = _mapping(import_cases_manifest, 'import_cases_manifest')
+    _, _, _, assignments = _allocation({'import_cases_manifest': import_cases_manifest})
     assignment = _mapping(assignments.get(case_id), 'assignment')
     if _mode(assignment) == 'imported':
         row = _positive_int(assignment.get('source_row_number'), 'assignment.source_row_number')
@@ -70,9 +82,9 @@ def qaplan_spec(ctx: Any, inputs: Mapping[str, object]) -> dict[str, object]:
         detail = next((item for item in details if isinstance(item, Mapping) and item.get('source_row_number') == row), None)
         case = _mapping(_mapping(detail, 'loaded detail').get('case'), 'loaded detail.case')
         if _text(case.get('id'), 'loaded detail.case.id') != case_id: raise ValueError('loaded detail case id mismatch')
-        return {'qaplan_spec': {'id': case_id, 'mode': 'imported', 'imported_case': dict(case)}}
+        return {'id': case_id, 'mode': 'imported', 'imported_case': dict(case)}
 
-    plan = _mapping(inputs.get('qaplan_plan'), 'qaplan_plan')
+    plan = _mapping(qaplan_plan_value, 'qaplan_plan')
     raw_items = plan.get('items')
     if not isinstance(raw_items, list): raise ValueError('qaplan.items must be a list')
     matches = [item for item in raw_items if isinstance(item, Mapping) and item.get('case_id') == case_id]
@@ -81,22 +93,22 @@ def qaplan_spec(ctx: Any, inputs: Mapping[str, object]) -> dict[str, object]:
     question_type = _choice(item.get('question_type'), ('precision', 'reasoning'), 'question_type')
     difficulty = _choice(item.get('difficulty'), ('easy', 'medium', 'hard'), 'difficulty')
     topic_id = _text(item.get('topic_id'), 'topic_id')
-    topics = _topics(inputs.get('topic_discovery_manifest'))
+    topics = _topics(topic_manifest)
     topic_matches = [topic for topic in topics if topic['topic_id'] == topic_id]
     if len(topic_matches) != 1: raise ValueError('topic_id must resolve to exactly one current topic')
     topic = topic_matches[0]
     if topic['question_type'] != question_type or topic['chunk_count'] < REFERENCE_COUNTS[difficulty]:
         raise ValueError('topic_id does not satisfy question_type or chunk_count')
-    chunks = _chunk_map(inputs.get('chunk'))
+    chunks = _chunk_map(chunks_value)
     references = []
     for chunk_id in topic['chunk_ids'][:REFERENCE_COUNTS[difficulty]]:
         if chunk_id not in chunks: raise ValueError('topic_id references an unavailable current chunk')
         references.append(chunks[chunk_id])
-    return {'qaplan_spec': {'id': case_id, 'mode': 'generated', 'question_type': question_type,
+    return {'id': case_id, 'mode': 'generated', 'question_type': question_type,
         'difficulty': difficulty, 'topic': {'topic_id': topic_id, 'name': topic['name']},
         'instruction': _instruction(question_type),
         'qaplan': {'plan_item_id': _text(item.get('plan_item_id'), 'plan_item_id'), 'lane': _text(item.get('lane'), 'lane')},
-        'references': references}}
+        'references': references}
 
 
 def qaplan_manifest(ctx: Any, inputs: Mapping[str, object]) -> dict[str, object]:

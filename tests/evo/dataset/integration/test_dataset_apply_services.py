@@ -4,7 +4,7 @@ import asyncio
 import pytest
 
 from evo import artifacts as A
-from evo.artifact_runtime import ArtifactCommit, ArtifactKey, ArtifactRecord, ArtifactRef
+from evo.artifact_runtime import ArtifactCommit, ArtifactKey, ArtifactRecord, ArtifactRef, PartitionSet
 from evo.service.contracts import ServiceError
 from evo.service.core import EvoService
 from evo.service.projections import ProjectionService
@@ -80,6 +80,247 @@ def _material_values() -> dict[ArtifactKey, tuple[int, object]]:
             'quotas': [{'kb_id': 'kb-a', 'doc_id': 'doc-1', 'group': 'block', 'required': 1}],
         }),
     }
+
+
+def _generation_plan_values() -> dict[ArtifactKey, tuple[int, object]]:
+    return {
+        ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN_PARAMS): (12, {}),
+        ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN): (13, {
+            'stats': {
+                'auto_case_count': 4,
+                'lane_summaries': [
+                    {'lane': 'precision_easy', 'eligible_topic_count': 2},
+                    {'lane': 'precision_medium', 'eligible_topic_count': 1},
+                    {'lane': 'precision_hard', 'eligible_topic_count': 1},
+                    {'lane': 'reasoning_easy', 'eligible_topic_count': 2},
+                    {'lane': 'reasoning_medium', 'eligible_topic_count': 1},
+                    {'lane': 'reasoning_hard', 'eligible_topic_count': 1},
+                ],
+            },
+        }),
+    }
+
+
+def _distribution(*, precision_easy: int = 1, precision_medium: int = 1, precision_hard: int = 0,
+                  reasoning_easy: int = 1, reasoning_medium: int = 1, reasoning_hard: int = 0) -> dict[str, object]:
+    return {
+        'precision': {'easy': precision_easy, 'medium': precision_medium, 'hard': precision_hard},
+        'reasoning': {'easy': reasoning_easy, 'medium': reasoning_medium, 'hard': reasoning_hard},
+    }
+
+
+def _case_patch_values(*, source: str = 'generated') -> dict[ArtifactKey, tuple[int, object]]:
+    case_id = 'case-1'
+    refs = [
+        {'kb_id': 'kb-a', 'doc_id': 'doc-1', 'chunk_id': 'chunk-old-1', 'text': '旧引用一'},
+        {'kb_id': 'kb-a', 'doc_id': 'doc-1', 'chunk_id': 'chunk-old-2', 'text': '旧引用二'},
+    ]
+    return {
+        ArtifactKey.scalar(A.EVAL_CASE_REQUESTS): (21, PartitionSet((case_id,))),
+        ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST): (22, {
+            'stats': {'case_allocation': {
+                'target_case_count': 1,
+                'import_case_count': 0 if source == 'generated' else 1,
+                'auto_case_count': 1 if source == 'generated' else 0,
+                'assignments': {case_id: {'mode': source}},
+            }},
+            'details': [],
+        }),
+        ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN): (23, {'items': [{
+            'case_id': case_id, 'plan_item_id': 'plan-1', 'lane': 'precision_medium',
+            'question_type': 'precision', 'difficulty': 'medium', 'topic_id': 'topic-old',
+        }]}),
+        ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST): (24, {'topics': [
+            {'topic_id': 'topic-old', 'name': '旧主题', 'question_type': 'precision',
+             'chunk_ids': ['chunk-old-1', 'chunk-old-2'], 'chunk_count': 2},
+            {'topic_id': 'topic-new', 'name': '新主题', 'question_type': 'precision',
+             'chunk_ids': ['chunk-new-1', 'chunk-new-2'], 'chunk_count': 2},
+        ]}),
+        ArtifactKey.scalar(A.DATASET_SELECTED_DOCS): (25, {'documents': [
+            {'kb_id': 'kb-a', 'doc_id': 'doc-1', 'included': True},
+        ]}),
+        ArtifactKey.partition(A.DATASET_QAPLAN_SPEC, case_id): (26, {
+            'id': case_id, 'mode': source, 'question_type': 'precision', 'difficulty': 'medium',
+            'topic': {'topic_id': 'topic-old', 'name': '旧主题'},
+            'instruction': '旧 instruction', 'qaplan': {'plan_item_id': 'plan-1', 'lane': 'precision_medium'},
+            'references': refs,
+        }),
+        ArtifactKey.partition(A.DATASET_CASE_DRAFT, case_id): (27, {
+            'id': case_id, 'question_type': 'precision', 'difficulty': 'medium',
+            'question': '旧问题', 'answer': '旧答案', 'grading_guidance': '旧说明',
+            'references': refs,
+            'reference_context': [{'chunk_id': item['chunk_id'], 'text': item['text']} for item in refs],
+            'reference_chunk_ids': [item['chunk_id'] for item in refs],
+            'reference_doc_ids': ['doc-1'], 'source_preparation': {'kb_ids': ['kb-a']},
+        }),
+        ArtifactKey.partition(A.DATASET_CASE_ENHANCEMENT, case_id): (28, {
+            'key_points': [{'id': 'key_point_1', 'statement': '旧得分点', 'evidence_chunk_ids': ['chunk-old-1']}],
+            'forbidden_claims': [],
+        }),
+        ArtifactKey.partition(A.DATASET_CHUNK, 'chunk-new-1'): (29, {
+            'kb_id': 'kb-a', 'doc_id': 'doc-1', 'chunk_id': 'chunk-new-1', 'text': '新引用一', 'available': True,
+        }),
+        ArtifactKey.partition(A.DATASET_CHUNK, 'chunk-new-2'): (30, {
+            'kb_id': 'kb-a', 'doc_id': 'doc-1', 'chunk_id': 'chunk-new-2', 'text': '新引用二', 'available': True,
+        }),
+    }
+
+
+def _case_patch_revision() -> str:
+    case_id = 'case-1'
+    return _revision(
+        ArtifactRef(ArtifactKey.scalar(A.EVAL_CASE_REQUESTS), 21),
+        ArtifactRef(ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST), 22),
+        ArtifactRef(ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN), 23),
+        ArtifactRef(ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST), 24),
+        ArtifactRef(ArtifactKey.scalar(A.DATASET_SELECTED_DOCS), 25),
+        ArtifactRef(ArtifactKey.partition(A.DATASET_QAPLAN_SPEC, case_id), 26),
+        ArtifactRef(ArtifactKey.partition(A.DATASET_CASE_DRAFT, case_id), 27),
+        ArtifactRef(ArtifactKey.partition(A.DATASET_CASE_ENHANCEMENT, case_id), 28),
+    )
+
+
+def test_patch_case_combines_requested_changes_and_keeps_plan_topic_as_single_source_of_truth() -> None:
+    case_id = 'case-1'
+    service, flow = _service(_case_patch_values())
+
+    asyncio.run(service.patch_case(case_id='case-1', thread_id='thr-1', request={
+        'request_id': 'case-patch-1',
+        'expected_revision': _case_patch_revision(),
+        'changes': {
+            'plan': {'topic_id': 'topic-new'},
+            'generate': {'question': '新问题', 'answer': '新答案', 'grading_guidance': '新说明'},
+            'grading': {
+                'key_points': [{'statement': '新得分点', 'evidence_chunk_ids': ['chunk-new-1']}],
+                'forbidden_claims': ['新禁止项'],
+            },
+        },
+    }))
+
+    commit = flow.commits[0]
+    assert commit.commit_id == 'dataset-case-patch:case-1:case-patch-1'
+    assert commit.expected_heads[ArtifactKey.partition(A.DATASET_CHUNK, 'chunk-new-1')] == ArtifactRef(
+        ArtifactKey.partition(A.DATASET_CHUNK, 'chunk-new-1'), 29,
+    )
+    assert commit.expected_heads[ArtifactKey.partition(A.DATASET_CHUNK, 'chunk-new-2')] == ArtifactRef(
+        ArtifactKey.partition(A.DATASET_CHUNK, 'chunk-new-2'), 30,
+    )
+    writes = {write.key: write.value for write in commit.writes}
+    assert writes[ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN)]['items'][0]['topic_id'] == 'topic-new'
+    assert [item['chunk_id'] for item in writes[ArtifactKey.partition(A.DATASET_QAPLAN_SPEC, case_id)]['references']] == [
+        'chunk-new-1', 'chunk-new-2',
+    ]
+    assert writes[ArtifactKey.partition(A.DATASET_CASE_DRAFT, case_id)]['question'] == '新问题'
+    assert writes[ArtifactKey.partition(A.DATASET_CASE_DRAFT, case_id)]['reference_chunk_ids'] == ['chunk-new-1', 'chunk-new-2']
+    assert writes[ArtifactKey.partition(A.DATASET_CASE_ENHANCEMENT, case_id)] == {
+        'key_points': [{'id': 'key_point_1', 'statement': '新得分点', 'evidence_chunk_ids': ['chunk-new-1']}],
+        'forbidden_claims': ['新禁止项'],
+    }
+
+
+def test_patch_case_rejects_imported_case_topic_changes_and_evidence_outside_effective_references() -> None:
+    imported, imported_flow = _service(_case_patch_values(source='imported'))
+    with pytest.raises(ServiceError) as source_error:
+        asyncio.run(imported.patch_case('thr-1', 'case-1', {
+            'request_id': 'imported-plan', 'expected_revision': _case_patch_revision(),
+            'changes': {'plan': {'topic_id': 'topic-new'}},
+        }))
+    assert source_error.value.status_code == 422
+    assert imported_flow.commits == []
+
+    service, flow = _service(_case_patch_values())
+    with pytest.raises(ServiceError) as evidence_error:
+        asyncio.run(service.patch_case('thr-1', 'case-1', {
+            'request_id': 'bad-evidence', 'expected_revision': _case_patch_revision(),
+            'changes': {'grading': {
+                'key_points': [{'statement': '不支持的依据', 'evidence_chunk_ids': ['chunk-not-current']}],
+                'forbidden_claims': [],
+            }},
+        }))
+    assert evidence_error.value.status_code == 422
+    assert flow.commits == []
+
+
+def test_patch_case_requires_the_complete_case_detail_revision() -> None:
+    service, flow = _service(_case_patch_values())
+    plan_ref = ArtifactRef(ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN), 23)
+
+    with pytest.raises(ServiceError) as error:
+        asyncio.run(service.patch_case('thr-1', 'case-1', {
+            'request_id': 'partial-revision', 'expected_revision': _revision(plan_ref),
+            'changes': {'generate': {'question': '新问题', 'answer': '新答案', 'grading_guidance': '新说明'}},
+        }))
+
+    assert error.value.status_code == 400
+    assert flow.commits == []
+
+
+def test_apply_generation_plan_converts_distribution_and_commits_params_with_revision_cas() -> None:
+    values = _generation_plan_values()
+    params_key = ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN_PARAMS)
+    params_ref = ArtifactRef(params_key, 12)
+    service, flow = _service(values)
+
+    asyncio.run(service.apply_generation_plan('thr-1', {
+        'request_id': 'plan-1',
+        'expected_revision': _revision(params_ref),
+        'distribution': _distribution(),
+    }))
+
+    assert len(flow.commits) == 1
+    commit = flow.commits[0]
+    assert commit.commit_id == 'dataset-generation-plan:plan-1'
+    assert commit.expected_heads == {params_key: params_ref}
+    assert len(commit.writes) == 1
+    assert commit.writes[0].key == params_key
+    assert commit.writes[0].value == {'lane_case_counts': {
+        'precision_easy': 1, 'precision_medium': 1, 'precision_hard': 0,
+        'reasoning_easy': 1, 'reasoning_medium': 1, 'reasoning_hard': 0,
+    }}
+
+
+@pytest.mark.parametrize(('distribution', 'message'), [
+    (_distribution(precision_easy=2, precision_medium=1, reasoning_easy=1, reasoning_medium=1), 'total'),
+    (_distribution(precision_medium=2, reasoning_easy=1, reasoning_medium=0), 'capacity'),
+])
+def test_apply_generation_plan_rejects_invalid_total_or_lane_capacity(distribution: dict[str, object], message: str) -> None:
+    params_key = ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN_PARAMS)
+    service, flow = _service(_generation_plan_values())
+
+    with pytest.raises(ServiceError) as error:
+        asyncio.run(service.apply_generation_plan('thr-1', {
+            'request_id': f'plan-{message}',
+            'expected_revision': _revision(ArtifactRef(params_key, 12)),
+            'distribution': distribution,
+        }))
+
+    assert error.value.status_code == 422
+    assert flow.commits == []
+
+
+def test_apply_generation_plan_requires_the_overview_params_revision_and_a_current_plan() -> None:
+    params_key = ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN_PARAMS)
+    plan_key = ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN)
+    params_ref = ArtifactRef(params_key, 12)
+    plan_ref = ArtifactRef(plan_key, 13)
+    service, _ = _service(_generation_plan_values())
+
+    with pytest.raises(ServiceError) as revision_error:
+        asyncio.run(service.apply_generation_plan('thr-1', {
+            'request_id': 'wrong-revision',
+            'expected_revision': _revision(params_ref, plan_ref),
+            'distribution': _distribution(),
+        }))
+    assert revision_error.value.status_code == 400
+
+    unavailable, _ = _service({params_key: (12, {})})
+    with pytest.raises(ServiceError) as plan_error:
+        asyncio.run(unavailable.apply_generation_plan('thr-1', {
+            'request_id': 'plan-unavailable',
+            'expected_revision': _revision(params_ref),
+            'distribution': _distribution(),
+        }))
+    assert plan_error.value.status_code == 409
 
 
 def test_apply_material_scan_config_commits_complete_changed_values_with_three_way_cas() -> None:

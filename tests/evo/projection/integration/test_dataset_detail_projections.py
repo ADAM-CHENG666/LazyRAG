@@ -3,18 +3,23 @@ from __future__ import annotations
 """Behavior tests for Dataset document and topic detail projections."""
 
 import asyncio
+from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
 from evo import artifacts as A
-from evo.artifact_runtime import ArtifactKey, ArtifactRecord, ArtifactRef
+from evo.artifact_runtime import ArtifactKey, ArtifactRecord, ArtifactRef, PartitionSet
+from evo.service.api import create_app
 from evo.service.contracts import ServiceError
 from evo.service.projections import ProjectionService
 
 
 class _DetailFlow:
-    def __init__(self, values: dict[ArtifactKey, dict[int, object]], *, has_thread: bool = True) -> None:
+    def __init__(self, values: dict[ArtifactKey, dict[int, object]], cases: dict[str, object] | None = None,
+                 *, has_thread: bool = True) -> None:
         self._values = values
+        self._cases = {} if cases is None else cases
         self._has_thread = has_thread
 
     async def has_run(self, thread_id: str) -> bool:
@@ -30,13 +35,16 @@ class _DetailFlow:
     async def read(self, thread_id: str, ref: ArtifactRef) -> object:
         return self._values[ref.key][ref.version]
 
+    async def case_snapshot(self, _: str, case_id: str) -> object:
+        return self._cases[case_id]
+
     @staticmethod
     def _record(key: ArtifactKey, version: int) -> ArtifactRecord:
         return ArtifactRecord(ArtifactRef(key, version), producer='test')
 
 
-def _service(values: dict[ArtifactKey, dict[int, object]]) -> ProjectionService:
-    return ProjectionService(_DetailFlow(values), definition=None)
+def _service(values: dict[ArtifactKey, dict[int, object]], cases: dict[str, object] | None = None) -> ProjectionService:
+    return ProjectionService(_DetailFlow(values, cases), definition=None)
 
 
 def _selected_docs(*documents: tuple[str, str, str, str, bool]) -> dict:
@@ -73,6 +81,41 @@ def _topic_detail(service: ProjectionService, *, page_token: str = '', page_size
     return asyncio.run(service.topic_detail(
         'thr-1', 'topic-1', page_size=page_size, page_token=page_token,
     ))
+
+
+def _case_detail(service: ProjectionService, case_id: str = 'case-1') -> dict:
+    return asyncio.run(service.case_detail('thr-1', case_id))
+
+
+def _case_statuses(*, plan: str = 'succeeded', generate: str = 'succeeded', grading: str = 'succeeded') -> dict[str, object]:
+    return {'runtime': {'operations': [
+        {'operation_id': 'dataset.qaplan_spec', 'status': plan},
+        {'operation_id': 'dataset.generate_case', 'status': generate},
+        {'operation_id': 'dataset.enhance_case', 'status': grading},
+    ]}}
+
+
+def _case_base_values() -> dict[ArtifactKey, dict[int, object]]:
+    return {
+        ArtifactKey.scalar(A.EVAL_CASE_REQUESTS): {1: PartitionSet(('case-1',))},
+        ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST): {1: {
+            'stats': {'case_allocation': {'assignments': {'case-1': {'mode': 'generated'}}}}, 'details': [],
+        }},
+        ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN): {1: {'items': [{
+            'case_id': 'case-1', 'question_type': 'precision', 'difficulty': 'medium', 'topic_id': 'topic-1',
+        }]}},
+        ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST): {1: {'topics': [{
+            'topic_id': 'topic-1', 'name': '电池安全', 'chunk_count': 2,
+        }]}},
+        ArtifactKey.scalar(A.DATASET_SELECTED_DOCS): {1: _selected_docs(
+            ('kb-a', '产品知识库', 'doc-1', '产品手册.pdf', True),
+        )},
+        ArtifactKey(A.DATASET_QAPLAN_SPEC, 'case-1'): {1: {
+            'id': 'case-1', 'mode': 'generated', 'question_type': 'precision', 'difficulty': 'medium',
+            'topic': {'topic_id': 'topic-1', 'name': '电池安全'},
+            'references': [{'kb_id': 'kb-a', 'doc_id': 'doc-1', 'chunk_id': 'chunk-plan', 'text': '规划引用'}],
+        }},
+    }
 
 
 def test_document_detail_projects_document_quotas_and_filtered_chunk_page() -> None:
@@ -262,3 +305,112 @@ def test_topic_detail_returns_404_when_topic_or_referenced_chunk_is_missing() ->
     with pytest.raises(ServiceError) as topic_error:
         asyncio.run(service.topic_detail('thr-1', 'missing-topic', page_size=50))
     assert topic_error.value.status_code == 404
+
+
+def test_case_detail_projects_generated_case_and_prefers_current_draft_references() -> None:
+    values = _case_base_values()
+    values[ArtifactKey(A.DATASET_CASE_DRAFT, 'case-1')] = {2: {
+        'id': 'case-1', 'question': '电池热失控的诱因是什么？', 'answer': '内部短路。',
+        'grading_guidance': '回答内部短路。',
+        'references': [{'kb_id': 'kb-a', 'doc_id': 'doc-1', 'chunk_id': 'chunk-draft', 'text': '当前引用'}],
+    }}
+    values[ArtifactKey(A.DATASET_CASE_ENHANCEMENT, 'case-1')] = {3: {
+        'key_points': [{'statement': '指出内部短路', 'evidence_chunk_ids': ['chunk-draft']}],
+        'forbidden_claims': ['只会由外部高温引起'],
+    }}
+    service = _service(values, {'case-1': _case_statuses()})
+
+    result = _case_detail(service)
+
+    assert result['case_id'] == 'case-1'
+    assert result['source'] == 'generated'
+    assert result['question_type'] == 'precision'
+    assert result['difficulty'] == 'medium'
+    assert result['topic'] == {'topic_id': 'topic-1', 'name': '电池安全', 'chunk_count': 2}
+    assert result['references'] == [{
+        'chunk_id': 'chunk-draft', 'knowledge_base': {'id': 'kb-a', 'name': '产品知识库'},
+        'document': {'id': 'doc-1', 'name': '产品手册.pdf'}, 'text': '当前引用',
+    }]
+    assert result['stages'] == {
+        'plan': {'status': 'succeeded'},
+        'generate': {
+            'status': 'succeeded', 'question': '电池热失控的诱因是什么？',
+            'answer': '内部短路。', 'grading_guidance': '回答内部短路。',
+        },
+        'grading': {
+            'status': 'succeeded',
+            'key_points': [{'statement': '指出内部短路', 'evidence_chunk_ids': ['chunk-draft']}],
+            'forbidden_claims': ['只会由外部高温引起'],
+        },
+    }
+    assert len(service._resolve_revision(result['revision'])) == 8
+
+
+def test_case_detail_uses_plan_references_before_generation_and_nulls_future_stage_data() -> None:
+    service = _service(
+        _case_base_values(),
+        {'case-1': _case_statuses(generate='pending', grading='pending')},
+    )
+
+    result = _case_detail(service)
+
+    assert result['references'][0]['chunk_id'] == 'chunk-plan'
+    assert result['stages'] == {
+        'plan': {'status': 'succeeded'},
+        'generate': {'status': 'pending', 'question': None, 'answer': None, 'grading_guidance': None},
+        'grading': {'status': 'pending', 'key_points': None, 'forbidden_claims': None},
+    }
+
+
+def test_case_detail_projects_imported_case_without_topic() -> None:
+    values = _case_base_values()
+    values[ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST)] = {1: {
+        'stats': {'case_allocation': {'assignments': {
+            'case-1': {'mode': 'imported', 'source_row_number': 7},
+        }}},
+        'details': [{'source_row_number': 7, 'case': {
+            'id': 'case-1', 'question_type': 'reasoning', 'difficulty': 'hard',
+            'references': [{'kb_id': 'kb-a', 'doc_id': 'doc-1', 'chunk_id': 'chunk-import', 'text': '导入引用'}],
+        }}],
+    }}
+    values[ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN)] = {1: {'items': []}}
+    values[ArtifactKey(A.DATASET_QAPLAN_SPEC, 'case-1')] = {1: {
+        'id': 'case-1', 'mode': 'imported', 'imported_case': {
+            'id': 'case-1', 'question_type': 'reasoning', 'difficulty': 'hard',
+            'references': [{'kb_id': 'kb-a', 'doc_id': 'doc-1', 'chunk_id': 'chunk-import', 'text': '导入引用'}],
+        },
+    }}
+    result = _case_detail(_service(values, {'case-1': _case_statuses()}))
+
+    assert result['source'] == 'imported'
+    assert result['question_type'] == 'reasoning'
+    assert result['difficulty'] == 'hard'
+    assert result['topic'] is None
+    assert result['references'][0]['chunk_id'] == 'chunk-import'
+
+
+def test_case_detail_handler_delegates_without_query_parameters(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls: list[tuple[str, str]] = []
+
+    class _Projections:
+        async def case_detail(self, thread_id: str, case_id: str) -> dict:
+            calls.append((thread_id, case_id))
+            return {'thread_id': thread_id, 'case_id': case_id}
+
+    class _Service:
+        projections = _Projections()
+
+        async def close(self) -> None:
+            return None
+
+    async def _open(_: Path) -> _Service:
+        return _Service()
+
+    monkeypatch.setattr('evo.service.api.EvoService.open', _open)
+    with TestClient(create_app(tmp_path)) as client:
+        response = client.get('/threads/thr-1/dataset/cases/case-1')
+        unsupported = client.get('/threads/thr-1/dataset/cases/case-1', params={'page_size': '20'})
+
+    assert response.status_code == 200
+    assert unsupported.status_code == 422
+    assert calls == [('thr-1', 'case-1')]

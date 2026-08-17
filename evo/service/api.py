@@ -22,6 +22,7 @@ from .contracts import (
     AlgorithmActionBody,
     ArtifactUpdateBody,
     AutomaticUpdateBody,
+    CasePatchBody,
     CaseRerunBody,
     CaseStructureBody,
     CommandRequest,
@@ -29,6 +30,7 @@ from .contracts import (
     ControlRequest,
     DatasetApplyBody,
     ExternalResultBody,
+    GenerationPlanApplyBody,
     MessageBody,
     RegisterAlgorithmBody,
     RetryRequest,
@@ -203,6 +205,36 @@ def create_app(root: str | Path | None = None) -> FastAPI:
         _query_keys(request, set())
         return await _service(app).projections.topics_overview(thread_id)
 
+    @app.get('/threads/{thread_id}/dataset/cases/overview')
+    async def dataset_cases_overview(thread_id: str, request: Request) -> dict[str, Any]:
+        _query_keys(request, set())
+        return await _service(app).projections.cases_overview(thread_id)
+
+    @app.get('/threads/{thread_id}/dataset/cases')
+    async def dataset_cases(thread_id: str, plan_status: str = '', generate_status: str = '',
+                            grading_status: str = '', source: str = '', question_type: str = '',
+                            difficulty: str = '', page_size: str = '', page_token: str = '') -> dict[str, Any]:
+        return await _service(app).projections.cases(
+            thread_id,
+            plan_status=plan_status,
+            generate_status=generate_status,
+            grading_status=grading_status,
+            source=source,
+            question_type=question_type,
+            difficulty=difficulty,
+            page_size=_optional_query_int(page_size, 'page_size'),
+            page_token=page_token,
+        )
+
+    @app.get('/threads/{thread_id}/dataset/cases/{case_id}')
+    async def dataset_case_detail(thread_id: str, case_id: str, request: Request) -> dict[str, Any]:
+        _query_keys(request, set())
+        return await _service(app).projections.case_detail(thread_id, case_id)
+
+    @app.patch('/threads/{thread_id}/dataset/cases/{case_id}')
+    async def patch_dataset_case(thread_id: str, case_id: str, payload: CasePatchBody) -> dict[str, Any]:
+        return await _service(app).patch_case(thread_id, case_id, payload)
+
     @app.get('/threads/{thread_id}/dataset/materials/documents')
     async def dataset_materials_documents(thread_id: str, included: str = '', knowledge_base_id: str = '',
                                           page_size: str = '', page_token: str = '') -> dict[str, Any]:
@@ -250,6 +282,10 @@ def create_app(root: str | Path | None = None) -> FastAPI:
     @app.post('/threads/{thread_id}/dataset/topics:apply')
     async def apply_dataset_topic_names(thread_id: str, payload: TopicApplyBody) -> dict[str, Any]:
         return await _service(app).apply_topic_names(thread_id, payload)
+
+    @app.post('/threads/{thread_id}/dataset/generation-plan:apply')
+    async def apply_dataset_generation_plan(thread_id: str, payload: GenerationPlanApplyBody) -> dict[str, Any]:
+        return await _service(app).apply_generation_plan(thread_id, payload)
 
     @app.get('/threads/{thread_id}/dataset/cases/{case_id}/topic-options')
     async def dataset_case_topic_options(thread_id: str, case_id: str, page_size: str = '',

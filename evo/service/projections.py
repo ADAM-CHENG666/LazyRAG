@@ -262,6 +262,218 @@ class ProjectionService:
             },
         }
 
+    async def cases_overview(self, thread_id: str) -> dict[str, Any]:
+        if not await self.flow.has_run(thread_id):
+            raise ServiceError(404, f'thread not found: {thread_id}')
+        status = _overview_stage_status(
+            await self.stage_snapshot(thread_id, 'dataset.case_generation'),
+        )
+        try:
+            params = await self.artifact(thread_id, A.DATASET_QAPLAN_PLAN_PARAMS)
+        except ServiceError as error:
+            if error.status_code != 404:
+                raise
+            return _empty_cases_overview(thread_id, status, revision=None)
+
+        revision = self._build_revision((_public_artifact_ref(params['record']),))
+        manifest = await _optional_overview_artifact(self, thread_id, A.DATASET_QAPLAN_MANIFEST)
+        requests = await _optional_overview_artifact(self, thread_id, A.EVAL_CASE_REQUESTS)
+        if requests is None:
+            return _empty_cases_overview(thread_id, status, revision=revision)
+
+        case_ids = _case_ids_from_partition_set(requests['value'])
+        stages = await self._case_stage_counts(thread_id, case_ids)
+        return {
+            'thread_id': thread_id,
+            'revision': revision,
+            'status': status,
+            'stages': stages,
+            'automatic_plan': None if manifest is None else _automatic_case_plan(manifest['value']),
+        }
+
+    async def _case_stage_counts(self, thread_id: str, case_ids: tuple[str, ...]) -> dict[str, Any]:
+        statuses_by_case = await self._case_operation_statuses(thread_id, case_ids)
+        statuses_by_operation: dict[str, list[str]] = {
+            'dataset.qaplan_spec': [],
+            'dataset.generate_case': [],
+            'dataset.enhance_case': [],
+        }
+        for statuses in statuses_by_case.values():
+            for operation_id, values in statuses_by_operation.items():
+                values.append(statuses[operation_id])
+        return {
+            'plan': _case_operation_summary(statuses_by_operation['dataset.qaplan_spec']),
+            'generate': _case_operation_summary(statuses_by_operation['dataset.generate_case']),
+            'grading': _case_operation_summary(statuses_by_operation['dataset.enhance_case']),
+        }
+
+    async def _case_operation_statuses(self, thread_id: str,
+                                       case_ids: tuple[str, ...]) -> dict[str, dict[str, str]]:
+        snapshots = await asyncio.gather(*(self.case_snapshot(thread_id, case_id) for case_id in case_ids))
+        result: dict[str, dict[str, str]] = {}
+        operation_ids = ('dataset.qaplan_spec', 'dataset.generate_case', 'dataset.enhance_case')
+        for case_id, snapshot in zip(case_ids, snapshots, strict=True):
+            runtime = _overview_mapping(
+                _overview_mapping(snapshot, 'case snapshot').get('snapshot'),
+                'case snapshot.snapshot',
+            ).get('runtime')
+            operations = _overview_mapping(runtime, 'case snapshot.runtime').get('operations')
+            if not isinstance(operations, list):
+                raise ServiceError(409, 'case snapshot.runtime.operations is invalid')
+            by_id = {
+                operation.get('operation_id'): operation.get('status')
+                for operation in operations
+                if isinstance(operation, Mapping)
+            }
+            statuses: dict[str, str] = {}
+            for operation_id in operation_ids:
+                operation_status = by_id.get(operation_id)
+                if operation_status not in {'pending', 'running', 'succeeded', 'failed'}:
+                    raise ServiceError(409, f'case snapshot has no valid status for {operation_id}')
+                statuses[operation_id] = operation_status
+            result[case_id] = statuses
+        return result
+
+    async def cases(self, thread_id: str, *, page_size: int | None = None, page_token: str = '',
+                    plan_status: str = '', generate_status: str = '', grading_status: str = '', source: str = '',
+                    question_type: str = '', difficulty: str = '') -> dict[str, Any]:
+        if not await self.flow.has_run(thread_id):
+            raise ServiceError(404, f'thread not found: {thread_id}')
+        size = self._validate_page_size(page_size)
+        filters = _case_filters(
+            plan_status, generate_status, grading_status, source, question_type, difficulty,
+        )
+        normalized_filters = self._normalize_filters(filters)
+        keys = (
+            ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST),
+            ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN),
+            ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST),
+            ArtifactKey.scalar(A.EVAL_CASE_REQUESTS),
+        )
+        refs: tuple[ArtifactRef, ...] = ()
+        revision = ''
+        offset = 0
+        if page_token:
+            context = self._resolve_page_token(
+                page_token, thread_id=thread_id, list_name='dataset.cases',
+                filters=normalized_filters, page_size=size,
+            )
+            refs = self._resolve_revision(context['revision'])
+            if {ref.key for ref in refs} != set(keys):
+                raise ServiceError(400, 'page_token is invalid')
+            revision, offset = context['revision'], context['next_offset']
+
+        refs_by_key = {ref.key: ref for ref in refs}
+        try:
+            artifacts = await self._read_artifact_batch(thread_id, keys, refs_by_key)
+        except ServiceError as error:
+            if page_token and error.status_code == 404:
+                raise ServiceError(409, 'page_token pagination snapshot is unavailable') from None
+            if not page_token and error.status_code == 404:
+                return {'thread_id': thread_id, 'revision': None, 'items': [], 'next_page_token': ''}
+            raise
+        if not page_token:
+            revision = self._build_revision(tuple(_public_artifact_ref(artifacts[key]['record']) for key in keys))
+
+        case_ids = _case_ids_from_partition_set(artifacts[ArtifactKey.scalar(A.EVAL_CASE_REQUESTS)]['value'])
+        statuses = await self._case_operation_statuses(thread_id, case_ids)
+        rows = [
+            row for row in _case_rows(
+                case_ids,
+                artifacts[ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST)]['value'],
+                artifacts[ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN)]['value'],
+                artifacts[ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST)]['value'],
+                statuses,
+            ) if _case_matches(row, filters)
+        ]
+        page = _page(rows, size, str(offset))
+        next_offset = page['next_page_token']
+        return {
+            'thread_id': thread_id,
+            'revision': revision,
+            'items': page['items'],
+            'next_page_token': '' if not next_offset else self._build_page_token(
+                thread_id=thread_id, list_name='dataset.cases', revision=revision,
+                filters=normalized_filters, page_size=size, next_offset=int(next_offset),
+            ),
+        }
+
+    async def case_detail(self, thread_id: str, case_id: str) -> dict[str, Any]:
+        if not await self.flow.has_run(thread_id):
+            raise ServiceError(404, f'thread not found: {thread_id}')
+        case_id = _required_id(case_id, 'case_id')
+        base_keys = (
+            ArtifactKey.scalar(A.EVAL_CASE_REQUESTS),
+            ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST),
+            ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN),
+            ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST),
+            ArtifactKey.scalar(A.DATASET_SELECTED_DOCS),
+        )
+        try:
+            artifacts = await self._read_artifact_batch(thread_id, base_keys, {})
+        except ServiceError as error:
+            if error.status_code == 404:
+                raise ServiceError(404, f'case not found: {case_id}') from None
+            raise
+        case_ids = _case_ids_from_partition_set(artifacts[base_keys[0]]['value'])
+        if case_id not in case_ids:
+            raise ServiceError(404, f'case not found: {case_id}')
+        statuses = await self._case_operation_statuses(thread_id, (case_id,))
+        row = _case_rows(
+            (case_id,),
+            artifacts[base_keys[1]]['value'],
+            artifacts[base_keys[2]]['value'],
+            artifacts[base_keys[3]]['value'],
+            statuses,
+        )[0]
+        optional = await self._case_detail_artifacts(thread_id, case_id)
+        spec = optional['spec']
+        draft = optional['draft']
+        enhancement = optional['enhancement']
+        references = _detail_case_references(spec, draft, row['source'])
+        documents = _selected_document_names(artifacts[base_keys[4]]['value'])
+        refs = tuple(
+            _public_artifact_ref(artifacts[key]['record'])
+            for key in base_keys
+        ) + tuple(
+            _public_artifact_ref(optional[name]['record'])
+            for name in ('spec', 'draft', 'enhancement')
+            if optional[name] is not None
+        )
+        return {
+            'thread_id': thread_id,
+            'revision': self._build_revision(refs),
+            'case_id': case_id,
+            'source': row['source'],
+            'question_type': row['question_type'],
+            'difficulty': row['difficulty'],
+            'topic': _case_detail_topic(row['topic'], artifacts[base_keys[3]]['value']),
+            'references': _detail_reference_rows(references, documents),
+            'stages': {
+                'plan': {'status': row['stages']['plan']},
+                'generate': _detail_generate_stage(row['stages']['generate'], draft),
+                'grading': _detail_grading_stage(row['stages']['grading'], enhancement),
+            },
+        }
+
+    async def _case_detail_artifacts(self, thread_id: str, case_id: str) -> dict[str, dict[str, Any] | None]:
+        artifact_ids = {
+            'spec': A.DATASET_QAPLAN_SPEC,
+            'draft': A.DATASET_CASE_DRAFT,
+            'enhancement': A.DATASET_CASE_ENHANCEMENT,
+        }
+
+        async def read_optional(artifact_id: str) -> dict[str, Any] | None:
+            try:
+                return await self.artifact(thread_id, artifact_id, case_id)
+            except ServiceError as error:
+                if error.status_code != 404:
+                    raise
+                return None
+
+        values = await asyncio.gather(*(read_optional(artifact_id) for artifact_id in artifact_ids.values()))
+        return dict(zip(artifact_ids, values, strict=True))
+
     async def topics(self, thread_id: str, *, question_type: str = '',
                      min_chunk_count: int | None = None, max_chunk_count: int | None = None,
                      page_size: int | None = None, page_token: str = '') -> dict[str, Any]:
@@ -1869,6 +2081,303 @@ def _overview_count(value: object, name: str) -> int:
 def _overview_warnings(value: object) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ServiceError(409, 'materials overview.warnings is invalid')
+    return list(value)
+
+
+async def _optional_overview_artifact(service: ProjectionService, thread_id: str,
+                                      artifact_id: str) -> dict[str, Any] | None:
+    try:
+        return await service.artifact(thread_id, artifact_id)
+    except ServiceError as error:
+        if error.status_code != 404:
+            raise
+        return None
+
+
+def _empty_cases_overview(thread_id: str, status: str, *, revision: str | None) -> dict[str, Any]:
+    return {
+        'thread_id': thread_id,
+        'revision': revision,
+        'status': status,
+        'stages': {
+            name: {'status': 'pending', 'succeeded': None, 'total': None, 'status_counts': None}
+            for name in ('plan', 'generate', 'grading')
+        },
+        'automatic_plan': None,
+    }
+
+
+def _case_ids_from_partition_set(value: object) -> tuple[str, ...]:
+    data = _overview_mapping(value, 'case partition set')
+    raw = data.get('keys')
+    if not isinstance(raw, list) or not all(isinstance(case_id, str) and case_id for case_id in raw):
+        raise ServiceError(409, 'case partition set.keys is invalid')
+    if len(set(raw)) != len(raw):
+        raise ServiceError(409, 'case partition set.keys is invalid')
+    return tuple(raw)
+
+
+def _case_operation_summary(statuses: list[str]) -> dict[str, Any]:
+    counts = {name: statuses.count(name) for name in ('pending', 'running', 'succeeded', 'failed')}
+    if counts['failed']:
+        status = 'failed'
+    elif counts['running']:
+        status = 'running'
+    elif statuses and counts['succeeded'] == len(statuses):
+        status = 'succeeded'
+    else:
+        status = 'pending'
+    return {
+        'status': status,
+        'succeeded': counts['succeeded'],
+        'total': len(statuses),
+        'status_counts': counts,
+    }
+
+
+def _automatic_case_plan(value: object) -> dict[str, Any]:
+    manifest = _overview_mapping(value, 'cases overview manifest')
+    stats = _overview_mapping(manifest.get('stats'), 'cases overview manifest.stats')
+    total = _overview_count(stats.get('auto_case_count'), 'cases overview manifest.auto_case_count')
+    summaries = manifest.get('lane_summaries')
+    if not isinstance(summaries, list):
+        raise ServiceError(409, 'cases overview manifest.lane_summaries is invalid')
+    result = {
+        question_type: {'total': 0, 'difficulties': {'easy': 0, 'medium': 0, 'hard': 0}}
+        for question_type in ('precision', 'reasoning')
+    }
+    for item in summaries:
+        summary = _overview_mapping(item, 'cases overview manifest lane summary')
+        question_type = summary.get('question_type')
+        difficulty = summary.get('difficulty')
+        if question_type not in result or difficulty not in result[question_type]['difficulties']:
+            raise ServiceError(409, 'cases overview manifest lane summary is invalid')
+        count = _overview_count(summary.get('allocated_case_count'), 'cases overview lane allocated_case_count')
+        result[question_type]['total'] += count
+        result[question_type]['difficulties'][difficulty] += count
+    if sum(item['total'] for item in result.values()) != total:
+        raise ServiceError(409, 'cases overview manifest automatic totals are inconsistent')
+    return {'total': total, 'question_types': result}
+
+
+def _case_filters(plan_status: str, generate_status: str, grading_status: str, source: str,
+                  question_type: str, difficulty: str) -> dict[str, object]:
+    values = {
+        'plan_status': (plan_status, {'pending', 'running', 'succeeded', 'failed'}),
+        'generate_status': (generate_status, {'pending', 'running', 'succeeded', 'failed'}),
+        'grading_status': (grading_status, {'pending', 'running', 'succeeded', 'failed'}),
+        'source': (source, {'imported', 'generated'}),
+        'question_type': (question_type, {'precision', 'reasoning'}),
+        'difficulty': (difficulty, {'easy', 'medium', 'hard'}),
+    }
+    result: dict[str, object] = {}
+    for name, (value, allowed) in values.items():
+        if not isinstance(value, str):
+            raise ServiceError(400, f'{name} must be a string')
+        if not value:
+            continue
+        if value not in allowed:
+            raise ServiceError(400, f'{name} is invalid')
+        result[name] = value
+    return result
+
+
+def _case_rows(case_ids: tuple[str, ...], import_manifest_value: object, plan_value: object,
+               topic_manifest_value: object, statuses: Mapping[str, Mapping[str, str]]) -> list[dict[str, Any]]:
+    imported = _overview_mapping(import_manifest_value, 'case import manifest')
+    allocation = _overview_mapping(
+        _overview_mapping(imported.get('stats'), 'case import manifest.stats').get('case_allocation'),
+        'case import manifest.case_allocation',
+    )
+    assignments = _overview_mapping(allocation.get('assignments'), 'case import manifest.assignments')
+    details = imported.get('details')
+    if not isinstance(details, list):
+        raise ServiceError(503, 'case import manifest.details is invalid')
+    imported_cases = {
+        detail.get('source_row_number'): detail.get('case')
+        for detail in details if isinstance(detail, Mapping)
+    }
+    plan = _overview_mapping(plan_value, 'qaplan plan')
+    raw_plan_items = plan.get('items')
+    if not isinstance(raw_plan_items, list):
+        raise ServiceError(503, 'qaplan plan.items is invalid')
+    plan_items = {
+        item.get('case_id'): item
+        for item in raw_plan_items if isinstance(item, Mapping)
+    }
+    topics = _overview_mapping(topic_manifest_value, 'topic manifest').get('topics')
+    if not isinstance(topics, list):
+        raise ServiceError(503, 'topic manifest.topics is invalid')
+    topics_by_id = {
+        item.get('topic_id'): item
+        for item in topics if isinstance(item, Mapping)
+    }
+    rows = []
+    for case_id in case_ids:
+        assignment = _overview_mapping(assignments.get(case_id), f'case assignment {case_id}')
+        mode = assignment.get('mode')
+        case_statuses = statuses.get(case_id)
+        if case_statuses is None:
+            raise ServiceError(409, f'case snapshot is missing: {case_id}')
+        if mode == 'imported':
+            source_row = assignment.get('source_row_number')
+            case = _overview_mapping(imported_cases.get(source_row), f'imported case {case_id}')
+            question_type = _case_choice(case.get('question_type'), {'precision', 'reasoning'}, 'question_type')
+            difficulty = _case_choice(case.get('difficulty'), {'easy', 'medium', 'hard'}, 'difficulty')
+            topic = None
+        elif mode == 'generated':
+            plan_item = _overview_mapping(plan_items.get(case_id), f'qaplan plan item {case_id}')
+            question_type = _case_choice(plan_item.get('question_type'), {'precision', 'reasoning'}, 'question_type')
+            difficulty = _case_choice(plan_item.get('difficulty'), {'easy', 'medium', 'hard'}, 'difficulty')
+            topic_id = plan_item.get('topic_id')
+            topic_value = _overview_mapping(topics_by_id.get(topic_id), f'topic {topic_id}')
+            topic = {'topic_id': topic_id, 'name': _required_id(topic_value.get('name'), 'topic.name')}
+        else:
+            raise ServiceError(503, f'case assignment mode is invalid: {case_id}')
+        rows.append({
+            'case_id': case_id,
+            'stages': {
+                'plan': case_statuses['dataset.qaplan_spec'],
+                'generate': case_statuses['dataset.generate_case'],
+                'grading': case_statuses['dataset.enhance_case'],
+            },
+            'source': mode,
+            'question_type': question_type,
+            'difficulty': difficulty,
+            'topic': topic,
+        })
+    return rows
+
+
+def _case_choice(value: object, allowed: set[str], name: str) -> str:
+    if not isinstance(value, str) or value not in allowed:
+        raise ServiceError(503, f'case {name} is invalid')
+    return value
+
+
+def _case_matches(row: Mapping[str, object], filters: Mapping[str, object]) -> bool:
+    stages = row.get('stages')
+    if not isinstance(stages, Mapping):
+        return False
+    return (
+        (not filters.get('plan_status') or stages.get('plan') == filters['plan_status'])
+        and (not filters.get('generate_status') or stages.get('generate') == filters['generate_status'])
+        and (not filters.get('grading_status') or stages.get('grading') == filters['grading_status'])
+        and (not filters.get('source') or row.get('source') == filters['source'])
+        and (not filters.get('question_type') or row.get('question_type') == filters['question_type'])
+        and (not filters.get('difficulty') or row.get('difficulty') == filters['difficulty'])
+    )
+
+
+def _case_detail_topic(value: object, topic_manifest_value: object) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    topic = _overview_mapping(value, 'case topic')
+    topic_id = _required_id(topic.get('topic_id'), 'topic.topic_id')
+    manifest = _overview_mapping(topic_manifest_value, 'topic manifest')
+    topics = manifest.get('topics')
+    if not isinstance(topics, list):
+        raise ServiceError(503, 'topic manifest.topics is invalid')
+    source = next(
+        (item for item in topics if isinstance(item, Mapping) and item.get('topic_id') == topic_id),
+        None,
+    )
+    source = _overview_mapping(source, f'topic {topic_id}')
+    return {
+        'topic_id': topic_id,
+        'name': _required_id(source.get('name'), 'topic.name'),
+        'chunk_count': _overview_count(source.get('chunk_count'), 'topic.chunk_count'),
+    }
+
+
+def _detail_case_references(spec: dict[str, Any] | None, draft: dict[str, Any] | None,
+                            source: object) -> list[Mapping[str, object]]:
+    if draft is not None:
+        value = _overview_mapping(draft['value'], 'case draft').get('references')
+    elif spec is not None:
+        spec_value = _overview_mapping(spec['value'], 'qaplan spec')
+        if source == 'imported':
+            value = _overview_mapping(spec_value.get('imported_case'), 'imported qaplan spec').get('references')
+        else:
+            value = spec_value.get('references')
+    else:
+        value = []
+    if not isinstance(value, list) or not all(isinstance(item, Mapping) for item in value):
+        raise ServiceError(503, 'case references are invalid')
+    return list(value)
+
+
+def _selected_document_names(value: object) -> dict[tuple[str, str], tuple[str, str]]:
+    documents = _overview_mapping(value, 'selected docs').get('documents')
+    if not isinstance(documents, list):
+        raise ServiceError(503, 'selected docs.documents is invalid')
+    result: dict[tuple[str, str], tuple[str, str]] = {}
+    for document in documents:
+        item = _overview_mapping(document, 'selected docs.document')
+        kb_id = _required_id(item.get('kb_id'), 'document.kb_id')
+        doc_id = _required_id(item.get('doc_id'), 'document.doc_id')
+        result[(kb_id, doc_id)] = (
+            _required_id(item.get('knowledge_base_name'), 'document.knowledge_base_name'),
+            _required_id(item.get('filename'), 'document.filename'),
+        )
+    return result
+
+
+def _detail_reference_rows(references: list[Mapping[str, object]],
+                           documents: Mapping[tuple[str, str], tuple[str, str]]) -> list[dict[str, Any]]:
+    rows = []
+    for reference in references:
+        kb_id = _required_id(reference.get('kb_id'), 'reference.kb_id')
+        doc_id = _required_id(reference.get('doc_id'), 'reference.doc_id')
+        names = documents.get((kb_id, doc_id))
+        if names is None:
+            raise ServiceError(503, f'reference document is unavailable: {kb_id}/{doc_id}')
+        rows.append({
+            'chunk_id': _required_id(reference.get('chunk_id'), 'reference.chunk_id'),
+            'knowledge_base': {'id': kb_id, 'name': names[0]},
+            'document': {'id': doc_id, 'name': names[1]},
+            'text': _required_id(reference.get('text'), 'reference.text'),
+        })
+    return rows
+
+
+def _detail_generate_stage(status: object, draft: dict[str, Any] | None) -> dict[str, Any]:
+    result = {'status': status, 'question': None, 'answer': None, 'grading_guidance': None}
+    if draft is None:
+        return result
+    value = _overview_mapping(draft['value'], 'case draft')
+    result.update({
+        field: _required_id(value.get(field), f'case draft.{field}')
+        for field in ('question', 'answer', 'grading_guidance')
+    })
+    return result
+
+
+def _detail_grading_stage(status: object, enhancement: dict[str, Any] | None) -> dict[str, Any]:
+    result = {'status': status, 'key_points': None, 'forbidden_claims': None}
+    if enhancement is None:
+        return result
+    value = _overview_mapping(enhancement['value'], 'case enhancement')
+    key_points = value.get('key_points')
+    forbidden_claims = value.get('forbidden_claims')
+    if not isinstance(key_points, list) or not isinstance(forbidden_claims, list):
+        raise ServiceError(503, 'case enhancement is invalid')
+    result['key_points'] = [
+        {
+            'statement': _required_id(_overview_mapping(item, 'case key point').get('statement'), 'key_point.statement'),
+            'evidence_chunk_ids': _detail_text_list(
+                _overview_mapping(item, 'case key point').get('evidence_chunk_ids'), 'key_point.evidence_chunk_ids',
+            ),
+        }
+        for item in key_points
+    ]
+    result['forbidden_claims'] = _detail_text_list(forbidden_claims, 'case forbidden_claims')
+    return result
+
+
+def _detail_text_list(value: object, name: str) -> list[str]:
+    if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+        raise ServiceError(503, f'{name} is invalid')
     return list(value)
 
 

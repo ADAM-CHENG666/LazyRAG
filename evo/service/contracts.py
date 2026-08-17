@@ -137,6 +137,37 @@ class TopicApplyBody(StrictModel):
     changes: list[dict[str, Any]] = Field(min_length=1)
 
 
+class GenerationPlanApplyBody(StrictModel):
+    request_id: str = Field(min_length=1, max_length=160)
+    expected_revision: str = Field(min_length=1)
+    distribution: dict[str, dict[str, int]]
+
+    @model_validator(mode='after')
+    def validate_distribution(self) -> Self:
+        expected_types = {'precision', 'reasoning'}
+        expected_difficulties = {'easy', 'medium', 'hard'}
+        if set(self.distribution) != expected_types:
+            raise ValueError('distribution must contain precision and reasoning')
+        for question_type, counts in self.distribution.items():
+            if set(counts) != expected_difficulties:
+                raise ValueError(f'distribution.{question_type} must contain easy, medium and hard')
+            if any(isinstance(count, bool) or count < 0 for count in counts.values()):
+                raise ValueError('distribution values must be non-negative integers')
+        return self
+
+
+class CasePatchBody(StrictModel):
+    request_id: str = Field(min_length=1, max_length=160)
+    expected_revision: str = Field(min_length=1)
+    changes: dict[str, Any]
+
+    @model_validator(mode='after')
+    def validate_changes(self) -> Self:
+        if not self.changes or set(self.changes) - {'plan', 'generate', 'grading'}:
+            raise ValueError('changes must contain plan, generate or grading')
+        return self
+
+
 _QAPLAN_LANES = frozenset({
     'precision_easy', 'precision_medium', 'precision_hard',
     'reasoning_easy', 'reasoning_medium', 'reasoning_hard',
@@ -240,8 +271,8 @@ class AbStrategyBody(StrictModel):
 
 __all__ = [
     'AbStrategyBody', 'AlgorithmActionBody', 'AlgorithmOwner', 'ArtifactUpdateBody', 'ArtifactValue',
-    'AutomaticUpdateBody', 'CaseRerunBody', 'CaseSeed', 'CaseStructureBody', 'CommandRequest',
-    'ConfigurationUpdateBody', 'ControlRequest', 'DatasetApplyBody', 'ExternalResultBody', 'MessageBody', 'RegisterAlgorithmBody',
+    'AutomaticUpdateBody', 'CasePatchBody', 'CaseRerunBody', 'CaseSeed', 'CaseStructureBody', 'CommandRequest',
+    'ConfigurationUpdateBody', 'ControlRequest', 'DatasetApplyBody', 'ExternalResultBody', 'GenerationPlanApplyBody', 'MessageBody', 'RegisterAlgorithmBody',
     'RetryRequest',
     'ServiceError', 'StrictModel', 'ThreadCreate', 'ThreadInputs', 'TopicApplyBody',
 ]

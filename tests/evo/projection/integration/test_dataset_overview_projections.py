@@ -8,19 +8,22 @@ from fastapi.testclient import TestClient
 
 from evo import artifacts as A
 from evo.artifact_flow import StageProgress, StageSnapshot
-from evo.artifact_runtime import ArtifactKey, ArtifactRecord, ArtifactRef
+from evo.artifact_runtime import ArtifactKey, ArtifactRecord, ArtifactRef, PartitionSet
 from evo.service.api import create_app
 from evo.service.projections import ProjectionService
 
 
 _MATERIAL_STAGE = 'dataset.material_preparation'
 _TOPIC_STAGE = 'dataset.topic_discovery'
+_CASE_STAGE = 'dataset.case_generation'
 
 
 class _OverviewFlow:
-    def __init__(self, values: dict[ArtifactKey, dict[int, dict]], statuses: dict[str, str]) -> None:
+    def __init__(self, values: dict[ArtifactKey, dict[int, object]], statuses: dict[str, str],
+                 cases: dict[str, object] | None = None) -> None:
         self.values = values
         self.statuses = statuses
+        self.cases = {} if cases is None else cases
 
     async def has_run(self, _: str) -> bool:
         return True
@@ -32,23 +35,31 @@ class _OverviewFlow:
     async def record(self, _: str, ref: ArtifactRef) -> ArtifactRecord | None:
         return self._record(ref.key, ref.version) if ref.version in self.values.get(ref.key, {}) else None
 
-    async def read(self, _: str, ref: ArtifactRef) -> dict:
+    async def read(self, _: str, ref: ArtifactRef) -> object:
         return self.values[ref.key][ref.version]
 
     async def stage_snapshot(self, _: str, stage: str) -> StageSnapshot:
         return StageSnapshot(StageProgress(stage, ArtifactKey.scalar('test.result'), status=self.statuses[stage]))
+
+    async def case_snapshot(self, _: str, case_id: str) -> object:
+        return self.cases[case_id]
 
     @staticmethod
     def _record(key: ArtifactKey, version: int) -> ArtifactRecord:
         return ArtifactRecord(ArtifactRef(key, version), producer='test')
 
 
-def _service(*, values: dict[ArtifactKey, dict[int, dict]], statuses: dict[str, str]) -> ProjectionService:
-    return ProjectionService(_OverviewFlow(values, statuses), definition=None)
+def _service(*, values: dict[ArtifactKey, dict[int, object]], statuses: dict[str, str],
+             cases: dict[str, object] | None = None) -> ProjectionService:
+    return ProjectionService(_OverviewFlow(values, statuses, cases), definition=None)
 
 
 def _enable_dataset_stages(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(A, 'STEPS', (_MATERIAL_STAGE, _TOPIC_STAGE))
+
+
+def _enable_case_stage(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(A, 'STEPS', (_CASE_STAGE,))
 
 
 def test_materials_overview_projects_current_manifest_and_stage_status(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -150,9 +161,112 @@ def test_topics_overview_keeps_a_valid_empty_manifest_distinct_from_no_manifest(
     }
 
 
+def test_cases_overview_projects_manifest_and_three_runtime_operation_counts(
+        monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_case_stage(monkeypatch)
+    params_ref = ArtifactRef(ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN_PARAMS), 2)
+    service = _service(
+        values={
+            params_ref.key: {2: {'lane_case_counts': {}}},
+            ArtifactKey.scalar(A.DATASET_QAPLAN_MANIFEST): {4: {
+                'stats': {
+                    'target_case_count': 3,
+                    'import_case_count': 1,
+                    'auto_case_count': 2,
+                    'planned_case_count': 2,
+                },
+                'lane_summaries': [
+                    {'lane': 'precision_easy', 'question_type': 'precision', 'difficulty': 'easy',
+                     'allocated_case_count': 1, 'eligible_topic_count': 1},
+                    {'lane': 'precision_medium', 'question_type': 'precision', 'difficulty': 'medium',
+                     'allocated_case_count': 0, 'eligible_topic_count': 0},
+                    {'lane': 'precision_hard', 'question_type': 'precision', 'difficulty': 'hard',
+                     'allocated_case_count': 0, 'eligible_topic_count': 0},
+                    {'lane': 'reasoning_easy', 'question_type': 'reasoning', 'difficulty': 'easy',
+                     'allocated_case_count': 0, 'eligible_topic_count': 0},
+                    {'lane': 'reasoning_medium', 'question_type': 'reasoning', 'difficulty': 'medium',
+                     'allocated_case_count': 0, 'eligible_topic_count': 0},
+                    {'lane': 'reasoning_hard', 'question_type': 'reasoning', 'difficulty': 'hard',
+                     'allocated_case_count': 1, 'eligible_topic_count': 1},
+                ],
+            }},
+            ArtifactKey.scalar(A.EVAL_CASE_REQUESTS): {3: PartitionSet(('case-1', 'case-2', 'case-3'))},
+        },
+        statuses={_CASE_STAGE: 'failed'},
+        cases={
+            'case-1': {'runtime': {'operations': [
+                {'operation_id': 'dataset.qaplan_spec', 'status': 'succeeded'},
+                {'operation_id': 'dataset.generate_case', 'status': 'succeeded'},
+                {'operation_id': 'dataset.enhance_case', 'status': 'succeeded'},
+            ]}},
+            'case-2': {'runtime': {'operations': [
+                {'operation_id': 'dataset.qaplan_spec', 'status': 'succeeded'},
+                {'operation_id': 'dataset.generate_case', 'status': 'running'},
+                {'operation_id': 'dataset.enhance_case', 'status': 'pending'},
+            ]}},
+            'case-3': {'runtime': {'operations': [
+                {'operation_id': 'dataset.qaplan_spec', 'status': 'failed'},
+                {'operation_id': 'dataset.generate_case', 'status': 'pending'},
+                {'operation_id': 'dataset.enhance_case', 'status': 'pending'},
+            ]}},
+        },
+    )
+
+    assert asyncio.run(service.cases_overview('thr-1')) == {
+        'thread_id': 'thr-1',
+        'revision': service._build_revision((params_ref,)),
+        'status': 'failed',
+        'stages': {
+            'plan': {
+                'status': 'failed', 'succeeded': 2, 'total': 3,
+                'status_counts': {'pending': 0, 'running': 0, 'succeeded': 2, 'failed': 1},
+            },
+            'generate': {
+                'status': 'running', 'succeeded': 1, 'total': 3,
+                'status_counts': {'pending': 1, 'running': 1, 'succeeded': 1, 'failed': 0},
+            },
+            'grading': {
+                'status': 'pending', 'succeeded': 1, 'total': 3,
+                'status_counts': {'pending': 2, 'running': 0, 'succeeded': 1, 'failed': 0},
+            },
+        },
+        'automatic_plan': {
+            'total': 2,
+            'question_types': {
+                'precision': {'total': 1, 'difficulties': {'easy': 1, 'medium': 0, 'hard': 0}},
+                'reasoning': {'total': 1, 'difficulties': {'easy': 0, 'medium': 0, 'hard': 1}},
+            },
+        },
+    }
+
+
+def test_cases_overview_keeps_plan_revision_and_reports_pending_before_case_partitions_exist(
+        monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_case_stage(monkeypatch)
+    params_ref = ArtifactRef(ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN_PARAMS), 1)
+    service = _service(
+        values={params_ref.key: {1: {'lane_case_counts': {}}}},
+        statuses={_CASE_STAGE: 'pending'},
+    )
+
+    assert asyncio.run(service.cases_overview('thr-1')) == {
+        'thread_id': 'thr-1',
+        'revision': service._build_revision((params_ref,)),
+        'status': 'pending',
+        'stages': {
+            name: {'status': 'pending', 'succeeded': None, 'total': None, 'status_counts': None}
+            for name in ('plan', 'generate', 'grading')
+        },
+        'automatic_plan': None,
+    }
+
+
 @pytest.mark.parametrize(('path', 'method'), [
     ('/threads/thr-1/dataset/materials/overview', 'materials_overview'),
     ('/threads/thr-1/dataset/topics/overview', 'topics_overview'),
+    ('/threads/thr-1/dataset/cases/overview', 'cases_overview'),
 ])
 def test_overview_handlers_delegate_without_query_parameters(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
                                                               path: str, method: str) -> None:
@@ -165,6 +279,10 @@ def test_overview_handlers_delegate_without_query_parameters(monkeypatch: pytest
 
         async def topics_overview(self, thread_id: str) -> dict:
             calls.append(('topics_overview', thread_id))
+            return {'thread_id': thread_id}
+
+        async def cases_overview(self, thread_id: str) -> dict:
+            calls.append(('cases_overview', thread_id))
             return {'thread_id': thread_id}
 
     class _Service:

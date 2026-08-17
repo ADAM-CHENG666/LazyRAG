@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from evo import artifacts as A
-from evo.artifact_runtime import ArtifactKey, ArtifactRecord, ArtifactRef
+from evo.artifact_runtime import ArtifactKey, ArtifactRecord, ArtifactRef, PartitionSet
 from evo.service.api import create_app
 from evo.service.contracts import ServiceError
 from evo.service.projections import ProjectionService
@@ -62,6 +62,34 @@ class _DocumentsFakeFlow:
 
     async def read(self, thread_id: str, ref: ArtifactRef) -> dict:
         return self._values[ref.key][ref.version]
+
+    @staticmethod
+    def _record(key: ArtifactKey, version: int) -> ArtifactRecord:
+        return ArtifactRecord(ArtifactRef(key, version), producer='test')
+
+
+class _CaseListFakeFlow:
+    def __init__(self, values: dict[ArtifactKey, dict[int, object]], cases: dict[str, object],
+                 *, has_thread: bool = True) -> None:
+        self._values = values
+        self._cases = cases
+        self._has_thread = has_thread
+
+    async def has_run(self, _: str) -> bool:
+        return self._has_thread
+
+    async def head(self, _: str, key: ArtifactKey) -> ArtifactRecord | None:
+        versions = self._values.get(key, {})
+        return None if not versions else self._record(key, max(versions))
+
+    async def record(self, _: str, ref: ArtifactRef) -> ArtifactRecord | None:
+        return self._record(ref.key, ref.version) if ref.version in self._values.get(ref.key, {}) else None
+
+    async def read(self, _: str, ref: ArtifactRef) -> object:
+        return self._values[ref.key][ref.version]
+
+    async def case_snapshot(self, _: str, case_id: str) -> object:
+        return self._cases[case_id]
 
     @staticmethod
     def _record(key: ArtifactKey, version: int) -> ArtifactRecord:
@@ -138,6 +166,68 @@ def _documents(service: ProjectionService, *, thread_id: str = 'thr-1', page_tok
         knowledge_base_id=knowledge_base_id,
         page_size=page_size,
         page_token=page_token,
+    ))
+
+
+def _case_list_values(*, topic_b_name: str = '主题 B') -> dict[ArtifactKey, dict[int, object]]:
+    return {
+        ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST): {1: {
+            'stats': {'case_allocation': {'assignments': {
+                'case-1': {'mode': 'imported', 'source_row_number': 1},
+                'case-2': {'mode': 'generated'},
+                'case-3': {'mode': 'generated'},
+            }}},
+            'details': [{'source_row_number': 1, 'case': {
+                'id': 'case-1', 'question_type': 'reasoning', 'difficulty': 'hard',
+            }}],
+        }},
+        ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN): {1: {'items': [
+            {'case_id': 'case-2', 'question_type': 'precision', 'difficulty': 'medium', 'topic_id': 'topic-b'},
+            {'case_id': 'case-3', 'question_type': 'reasoning', 'difficulty': 'easy', 'topic_id': 'topic-a'},
+        ]}},
+        ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST): {1: {'topics': [
+            {'topic_id': 'topic-a', 'name': '主题 A'},
+            {'topic_id': 'topic-b', 'name': topic_b_name},
+        ]}},
+        ArtifactKey.scalar(A.EVAL_CASE_REQUESTS): {1: PartitionSet(('case-1', 'case-2', 'case-3'))},
+    }
+
+
+def _case_snapshots() -> dict[str, object]:
+    return {
+        'case-1': {'runtime': {'operations': [
+            {'operation_id': 'dataset.qaplan_spec', 'status': 'succeeded'},
+            {'operation_id': 'dataset.generate_case', 'status': 'succeeded'},
+            {'operation_id': 'dataset.enhance_case', 'status': 'succeeded'},
+        ]}},
+        'case-2': {'runtime': {'operations': [
+            {'operation_id': 'dataset.qaplan_spec', 'status': 'succeeded'},
+            {'operation_id': 'dataset.generate_case', 'status': 'running'},
+            {'operation_id': 'dataset.enhance_case', 'status': 'pending'},
+        ]}},
+        'case-3': {'runtime': {'operations': [
+            {'operation_id': 'dataset.qaplan_spec', 'status': 'failed'},
+            {'operation_id': 'dataset.generate_case', 'status': 'pending'},
+            {'operation_id': 'dataset.enhance_case', 'status': 'pending'},
+        ]}},
+    }
+
+
+def _case_list_service(*, values: dict[ArtifactKey, dict[int, object]] | None = None,
+                       has_thread: bool = True) -> ProjectionService:
+    return ProjectionService(
+        _CaseListFakeFlow(_case_list_values() if values is None else values, _case_snapshots(), has_thread=has_thread),
+        definition=None,
+    )
+
+
+def _cases(service: ProjectionService, *, thread_id: str = 'thr-1', page_size: int = 50,
+           page_token: str = '', plan_status: str = '', generate_status: str = '', grading_status: str = '',
+           source: str = '', question_type: str = '', difficulty: str = '') -> dict:
+    return asyncio.run(service.cases(
+        thread_id, page_size=page_size, page_token=page_token, plan_status=plan_status,
+        generate_status=generate_status, grading_status=grading_status, source=source,
+        question_type=question_type, difficulty=difficulty,
     ))
 
 
@@ -451,6 +541,76 @@ def test_topics_returns_409_when_the_token_snapshot_cannot_be_read() -> None:
     assert error.value.status_code == 409
 
 
+def test_cases_projects_plan_metadata_and_runtime_operation_statuses() -> None:
+    result = _cases(_case_list_service())
+
+    assert [item['case_id'] for item in result['items']] == ['case-1', 'case-2', 'case-3']
+    assert result['items'] == [
+        {
+            'case_id': 'case-1',
+            'stages': {'plan': 'succeeded', 'generate': 'succeeded', 'grading': 'succeeded'},
+            'source': 'imported', 'question_type': 'reasoning', 'difficulty': 'hard', 'topic': None,
+        },
+        {
+            'case_id': 'case-2',
+            'stages': {'plan': 'succeeded', 'generate': 'running', 'grading': 'pending'},
+            'source': 'generated', 'question_type': 'precision', 'difficulty': 'medium',
+            'topic': {'topic_id': 'topic-b', 'name': '主题 B'},
+        },
+        {
+            'case_id': 'case-3',
+            'stages': {'plan': 'failed', 'generate': 'pending', 'grading': 'pending'},
+            'source': 'generated', 'question_type': 'reasoning', 'difficulty': 'easy',
+            'topic': {'topic_id': 'topic-a', 'name': '主题 A'},
+        },
+    ]
+
+
+def test_cases_combines_all_status_and_business_filters_with_and_semantics() -> None:
+    service = _case_list_service()
+
+    result = _cases(
+        service,
+        plan_status='succeeded', generate_status='running', grading_status='pending',
+        source='generated', question_type='precision', difficulty='medium',
+    )
+
+    assert [item['case_id'] for item in result['items']] == ['case-2']
+
+
+def test_cases_pagination_keeps_its_artifact_snapshot_and_binds_query_behavior() -> None:
+    service = _case_list_service()
+    first = _cases(service, page_size=1)
+
+    # 首屏取得 v1；随后 Topic 名称变更为 v2。旧 token 仍读取 v1。
+    service.flow._values[ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST)][2] = {
+        'topics': [{'topic_id': 'topic-a', 'name': '主题 A'}, {'topic_id': 'topic-b', 'name': '新主题 B'}],
+    }
+    old_next = _cases(service, page_size=1, page_token=first['next_page_token'])
+    new_first = _cases(service, page_size=1)
+
+    assert first['revision'] == old_next['revision']
+    assert old_next['items'][0]['topic'] == {'topic_id': 'topic-b', 'name': '主题 B'}
+    assert new_first['revision'] != first['revision']
+
+    with pytest.raises(ServiceError) as error:
+        _cases(service, page_size=1, page_token=first['next_page_token'], source='generated')
+    assert error.value.status_code == 400
+
+
+@pytest.mark.parametrize(('kwargs', 'message'), [
+    ({'plan_status': 'completed'}, 'plan_status'),
+    ({'source': 'manual'}, 'source'),
+    ({'question_type': 'factual'}, 'question_type'),
+    ({'difficulty': 'very-hard'}, 'difficulty'),
+])
+def test_cases_rejects_invalid_filters(kwargs: dict[str, str], message: str) -> None:
+    with pytest.raises(ServiceError) as error:
+        _cases(_case_list_service(), **kwargs)
+    assert error.value.status_code == 400
+    assert message in str(error.value)
+
+
 def test_topics_handler_delegates_the_documented_query_parameters(monkeypatch: pytest.MonkeyPatch,
                                                                    tmp_path: Path) -> None:
     calls: list[tuple[str, dict]] = []
@@ -492,6 +652,45 @@ def test_topics_handler_delegates_the_documented_query_parameters(monkeypatch: p
         'max_chunk_count': 5,
         'page_size': 20,
         'page_token': 'page-2',
+    })]
+
+
+def test_cases_handler_delegates_the_documented_query_parameters(monkeypatch: pytest.MonkeyPatch,
+                                                                  tmp_path: Path) -> None:
+    calls: list[tuple[str, dict]] = []
+
+    class _Projections:
+        async def cases(self, thread_id: str, **kwargs: object) -> dict:
+            calls.append((thread_id, kwargs))
+            return {'thread_id': thread_id, 'revision': 'r1', 'items': [], 'next_page_token': ''}
+
+    class _Service:
+        projections = _Projections()
+
+        async def close(self) -> None:
+            return None
+
+    async def _open(_: Path) -> _Service:
+        return _Service()
+
+    monkeypatch.setattr('evo.service.api.EvoService.open', _open)
+    with TestClient(create_app(tmp_path)) as client:
+        response = client.get(
+            '/threads/thr-1/dataset/cases',
+            params={
+                'plan_status': 'succeeded', 'generate_status': 'running', 'grading_status': 'pending',
+                'source': 'generated', 'question_type': 'precision', 'difficulty': 'medium',
+                'page_size': '20', 'page_token': 'page-2',
+            },
+        )
+        invalid_response = client.get('/threads/thr-1/dataset/cases', params={'page_size': 'not-an-integer'})
+
+    assert response.status_code == 200
+    assert invalid_response.status_code == 400
+    assert calls == [('thr-1', {
+        'plan_status': 'succeeded', 'generate_status': 'running', 'grading_status': 'pending',
+        'source': 'generated', 'question_type': 'precision', 'difficulty': 'medium',
+        'page_size': 20, 'page_token': 'page-2',
     })]
 
 
