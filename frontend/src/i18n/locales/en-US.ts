@@ -2169,6 +2169,7 @@ const enUS = {
     running: "Running",
     history: "History",
     artifacts: "Artifacts",
+    references: "References",
     download: "Download",
     executionProcess: "Execution Process",
     estimatedSeconds: "~{{seconds}}s",
