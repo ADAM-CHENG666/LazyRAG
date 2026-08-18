@@ -602,7 +602,9 @@ class EvoService:
         if not writes:
             raise ServiceError(422, 'changes do not alter the current value')
         try:
-            await self.flow.commit(thread_id, ArtifactCommit(commit_id, producer, writes, {ref.key: ref for ref in refs}))
+            await self.flow.commit_values(
+                thread_id, ArtifactCommit(commit_id, producer, writes, {ref.key: ref for ref in refs}),
+            )
         except DefinitionError as error:
             raise ServiceError(409, str(error)) from error
         await self._continue_automatic(thread_id)
@@ -1048,7 +1050,9 @@ def _validate_material_parser_capabilities(client: object | None, source_ids: li
         raise ServiceError(503, 'parser capabilities are unavailable') from exc
     active_sources = [kb_id for kb_id in source_ids if enabled.get(kb_id) is True]
     for field, param in (('split_rules', 'groups'), ('layout_types', 'allowed_types')):
-        requested = _list_value(params.get(param, ()), f'build_chunks_params.{param}')
+        # An absent key means the request left the candidate configuration alone;
+        # only what the user actually asked to enable is validated here.
+        requested = _list_value(params.get(param, []), f'build_chunks_params.{param}')
         supported = _supported_capability_ids(capabilities, active_sources, field)
         if not active_sources or any(item not in supported for item in requested):
             raise ServiceError(422, f'{param} contains a capability unsupported by current material sources')

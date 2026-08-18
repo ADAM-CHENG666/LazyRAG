@@ -1,13 +1,26 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import pytest
 
 from evo import artifacts as A
-from evo.artifact_runtime import ArtifactCommit, ArtifactKey, ArtifactRecord, ArtifactRef, PartitionSet
+from evo.artifact_flow import ArtifactFlow, ArtifactUpdate, FlowDefinition, FlowStage
+from evo.artifact_runtime import (
+    ArtifactCommit,
+    ArtifactDraft,
+    ArtifactKey,
+    ArtifactRecord,
+    ArtifactRef,
+    DefinitionError,
+    PartitionSet,
+)
 from evo.service.contracts import ServiceError
 from evo.service.core import EvoService
 from evo.service.projections import ProjectionService
+
+
+dataset_module = importlib.import_module('evo.operations.dataset.operations')
 
 
 class _ApplyFlow:
@@ -30,6 +43,9 @@ class _ApplyFlow:
     async def commit(self, _thread_id: str, commit: ArtifactCommit) -> object:
         self.commits.append(commit)
         return object()
+
+    async def commit_values(self, thread_id: str, commit: ArtifactCommit) -> object:
+        return await self.commit(thread_id, commit)
 
 
 def _service(values: dict[ArtifactKey, tuple[int, object]]) -> tuple[EvoService, _ApplyFlow]:
@@ -382,6 +398,36 @@ def test_material_apply_rejects_enabling_a_capability_not_supported_by_current_s
     assert error.value.status_code == 422
 
 
+def test_material_apply_accepts_changes_that_leave_the_candidate_configuration_untouched() -> None:
+    # The params artifact is seeded empty, so adjusting only the case count or the
+    # document scope leaves 'groups' and 'allowed_types' absent. Capability
+    # validation must treat that as "nothing requested" rather than rejecting it.
+    values = _material_values()
+    values[ArtifactKey.scalar(A.DATASET_BUILD_CHUNKS_PARAMS)] = (5, {})
+    service, flow = _service(values)
+    service.capability_client = _CapabilityClient({
+        'kb-a': {
+            'split_rules': [{'id': 'block', 'name': '段落'}],
+            'layout_types': [{'id': 'text', 'name': '文本'}],
+        },
+    })
+    source = ArtifactRef(ArtifactKey.scalar(A.CORPUS_SOURCE_CONFIG), 3)
+    selection = ArtifactRef(ArtifactKey.scalar(A.DATASET_SELECT_DOCS_PARAMS), 4)
+    chunks = ArtifactRef(ArtifactKey.scalar(A.DATASET_BUILD_CHUNKS_PARAMS), 5)
+
+    asyncio.run(service.apply_material_scan_config('thr-1', {
+        'request_id': 'untouched-candidates',
+        'expected_revision': _revision(source, selection, chunks),
+        'changes': {'target_case_count': 7},
+    }))
+
+    assert len(flow.commits) == 1
+    values_by_id = {write.key.artifact_id: write.value for write in flow.commits[0].writes}
+    assert values_by_id[A.CORPUS_SOURCE_CONFIG]['target_case_count'] == 7
+    # Untouched candidate configuration must not be rewritten.
+    assert A.DATASET_BUILD_CHUNKS_PARAMS not in values_by_id
+
+
 def test_apply_material_chunk_selection_preserves_quota_and_uses_document_snapshot_cas() -> None:
     service, flow = _service(_material_values())
     docs = ArtifactRef(ArtifactKey.scalar(A.DATASET_SELECTED_DOCS), 6)
@@ -458,3 +504,132 @@ def test_apply_services_return_404_for_missing_document_chunk_or_topic() -> None
             'changes': [{'topic_id': 'missing', 'name': 'new'}],
         }))
     assert topic_error.value.status_code == 404
+
+
+def _material_scan_keys() -> tuple[ArtifactKey, ArtifactKey, ArtifactKey]:
+    return (
+        ArtifactKey.scalar(A.CORPUS_SOURCE_CONFIG),
+        ArtifactKey.scalar(A.DATASET_SELECT_DOCS_PARAMS),
+        ArtifactKey.scalar(A.DATASET_BUILD_CHUNKS_PARAMS),
+    )
+
+
+async def _open_material_scan_flow(tmp_path) -> ArtifactFlow:
+    definition = FlowDefinition(
+        (
+            dataset_module.import_cases_operation,
+            dataset_module.select_docs_operation,
+            dataset_module.build_chunk_candidates_operation,
+        ),
+        (FlowStage('materials', ArtifactKey.scalar(A.DATASET_BUILD_CHUNK_CANDIDATES)),),
+    )
+    flow = await ArtifactFlow.open(tmp_path / 'runtime-scan', definition)
+    source_key, selection_key, chunks_key = _material_scan_keys()
+    await flow.create('thr-1', ArtifactCommit(
+        'seed:thr-1',
+        'user:create',
+        (
+            ArtifactDraft(source_key, {
+                'kb_id': ['kb-a'], 'knowledge_base_names': {'kb-a': 'A'},
+                'csv_data': [], 'target_case_count': 3,
+            }),
+            ArtifactDraft(selection_key, {
+                'knowledge_bases': [{'kb_id': 'kb-a', 'included': True}],
+                'excluded_docs': [],
+            }),
+            ArtifactDraft(chunks_key, {}),
+        ),
+        {source_key: None, selection_key: None, chunks_key: None},
+    ))
+    return flow
+
+
+def _service_with_flow(flow: ArtifactFlow) -> EvoService:
+    service = object.__new__(EvoService)
+    service.flow = flow
+    service.capability_client = None
+
+    async def _continue(_thread_id: str) -> None:
+        return None
+
+    service._continue_automatic = _continue  # type: ignore[method-assign]
+    return service
+
+
+def test_content_commit_is_rejected_by_structure_commit_and_accepted_by_commit_values(tmp_path) -> None:
+    async def run() -> None:
+        flow = await _open_material_scan_flow(tmp_path)
+        try:
+            source_key, selection_key, chunks_key = _material_scan_keys()
+            source = ArtifactRef(source_key, 1)
+            selection = ArtifactRef(selection_key, 1)
+            chunks = ArtifactRef(chunks_key, 1)
+            next_source = {
+                'kb_id': ['kb-a'], 'knowledge_base_names': {'kb-a': 'A'},
+                'csv_data': [], 'target_case_count': 7, 'min_case_count': 7,
+            }
+            content = ArtifactCommit(
+                'dataset-materials-scan:case-count',
+                'user:dataset-materials-scan',
+                (ArtifactDraft(source_key, next_source),),
+                {source_key: source, selection_key: selection, chunks_key: chunks},
+            )
+            with pytest.raises(DefinitionError, match='reserved for atomic case structure changes'):
+                await flow.commit('thr-1', content)
+
+            await flow.commit_values('thr-1', content)
+            source_head = await flow.head('thr-1', source_key)
+            selection_head = await flow.head('thr-1', selection_key)
+            chunks_head = await flow.head('thr-1', chunks_key)
+            assert source_head is not None and source_head.ref.version == 2
+            assert selection_head is not None and selection_head.ref.version == 1
+            assert chunks_head is not None and chunks_head.ref.version == 1
+            assert (await flow.read('thr-1', source_head.ref))['target_case_count'] == 7
+        finally:
+            await flow.close()
+
+    asyncio.run(run())
+
+
+def test_apply_material_scan_config_commits_case_count_through_real_flow(tmp_path) -> None:
+    async def run() -> None:
+        flow = await _open_material_scan_flow(tmp_path)
+        try:
+            service = _service_with_flow(flow)
+            source_key, selection_key, chunks_key = _material_scan_keys()
+            source = ArtifactRef(source_key, 1)
+            selection = ArtifactRef(selection_key, 1)
+            chunks = ArtifactRef(chunks_key, 1)
+            result = await service.apply_material_scan_config('thr-1', {
+                'request_id': 'case-count-only',
+                'expected_revision': _revision(source, selection, chunks),
+                'changes': {'target_case_count': 7},
+            })
+            assert result['status'] == 'applied'
+            source_head = await flow.head('thr-1', source_key)
+            selection_head = await flow.head('thr-1', selection_key)
+            chunks_head = await flow.head('thr-1', chunks_key)
+            assert source_head is not None and source_head.ref.version == 2
+            assert selection_head is not None and selection_head.ref.version == 1
+            assert chunks_head is not None and chunks_head.ref.version == 1
+
+            await flow.update_artifacts(
+                'thr-1',
+                (ArtifactUpdate(selection, {
+                    'knowledge_bases': [{'kb_id': 'kb-a', 'included': False}],
+                    'excluded_docs': [],
+                }),),
+                request_id='bump-selection',
+            )
+            with pytest.raises(ServiceError) as error:
+                await service.apply_material_scan_config('thr-1', {
+                    'request_id': 'stale-sibling',
+                    'expected_revision': _revision(source_head.ref, selection, chunks),
+                    'changes': {'target_case_count': 8},
+                })
+            assert error.value.status_code == 409
+            assert 'stale' in str(error.value)
+        finally:
+            await flow.close()
+
+    asyncio.run(run())

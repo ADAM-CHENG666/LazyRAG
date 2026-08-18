@@ -118,6 +118,43 @@ class ArtifactFlow:
         await self._validate_structure_commit(run_id, commit)
         return await self._project(await self._runtime.commit(run_id, commit))
 
+    async def commit_values(self, run_id: str, commit: ArtifactCommit) -> FlowSnapshot:
+        """Write existing artifact content with a composite CAS.
+
+        `commit()` is reserved for PartitionSet structure changes.
+        `update_artifacts()` only compares the keys it writes. Dataset apply
+        needs both: write only the values that changed, while treating the
+        whole snapshot that produced those values as a single precondition.
+        """
+        self._validate_user_commit(commit)
+        self._validate_content_commit(commit)
+        expected_by_key = commit.expected_heads
+        records = await asyncio.gather(*(
+            self._runtime.record(run_id, expected_by_key[write.key])
+            for write in commit.writes
+        ))
+        missing = tuple(
+            expected_by_key[write.key]
+            for write, record in zip(commit.writes, records, strict=True)
+            if record is None
+        )
+        if missing:
+            names = ', '.join(
+                f'{ref.key.artifact_id}@v{ref.version}' for ref in missing if ref is not None
+            )
+            raise DefinitionError(f'content commit targets do not exist: {names}')
+        return await self._project(await self._runtime.commit(run_id, ArtifactCommit(
+            commit.commit_id,
+            commit.producer,
+            tuple(
+                ArtifactDraft(write.key, write.value, record.input_refs)
+                for write, record in zip(commit.writes, records, strict=True)
+                if record is not None
+            ),
+            dict(expected_by_key),
+            self._partition_guards((*commit.output_keys, *expected_by_key)),
+        )))
+
     async def configuration(self, run_id: str) -> RunConfiguration:
         return await self._runtime.configuration(run_id)
 
@@ -200,14 +237,7 @@ class ArtifactFlow:
         if missing:
             names = ', '.join(f'{ref.key.artifact_id}@v{ref.version}' for ref in missing)
             raise DefinitionError(f'artifact update targets do not exist: {names}')
-        guards = tuple(dict.fromkeys(
-            PartitionGuard(
-                ArtifactKey.scalar(self.definition.partition_set_by_artifact[key.artifact_id]),
-                key.partition_key,
-            )
-            for key in keys
-            if key.partition_key
-        ))
+        guards = self._partition_guards(keys)
         command_id = _request_id(request_id)
         return await self._project(await self._runtime.commit(run_id, ArtifactCommit(
             f'flow-update:{command_id}',
@@ -356,6 +386,16 @@ class ArtifactFlow:
         retries = await self._runtime.retry_requests(runtime.run_id)
         return project_flow(self.definition, runtime, retries)
 
+    def _partition_guards(self, keys: Iterable[ArtifactKey]) -> tuple[PartitionGuard, ...]:
+        return tuple(dict.fromkeys(
+            PartitionGuard(
+                ArtifactKey.scalar(self.definition.partition_set_by_artifact[key.artifact_id]),
+                key.partition_key,
+            )
+            for key in keys
+            if key.partition_key and key.artifact_id in self.definition.partition_set_by_artifact
+        ))
+
     def _validate_user_commit(self, commit: ArtifactCommit) -> None:
         if not isinstance(commit, ArtifactCommit):
             raise TypeError('commit must be ArtifactCommit')
@@ -370,6 +410,26 @@ class ArtifactFlow:
             raise DefinitionError(f'approval artifacts require approve(): {names}')
         if any(write.key.artifact_id == RUN_CONFIGURATION_ARTIFACT_ID for write in commit.writes):
             raise DefinitionError('run configuration requires update_configuration()')
+
+    def _validate_content_commit(self, commit: ArtifactCommit) -> None:
+        structural = sorted({
+            write.key.artifact_id
+            for write in commit.writes
+            if write.key.artifact_id in self._content_update_forbidden_ids
+        })
+        if structural:
+            raise DefinitionError(f'artifacts require their dedicated update API: {", ".join(structural)}')
+        if not set(commit.output_keys).issubset(commit.expected_heads):
+            raise DefinitionError('content commits must compare every write')
+        if any(commit.expected_heads.get(key) is None for key in (*commit.output_keys, *commit.expected_heads)):
+            raise DefinitionError('content commits can only update existing artifacts')
+        unknown_partitioned = sorted({
+            key.artifact_id
+            for key in (*commit.output_keys, *commit.expected_heads)
+            if key.partition_key and key.artifact_id not in self.definition.partition_set_by_artifact
+        })
+        if unknown_partitioned:
+            raise DefinitionError(f'unknown partitioned artifacts: {", ".join(unknown_partitioned)}')
 
     async def _validate_structure_commit(self, run_id: str, commit: ArtifactCommit) -> None:
         partition_set_ids = frozenset(self.definition.partition_set_by_artifact.values())

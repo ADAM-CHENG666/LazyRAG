@@ -168,6 +168,52 @@ def test_material_adjustment_options_marks_every_capability_unsupported_without_
     assert result['layout_types'][0]['supported'] is False
 
 
+def test_material_adjustment_options_reports_pipeline_defaults_before_any_adjustment() -> None:
+    # The params artifact is seeded empty, so candidates are built from the
+    # BuildChunksParams defaults. The projection must report those as the current
+    # configuration instead of claiming nothing participates.
+    source_key = ArtifactKey.scalar(A.CORPUS_SOURCE_CONFIG)
+    selection_key = ArtifactKey.scalar(A.DATASET_SELECT_DOCS_PARAMS)
+    chunks_key = ArtifactKey.scalar(A.DATASET_BUILD_CHUNKS_PARAMS)
+    capabilities = _CapabilityClient({
+        'kb-a': {
+            'split_rules': [{'id': 'block', 'name': 'paragraph slice'}, {'id': 'line', 'name': 'sentence slice'}],
+            'layout_types': [{'id': 'heading', 'name': '标题'}, {'id': 'text', 'name': '文本'}],
+        },
+    })
+    service = _service({
+        source_key: {1: {'kb_id': ['kb-a'], 'csv_data': [], 'target_case_count': 2}},
+        selection_key: {1: {'knowledge_bases': [{'kb_id': 'kb-a', 'included': True}]}},
+        chunks_key: {1: {}},
+    }, capability_client=capabilities)
+
+    result = asyncio.run(service.material_adjustment_options('thr-1'))
+
+    assert result['split_rules'] == [
+        {'id': 'block', 'name': 'paragraph slice', 'supported': True, 'enabled': True, 'priority': 1},
+        {'id': 'line', 'name': 'sentence slice', 'supported': True, 'enabled': False, 'priority': None},
+    ]
+    assert result['layout_types'] == [
+        {'id': 'heading', 'name': '标题', 'supported': True, 'enabled': False},
+        {'id': 'text', 'name': '文本', 'supported': True, 'enabled': True},
+    ]
+
+
+def test_material_adjustment_options_rejects_params_the_pipeline_cannot_run() -> None:
+    source_key = ArtifactKey.scalar(A.CORPUS_SOURCE_CONFIG)
+    selection_key = ArtifactKey.scalar(A.DATASET_SELECT_DOCS_PARAMS)
+    chunks_key = ArtifactKey.scalar(A.DATASET_BUILD_CHUNKS_PARAMS)
+    service = _service({
+        source_key: {1: {'kb_id': ['kb-a'], 'csv_data': [], 'target_case_count': 2}},
+        selection_key: {1: {'knowledge_bases': [{'kb_id': 'kb-a', 'included': True}]}},
+        chunks_key: {1: {'excluded_chunks': ['legacy']}},
+    })
+
+    with pytest.raises(ServiceError) as error:
+        asyncio.run(service.material_adjustment_options('thr-1'))
+    assert error.value.status_code == 503
+
+
 def test_material_adjustment_options_maps_core_capability_failure_to_503() -> None:
     source_key = ArtifactKey.scalar(A.CORPUS_SOURCE_CONFIG)
     selection_key = ArtifactKey.scalar(A.DATASET_SELECT_DOCS_PARAMS)

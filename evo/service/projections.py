@@ -18,6 +18,7 @@ from evo.artifact_runtime import (
     PartitionSet,
     RecordedOperationEvent,
 )
+from evo.operations.dataset.chunks_build import BuildChunksParams
 from evo.operations.dataset.kb_client import KnowledgeBaseClient
 
 from .contracts import ServiceError
@@ -875,6 +876,15 @@ class ProjectionService:
             )
         except Exception as exc:
             raise ServiceError(503, 'parser capabilities are unavailable') from exc
+        # Report the configuration the pipeline actually runs with. The params
+        # artifact is seeded empty and stays empty until the user submits an
+        # adjustment, so reading its keys directly would report every split rule
+        # and layout type as disabled while candidates were in fact built from
+        # the defaults.
+        try:
+            effective = BuildChunksParams.from_dict(params)
+        except ValueError as exc:
+            raise ServiceError(503, 'build_chunks_params projection is invalid') from exc
         return {
             'thread_id': thread_id,
             'revision': self._build_revision(refs),
@@ -888,10 +898,10 @@ class ProjectionService:
                 for kb_id in source_ids
             ],
             'split_rules': _project_capability_directory(
-                capabilities, source_ids, enabled, 'split_rules', params.get('groups', ()), priority=True,
+                capabilities, source_ids, enabled, 'split_rules', effective.groups, priority=True,
             ),
             'layout_types': _project_capability_directory(
-                capabilities, source_ids, enabled, 'layout_types', params.get('allowed_types', ()), priority=False,
+                capabilities, source_ids, enabled, 'layout_types', effective.allowed_types, priority=False,
             ),
         }
 

@@ -11,7 +11,8 @@ import {
 import { FinalResultCard } from "./workbench/FinalResultCard";
 import { CutoverDecisionCard } from "./workbench/CutoverDecisionCard";
 import { ProcessActivitySection } from "./workbench/ProcessActivitySection";
-import { DatasetStreamingTable } from "./workbench/DatasetStreamingTable";
+import { DatasetWorkspace } from "./workbench/dataset/DatasetWorkspace";
+import { DatasetStageActionButton, DatasetStageActionProvider } from "./workbench/dataset/stageAction";
 import { EvalStreamingTable } from "./workbench/EvalStreamingTable";
 import { AbtestStreamingTable } from "./workbench/AbtestStreamingTable";
 import { AnalysisStreamingTable } from "./workbench/AnalysisStreamingTable";
@@ -90,8 +91,6 @@ export function SelfEvolutionWorkbenchView({
   onRetryThreadHistoryList,
   onCancelCreateSession,
   onConfirmCreateSession,
-  streamingDatasetRows = [],
-  streamingDatasetProgress = { current: 0, total: 0 },
   streamingEvalRows = [],
   streamingEvalProgress = { current: 0, total: 0 },
   streamingAbtestRows = [],
@@ -327,6 +326,7 @@ export function SelfEvolutionWorkbenchView({
         >
           <div className="self-evolution-workbench-main-scroll">
             {hasThreadRestoreError ? renderThreadRestoreNotice() : (
+              <DatasetStageActionProvider>
               <div className="self-evolution-process-board" aria-label={t("selfEvolutionRun.evoFlowProgressAria")}>
                 <div className="self-evolution-process-live">
                   <div className="self-evolution-process-live-main">
@@ -338,6 +338,7 @@ export function SelfEvolutionWorkbenchView({
                       </span>
                     </div>
                   </div>
+                  {shouldShowStageDetail && displayStage === "dataset" && <DatasetStageActionButton />}
                   {shouldShowStageActionButtons &&
                     (canViewStageArtifact || displayStage === "eval" || displayStage === "abtest") && (
                     <div className="self-evolution-process-observation-actions" aria-label={t("selfEvolutionRun.observationEntryAria")}>
@@ -392,11 +393,7 @@ export function SelfEvolutionWorkbenchView({
                 )}
 
                 {shouldShowStageDetail && displayStage === "dataset" ? (
-                  <DatasetStreamingTable
-                    rows={streamingDatasetRows}
-                    current={streamingDatasetProgress.current}
-                    total={streamingDatasetProgress.total}
-                  />
+                  <DatasetWorkspace threadId={routeThreadId} />
                 ) : shouldShowStageDetail && displayStage === "eval" ? (
                   <EvalStreamingTable
                     rows={streamingEvalRows}
@@ -431,6 +428,7 @@ export function SelfEvolutionWorkbenchView({
                 ) : null}
 
               </div>
+              </DatasetStageActionProvider>
             )}
           </div>
         </main>

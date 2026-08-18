@@ -1,0 +1,534 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Alert, Button, Checkbox, Drawer, Input, Modal, message } from "antd";
+import { DeleteOutlined, PlusOutlined } from "@ant-design/icons";
+import { datasetRoot, describeRequestError, getJson, newRequestId, patchJson } from "./api";
+import { PAGE_SIZE } from "./hooks";
+import {
+  Chip,
+  ChunkText,
+  DIFFICULTY_TEXT,
+  DrawerAttributes,
+  QUESTION_TYPE_TEXT,
+  StatusIcon,
+  toVisualStatus,
+} from "./primitives";
+import type {
+  CaseDetail,
+  CaseKeyPoint,
+  CaseRow,
+  CaseStageKey,
+  CaseTopicOption,
+  PagedResponse,
+} from "./types";
+
+const STAGE_LABEL: Record<CaseStageKey, string> = {
+  plan: "生成规划",
+  generate: "问答生成",
+  grading: "判分规则",
+};
+
+type Draft = {
+  topicId?: string;
+  question: string;
+  answer: string;
+  guidance: string;
+  keyPoints: CaseKeyPoint[];
+  forbiddenClaims: string;
+};
+
+const toDraft = (detail: CaseDetail): Draft => ({
+  topicId: detail.topic?.topic_id,
+  question: detail.stages.generate.question || "",
+  answer: detail.stages.generate.answer || "",
+  guidance: detail.stages.generate.grading_guidance || "",
+  keyPoints: (detail.stages.grading.key_points || []).map((point) => ({
+    statement: point.statement,
+    evidence_chunk_ids: [...point.evidence_chunk_ids],
+  })),
+  forbiddenClaims: (detail.stages.grading.forbidden_claims || []).join("\n"),
+});
+
+/** Opens on the sub-stage that most needs attention: the first unfinished one. */
+const focusStage = (detail: CaseDetail): CaseStageKey => {
+  const order: CaseStageKey[] = ["plan", "generate", "grading"];
+  return order.find((stage) => detail.stages[stage].status !== "succeeded") || "generate";
+};
+
+export function CaseDetailDrawer({
+  threadId,
+  row,
+  onClose,
+  onSaved,
+}: {
+  threadId: string;
+  row?: CaseRow;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [detail, setDetail] = useState<CaseDetail>();
+  const [topicOptions, setTopicOptions] = useState<CaseTopicOption[]>([]);
+  const [stage, setStage] = useState<CaseStageKey>("generate");
+  const [draft, setDraft] = useState<Draft>();
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string>();
+
+  const caseId = row?.case_id;
+  const root = datasetRoot(threadId);
+
+  const load = useCallback(async () => {
+    if (!caseId) return;
+    setError(undefined);
+    try {
+      const detailUrl = `${root}/cases/${encodeURIComponent(caseId)}`;
+      const [value, options] = await Promise.all([
+        getJson<CaseDetail>(detailUrl),
+        // Topic options only drive the optional re-assignment picker.
+        getJson<PagedResponse<CaseTopicOption>>(`${detailUrl}/topic-options`, {
+          page_size: PAGE_SIZE,
+        }).catch(() => undefined),
+      ]);
+      setDetail(value);
+      setDraft(toDraft(value));
+      setStage(focusStage(value));
+      setTopicOptions(options?.items || []);
+    } catch (caught) {
+      setError(describeRequestError(caught, "读取用例详情失败"));
+    }
+  }, [caseId, root]);
+
+  useEffect(() => {
+    if (!caseId) {
+      setDetail(undefined);
+      setDraft(undefined);
+      setTopicOptions([]);
+      return;
+    }
+    void load();
+  }, [caseId, load]);
+
+  const imported = detail?.source === "imported";
+  const initial = useMemo(() => (detail ? toDraft(detail) : undefined), [detail]);
+  const planChanged = Boolean(draft && initial && draft.topicId !== initial.topicId);
+  const generateChanged = Boolean(
+    draft &&
+      initial &&
+      (draft.question !== initial.question ||
+        draft.answer !== initial.answer ||
+        draft.guidance !== initial.guidance),
+  );
+  const gradingChanged = Boolean(
+    draft &&
+      initial &&
+      (JSON.stringify(draft.keyPoints) !== JSON.stringify(initial.keyPoints) ||
+        draft.forbiddenClaims !== initial.forbiddenClaims),
+  );
+  const dirty = planChanged || generateChanged || gradingChanged;
+
+  const currentTopicName =
+    topicOptions.find((option) => option.topic_id === draft?.topicId)?.name ||
+    (draft?.topicId === detail?.topic?.topic_id ? detail?.topic?.name : undefined) ||
+    "—";
+
+  const patch = (partial: Partial<Draft>) =>
+    setDraft((prev) => (prev ? { ...prev, ...partial } : prev));
+
+  const submit = async () => {
+    if (!detail || !draft || !dirty) return;
+    if (planChanged && gradingChanged) {
+      message.warning("更换主题后判分规则会基于新的引用重新生成，请先撤销判分规则的修改。");
+      return;
+    }
+    const forbidden = draft.forbiddenClaims
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (gradingChanged) {
+      if (draft.keyPoints.some((point) => !point.statement.trim())) {
+        message.warning("关键得分点内容不能为空。");
+        return;
+      }
+      if (draft.keyPoints.some((point) => !point.evidence_chunk_ids.length)) {
+        message.warning("每个关键得分点至少绑定一个依据片段。");
+        return;
+      }
+      if (forbidden.length > 3) {
+        message.warning("错误结论最多 3 条。");
+        return;
+      }
+    }
+
+    const affected = [
+      planChanged ? "生成规划" : undefined,
+      generateChanged || planChanged ? "问答生成" : undefined,
+      "判分规则",
+    ].filter(Boolean);
+
+    Modal.confirm({
+      title: "保存当前用例修改",
+      content: (
+        <div className="dataset-impact-copy">
+          <p>
+            本次修改：
+            {[
+              planChanged ? "更换主题" : undefined,
+              generateChanged ? "问答内容" : undefined,
+              gradingChanged ? "判分规则" : undefined,
+            ]
+              .filter(Boolean)
+              .join("、")}
+          </p>
+          <p>可能受影响的阶段：{affected.join(" → ")}</p>
+          <p>保存后 Evo 只会重新执行当前用例受影响的下游阶段，不影响其他用例。</p>
+        </div>
+      ),
+      okText: "确认保存",
+      cancelText: "返回继续编辑",
+      onOk: async () => {
+        setSaving(true);
+        try {
+          const changes: Record<string, unknown> = {};
+          if (planChanged && draft.topicId) changes.plan = { topic_id: draft.topicId };
+          if (generateChanged) {
+            changes.generate = {
+              question: draft.question,
+              answer: draft.answer,
+              grading_guidance: draft.guidance,
+            };
+          }
+          if (gradingChanged) {
+            changes.grading = {
+              key_points: draft.keyPoints,
+              forbidden_claims: forbidden,
+            };
+          }
+          await patchJson(`${root}/cases/${encodeURIComponent(detail.case_id)}`, {
+            request_id: newRequestId(),
+            expected_revision: detail.revision,
+            changes,
+          });
+          message.success("用例修改已保存");
+          onSaved();
+          await load();
+        } catch (caught) {
+          message.error(describeRequestError(caught, "保存用例失败"));
+          throw caught;
+        } finally {
+          setSaving(false);
+        }
+      },
+    });
+  };
+
+  return (
+    <Drawer
+      className="dataset-drawer"
+      rootClassName="dataset-drawer-root"
+      title={row ? `${row.case_id} · 用例详情` : "用例详情"}
+      open={Boolean(row)}
+      width={560}
+      onClose={onClose}
+      destroyOnClose
+      footer={
+        <div className="dataset-drawer-foot">
+          <Button onClick={onClose}>关闭</Button>
+          <Button type="primary" disabled={!dirty} loading={saving} onClick={() => void submit()}>
+            保存
+          </Button>
+        </div>
+      }
+    >
+      {error ? (
+        <Alert
+          type="error"
+          showIcon
+          message="用例详情不可用"
+          description={error}
+          action={
+            <Button size="small" onClick={() => void load()}>
+              重试
+            </Button>
+          }
+        />
+      ) : !detail || !draft ? (
+        <div className="dataset-skeleton-lines">
+          <span />
+          <span />
+          <span />
+          <span />
+        </div>
+      ) : (
+        <>
+          <DrawerAttributes
+            items={[
+              { label: "Case ID", value: detail.case_id },
+              {
+                label: "来源",
+                value: (
+                  <Chip tone={imported ? "imported" : "neutral"}>
+                    {imported ? "CSV 导入" : "自动生成"}
+                  </Chip>
+                ),
+              },
+              {
+                label: "题型与难度",
+                value: `${QUESTION_TYPE_TEXT[detail.question_type]} · ${
+                  DIFFICULTY_TEXT[detail.difficulty]
+                }`,
+              },
+              { label: "主题", value: currentTopicName },
+            ]}
+          />
+
+          {dirty ? (
+            <div className="dataset-case-unsaved">
+              当前 Case 有修改尚未保存；可继续切换子阶段编辑。
+            </div>
+          ) : null}
+
+          <nav className="dataset-case-roadmap" aria-label="用例阶段">
+            {(Object.keys(STAGE_LABEL) as CaseStageKey[]).map((key) => (
+              <button
+                type="button"
+                key={key}
+                className={`dataset-roadmap-step${stage === key ? " is-selected" : ""}`}
+                onClick={() => setStage(key)}
+              >
+                <strong>{STAGE_LABEL[key]}</strong>
+                <small>
+                  <StatusIcon status={toVisualStatus(detail.stages[key].status)} />
+                </small>
+              </button>
+            ))}
+          </nav>
+
+          {stage === "plan" && (
+            <section>
+              <div className="dataset-case-panel-summary">
+                {imported
+                  ? "该用例随 CSV 导入，不绑定主题。"
+                  : "只展示符合当前题型、难度及占用规则的可选主题。"}
+              </div>
+              {imported ? (
+                <div className="dataset-detail-block">
+                  <h4>主题</h4>
+                  <p>—</p>
+                </div>
+              ) : (
+                <>
+                  <div className="dataset-detail-block">
+                    <h4>更换主题</h4>
+                    <div className="dataset-topic-option-list">
+                      {(detail.topic
+                        ? [
+                            {
+                              topic_id: detail.topic.topic_id,
+                              name: detail.topic.name,
+                              chunk_count: detail.topic.chunk_count,
+                            },
+                            ...topicOptions.filter(
+                              (option) => option.topic_id !== detail.topic?.topic_id,
+                            ),
+                          ]
+                        : topicOptions
+                      ).map((option) => (
+                        <button
+                          type="button"
+                          key={option.topic_id}
+                          className={`dataset-topic-option${
+                            draft.topicId === option.topic_id ? " is-selected" : ""
+                          }`}
+                          onClick={() => patch({ topicId: option.topic_id })}
+                        >
+                          <strong>{option.name}</strong>
+                          <div className="dataset-topic-option-meta">
+                            <span>{option.topic_id}</span>
+                            <span>
+                              {option.chunk_count} 个片段
+                              {option.topic_id === detail.topic?.topic_id ? " · 当前" : ""}
+                            </span>
+                          </div>
+                        </button>
+                      ))}
+                      {!detail.topic && !topicOptions.length ? (
+                        <p className="dataset-note">当前没有可替换的主题。</p>
+                      ) : null}
+                    </div>
+                  </div>
+                  <div className="dataset-warning-note">
+                    参考片段由算法随主题自动调整，不在此处单独展示或修改。
+                  </div>
+                </>
+              )}
+            </section>
+          )}
+
+          {stage === "generate" && (
+            <section>
+              <div className="dataset-case-panel-summary">
+                {imported
+                  ? "问答内容随 CSV 导入，在本阶段只读。"
+                  : "问题、标准答案与评分说明共同属于当前 Case 修改。"}
+              </div>
+              {imported ? (
+                <div className="dataset-readonly-stack">
+                  <ReadonlyItem label="问题" value={draft.question} />
+                  <ReadonlyItem label="标准答案" value={draft.answer} />
+                  <ReadonlyItem label="评分说明" value={draft.guidance} />
+                </div>
+              ) : (
+                <>
+                  <FieldGroup
+                    label="问题"
+                    value={draft.question}
+                    onChange={(value) => patch({ question: value })}
+                  />
+                  <FieldGroup
+                    label="标准答案"
+                    value={draft.answer}
+                    onChange={(value) => patch({ answer: value })}
+                  />
+                  <FieldGroup
+                    label="评分说明"
+                    value={draft.guidance}
+                    onChange={(value) => patch({ guidance: value })}
+                  />
+                </>
+              )}
+            </section>
+          )}
+
+          {stage === "grading" && (
+            <section>
+              <div className="dataset-case-panel-summary">
+                问答内容只读；关键得分点只能绑定当前 Case 的参考片段。
+              </div>
+              <div className="dataset-readonly-stack">
+                <ReadonlyItem label="问题" value={draft.question} />
+                <ReadonlyItem label="标准答案" value={draft.answer} />
+                <ReadonlyItem label="评分说明" value={draft.guidance} />
+              </div>
+
+              {draft.keyPoints.map((point, index) => (
+                <div className="dataset-score-point" key={`key-point-${index}`}>
+                  <label>
+                    关键得分点 {index + 1}
+                    <button
+                      type="button"
+                      className="dataset-icon-action"
+                      aria-label={`删除关键得分点 ${index + 1}`}
+                      onClick={() =>
+                        patch({ keyPoints: draft.keyPoints.filter((_, at) => at !== index) })
+                      }
+                    >
+                      <DeleteOutlined />
+                    </button>
+                  </label>
+                  <Input
+                    value={point.statement}
+                    onChange={(event) =>
+                      patch({
+                        keyPoints: draft.keyPoints.map((item, at) =>
+                          at === index ? { ...item, statement: event.target.value } : item,
+                        ),
+                      })
+                    }
+                  />
+                  <div className="dataset-evidence-title">
+                    <span>依据片段</span>
+                    <span>至少选择 1 个</span>
+                  </div>
+                  <div className="dataset-chunk-card-list">
+                    {detail.references.map((reference) => {
+                      const checked = point.evidence_chunk_ids.includes(reference.chunk_id);
+                      return (
+                        <article className="dataset-chunk-card" key={reference.chunk_id}>
+                          <div className="dataset-chunk-card-head">
+                            <strong title={reference.document.name}>{reference.document.name}</strong>
+                            <Checkbox
+                              checked={checked}
+                              onChange={(event) =>
+                                patch({
+                                  keyPoints: draft.keyPoints.map((item, at) =>
+                                    at === index
+                                      ? {
+                                          ...item,
+                                          evidence_chunk_ids: event.target.checked
+                                            ? [...item.evidence_chunk_ids, reference.chunk_id]
+                                            : item.evidence_chunk_ids.filter(
+                                                (id) => id !== reference.chunk_id,
+                                              ),
+                                        }
+                                      : item,
+                                  ),
+                                })
+                              }
+                            >
+                              绑定
+                            </Checkbox>
+                          </div>
+                          <div className="dataset-chunk-card-meta">
+                            <Chip>{reference.knowledge_base.name}</Chip>
+                            <span className="dataset-chunk-id">{reference.chunk_id}</span>
+                          </div>
+                          <ChunkText text={reference.text} />
+                        </article>
+                      );
+                    })}
+                    {!detail.references.length ? (
+                      <p className="dataset-note">当前用例还没有参考片段。</p>
+                    ) : null}
+                  </div>
+                </div>
+              ))}
+              <Button
+                size="small"
+                icon={<PlusOutlined />}
+                onClick={() =>
+                  patch({ keyPoints: [...draft.keyPoints, { statement: "", evidence_chunk_ids: [] }] })
+                }
+              >
+                新增关键得分点
+              </Button>
+
+              <div className="dataset-form-group">
+                <label htmlFor="dataset-forbidden">错误结论（每行一条，最多 3 条）</label>
+                <Input.TextArea
+                  id="dataset-forbidden"
+                  rows={3}
+                  value={draft.forbiddenClaims}
+                  onChange={(event) => patch({ forbiddenClaims: event.target.value })}
+                />
+              </div>
+            </section>
+          )}
+        </>
+      )}
+    </Drawer>
+  );
+}
+
+function ReadonlyItem({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="dataset-readonly-item">
+      <small>{label}</small>
+      <p>{value || "—"}</p>
+    </div>
+  );
+}
+
+function FieldGroup({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div className="dataset-form-group">
+      <label>{label}</label>
+      <Input.TextArea rows={3} value={value} onChange={(event) => onChange(event.target.value)} />
+    </div>
+  );
+}
