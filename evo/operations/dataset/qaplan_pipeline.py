@@ -16,6 +16,8 @@ from .select_docs import select_docs
 from .topic_discovery import (
     topic_discovery_embedding_cluster,
     topic_discovery_embedding_label,
+    topic_discovery_embedding_label_cluster,
+    topic_discovery_embedding_label_manifest,
     topic_discovery_entity_build_graph,
     topic_discovery_entity_cluster,
     topic_discovery_manifest,
@@ -66,6 +68,10 @@ def dataset_materializers(case_ids: tuple[str, ...]) -> dict[str, Any]:
         'dataset.topic_discovery_embedding_label': lambda ctx, inputs: topic_discovery_embedding_label(
             ctx, inputs, llm_complete=complete(inputs)
         ),
+        'dataset.topic_discovery_embedding_label_cluster': lambda ctx, inputs: topic_discovery_embedding_label_cluster(
+            ctx, inputs, llm_complete=complete(inputs)
+        ),
+        'dataset.topic_discovery_embedding_label_manifest': topic_discovery_embedding_label_manifest,
         'dataset.topic_discovery_manifest': topic_discovery_manifest,
         'dataset.qaplan_plan': lambda ctx, inputs: qaplan_plan(qaplan_context(ctx), inputs),
         'dataset.qaplan_spec': lambda ctx, inputs: qaplan_spec(qaplan_context(ctx), inputs),

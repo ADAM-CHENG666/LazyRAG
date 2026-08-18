@@ -2,107 +2,74 @@ operation:
   op_id: dataset.topic_discovery_embedding_label
   flow: dataset
   stage: topic_discovery_embedding_label
-  description: 使用 LLM 为 embedding cluster candidates 生成 topics，产出最终 embedding clusters。
+  description: 使用 LLM 为一个 embedding candidate 动态分区生成 topics。
 
 fixed_op:
   inputs:
-    embedding_cluster_candidates:
-      artifact_id: dataset.topic_discovery_embedding_cluster_candidates
-      required: true
-      partition: unpartitioned
-    chunk:
-      artifact_id: dataset.chunk
+    request:
+      artifact_id: dataset.embedding_label_request
       required: true
       partition: partitioned
-      mapping: all_to_unpartitioned
+      mapping: each
     topic_discovery_embedding_label_params:
       artifact_id: dataset.topic_discovery_embedding_label_params
       required: true
       partition: unpartitioned
   outputs:
-    embedding_clusters:
-      artifact_id: dataset.topic_discovery_embedding_clusters
-      partition: unpartitioned
+    embedding_cluster:
+      artifact_id: dataset.embedding_cluster
+      partition: partitioned
 
 materializer:
-  function: topic_discovery_embedding_label
+  function: topic_discovery_embedding_label_cluster
   return_keys:
-    - embedding_clusters
+    - embedding_cluster
 
 input_payload:
-  embedding_cluster_candidates:
+  request:
     fields:
-      clusters:
-        # 综合推理主题的可编辑源 Artifact；前端只允许修改每项的 topics。
+      candidate_id:
+        type: string
+        required: true
+      cluster_type:
+        type: string
+        required: true
+        enum:
+          - embedding
+      chunk_ids:
+        type: list[string]
+        required: true
+        validation:
+          - non_empty
+      chunk_count:
+        type: integer
+        required: true
+      scores:
+        type: object
+        required: false
+        default: {}
+      metadata:
+        type: object
+        required: false
+        default: {}
+      chunks:
         type: array
         required: true
         item:
           type: object
           fields:
-            candidate_id:
+            chunk_id:
               type: string
               required: true
-            cluster_type:
+            kb_id:
+              type: string
+              required: false
+            doc_id:
               type: string
               required: true
-              enum:
-                - embedding
-            topics:
-              type: list[string]
-              required: false
-              default: []
-            chunk_ids:
-              type: list[string]
+            text:
+              type: string
               required: true
-              validation:
-                - non_empty
-            chunk_count:
-              type: integer
-              required: true
-            scores:
-              type: object
-              required: false
-              default: {}
-            metadata:
-              type: object
-              required: false
-              default: {}
-      skipped_chunks:
-        type: array
-        required: false
-        default: []
-      stats:
-        type: object
-        required: false
-      params:
-        type: object
-        required: false
-  chunk:
-    tuple: true
-    item:
-      fields:
-        available:
-          type: boolean
-          required: false
-          default: true
-        chunk_id:
-          type: string
-          required: true
-          validation:
-            - non_empty_after_strip
-        doc_id:
-          type: string
-          required: true
-        group:
-          type: string
-          required: true
-        text:
-          type: string
-          required: true
-        embedding:
-          type: object
-          required: false
-          default: {}
   topic_discovery_embedding_label_params:
     fields:
       max_topics_per_cluster:
@@ -127,124 +94,72 @@ input_payload:
           - positive_integer
 
 output_payload:
-  embedding_clusters:
+  embedding_cluster:
     json_compatible: true
     fields:
-      clusters:
-        type: array
-        item:
-          type: object
-          fields:
-            cluster_id:
-              # 上游 Cluster 稳定 ID，应被最终 manifest 保留为 source_cluster_id。
-              type: string
-            cluster_type:
-              # 固定为 embedding；前端展示为“综合推理主题”。
-              type: string
-              enum:
-                - embedding
-            topics:
-              # LLM 为当前 Cluster 生成的 Topic 名称列表，也是本 Artifact 唯一允许人工修改的字段。
-              type: list[string]
-            chunk_ids:
-              # Topic 的支撑 Chunk，第一版只读，不允许增删或移动。
-              type: list[string]
-            chunk_count:
-              # 必须等于 chunk_ids 长度；决定 Topic 的 1 / 2 / 3+ 支撑能力。
-              type: integer
-            scores:
-              # 聚类算法保留字段；当前 STEP2 页面不读取，最终 manifest 不再透传。
-              type: object
-            metadata:
-              # 聚类算法保留字段；当前 STEP2 页面不读取，最终 manifest 不再透传。
-              type: object
-              required: false
-      skipped_chunks:
-        # 未进入 embedding Cluster 的 Chunk；当前总览不读取，必要时用于异常说明。
-        type: array
-      stats:
-        # embedding 命名过程统计，不作为 STEP2 默认总览的 Topic 统计来源。
+      cluster_id:
+        # 取值等于上游 candidate_id；保持最终 embedding_clusters 的既有 cluster_id 契约。
+        type: string
+      cluster_type:
+        type: string
+        enum:
+          - embedding
+      topics:
+        # 当前 candidate 唯一允许人工修改的字段。
+        type: list[string]
+      chunk_ids:
+        # 支撑该 candidate 的 Chunk，按输入顺序保留。
+        type: list[string]
+      chunk_count:
+        type: integer
+      scores:
         type: object
-        fields:
-          candidate_count:
-            type: integer
-          cluster_count:
-            type: integer
-          labeled_cluster_count:
-            type: integer
-      params:
+      metadata:
         type: object
-        fields:
-          max_topics_per_cluster:
-            type: integer
-          max_chars_per_chunk_for_label:
-            type: integer
-          max_label_source_chunks:
-            type: integer
+        required: false
 
 
 execution_flow:
   - 解析并校验 topic_discovery_embedding_label_params。
-  - 读取并校验 embedding_cluster_candidates。
-  - 当 embedding_cluster_candidates.clusters=[] 时，返回 clusters=[] 的合法空结果，不建立 chunk 索引也不调用 LLM。
-  - 读取 chunk tuple 并建立 chunk_id 到 chunk payload 的索引。
-  - 按 candidates.clusters 稳定顺序逐个处理 cluster。
-  - 对每个 cluster 按 chunk_ids 原顺序选择前 max_label_source_chunks 个 chunk。
+  - 读取当前动态分区的 embedding_label_request；每个 attempt 只处理一个 candidate。
+  - 对该 candidate 按 chunk_ids 原顺序选择前 max_label_source_chunks 个 chunk。
   - 使用截断后的 chunk text 和 max_topics_per_cluster 构造 LLM prompt。
   - 调用 LLM，解析并校验 topics 为非空 list[string]。
-  - 任一 cluster 解析失败、topics 为空或 LLM 失败时抛错。
-  - 将 candidate_id 规范化为 cluster_id，保留 chunk_ids、chunk_count、scores 和 metadata。
-  - 保留 skipped_chunks，汇总 stats 和 params。
-  - 返回 {"embedding_clusters": payload}。
+  - 当前 candidate 解析失败、topics 为空或 LLM 失败时仅使该动态分区失败。
+  - 输出同一 candidate_id 的单一 embedding_cluster；并发由 Runtime 既有全局配置控制。
 
 tests:
   label_generation_logic:
-    # 标注主逻辑：看候选 cluster 如何选取 label source chunks、构造 prompt、保留 chunk_ids 并汇总 stats。
+    # 单 candidate 标注：看动态分区如何选取 source chunks、构造 prompt 并保留元数据。
     cases:
-      # 正常 candidates 输入能逐个 cluster 调用 LLM，产出 topics、stats 和 params。
+      # 正常 request 只调用一次 LLM，并产出以同一 candidate_id 为 cluster_id 的 embedding_cluster。
       - success
-      # 空参数输入时使用默认 max_topics / max_chars / max_source_chunks，并将默认值回写到 params。
-      # 例子：不传任何参数时，默认使用 max_topics_per_cluster=3、max_chars_per_chunk_for_label=2048、
-      # max_label_source_chunks=8，并在输出 params 中原样回写。
+      # 空参数输入时使用已有默认 max_topics / max_chars / max_source_chunks。
       - default_params
-      # 每个 cluster 只取前 max_label_source_chunks 个 chunk 参与 prompt 构造。
-      # 例子：某个 cluster 有 3 个 chunk，但 max_label_source_chunks=2 时，prompt 中只应出现前 2 个 chunk。
+      # 只取前 max_label_source_chunks 个 chunk 参与 prompt 构造。
       - label_source_chunk_limit
       # 单个 chunk 文本在进入 prompt 前会按 max_chars_per_chunk_for_label 截断。
-      # 例子：chunk text 长度为 20，max_chars_per_chunk_for_label=5 时，prompt 中只保留前 5 个字符。
       - chunk_text_truncation
-      # LLM 返回的 topics 数量不得超过 max_topics_per_cluster，超限时直接失败。
-      # 例子：max_topics_per_cluster=2，但 LLM 返回 3 个 topics，应直接抛错。
+      # LLM 返回 topics 数量不得超过 max_topics_per_cluster，超限时直接失败。
       - max_topics_limit
-      # 输出 cluster 必须保留 candidate 的 chunk_ids 原顺序，不因标注过程重排。
-      # 例子：candidate.chunk_ids=['chunk-2', 'chunk-1'] 时，输出 cluster 也必须保持这个顺序。
+      # 输出必须保留 request 的 candidate_id（作为 cluster_id）、chunk_ids、scores 和 metadata，不因标注过程重排。
       - preserves_chunk_ids
-      # 空 candidate 列表直接形成空 embedding clusters，不调用 LLM，供 imported-only run 继续收口。
-      - imported_only_empty_label_bypass
-      # candidate_count、cluster_count、labeled_cluster_count 与最终输出一致。
-      - stats
-      # materializer 返回结构固定为 {"embedding_clusters": payload}，不混入额外字段。
+      # materializer 返回结构固定为 {"embedding_cluster": payload}，不混入额外字段。
       - return_keys_match_outputs
   llm_and_input_validation:
-    # LLM 与输入校验：看缺失 chunk text、空 topics、非法 JSON 等场景是否直接失败。
+    # LLM 与输入校验：当前分区失败，不在这里发布聚合结果。
     cases:
-      # embedding_cluster_candidates.clusters 必须是 list，chunk 输入必须能建立 chunk_id -> chunk 的完整索引。
-      # 例子：clusters 不是 list、candidate 缺失 chunk_ids、chunk 不是 tuple、或 chunk_id 无法建立索引时，应直接失败。
+      # request 必须包含 candidate_id、chunk_ids 与完整 chunks；chunk_id 顺序必须匹配。
       - contract
       # 参数必须是正整数且满足上限约束；非法参数应立即抛错。
-      # 例子：max_topics_per_cluster=0、max_chars_per_chunk_for_label>20000、max_label_source_chunks=False 都应失败。
       - validation_error
-      # cluster 引用的 chunk 缺失文本、不可用或不存在时，不继续调用 LLM，直接失败。
-      # 例子：candidate 引用了不存在的 chunk_id、chunk.available=false、或 chunk.text 为空字符串，都应直接失败。
+      # request 中 chunk 缺失文本或与 chunk_ids 不匹配时，不继续调用 LLM，直接失败。
       - missing_chunk_text_error
       # LLM 返回 topics=[] 或 topics 含空字符串时直接失败，不接受空标签。
-      # 例子：LLM 返回 {"topics": []} 或 {"topics": [""]} 时，应直接失败。
       - empty_topics_error
       # LLM 返回非法 JSON、缺少 topics 字段或 topics 不是 list[string] 时直接失败。
-      # 例子：LLM 返回 not-json、{"label":"x"}、{"topics":"x"} 都应直接失败。
       - invalid_llm_output_error
   runtime_wiring:
-    # fixed op 接线：看 runtime 中 candidate clusters 与原始 chunk 是否能一并送入标注步骤。
+    # fixed op 接线：每个 request 动态分区独立建立 attempt，受既有 Runtime 全局并发配置限制。
     cases:
-      # runtime 中 embedding_cluster_candidates 与 partitioned chunk 输入能正确汇总到 embedding_clusters。
       - partition

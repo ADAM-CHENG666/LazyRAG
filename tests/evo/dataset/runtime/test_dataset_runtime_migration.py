@@ -57,7 +57,8 @@ def test_current_flow_splits_dataset_before_eval() -> None:
         'dataset.build_entity_graph',
         'dataset.cluster_entities',
         'dataset.cluster_embeddings',
-        'dataset.label_embedding_clusters',
+        'dataset.label_embedding_cluster',
+        'dataset.embedding_label_manifest',
         'dataset.topic_manifest',
     }
     assert {operation.spec.op_id for operation in definition.stage_operations(2)} == {

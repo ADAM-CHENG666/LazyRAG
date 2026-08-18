@@ -1579,7 +1579,7 @@ def flow_events(snapshot: FlowSnapshot, attempts: tuple[AttemptSnapshot, ...],
         stage = _operation_stage(definition, attempt.operation_id)
         if not stage:
             continue
-        case = attempt_case(snapshot, attempt, partition_sets)
+        partition = attempt_case(snapshot, attempt, partition_sets)
         base = {
             'thread_id': snapshot.run_id,
             'step_id': f'{snapshot.run_id}:{stage}',
@@ -1588,7 +1588,7 @@ def flow_events(snapshot: FlowSnapshot, attempts: tuple[AttemptSnapshot, ...],
             'next_step_run_id': '',
             'operation_id': attempt.operation_id,
             'attempt_id': attempt.attempt_id,
-            **({'case': case} if case is not None else {}),
+            **({'partition': partition} if partition is not None else {}),
         }
         rows.append((
             attempt.created_at,

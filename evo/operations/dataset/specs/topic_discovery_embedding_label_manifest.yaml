@@ -1,0 +1,47 @@
+operation:
+  op_id: dataset.topic_discovery_embedding_label_manifest
+  flow: dataset
+  stage: topic_discovery_embedding_label
+  description: 汇总全部动态命名成功的 embedding Cluster，作为最终 Topic Manifest 的 embedding 输入。
+
+fixed_op:
+  inputs:
+    candidates:
+      artifact_id: dataset.topic_discovery_embedding_cluster_candidates
+      required: true
+      partition: unpartitioned
+    label_requests:
+      artifact_id: dataset.embedding_label_requests
+      required: true
+      partition: unpartitioned
+    labeled_clusters:
+      artifact_id: dataset.embedding_cluster
+      required: true
+      partition: partitioned
+      mapping: all_to_unpartitioned
+    topic_discovery_embedding_label_params:
+      artifact_id: dataset.topic_discovery_embedding_label_params
+      required: true
+      partition: unpartitioned
+  outputs:
+    embedding_clusters:
+      artifact_id: dataset.embedding_clusters
+      partition: unpartitioned
+
+materializer:
+  function: topic_discovery_embedding_label_manifest
+  return_keys: [embedding_clusters]
+
+execution_flow:
+  - 空 label_requests 合法汇总为 clusters=[]，不调用 LLM。
+  - 非空时必须等待每个 candidate_id 恰有一份成功的 embedding_cluster；任一失败或缺失均不发布 embedding_clusters。
+  - 按 label_requests 的稳定分区顺序汇总，并复制 candidates 的 skipped_chunks、params 与统计。
+  - 输出保持既有 dataset.embedding_clusters 契约，因此最终 topic_manifest、审批与 qaplan 无需改变。
+
+tests:
+  dynamic_label_aggregation:
+    cases:
+      - empty_requests_returns_empty_embedding_clusters
+      - preserves_candidate_partition_order
+      - rejects_missing_or_duplicate_labeled_cluster
+      - failed_label_partition_blocks_topic_manifest

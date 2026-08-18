@@ -23,11 +23,19 @@ fixed_op:
     embedding_cluster_candidates:
       artifact_id: dataset.topic_discovery_embedding_cluster_candidates
       partition: unpartitioned
+    embedding_label_requests:
+      artifact_id: dataset.embedding_label_requests
+      partition: unpartitioned
+    embedding_label_request:
+      artifact_id: dataset.embedding_label_request
+      partition: partitioned
 
 materializer:
   function: topic_discovery_embedding_cluster
   return_keys:
     - embedding_cluster_candidates
+    - embedding_label_requests
+    - embedding_label_request
 
 input_payload:
   chunk:
@@ -163,6 +171,45 @@ output_payload:
             type: integer
           min_samples:
             type: integer
+  embedding_label_requests:
+    # 动态分区集合；每个分区对应一个 candidate_id。
+    partition_set: true
+  embedding_label_request:
+    # 单个 candidate 的 LLM 标注输入，由后续 partitioned operation 按 each 消费。
+    partitioned: true
+    fields:
+      candidate_id:
+        type: string
+      cluster_type:
+        type: string
+        enum:
+          - embedding
+      chunk_ids:
+        type: list[string]
+      chunk_count:
+        type: integer
+      scores:
+        type: object
+        required: false
+        default: {}
+      metadata:
+        type: object
+        required: false
+        default: {}
+      chunks:
+        type: array
+        item:
+          type: object
+          fields:
+            chunk_id:
+              type: string
+            kb_id:
+              type: string
+              required: false
+            doc_id:
+              type: string
+            text:
+              type: string
 
 
 execution_flow:
@@ -178,8 +225,10 @@ execution_flow:
   - 使用 UMAP 将 embedding 降到 umap_n_components 维；缺少 UMAP 依赖时失败。
   - 使用 HDBSCAN 聚类；缺少 HDBSCAN 依赖时失败。
   - 按 HDBSCAN label 构建 clusters；label=-1 每个 chunk 单独生成 singleton candidate。
+  - 按稳定 candidate_id 创建 embedding_label_requests 动态分区；空 candidates 创建合法空集合。
+  - 每个分区写入 embedding_label_request，包含该 candidate 的元数据与成员 Chunk 原顺序内容；后续命名分区不重复读取全量 Chunk。
   - 汇总 skipped_chunks、stats 和 params。
-  - 返回 {"embedding_cluster_candidates": payload}。
+  - 返回 candidates、动态分区集合与逐 candidate 请求；本 operation 不调用 LLM。
 
 tests:
   embedding_cluster_logic:
@@ -223,7 +272,7 @@ tests:
       # 例子：不传 clusterer 且运行环境缺少 hdbscan 时，应直接抛出 HDBSCAN dependency is required。
       - missing_hdbscan_error
   runtime_wiring:
-    # fixed op 接线：看 partitioned chunk 输入在 runtime 中是否能聚合为单个 embedding_cluster_candidates。
+    # fixed op 接线：看 partitioned chunk 输入在 runtime 中是否能聚合为 candidates 与动态 label 分区集合。
     cases:
-      # runtime 能正确汇总 partitioned chunk 输入，并产出单个 unpartitioned embedding_cluster_candidates。
+      # runtime 能正确产出 candidates、稳定 candidate 分区集合及逐 candidate 请求。
       - partition

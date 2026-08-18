@@ -237,8 +237,8 @@ export function buildStreamingDatasetCaseRows(events: NormalizedThreadEvent[]): 
       return;
     }
 
-    const caseRecord = getNestedRecordField(event.payload, ["case"]);
-    const caseIndex = getNumberField(caseRecord, ["index"]) ?? getNumberField(event.payload, ["case_index"]);
+    const partition = getNestedRecordField(event.payload, ["partition"]);
+    const caseIndex = getNumberField(partition, ["index"]) ?? getNumberField(event.payload, ["case_index"]);
     const existing = rows.get(caseId);
     const row: DatasetStreamingRow & { order: number } = {
       key: caseId,
@@ -322,9 +322,9 @@ export function buildStreamingAnalysisCaseRows(
       return;
     }
 
-    const caseRecord = getNestedRecordField(event.payload, ["case"]);
+    const partition = getNestedRecordField(event.payload, ["partition"]);
     const caseIndex =
-      getNumberField(caseRecord, ["index"]) ??
+      getNumberField(partition, ["index"]) ??
       getNumberField(event.payload, ["case_index"]);
     const existing = rows.get(caseId);
     const row: AnalysisStreamingRow & { order: number } = {
@@ -451,8 +451,8 @@ export function buildStreamingEvalCaseRows(events: NormalizedThreadEvent[]): Eva
       return;
     }
 
-    const caseRecord = getNestedRecordField(event.payload, ["case"]);
-    const caseIndex = getNumberField(caseRecord, ["index"]) ?? getNumberField(event.payload, ["case_index"]);
+    const partition = getNestedRecordField(event.payload, ["partition"]);
+    const caseIndex = getNumberField(partition, ["index"]) ?? getNumberField(event.payload, ["case_index"]);
     const existing = rows.get(caseId);
     const row: EvalStreamingRow & { order: number } = {
       key: caseId,
@@ -582,9 +582,9 @@ export function buildStreamingAbtestCaseRows(events: NormalizedThreadEvent[]): A
       return;
     }
 
-    const caseRecord = getNestedRecordField(event.payload, ["case"]);
+    const partition = getNestedRecordField(event.payload, ["partition"]);
     const caseIndex =
-      getNumberField(caseRecord, ["index"]) ?? getNumberField(event.payload, ["case_index"]);
+      getNumberField(partition, ["index"]) ?? getNumberField(event.payload, ["case_index"]);
     const existing = rows.get(caseId);
     const row: AbtestStreamingRow & { order: number } = {
       key: caseId,

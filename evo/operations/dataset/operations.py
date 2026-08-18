@@ -37,6 +37,8 @@ from .source_config import normalize_source_config
 from .topic_discovery import (
     topic_discovery_embedding_cluster,
     topic_discovery_embedding_label,
+    topic_discovery_embedding_label_cluster,
+    topic_discovery_embedding_label_manifest,
     topic_discovery_entity_build_graph,
     topic_discovery_entity_cluster,
     topic_discovery_manifest,
@@ -277,7 +279,11 @@ async def cluster_entities_operation(ctx: OperationContext, graph: object) -> Op
         'chunks_manifest': one(A.DATASET_BUILD_CHUNKS_MANIFEST),
         'material_approval': one(A.APPROVAL_DATASET_MATERIAL_PREPARATION),
     },
-    outputs={'candidates': scalar(A.DATASET_EMBEDDING_CLUSTER_CANDIDATES)},
+    outputs={
+        'candidates': scalar(A.DATASET_EMBEDDING_CLUSTER_CANDIDATES),
+        'partitions': scalar(A.DATASET_EMBEDDING_LABEL_REQUESTS),
+        'requests': partitioned(A.DATASET_EMBEDDING_LABEL_REQUEST, over=A.DATASET_EMBEDDING_LABEL_REQUESTS),
+    },
 )
 async def cluster_embeddings_operation(
     ctx: OperationContext,
@@ -287,39 +293,67 @@ async def cluster_embeddings_operation(
 ) -> OperationResult:
     del material_approval
     values = _chunk_values_for_manifest(chunks, _mapping(chunks_manifest, 'chunks_manifest'))
-    candidates = topic_discovery_embedding_cluster(ctx, {
+    output = topic_discovery_embedding_cluster(ctx, {
         'chunk': values,
         'topic_discovery_embedding_cluster_params': {},
-    })['embedding_cluster_candidates']
-    return await _result(ctx, 'dataset.embedding_candidates_built', {'candidates': candidates})
+    })
+    partition_ids = tuple(output['embedding_label_requests'])
+    return await _result(ctx, 'dataset.embedding_candidates_built', {
+        'candidates': output['embedding_cluster_candidates'],
+        'partitions': PartitionSet(partition_ids),
+        'requests': output['embedding_label_request'],
+    }, total=len(partition_ids))
 
 
 @operation(
-    op_id='dataset.label_embedding_clusters',
+    op_id='dataset.label_embedding_cluster',
+    inputs={
+        'request': each(A.DATASET_EMBEDDING_LABEL_REQUEST, over=A.DATASET_EMBEDDING_LABEL_REQUESTS),
+        'run_config': one(A.RUN_CONFIG),
+    },
+    outputs={'cluster': partitioned(A.DATASET_EMBEDDING_CLUSTER)},
+    max_concurrency=4,
+)
+async def label_embedding_cluster_operation(
+    ctx: OperationContext,
+    request: object,
+    run_config: object,
+) -> OperationResult:
+    cluster = topic_discovery_embedding_label_cluster(ctx, {
+        'request': _mapping(request, 'request'),
+        'topic_discovery_embedding_label_params': {},
+    }, llm_complete=_llm_complete(run_config))['embedding_cluster']
+    return await _result(
+        ctx,
+        'dataset.embedding_cluster_labeled',
+        {'cluster': cluster},
+        case_id=ctx.partition_key,
+    )
+
+
+@operation(
+    op_id='dataset.embedding_label_manifest',
     inputs={
         'candidates': one(A.DATASET_EMBEDDING_CLUSTER_CANDIDATES),
-        'chunks': all_items(A.DATASET_CHUNK, over=A.DATASET_CHUNK_REQUESTS),
-        'chunks_manifest': one(A.DATASET_BUILD_CHUNKS_MANIFEST),
-        'run_config': one(A.RUN_CONFIG),
+        'requests': one(A.DATASET_EMBEDDING_LABEL_REQUESTS),
+        'clusters': all_items(A.DATASET_EMBEDDING_CLUSTER, over=A.DATASET_EMBEDDING_LABEL_REQUESTS),
     },
     outputs={'clusters': scalar(A.DATASET_EMBEDDING_CLUSTERS)},
 )
-async def label_embedding_clusters_operation(
+async def embedding_label_manifest_operation(
     ctx: OperationContext,
     candidates: object,
-    chunks: object,
-    chunks_manifest: object,
-    run_config: object,
+    requests: object,
+    clusters: object,
 ) -> OperationResult:
-    values = _chunk_values_for_manifest(chunks, _mapping(chunks_manifest, 'chunks_manifest'))
-    candidate_value = _mapping(candidates, 'candidates')
-    complete = _llm_complete(run_config) if candidate_value.get('clusters') else None
-    clusters = topic_discovery_embedding_label(ctx, {
-        'embedding_cluster_candidates': candidate_value,
-        'chunk': values,
+    values = _successful_values(clusters)
+    manifest = topic_discovery_embedding_label_manifest(ctx, {
+        'embedding_cluster_candidates': _mapping(candidates, 'candidates'),
+        'embedding_label_requests': _partition_set_ids(requests),
+        'embedding_cluster': values,
         'topic_discovery_embedding_label_params': {},
-    }, llm_complete=complete)['embedding_clusters']
-    return await _result(ctx, 'dataset.embedding_clusters_labeled', {'clusters': clusters})
+    })['embedding_clusters']
+    return await _result(ctx, 'dataset.embedding_clusters_labeled', {'clusters': manifest}, total=len(values))
 
 
 @operation(
@@ -607,7 +641,8 @@ _DATASET_OPERATIONS: tuple[Operation, ...] = (
     build_entity_graph_operation,
     cluster_entities_operation,
     cluster_embeddings_operation,
-    label_embedding_clusters_operation,
+    label_embedding_cluster_operation,
+    embedding_label_manifest_operation,
     topic_manifest_operation,
     qaplan_plan_operation,
     qaplan_spec_operation,
@@ -686,6 +721,12 @@ def _successful_entries(value: object) -> tuple[tuple[str, object], ...]:
 
 def _successful_values(value: object) -> tuple[Mapping[str, Any], ...]:
     return tuple(_mapping(item, 'partition value') for _, item in _successful_entries(value))
+
+
+def _partition_set_ids(value: object) -> tuple[str, ...]:
+    if not isinstance(value, PartitionSet):
+        raise ValueError('partition set input must be a PartitionSet')
+    return value.keys
 
 
 def _failures(value: object) -> list[dict[str, object]]:
