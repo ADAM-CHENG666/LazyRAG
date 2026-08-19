@@ -679,7 +679,7 @@ class RunSession:
                 invocation.operation.spec.op_id,
                 invocation.partition_key,
                 invocation.lineage_refs(),
-                tuple(invocation.expected_heads),
+                tuple(key for key in invocation.output_keys.values() if key is not None),
                 retry_request_id=invocation.retry_request_id,
             )
         except Exception as exc:
