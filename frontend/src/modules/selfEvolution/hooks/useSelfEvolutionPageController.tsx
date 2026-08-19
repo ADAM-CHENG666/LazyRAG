@@ -172,6 +172,7 @@ import {
   applyThreadStepStatusToWorkflowSteps,
   getStageLabel,
   toThreadEventStage,
+  mergeWorkflowStepStatus,
   fetchThreadGateContent,
   fetchThreadGateDownload,
   getGateEvalCaseCount,
@@ -651,10 +652,11 @@ export function SelfEvolutionPageController({
     [threadEvents],
   );
   const threadStepStatusByStage = useMemo(
-    () => ({
-      ...buildThreadStepStatusByStage(threadStepList, threadFlowStatus),
-      ...threadTerminalStatusByStage,
-    }),
+    () =>
+      mergeWorkflowStepStatus(
+        threadTerminalStatusByStage,
+        buildThreadStepStatusByStage(threadStepList, threadFlowStatus),
+      ),
     [threadFlowStatus, threadStepList, threadTerminalStatusByStage],
   );
   const stepListCheckpointPrompt = useMemo(
@@ -6710,6 +6712,11 @@ export function SelfEvolutionPageController({
           onOpenArtifact: openWorkflowArtifact,
           onOpenObservation: openObservationPage,
           onOpenCaseArtifact: openCaseArtifact,
+          onDatasetWriteApplied: () => {
+            if (routeThreadId) {
+              void refreshThreadStepList(routeThreadId);
+            }
+          },
           onWorkbenchTabChange: handleWorkbenchTabChange,
           onCloseArtifactPanel: closeArtifactPanel,
           canViewStageArtifact,

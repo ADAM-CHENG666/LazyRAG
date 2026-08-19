@@ -28,6 +28,7 @@ import {
   isCheckpointGateFlowStatus,
   getFlowStatusFromPayload,
   resolveTerminalStepStatusFromFlowStatus,
+  datasetWorkflowStepFromSteps,
   type ThreadEventStage,
   type WorkflowRuntimeState,
   AGENT_API_BASE,
@@ -865,12 +866,25 @@ export function buildThreadStepStatusByStage(
   const result: Partial<Record<ThreadEventStage, StepStatus>> = {};
   for (const step of stepList.steps) {
     const stage = toThreadEventStage(step.stage || step.title);
+    if (!stage || stage === "dataset") {
+      continue;
+    }
     const normalizedStatus = resolveCheckpointAwareStepStatus(
       normalizeThreadStepStatus(step.status),
       { flowStatus, step, stage },
     );
-    if (stage && normalizedStatus) {
+    if (normalizedStatus) {
       result[stage] = normalizedStatus;
+    }
+  }
+  const datasetStep = datasetWorkflowStepFromSteps(stepList.steps);
+  if (datasetStep) {
+    const normalizedStatus = resolveCheckpointAwareStepStatus(
+      normalizeThreadStepStatus(datasetStep.status),
+      { flowStatus, step: datasetStep, stage: "dataset" },
+    );
+    if (normalizedStatus) {
+      result.dataset = normalizedStatus;
     }
   }
   return result;
@@ -892,8 +906,11 @@ export function applyThreadStepListToWorkflowRuntimeState(
 
   for (const step of stepList.steps) {
     const stage = toThreadEventStage(step.stage || step.title);
+    if (!stage || stage === "dataset") {
+      continue;
+    }
     const normalizedStatus = normalizeThreadStepStatus(step.status);
-    if (!stage || !normalizedStatus) {
+    if (!normalizedStatus) {
       continue;
     }
     const workflowStepId = stageStepMap[stage];
@@ -905,6 +922,21 @@ export function applyThreadStepListToWorkflowRuntimeState(
           ? next[workflowStepId].progress || getCompletedProgressSnapshot()
           : next[workflowStepId].progress,
     };
+  }
+  const datasetStep = datasetWorkflowStepFromSteps(stepList.steps);
+  if (datasetStep) {
+    const normalizedStatus = normalizeThreadStepStatus(datasetStep.status);
+    if (normalizedStatus) {
+      const workflowStepId = stageStepMap.dataset;
+      next[workflowStepId] = {
+        ...next[workflowStepId],
+        status: normalizedStatus,
+        progress:
+          normalizedStatus === "done"
+            ? next[workflowStepId].progress || getCompletedProgressSnapshot()
+            : next[workflowStepId].progress,
+      };
+    }
   }
 
   return next;

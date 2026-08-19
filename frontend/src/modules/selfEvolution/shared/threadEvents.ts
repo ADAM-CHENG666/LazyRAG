@@ -8,6 +8,7 @@ import { buildCheckpointWaitPrompt, buildFailureRetryPrompt } from "./checkpoint
 import { buildAbtestEventDisplayText, buildAnalysisEventDisplayText, buildApplyEventDisplayText, buildDatasetEventDisplayText, buildEvalEventDisplayText, compactPayloadForDisplay } from "./eventDisplay";
 import { getEvalPayloadPhase, getWorkflowProgressSnapshot } from "./progress";
 import { localizeErrorCode } from "@/components/request";
+import { toThreadEventStage } from "./datasetWorkflowStatus";
 
 const THREAD_EVENT_STAGE_ORDER: ThreadEventStage[] = [
   "dataset",
@@ -146,24 +147,6 @@ export function buildTerminalStatusByStage(
     );
   }
   return result;
-}
-
-export function toThreadEventStage(value: unknown): ThreadEventStage | undefined {
-  if (typeof value !== "string") {
-    return undefined;
-  }
-
-  const normalized = value.trim();
-  return {
-    dataset: "dataset",
-    eval: "eval",
-    candidate_eval: "abtest",
-    run: "analysis",
-    analysis: "analysis",
-    apply: "repair",
-    repair: "repair",
-    abtest: "abtest",
-  }[normalized] as ThreadEventStage | undefined;
 }
 
 export function getStageLabel(value: unknown) {

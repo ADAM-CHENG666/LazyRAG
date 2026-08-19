@@ -23,7 +23,7 @@ const STEP_SYMBOL: Record<string, string> = {
   failed: "!",
 };
 
-export function DatasetWorkspace({ threadId }: { threadId?: string }) {
+export function DatasetWorkspace({ threadId, onWriteApplied }: { threadId?: string; onWriteApplied?: () => void }) {
   const [tab, setTab] = useState<DatasetTab>("materials");
   const [refreshToken, setRefreshToken] = useState(0);
   const [overviewToken, setOverviewToken] = useState(0);
@@ -67,7 +67,7 @@ export function DatasetWorkspace({ threadId }: { threadId?: string }) {
     }
   }, []);
 
-  const { statuses, activeTab, refreshSteps } = useDatasetStages(threadId, handleStageEvent);
+  const { statuses, activeTab, resumeAfterWrite } = useDatasetStages(threadId, handleStageEvent);
 
   useEffect(() => {
     setTopicLabelProgress(undefined);
@@ -144,7 +144,8 @@ export function DatasetWorkspace({ threadId }: { threadId?: string }) {
       setDraft(undefined);
       setStaleTab(undefined);
       setRefreshToken((token) => token + 1);
-      void refreshSteps();
+      resumeAfterWrite();
+      onWriteApplied?.();
       message.success("修改已应用，受影响的步骤将重新执行。");
     } catch (error) {
       message.error(describeRequestError(error, "应用修改失败"));
@@ -257,7 +258,8 @@ export function DatasetWorkspace({ threadId }: { threadId?: string }) {
             onSaveDraft={saveDraft}
             onCaseSaved={() => {
               setRefreshToken((token) => token + 1);
-              void refreshSteps();
+              resumeAfterWrite();
+              onWriteApplied?.();
             }}
           />
         )}

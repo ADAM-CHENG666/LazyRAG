@@ -2,7 +2,8 @@ import { type CheckpointWaitPrompt, type EvolutionMode, type NormalizedThreadEve
 import { stageStepMap, stepStageMap, workflowStepOrder } from "./constants";
 import { getWorkflowStepDefinitions, t } from "./i18n";
 import { getLastItem, getOperationRunId, getStringField } from "./fields";
-import { dedupeNormalizedEvents, getFlowStatusFromPayload, isTerminalThreadEvent, resolveTerminalStepStatusFromFlowStatus, toThreadEventStage } from "./threadEvents";
+import { dedupeNormalizedEvents, getFlowStatusFromPayload, isTerminalThreadEvent, resolveTerminalStepStatusFromFlowStatus } from "./threadEvents";
+import { toThreadEventStage } from "./datasetWorkflowStatus";
 import { getCompletedEvalProgressPhases, getCompletedProgressSnapshot, getEvalOverallProgressSnapshot, getRuntimeProgressStatusLabel, isIntentSidecarOperation, isStepFinishEvent, mergeProgressSnapshot, updateEvalProgressPhases, updateProgressStatusText } from "./progress";
 
 export function createInitialWorkflowRuntimeState(): WorkflowRuntimeState {
