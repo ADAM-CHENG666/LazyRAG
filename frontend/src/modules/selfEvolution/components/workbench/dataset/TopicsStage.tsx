@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { Alert, Button, Drawer, Input } from "antd";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Button, Drawer, Input } from "antd";
 import { datasetRoot, describeRequestError, getJson } from "./api";
 import { chunkTags } from "./capabilities";
 import { CHUNK_PAGE_SIZE, PAGE_SIZE, useDatasetList, useDatasetResource } from "./hooks";
@@ -9,16 +9,17 @@ import {
   ColumnFilter,
   DrawerAttributes,
   ListPlaceholder,
-  OverviewMetrics,
   OverviewPane,
   QUESTION_TYPE_TEXT,
+  ScrollSentinel,
+  StageProgressTrack,
   StatusIcon,
   percentText,
   ratio,
   toVisualStatus,
 } from "./primitives";
 import { usePublishDatasetStageAction } from "./stageAction";
-import { summarizeTopicLabelProgress, type TopicLabelProgress } from "./topicLabelProgress";
+import { topicDiscoverySteps, type TopicDiscoveryProgress } from "./topicLabelProgress";
 import type {
   AdjustmentOptions,
   DatasetDraft,
@@ -34,7 +35,7 @@ type Props = {
   threadId: string;
   refreshToken: number;
   overviewToken: number;
-  labelProgress?: TopicLabelProgress;
+  labelProgress?: TopicDiscoveryProgress;
   onOverviewRevision: (tab: "topics", revision: string | null) => void;
   draft?: DatasetDraft;
   onSaveDraft: (draft: DatasetDraft) => boolean;
@@ -97,7 +98,10 @@ export function TopicsStage({
   const distribution = overview.data?.question_types;
   const stageStatus = toVisualStatus(overview.data?.status || "pending");
   const hasFilters = Boolean(questionType || chunkBucket);
-  const labelSummary = summarizeTopicLabelProgress(labelProgress);
+  const discoverySteps = useMemo(
+    () => topicDiscoverySteps(labelProgress, overview.data),
+    [labelProgress, overview.data],
+  );
   const clearFilters = () => {
     setQuestionType(undefined);
     setChunkBucket(undefined);
@@ -105,22 +109,17 @@ export function TopicsStage({
 
   return (
     <>
-      {labelProgress ? (
-        <Alert
-          showIcon
-          type={labelSummary.failed ? "warning" : "info"}
-          message={`正在生成主题标签：已完成 ${labelSummary.completed}/${labelSummary.total}`}
-          description={`运行中 ${labelSummary.running} 个${labelSummary.failed ? `；失败 ${labelSummary.failed} 个` : ""}`}
-        />
-      ) : null}
       <div className="dataset-overview-row">
-        <OverviewPane title="主题总数">
+        <OverviewPane
+          title="发现进度"
+          extra={
+            overview.data?.total_topics != null ? `共 ${overview.data.total_topics} 个主题` : undefined
+          }
+        >
           {overview.error ? (
             <p className="dataset-pane-error">{overview.error}</p>
           ) : (
-            <OverviewMetrics
-              items={[{ label: "总数", value: overview.data?.total_topics, unit: "个" }]}
-            />
+            <StageProgressTrack steps={discoverySteps} />
           )}
         </OverviewPane>
         <OverviewPane
@@ -250,13 +249,7 @@ export function TopicsStage({
             </tbody>
           </table>
         </div>
-        {topics.nextPageToken ? (
-          <div className="dataset-load-more">
-            <Button size="small" loading={topics.loading} onClick={() => void topics.loadMore()}>
-              加载更多主题
-            </Button>
-          </div>
-        ) : null}
+        <ScrollSentinel hasMore={!!topics.nextPageToken} loading={topics.loading} onLoadMore={() => void topics.loadMore()} />
       </section>
 
       <TopicDrawer
@@ -431,13 +424,7 @@ function TopicDrawer({
               ))}
               {!chunks.length && !loading && <p className="dataset-note">该主题没有支撑片段。</p>}
             </div>
-            {nextPageToken ? (
-              <div className="dataset-load-more">
-                <Button size="small" loading={loading} onClick={() => void load(nextPageToken)}>
-                  加载更多片段
-                </Button>
-              </div>
-            ) : null}
+            <ScrollSentinel hasMore={!!nextPageToken} loading={loading} onLoadMore={() => void load(nextPageToken)} />
           </div>
         </>
       )}

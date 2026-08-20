@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Button } from "antd";
+import { Fragment, useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { Button, Spin } from "antd";
 import type {
   Difficulty,
   FlowStatus,
@@ -320,6 +320,74 @@ export function DrawerAttributes({
           <strong>{item.value}</strong>
         </div>
       ))}
+    </div>
+  );
+}
+
+export type StageProgressStep = {
+  key: string;
+  label: string;
+  completed: number;
+  total: number;
+  status: VisualStatus;
+  summary: string;
+};
+
+export function StageProgressTrack({ steps }: { steps: StageProgressStep[] }) {
+  return (
+    <div className="dataset-stage-progress">
+      {steps.map((step, index) => (
+        <Fragment key={step.key}>
+          {index ? <span className="dataset-stage-progress-link" aria-hidden /> : null}
+          <div className="dataset-stage-progress-step">
+            <div
+              className={`dataset-progress-ring is-${step.status}`}
+              style={{ "--dataset-progress": `${step.total ? Math.round((step.completed / step.total) * 360) : 0}deg` } as CSSProperties}
+            >
+              <strong>
+                {step.completed}/{step.total}
+              </strong>
+            </div>
+            <b>{step.label}</b>
+            <small className={`is-${step.status}`}>{step.summary}</small>
+          </div>
+        </Fragment>
+      ))}
+    </div>
+  );
+}
+
+export function ScrollSentinel({
+  hasMore,
+  loading,
+  onLoadMore,
+}: {
+  hasMore: boolean;
+  loading: boolean;
+  onLoadMore: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const loadMoreRef = useRef(onLoadMore);
+  loadMoreRef.current = onLoadMore;
+
+  const handleIntersect = useCallback((entries: IntersectionObserverEntry[]) => {
+    if (entries[0]?.isIntersecting) {
+      loadMoreRef.current();
+    }
+  }, []);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || !hasMore || loading) return undefined;
+    const observer = new IntersectionObserver(handleIntersect, { rootMargin: '200px' });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [hasMore, loading, handleIntersect]);
+
+  if (!hasMore) return null;
+  return (
+    <div ref={ref} className="dataset-load-more">
+      {loading ? <Spin size="small" /> : null}
     </div>
   );
 }

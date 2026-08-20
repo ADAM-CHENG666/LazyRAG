@@ -37,6 +37,36 @@ describe('dataset workflow status from /steps', () => {
     expect(chosen?.status).toBe('running');
   });
 
+  it('prefers a running earlier stage over a completed later stage (re-trigger scenario)', () => {
+    const chosen = datasetWorkflowStepFromSteps(steps([
+      { stage: 'dataset.material_preparation', status: 'running' },
+      { stage: 'dataset.topic_discovery', status: 'completed' },
+      { stage: 'dataset.case_generation', status: 'pending' },
+    ]));
+    expect(chosen?.stage).toBe('dataset.material_preparation');
+    expect(chosen?.status).toBe('running');
+  });
+
+  it('shows running when a middle stage is completed but later stages are still pending', () => {
+    const chosen = datasetWorkflowStepFromSteps(steps([
+      { stage: 'dataset.material_preparation', status: 'completed' },
+      { stage: 'dataset.topic_discovery', status: 'completed' },
+      { stage: 'dataset.case_generation', status: 'pending' },
+    ]));
+    expect(chosen?.stage).toBe('dataset.topic_discovery');
+    expect(chosen?.status).toBe('running');
+  });
+
+  it('shows completed only when all dataset stages are done', () => {
+    const chosen = datasetWorkflowStepFromSteps(steps([
+      { stage: 'dataset.material_preparation', status: 'completed' },
+      { stage: 'dataset.topic_discovery', status: 'completed' },
+      { stage: 'dataset.case_generation', status: 'completed' },
+    ]));
+    expect(chosen?.stage).toBe('dataset.case_generation');
+    expect(chosen?.status).toBe('completed');
+  });
+
   it('keeps a completed materials checkpoint when later dataset stages are still pending', () => {
     const chosen = datasetWorkflowStepFromSteps(steps([
       { stage: 'dataset.material_preparation', status: 'paused' },

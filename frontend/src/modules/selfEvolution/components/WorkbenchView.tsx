@@ -340,7 +340,7 @@ export function SelfEvolutionWorkbenchView({
                     </div>
                   </div>
                   {shouldShowStageDetail && displayStage === "dataset" && <DatasetStageActionButton />}
-                  {shouldShowStageActionButtons &&
+                  {shouldShowStageActionButtons && displayStage !== "dataset" &&
                     (canViewStageArtifact || displayStage === "eval" || displayStage === "abtest") && (
                     <div className="self-evolution-process-observation-actions" aria-label={t("selfEvolutionRun.observationEntryAria")}>
                       {canViewStageArtifact && viewStageArtifactKind ? (

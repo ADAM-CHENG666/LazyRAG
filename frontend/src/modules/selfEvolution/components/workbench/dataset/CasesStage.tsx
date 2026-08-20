@@ -1,5 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
-import { Button } from "antd";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { datasetRoot, getJson } from "./api";
 import { CaseDetailDrawer } from "./CaseDetailDrawer";
 import { GenerationPlanDrawer } from "./GenerationPlanDrawer";
@@ -11,17 +10,18 @@ import {
   ListPlaceholder,
   OverviewPane,
   QUESTION_TYPE_TEXT,
-  STATUS_TEXT,
+  ScrollSentinel,
+  StageProgressTrack,
   StatusIcon,
   ratio,
   toVisualStatus,
 } from "./primitives";
+import { progressSummary } from "./topicLabelProgress";
 import { usePublishDatasetStageAction } from "./stageAction";
 import type {
   CaseRow,
   CaseSource,
   CaseStageKey,
-  CaseStageProgress,
   CasesOverview,
   DatasetDraft,
   Difficulty,
@@ -134,14 +134,27 @@ export function CasesStage({
           {overview.error ? (
             <p className="dataset-pane-error">{overview.error}</p>
           ) : (
-            <div className="dataset-case-progress">
-              {STAGE_ORDER.map((key, index) => (
-                <Fragment key={key}>
-                  {index ? <span className="dataset-case-progress-link" aria-hidden /> : null}
-                  <ProgressRing label={STAGE_LABEL[key]} progress={overview.data?.stages[key]} />
-                </Fragment>
-              ))}
-            </div>
+            <StageProgressTrack
+              steps={STAGE_ORDER.map((key) => {
+                const progress = overview.data?.stages[key];
+                const status = toVisualStatus(progress?.status || "pending");
+                const completed = progress?.succeeded ?? 0;
+                const total = progress?.total ?? 0;
+                const counts = progress?.status_counts;
+                return {
+                  key,
+                  label: STAGE_LABEL[key],
+                  completed,
+                  total,
+                  status,
+                  summary: progressSummary(status, completed, total, {
+                    running: counts?.running ?? 0,
+                    failed: counts?.failed ?? 0,
+                    pending: counts?.pending ?? 0,
+                  }),
+                };
+              })}
+            />
           )}
         </OverviewPane>
         <OverviewPane
@@ -293,13 +306,7 @@ export function CasesStage({
             </tbody>
           </table>
         </div>
-        {cases.nextPageToken ? (
-          <div className="dataset-load-more">
-            <Button size="small" loading={cases.loading} onClick={() => void cases.loadMore()}>
-              加载更多用例
-            </Button>
-          </div>
-        ) : null}
+        <ScrollSentinel hasMore={!!cases.nextPageToken} loading={cases.loading} onLoadMore={() => void cases.loadMore()} />
       </section>
 
       <CaseDetailDrawer
@@ -316,35 +323,5 @@ export function CasesStage({
         onSaveDraft={onSaveDraft}
       />
     </>
-  );
-}
-
-function ProgressRing({ label, progress }: { label: string; progress?: CaseStageProgress }) {
-  const succeeded = progress?.succeeded ?? 0;
-  const total = progress?.total ?? 0;
-  const status = toVisualStatus(progress?.status || "pending");
-  const degrees = total ? Math.round((succeeded / total) * 360) : 0;
-  const counts = progress?.status_counts;
-  const notes = counts
-    ? (["failed", "running", "pending"] as OperationStatus[])
-        .filter((key) => (counts[key] ?? 0) > 0)
-        .map((key) => `${counts[key]} ${STATUS_TEXT[toVisualStatus(key)]}`)
-    : [];
-  const summary =
-    total > 0 && succeeded === total ? "全部完成" : notes.length ? notes.join(" · ") : "—";
-
-  return (
-    <div className="dataset-case-progress-step">
-      <div
-        className={`dataset-progress-ring is-${status}`}
-        style={{ "--dataset-progress": `${degrees}deg` } as React.CSSProperties}
-      >
-        <strong>
-          {succeeded}/{total}
-        </strong>
-      </div>
-      <b>{label}</b>
-      <small className={`is-${status}`}>{summary}</small>
-    </div>
   );
 }

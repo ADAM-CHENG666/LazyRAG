@@ -1,67 +1,294 @@
-export const TOPIC_DISCOVERY_STAGE = "dataset.topic_discovery";
-export const TOPIC_LABEL_OPERATION = "dataset.label_embedding_cluster";
+import type { VisualStatus } from './types';
 
-type PartitionStatus = "running" | "completed" | "failed" | "canceled";
+export const TOPIC_DISCOVERY_STAGE = 'dataset.topic_discovery';
+
+export const TOPIC_PHASE_ORDER = ['entities', 'semantic', 'topics'] as const;
+export type TopicPhaseId = (typeof TOPIC_PHASE_ORDER)[number];
+
+const PHASE_LABEL: Record<TopicPhaseId, string> = {
+  entities: '实体提取',
+  semantic: '语义发现',
+  topics: '主题生成',
+};
+
+const PHASE_BY_OPERATION: Record<string, TopicPhaseId> = {
+  'dataset.extract_chunk_entities': 'entities',
+  'dataset.chunk_entities_manifest': 'entities',
+  'dataset.cluster_embeddings': 'semantic',
+  'dataset.label_embedding_cluster': 'semantic',
+  'dataset.embedding_label_manifest': 'semantic',
+  'dataset.topic_manifest': 'topics',
+};
+
+const PARTITION_OPS = new Set([
+  'dataset.extract_chunk_entities',
+  'dataset.label_embedding_cluster',
+]);
+
+const COMPLETE_OPS = new Set([
+  'dataset.chunk_entities_manifest',
+  'dataset.embedding_label_manifest',
+  'dataset.topic_manifest',
+]);
+
+type PartitionStatus = 'running' | 'completed' | 'failed' | 'canceled';
 
 export type TopicLabelPartitionEvent = {
   event: string;
   stage: string;
+  tab?: string;
   operationId?: string;
   stepId: string;
   partition?: { id?: string; total?: number };
   status?: string;
+  progress?: { current?: number | null; total?: number | null };
 };
 
-export type TopicLabelProgress = {
-  stepId: string;
-  total: number;
-  statuses: Record<string, PartitionStatus>;
-};
-
-export type TopicLabelProgressSummary = {
-  total: number;
+export type TopicPhaseState = {
+  id: TopicPhaseId;
+  label: string;
   completed: number;
+  total: number;
   running: number;
   failed: number;
+  status: VisualStatus;
+};
+
+export type TopicDiscoveryProgress = {
+  stepId: string;
+  partitions: Partial<Record<TopicPhaseId, Record<string, PartitionStatus>>>;
+  phases: Record<TopicPhaseId, TopicPhaseState>;
+};
+
+export type TopicDiscoveryStepView = {
+  key: TopicPhaseId;
+  label: string;
+  completed: number;
+  total: number;
+  status: VisualStatus;
+  summary: string;
 };
 
 export function applyTopicLabelPartitionEvent(
-  current: TopicLabelProgress | undefined,
+  current: TopicDiscoveryProgress | undefined,
   event: TopicLabelPartitionEvent,
-): TopicLabelProgress | undefined {
-  if (
-    event.event !== TOPIC_LABEL_OPERATION ||
-    event.stage !== TOPIC_DISCOVERY_STAGE ||
-    event.operationId !== TOPIC_LABEL_OPERATION ||
-    !event.stepId ||
-    !event.partition?.id ||
-    !isPartitionStatus(event.status)
-  ) {
+): TopicDiscoveryProgress | undefined {
+  if (event.stage !== TOPIC_DISCOVERY_STAGE && event.tab !== 'topics') {
     return current;
   }
 
-  const base = current?.stepId === event.stepId
-    ? current
-    : { stepId: event.stepId, total: 0, statuses: {} };
+  if (event.event === 'step.finish') {
+    return current ? completeAllPhases(current) : current;
+  }
+
+  const operationId = event.operationId || event.event;
+  const phaseId = PHASE_BY_OPERATION[operationId];
+  if (!phaseId || !event.stepId) {
+    return current;
+  }
+
+  const base =
+    current?.stepId === event.stepId
+      ? cloneProgress(current)
+      : emptyProgress(event.stepId);
+
+  completeEarlierPhases(base, phaseId);
+
+  if (PARTITION_OPS.has(operationId) && event.partition?.id && isPartitionStatus(event.status)) {
+    const statuses = { ...(base.partitions[phaseId] || {}) };
+    statuses[event.partition.id] = event.status;
+    base.partitions[phaseId] = statuses;
+    const total = event.partition.total ?? base.phases[phaseId].total;
+    base.phases[phaseId] = summarizePartitionPhase(phaseId, statuses, total);
+    return base;
+  }
+
+  if (event.status === 'running' || event.status === 'completed' || event.status === 'failed') {
+    const phase = base.phases[phaseId];
+    const hintedTotal = Number(event.progress?.total ?? event.partition?.total ?? phase.total);
+    if (COMPLETE_OPS.has(operationId) && event.status === 'completed') {
+      const total = Math.max(phase.total, hintedTotal, 1);
+      base.phases[phaseId] = {
+        ...phase,
+        completed: total,
+        total,
+        running: 0,
+        failed: 0,
+        status: 'done',
+      };
+    } else if (event.status === 'failed') {
+      base.phases[phaseId] = { ...phase, total: Math.max(phase.total, hintedTotal, 1), failed: 1, status: 'failed' };
+    } else if (phase.status !== 'done') {
+      base.phases[phaseId] = {
+        ...phase,
+        total: Math.max(phase.total, hintedTotal),
+        status: 'running',
+      };
+    }
+  }
+
+  return base;
+}
+
+export function topicDiscoverySteps(
+  progress: TopicDiscoveryProgress | undefined,
+  overview?: { status?: string; total_topics?: number | null },
+): TopicDiscoveryStepView[] {
+  const phases = progress?.phases ?? emptyProgress('').phases;
+  const overviewDone = overview?.status === 'completed' || overview?.status === 'succeeded';
+  const topicCount = overview?.total_topics ?? null;
+
+  return TOPIC_PHASE_ORDER.map((id) => {
+    const phase = phases[id];
+    let status = phase.status;
+    let completed = phase.completed;
+    let total = phase.total;
+    if (overviewDone) {
+      status = 'done';
+      if (id === 'topics' && topicCount != null) {
+        completed = topicCount;
+        total = topicCount;
+      } else if (total > 0) {
+        completed = total;
+      } else {
+        completed = 1;
+        total = 1;
+      }
+    } else if (id === 'topics' && status === 'done' && topicCount != null) {
+      completed = topicCount;
+      total = topicCount;
+    }
+    return {
+      key: id,
+      label: PHASE_LABEL[id],
+      completed,
+      total,
+      status,
+      summary: progressSummary(status, completed, total, {
+        running: phase.running,
+        failed: phase.failed,
+        pending: Math.max(0, total - completed - phase.running - phase.failed),
+      }),
+    };
+  });
+}
+
+export function progressSummary(
+  status: VisualStatus,
+  completed: number,
+  total: number,
+  counts?: { running?: number; failed?: number; pending?: number; stale?: number },
+) {
+  if (status === 'done' || (total > 0 && completed === total && (counts?.failed || 0) === 0)) {
+    return '全部完成';
+  }
+  const notes = [
+    counts?.failed ? `${counts.failed} 失败` : '',
+    counts?.running ? `${counts.running} 执行中` : '',
+    counts?.stale ? `${counts.stale} 待更新` : '',
+    counts?.pending ? `${counts.pending} 未开始` : '',
+  ].filter(Boolean);
+  if (notes.length) {
+    return notes.join(' · ');
+  }
+  if (status === 'running') {
+    return '执行中';
+  }
+  if (status === 'failed') {
+    return '失败';
+  }
+  return '未开始';
+}
+
+function emptyPhase(id: TopicPhaseId): TopicPhaseState {
   return {
-    stepId: base.stepId,
-    total: event.partition.total ?? base.total,
-    statuses: { ...base.statuses, [event.partition.id]: event.status },
+    id,
+    label: PHASE_LABEL[id],
+    completed: 0,
+    total: 0,
+    running: 0,
+    failed: 0,
+    status: 'pending',
   };
 }
 
-export function summarizeTopicLabelProgress(
-  progress: TopicLabelProgress | undefined,
-): TopicLabelProgressSummary {
-  const summary: TopicLabelProgressSummary = { total: progress?.total || 0, completed: 0, running: 0, failed: 0 };
-  for (const status of Object.values(progress?.statuses || {})) {
-    if (status === "completed") summary.completed += 1;
-    else if (status === "running") summary.running += 1;
-    else if (status === "failed") summary.failed += 1;
+function emptyProgress(stepId: string): TopicDiscoveryProgress {
+  return {
+    stepId,
+    partitions: {},
+    phases: {
+      entities: emptyPhase('entities'),
+      semantic: emptyPhase('semantic'),
+      topics: emptyPhase('topics'),
+    },
+  };
+}
+
+function cloneProgress(progress: TopicDiscoveryProgress): TopicDiscoveryProgress {
+  return {
+    stepId: progress.stepId,
+    partitions: {
+      entities: { ...progress.partitions.entities },
+      semantic: { ...progress.partitions.semantic },
+      topics: { ...progress.partitions.topics },
+    },
+    phases: {
+      entities: { ...progress.phases.entities },
+      semantic: { ...progress.phases.semantic },
+      topics: { ...progress.phases.topics },
+    },
+  };
+}
+
+function summarizePartitionPhase(
+  id: TopicPhaseId,
+  statuses: Record<string, PartitionStatus>,
+  total: number,
+): TopicPhaseState {
+  let completed = 0;
+  let running = 0;
+  let failed = 0;
+  for (const status of Object.values(statuses)) {
+    if (status === 'completed') completed += 1;
+    else if (status === 'running') running += 1;
+    else if (status === 'failed') failed += 1;
   }
-  return summary;
+  const resolvedTotal = Math.max(total, Object.keys(statuses).length);
+  let status: VisualStatus = 'pending';
+  if (failed && !running && completed + failed >= resolvedTotal) status = 'failed';
+  else if (running || (completed > 0 && completed < resolvedTotal)) status = 'running';
+  else if (resolvedTotal > 0 && completed >= resolvedTotal) status = 'done';
+  return {
+    id,
+    label: PHASE_LABEL[id],
+    completed,
+    total: resolvedTotal,
+    running,
+    failed,
+    status,
+  };
+}
+
+function completeEarlierPhases(progress: TopicDiscoveryProgress, active: TopicPhaseId) {
+  const activeIndex = TOPIC_PHASE_ORDER.indexOf(active);
+  for (const id of TOPIC_PHASE_ORDER.slice(0, activeIndex)) {
+    const phase = progress.phases[id];
+    if (phase.status === 'done') continue;
+    const total = Math.max(phase.total, 1);
+    progress.phases[id] = { ...phase, completed: total, total, running: 0, status: 'done' };
+  }
+}
+
+function completeAllPhases(progress: TopicDiscoveryProgress): TopicDiscoveryProgress {
+  const next = cloneProgress(progress);
+  for (const id of TOPIC_PHASE_ORDER) {
+    const phase = next.phases[id];
+    const total = Math.max(phase.total, 1);
+    next.phases[id] = { ...phase, completed: total, total, running: 0, status: 'done' };
+  }
+  return next;
 }
 
 function isPartitionStatus(status: string | undefined): status is PartitionStatus {
-  return status === "running" || status === "completed" || status === "failed" || status === "canceled";
+  return status === 'running' || status === 'completed' || status === 'failed' || status === 'canceled';
 }

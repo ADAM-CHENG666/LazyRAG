@@ -17,6 +17,7 @@ import {
   ListPlaceholder,
   OverviewMetrics,
   OverviewPane,
+  ScrollSentinel,
   percentText,
   ratio,
 } from "./primitives";
@@ -283,13 +284,7 @@ export function MaterialsStage({
             </tbody>
           </table>
         </div>
-        {documents.nextPageToken ? (
-          <div className="dataset-load-more">
-            <Button size="small" loading={documents.loading} onClick={() => void documents.loadMore()}>
-              加载更多文档
-            </Button>
-          </div>
-        ) : null}
+        <ScrollSentinel hasMore={!!documents.nextPageToken} loading={documents.loading} onLoadMore={() => void documents.loadMore()} />
       </section>
 
       <DocumentDrawer
@@ -619,15 +614,10 @@ function DocumentDrawer({
                   <p className="dataset-note">没有符合当前筛选条件的片段。</p>
                 )}
               </div>
-              {nextPageToken ? (
-                <div className="dataset-load-more">
-                  <Button size="small" loading={loading} onClick={() => void load(nextPageToken)}>
-                    加载更多片段
-                  </Button>
-                </div>
-              ) : (
+              <ScrollSentinel hasMore={!!nextPageToken} loading={loading} onLoadMore={() => void load(nextPageToken)} />
+              {!nextPageToken && !loading ? (
                 <div className="dataset-note is-centered">已按原文顺序加载全部有效片段</div>
-              )}
+              ) : null}
             </div>
           ) : (
             <p className="dataset-note">该文档未参与本次数据集构建，没有可调整的片段。</p>

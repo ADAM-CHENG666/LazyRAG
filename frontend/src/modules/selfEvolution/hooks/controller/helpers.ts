@@ -29,6 +29,7 @@ import {
   getFlowStatusFromPayload,
   resolveTerminalStepStatusFromFlowStatus,
   datasetWorkflowStepFromSteps,
+  isDatasetSubStage,
   type ThreadEventStage,
   type WorkflowRuntimeState,
   AGENT_API_BASE,
@@ -1204,7 +1205,11 @@ export function resolveStepListCheckpointPrompt(
 ): CheckpointWaitPrompt | undefined {
   const waitingStep = getCheckpointWaitingStep(stepList);
   if (waitingStep) {
-    const completedStage = toThreadEventStage(waitingStep.stage || waitingStep.title);
+    const rawStage = waitingStep.stage || waitingStep.title;
+    if (isDatasetSubStage(rawStage)) {
+      return undefined;
+    }
+    const completedStage = toThreadEventStage(rawStage);
     if (!completedStage || completedStage === "abtest") {
       return undefined;
     }
@@ -1225,7 +1230,11 @@ export function resolveStepListCheckpointPrompt(
     return undefined;
   }
 
-  const lastStage = toThreadEventStage(lastStep.stage || lastStep.title);
+  const rawLastStage = lastStep.stage || lastStep.title;
+  if (isDatasetSubStage(rawLastStage)) {
+    return undefined;
+  }
+  const lastStage = toThreadEventStage(rawLastStage);
   if (!lastStage || lastStage === "abtest") {
     return undefined;
   }

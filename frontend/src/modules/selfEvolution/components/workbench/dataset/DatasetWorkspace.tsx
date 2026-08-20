@@ -5,7 +5,12 @@ import { MaterialsStage } from "./MaterialsStage";
 import { TopicsStage } from "./TopicsStage";
 import { datasetRoot, describeRequestError, newRequestId, postJson } from "./api";
 import { STATUS_TEXT } from "./primitives";
-import { applyTopicLabelPartitionEvent, type TopicLabelProgress } from "./topicLabelProgress";
+import {
+  draftAffectsTab,
+  resolveRevisionRefreshAction,
+  TERMINAL_STAGE_EVENTS,
+} from "./datasetRefresh";
+import { applyTopicLabelPartitionEvent, type TopicDiscoveryProgress } from "./topicLabelProgress";
 import { DATASET_TABS, useDatasetStages, type DatasetStreamEvent } from "./useDatasetStages";
 import "./dataset.scss";
 import {
@@ -27,7 +32,7 @@ export function DatasetWorkspace({ threadId, onWriteApplied }: { threadId?: stri
   const [tab, setTab] = useState<DatasetTab>("materials");
   const [refreshToken, setRefreshToken] = useState(0);
   const [overviewToken, setOverviewToken] = useState(0);
-  const [topicLabelProgress, setTopicLabelProgress] = useState<TopicLabelProgress>();
+  const [topicLabelProgress, setTopicLabelProgress] = useState<TopicDiscoveryProgress>();
   const [staleTab, setStaleTab] = useState<DatasetTab>();
   const [draft, setDraft] = useState<DatasetDraft>();
   const [applying, setApplying] = useState(false);
@@ -36,42 +41,103 @@ export function DatasetWorkspace({ threadId, onWriteApplied }: { threadId?: stri
   // Set while an event-triggered overview reload is in flight, so that manual
   // refreshes and stage switches never raise the "data changed" banner.
   const probing = useRef<DatasetTab>();
+  const pendingRefresh = useRef(new Set<DatasetTab>());
   const tabRef = useRef(tab);
   tabRef.current = tab;
   // Read by callbacks that must stay referentially stable for the stage panels.
   const draftRef = useRef<DatasetDraft>();
   draftRef.current = draft;
+  const topicProgressRef = useRef<TopicDiscoveryProgress>();
+  const progressFlushRef = useRef<number>();
 
-  // An event only refreshes the stage overview. Lists, open details, paging and
-  // drafts stay untouched; a changed revision surfaces a refresh entry instead.
-  const handleStageEvent = useCallback((event: DatasetStreamEvent) => {
-    setTopicLabelProgress((current) => applyTopicLabelPartitionEvent(current, event));
-    if (event.event === "step.finish" && event.tab === "topics") {
-      setTopicLabelProgress(undefined);
+  const scheduleProgressFlush = useCallback(() => {
+    if (progressFlushRef.current) return;
+    progressFlushRef.current = requestAnimationFrame(() => {
+      progressFlushRef.current = 0;
+      setTopicLabelProgress(topicProgressRef.current);
+    });
+  }, []);
+
+  const flushPendingRefresh = useCallback((targetTab: DatasetTab) => {
+    if (!pendingRefresh.current.has(targetTab)) return;
+    pendingRefresh.current.delete(targetTab);
+    if (draftAffectsTab(draftRef.current, targetTab)) {
+      setStaleTab(targetTab);
+      setOverviewToken((token) => token + 1);
+      return;
     }
-    if (
-      event.tab !== tabRef.current ||
-      (event.event !== "step.finish" && event.event !== "checkpoint.continue" && event.event !== "done")
-    ) return;
-    probing.current = event.tab;
+    setStaleTab(undefined);
+    setRefreshToken((token) => token + 1);
     setOverviewToken((token) => token + 1);
   }, []);
 
+  // Terminal SSE events reload overview for the finished stage; when the
+  // published revision changes, lists auto-refresh unless a draft would be lost.
+  const handleStageEvent = useCallback((event: DatasetStreamEvent) => {
+    if (event.tab === "topics" || event.stage === "dataset.topic_discovery") {
+      const next = applyTopicLabelPartitionEvent(topicProgressRef.current, event);
+      if (next !== topicProgressRef.current) {
+        topicProgressRef.current = next;
+        scheduleProgressFlush();
+      }
+    }
+    if (!TERMINAL_STAGE_EVENTS.has(event.event)) return;
+    if (event.tab === tabRef.current) {
+      probing.current = event.tab;
+      setOverviewToken((token) => token + 1);
+      return;
+    }
+    pendingRefresh.current.add(event.tab);
+  }, [scheduleProgressFlush]);
+
   const handleOverviewRevision = useCallback((stageTab: DatasetTab, revision: string | null) => {
     const previous = revisions.current[stageTab];
+    const wasProbing = probing.current === stageTab;
+    if (wasProbing) {
+      probing.current = undefined;
+    }
+    const action = resolveRevisionRefreshAction(
+      stageTab,
+      tabRef.current,
+      previous,
+      revision,
+      draftRef.current,
+    );
     revisions.current[stageTab] = revision;
-    if (probing.current !== stageTab) return;
-    probing.current = undefined;
-    if (previous !== undefined && previous !== revision) {
+    const draftBlocks = draftAffectsTab(draftRef.current, stageTab);
+    if (action === "auto" || (wasProbing && action === "none" && !draftBlocks)) {
+      setStaleTab(undefined);
+      setRefreshToken((token) => token + 1);
+    } else if (action === "stale" || (wasProbing && draftBlocks)) {
       setStaleTab(stageTab);
+    } else if (action === "pending") {
+      pendingRefresh.current.add(stageTab);
     }
   }, []);
 
   const { statuses, activeTab, resumeAfterWrite } = useDatasetStages(threadId, handleStageEvent);
 
   useEffect(() => {
+    topicProgressRef.current = undefined;
+    pendingRefresh.current.clear();
+    revisions.current = {};
+    probing.current = undefined;
+    if (progressFlushRef.current) {
+      cancelAnimationFrame(progressFlushRef.current);
+      progressFlushRef.current = 0;
+    }
     setTopicLabelProgress(undefined);
+    setStaleTab(undefined);
   }, [threadId]);
+
+  useEffect(
+    () => () => {
+      if (progressFlushRef.current) {
+        cancelAnimationFrame(progressFlushRef.current);
+      }
+    },
+    [],
+  );
 
   // The executing stage only decides the default tab on first entry; later
   // progress must not pull the view away from what the user is reading.
@@ -79,13 +145,15 @@ export function DatasetWorkspace({ threadId, onWriteApplied }: { threadId?: stri
     if (activeTab && followActiveStage.current) {
       followActiveStage.current = false;
       setTab(activeTab);
+      flushPendingRefresh(activeTab);
     }
-  }, [activeTab]);
+  }, [activeTab, flushPendingRefresh]);
 
   const selectTab = (next: DatasetTab) => {
     followActiveStage.current = false;
     setStaleTab(undefined);
     setTab(next);
+    flushPendingRefresh(next);
   };
 
   const refreshNow = () => {

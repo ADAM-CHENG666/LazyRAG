@@ -31,6 +31,7 @@ export type DatasetStreamEvent = {
   attemptId?: string;
   status?: string;
   partition?: { id?: string; index?: number; total?: number };
+  progress?: { current?: number | null; total?: number | null };
 };
 
 const INITIAL_STATUSES: StageStatuses = {
@@ -55,7 +56,7 @@ export function useDatasetStages(threadId: string | undefined, onStageEvent: (ev
   const [activeTab, setActiveTab] = useState<DatasetTab>();
   const eventHandler = useRef(onStageEvent);
   eventHandler.current = onStageEvent;
-  const resumeStream = useRef<() => void>(() => undefined);
+  const resumeStream = useRef<(force?: boolean) => void>(() => undefined);
 
   const refreshSteps = useCallback(async () => {
     if (!threadId) return;
@@ -67,7 +68,7 @@ export function useDatasetStages(threadId: string | undefined, onStageEvent: (ev
       for (const item of response.items || []) {
         const tab = TAB_BY_STAGE[item.stage];
         if (!tab) continue;
-        next[tab] = toVisualStatus(item.status);
+        next[tab] = item.status === 'paused' ? 'done' : toVisualStatus(item.status);
         if (item.step_id === response.active_step_id) running = tab;
       }
       setStatuses(next);
@@ -79,7 +80,7 @@ export function useDatasetStages(threadId: string | undefined, onStageEvent: (ev
 
   const resumeAfterWrite = useCallback(() => {
     void refreshSteps();
-    resumeStream.current();
+    resumeStream.current(true);
   }, [refreshSteps]);
 
   useEffect(() => {
@@ -122,6 +123,7 @@ export function useDatasetStages(threadId: string | undefined, onStageEvent: (ev
           const frames = buffer.split(/\r?\n\r?\n/);
           buffer = frames.pop() || "";
           let reachedDone = false;
+          let handledEvents = 0;
           for (const frame of frames) {
             const parsed = parseDatasetSseFrame(frame);
             if (!parsed) continue;
@@ -141,6 +143,14 @@ export function useDatasetStages(threadId: string | undefined, onStageEvent: (ev
               void refreshSteps();
             }
             eventHandler.current(event);
+            handledEvents += 1;
+            if (handledEvents >= 48) {
+              handledEvents = 0;
+              await new Promise<void>((resolve) => {
+                requestAnimationFrame(() => resolve());
+              });
+              if (stopped || myRound !== round) break;
+            }
           }
           if (reachedDone) {
             await reader.cancel().catch(() => undefined);
@@ -155,8 +165,9 @@ export function useDatasetStages(threadId: string | undefined, onStageEvent: (ev
     };
 
     void consume();
-    resumeStream.current = () => {
-      if (stopped || !streamEnded) return;
+    resumeStream.current = (force?: boolean) => {
+      if (stopped) return;
+      if (!force && !streamEnded) return;
       void consume();
     };
 
@@ -182,6 +193,7 @@ type ParsedDatasetFrame = {
     status?: string;
     last_event_id?: string;
     partition?: { id?: string; index?: number; total?: number };
+    progress?: { current?: number | null; total?: number | null };
   };
 };
 
@@ -221,6 +233,7 @@ function toDatasetStreamEvent(parsed: ParsedDatasetFrame): DatasetStreamEvent | 
         attemptId: payload.attempt_id,
         status: payload.status,
         partition: payload.partition,
+        progress: payload.progress,
       }
     : undefined;
 }

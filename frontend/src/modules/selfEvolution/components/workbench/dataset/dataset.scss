@@ -341,8 +341,8 @@ $ds-line: #dbe8f9;
   text-align: right;
 }
 
-/* Case progress rings */
-.dataset-case-progress {
+/* Shared 3-ring stage progress (topics + cases), matching the v2 demo. */
+.dataset-stage-progress {
   display: grid;
   flex: 1;
   min-height: 0;
@@ -353,14 +353,14 @@ $ds-line: #dbe8f9;
   padding-top: 1px;
 }
 
-.dataset-case-progress-link {
+.dataset-stage-progress-link {
   width: 18px;
   height: 1px;
   margin-top: 31px;
   background: #d7e2ee;
 }
 
-.dataset-case-progress-step {
+.dataset-stage-progress-step {
   display: grid;
   width: 68px;
   min-width: 0;
@@ -439,6 +439,10 @@ $ds-line: #dbe8f9;
 
   &.is-failed {
     --dataset-progress-color: #c65349;
+  }
+
+  &.is-pending {
+    --dataset-progress-color: #9aaabc;
   }
 }
 
