@@ -1414,5 +1414,9 @@
   "2002276": { "en-US": "Git ls-remote %s returned no commit", "zh-CN": "查询远程 %s 未返回提交" },
   "2002277": { "en-US": "Git rev-parse head failed", "zh-CN": "解析本地 HEAD 失败" },
   "2002278": { "en-US": "Git rev-parse head returned invalid commit %q", "zh-CN": "本地 HEAD 返回无效提交 %q" },
-  "2002279": { "en-US": "Hash %s failed", "zh-CN": "计算 %s 的哈希失败" }
+  "2002279": { "en-US": "Hash %s failed", "zh-CN": "计算 %s 的哈希失败" },
+  "2002280": { "en-US": "At least two internal skills are required", "zh-CN": "至少需要选择两个内部技能" },
+  "2002281": { "en-US": "The ZIP downloader is not configured", "zh-CN": "未配置 ZIP 下载器" },
+  "2002282": { "en-US": "Unsupported market skill source type", "zh-CN": "不支持的技能市场来源类型" },
+  "2002283": { "en-US": "The skill package storage path is required", "zh-CN": "缺少技能包存储路径" }
 }
