@@ -84,6 +84,7 @@ export function SelfEvolutionWorkbenchView({
   onOpenObservation,
   onOpenCaseArtifact,
   onDatasetWriteApplied,
+  datasetExecutionResumeToken,
   onWorkbenchTabChange,
   onCloseArtifactPanel,
   canViewStageArtifact = false,
@@ -394,7 +395,11 @@ export function SelfEvolutionWorkbenchView({
                 )}
 
                 {shouldShowStageDetail && displayStage === "dataset" ? (
-                  <DatasetWorkspace threadId={routeThreadId} onWriteApplied={onDatasetWriteApplied} />
+                  <DatasetWorkspace
+                    threadId={routeThreadId}
+                    onWriteApplied={onDatasetWriteApplied}
+                    executionResumeToken={datasetExecutionResumeToken}
+                  />
                 ) : shouldShowStageDetail && displayStage === "eval" ? (
                   <EvalStreamingTable
                     rows={streamingEvalRows}

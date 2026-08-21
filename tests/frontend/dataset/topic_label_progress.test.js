@@ -9,6 +9,7 @@ function event(overrides = {}) {
     event: 'dataset.extract_chunk_entities',
     stage: 'dataset.topic_discovery',
     operationId: 'dataset.extract_chunk_entities',
+    attemptId: 'attempt-1',
     stepId: 'thread-1:dataset.topic_discovery:1',
     partition: { id: 'chunk-1', total: 3 },
     status: 'running',
@@ -77,5 +78,57 @@ describe('topic discovery 3-phase progress', () => {
     expect(steps[2].completed).toBe(8);
     expect(steps[2].total).toBe(8);
     expect(steps[2].summary).toBe('全部完成');
+  });
+
+  it('keeps a new SSE execution round visible when overview still has the prior completed snapshot', () => {
+    const progress = applyTopicLabelPartitionEvent(undefined, event({
+      stepId: 'thread-1:dataset.topic_discovery:2',
+      status: 'running',
+    }));
+
+    const steps = topicDiscoverySteps(progress, { status: 'completed', total_topics: 8 });
+    expect(steps[0]).toMatchObject({ completed: 0, total: 3, status: 'running' });
+    expect(steps[1].status).toBe('pending');
+    expect(steps[2].status).toBe('pending');
+  });
+
+  it('never invents a 1/1 total when a later operation arrives before partition events', () => {
+    const progress = applyTopicLabelPartitionEvent(undefined, event({
+      event: 'dataset.cluster_embeddings',
+      operationId: 'dataset.cluster_embeddings',
+      partition: undefined,
+      status: 'running',
+    }));
+
+    const steps = topicDiscoverySteps(progress);
+    expect(steps[0]).toMatchObject({ status: 'done', completed: 0, total: null });
+    expect(steps[1]).toMatchObject({ status: 'running', completed: 0, total: null });
+  });
+
+  it('does not invent entity or semantic totals from a completed overview', () => {
+    const steps = topicDiscoverySteps(undefined, { status: 'completed', total_topics: 8 });
+
+    expect(steps[0]).toMatchObject({ completed: 0, total: null, status: 'done' });
+    expect(steps[1]).toMatchObject({ completed: 0, total: null, status: 'done' });
+    expect(steps[2]).toMatchObject({ completed: 8, total: 8, status: 'done' });
+  });
+
+  it('does not flash the previous completed overview while /steps says this stage is running', () => {
+    const steps = topicDiscoverySteps(
+      undefined,
+      { status: 'completed', total_topics: 8 },
+      'running',
+    );
+
+    expect(steps.every((step) => step.status === 'pending')).toBe(true);
+    expect(steps.every((step) => step.completed === 0)).toBe(true);
+  });
+
+  it('does not let an earlier attempt overwrite a retried partition', () => {
+    let progress = applyTopicLabelPartitionEvent(undefined, event({ status: 'failed' }));
+    progress = applyTopicLabelPartitionEvent(progress, event({ attemptId: 'attempt-2', status: 'running' }));
+    progress = applyTopicLabelPartitionEvent(progress, event({ attemptId: 'attempt-1', status: 'completed' }));
+
+    expect(topicDiscoverySteps(progress)[0]).toMatchObject({ status: 'running', completed: 0 });
   });
 });

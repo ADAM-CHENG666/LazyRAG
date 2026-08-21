@@ -379,6 +379,7 @@ export function SelfEvolutionPageController({
     steps: [],
   });
   const [threadFlowStatus, setThreadFlowStatus] = useState<string>();
+  const [datasetExecutionResumeToken, setDatasetExecutionResumeToken] = useState(0);
   const threadStepListRef = useRef(threadStepList);
   threadStepListRef.current = threadStepList;
   const activeThreadIdRef = useRef<string>();
@@ -2485,6 +2486,9 @@ export function SelfEvolutionPageController({
     }
 
     processedWorkflowEventKeysRef.current.add(event.key);
+    if (event.type === "checkpoint.continue") {
+      setDatasetExecutionResumeToken((token) => token + 1);
+    }
     const mergedEvents = mergeThreadEvents([event]);
     if (event.checkpointWait) {
       setLiveCheckpointWaitPrompt(getPendingCheckpointWaitPrompt(mergedEvents));
@@ -3782,7 +3786,9 @@ export function SelfEvolutionPageController({
             activeSessionId,
             controller,
           );
-          await subscribePendingNextStepRun(activeThreadId, activeSessionId);
+          if (await subscribePendingNextStepRun(activeThreadId, activeSessionId)) {
+            setDatasetExecutionResumeToken((token) => token + 1);
+          }
           return;
         }
 
@@ -3808,7 +3814,9 @@ export function SelfEvolutionPageController({
             { dedupeLast: true },
           );
         }
-        await subscribePendingNextStepRun(activeThreadId, activeSessionId);
+        if (await subscribePendingNextStepRun(activeThreadId, activeSessionId)) {
+          setDatasetExecutionResumeToken((token) => token + 1);
+        }
       } catch (error) {
         appendSystemMessage(
           getCatalogApiErrorMessage(error),
@@ -3853,6 +3861,7 @@ export function SelfEvolutionPageController({
         `${AGENT_API_BASE}/threads/${encodeURIComponent(activeThreadId)}/continue`,
         { command_id: requestedCommandId },
       );
+      setDatasetExecutionResumeToken((token) => token + 1);
       await refreshThreadStepList(activeThreadId);
 
       setSelectedThreadStepId(undefined);
@@ -6717,6 +6726,7 @@ export function SelfEvolutionPageController({
               void refreshThreadStepList(routeThreadId);
             }
           },
+          datasetExecutionResumeToken,
           onWorkbenchTabChange: handleWorkbenchTabChange,
           onCloseArtifactPanel: closeArtifactPanel,
           canViewStageArtifact,

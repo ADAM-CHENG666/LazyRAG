@@ -11,6 +11,7 @@ import type {
 export const STATUS_TEXT: Record<VisualStatus, string> = {
   done: "已完成",
   running: "执行中",
+  paused: "等待调整",
   stale: "待更新",
   pending: "未开始",
   failed: "失败",
@@ -19,6 +20,7 @@ export const STATUS_TEXT: Record<VisualStatus, string> = {
 const STATUS_SYMBOL: Record<VisualStatus, string> = {
   done: "✓",
   running: "●",
+  paused: "⏸",
   stale: "↻",
   pending: "○",
   failed: "!",
@@ -27,6 +29,7 @@ const STATUS_SYMBOL: Record<VisualStatus, string> = {
 export const FLOW_STATUS_TEXT: Record<FlowStatus, string> = {
   pending: "等待中",
   running: "执行中",
+  paused: "等待调整",
   completed: "已完成",
   awaiting_approval: "等待确认",
   failed: "执行失败",
@@ -45,15 +48,16 @@ export const DIFFICULTY_TEXT: Record<Difficulty, string> = {
 
 export function toVisualStatus(status: OperationStatus | FlowStatus | string): VisualStatus {
   switch (status) {
-    case "succeeded":
     case "completed":
       return "done";
     case "running":
     case "pausing":
-    case "paused":
       return "running";
+    case "paused":
+      return "paused";
     case "failed":
     case "cancelled":
+    case "canceled":
     case "cancelling":
       return "failed";
     default:
@@ -328,7 +332,7 @@ export type StageProgressStep = {
   key: string;
   label: string;
   completed: number;
-  total: number;
+  total: number | null;
   status: VisualStatus;
   summary: string;
 };
@@ -345,7 +349,7 @@ export function StageProgressTrack({ steps }: { steps: StageProgressStep[] }) {
               style={{ "--dataset-progress": `${step.total ? Math.round((step.completed / step.total) * 360) : 0}deg` } as CSSProperties}
             >
               <strong>
-                {step.completed}/{step.total}
+                {step.total == null ? "—" : `${step.completed}/${step.total}`}
               </strong>
             </div>
             <b>{step.label}</b>

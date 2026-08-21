@@ -88,6 +88,7 @@ export type SelfEvolutionWorkbenchViewProps = {
   onOpenObservation: (kind: SelfEvolutionObservationKind) => void;
   onOpenCaseArtifact: (kind: WorkflowResultKind, artifactId: string, title: string, caseId?: string) => void;
   onDatasetWriteApplied?: () => void;
+  datasetExecutionResumeToken?: number;
   onWorkbenchTabChange: (tab?: SelfEvolutionWorkbenchTab) => void;
   onCloseArtifactPanel: () => void;
   canViewStageArtifact?: boolean;

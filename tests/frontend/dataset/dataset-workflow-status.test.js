@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   datasetWorkflowStepFromSteps,
   mergeWorkflowStepStatus,
+  terminalDatasetWorkflowStatus,
   toThreadEventStage,
 } from '../../../frontend/src/modules/selfEvolution/shared/datasetWorkflowStatus.ts';
 
@@ -75,6 +76,10 @@ describe('dataset workflow status from /steps', () => {
     ]));
     expect(chosen?.stage).toBe('dataset.material_preparation');
     expect(chosen?.status).toBe('paused');
+  });
+
+  it('keeps the dataset workflow paused when case generation waits for a plan adjustment', () => {
+    expect(terminalDatasetWorkflowStatus('paused')).toBe('paused');
   });
 });
 

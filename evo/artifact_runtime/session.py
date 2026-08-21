@@ -639,11 +639,55 @@ class RunSession:
             await self._publish()
             return
 
-        for invocation in self._launch_candidates(self._decision):
+        candidates = tuple(self._launch_candidates(self._decision))
+        if await self._pause_for_generation_plan_gate(candidates):
+            await self._publish()
+            return
+
+        for invocation in candidates:
             await self._launch(invocation)
             if self._status == 'failed':
                 break
         await self._publish()
+
+    async def _pause_for_generation_plan_gate(
+        self,
+        candidates: tuple[OperationInvocation, ...],
+    ) -> bool:
+        if not any(
+            invocation.operation.spec.op_id == 'dataset.qaplan_plan'
+            for invocation in candidates
+        ):
+            return False
+        if self._status == 'paused':
+            return True
+        if not isinstance(self._decision, PlanReady):
+            return False
+
+        from evo import artifacts as runtime_artifacts
+        from evo.operations.dataset.qaplan_capacity import default_lane_distribution_exceeds_capacity
+
+        keys = (
+            ArtifactKey.scalar(runtime_artifacts.DATASET_IMPORT_CASES_MANIFEST),
+            ArtifactKey.scalar(runtime_artifacts.DATASET_TOPIC_MANIFEST),
+            ArtifactKey.scalar(runtime_artifacts.DATASET_QAPLAN_PLAN_PARAMS),
+        )
+        records = tuple(self._decision.view.records.get(key) for key in keys)
+        if any(record is None for record in records):
+            return False
+        refs = tuple(record.ref for record in records)
+        values = await self._store.read_many(self.run_id, refs)
+        import_manifest, topic_manifest, plan_params = (
+            values[ref] for ref in refs
+        )
+        if not default_lane_distribution_exceeds_capacity(
+            import_manifest,
+            topic_manifest,
+            plan_params,
+        ):
+            return False
+        await self._pause()
+        return True
 
     def _launch_candidates(self, decision: PlanReady) -> Iterator[OperationInvocation]:
         active_invocations = {

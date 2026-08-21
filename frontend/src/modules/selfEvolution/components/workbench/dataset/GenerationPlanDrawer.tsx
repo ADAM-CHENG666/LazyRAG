@@ -56,9 +56,15 @@ export function GenerationPlanDrawer({
     0,
   );
   const revision = overview?.revision;
+  const withinCapacities = QUESTION_TYPES.every((type) =>
+    DIFFICULTIES.every((difficulty) => {
+      const capacity = overview?.automatic_plan?.question_types?.[type]?.capacities?.[difficulty];
+      return capacity == null || distribution[type][difficulty] <= capacity;
+    }),
+  );
   const unchanged =
     JSON.stringify(distribution) === JSON.stringify(toDistribution(overview));
-  const canSave = Boolean(revision) && total === expected && !unchanged;
+  const canSave = Boolean(revision) && total === expected && withinCapacities && !unchanged;
 
   const save = () => {
     if (!revision || !canSave) return;
@@ -97,12 +103,12 @@ export function GenerationPlanDrawer({
               DIFFICULTIES.map((difficulty) => (
                 <div className="dataset-lane-input" key={`${type}-${difficulty}`}>
                   <label htmlFor={`plan-${type}-${difficulty}`}>
-                    {QUESTION_TYPE_TEXT[type]} · {DIFFICULTY_TEXT[difficulty]}
+                    {QUESTION_TYPE_TEXT[type]} · {DIFFICULTY_TEXT[difficulty]} · 上限 {overview.automatic_plan.question_types?.[type]?.capacities?.[difficulty] ?? "—"}
                   </label>
                   <InputNumber
                     id={`plan-${type}-${difficulty}`}
                     min={0}
-                    max={expected}
+                    max={overview.automatic_plan.question_types?.[type]?.capacities?.[difficulty] ?? expected}
                     value={distribution[type][difficulty]}
                     onChange={(value) =>
                       setDistribution((prev) => ({

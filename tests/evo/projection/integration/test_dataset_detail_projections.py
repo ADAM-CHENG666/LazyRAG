@@ -332,13 +332,13 @@ def test_case_detail_projects_generated_case_and_prefers_current_draft_reference
         'document': {'id': 'doc-1', 'name': '产品手册.pdf'}, 'text': '当前引用',
     }]
     assert result['stages'] == {
-        'plan': {'status': 'succeeded'},
+        'plan': {'status': 'completed'},
         'generate': {
-            'status': 'succeeded', 'question': '电池热失控的诱因是什么？',
+            'status': 'completed', 'question': '电池热失控的诱因是什么？',
             'answer': '内部短路。', 'grading_guidance': '回答内部短路。',
         },
         'grading': {
-            'status': 'succeeded',
+            'status': 'completed',
             'key_points': [{'statement': '指出内部短路', 'evidence_chunk_ids': ['chunk-draft']}],
             'forbidden_claims': ['只会由外部高温引起'],
         },
@@ -356,7 +356,7 @@ def test_case_detail_uses_plan_references_before_generation_and_nulls_future_sta
 
     assert result['references'][0]['chunk_id'] == 'chunk-plan'
     assert result['stages'] == {
-        'plan': {'status': 'succeeded'},
+        'plan': {'status': 'completed'},
         'generate': {'status': 'pending', 'question': None, 'answer': None, 'grading_guidance': None},
         'grading': {'status': 'pending', 'key_points': None, 'forbidden_claims': None},
     }

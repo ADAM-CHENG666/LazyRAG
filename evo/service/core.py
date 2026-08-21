@@ -26,6 +26,8 @@ from evo.operations import evo_flow_definition
 from evo.operations.dataset.source_config import normalize_source_config
 from evo.operations.dataset.kb_client import KnowledgeBaseClient
 from evo.operations.dataset.qaplan import build_qaplan_spec
+from evo.operations.dataset.qaplan_capacity import auto_case_count as _auto_case_count_from_manifest
+from evo.operations.dataset.qaplan_capacity import eligible_lane_counts as _eligible_lane_counts_from_manifest
 from evo.repair_model import EvoModelConfigError, resolve_evo_model
 
 from .contracts import (
@@ -230,6 +232,8 @@ class EvoService:
         async with self._control_locks.setdefault(thread_id, asyncio.Lock()):
             snapshot = await self.flow.snapshot(thread_id)
             stage = request.stage or snapshot.current_stage
+            if snapshot.status == 'paused' and stage == 'dataset.case_generation':
+                raise ServiceError(409, 'case generation requires an adjusted plan before retrying')
             await self.flow.retry_stage(thread_id, stage, request_id=command_id)
             await self._continue_automatic(thread_id)
             return _accepted(thread_id, command_id, 'retry')
@@ -446,27 +450,39 @@ class EvoService:
         (params,) = await self._read_expected_values(thread_id, (params_ref,))
         _copy_mapping(params, 'qaplan_plan_params')
 
-        plan_key = ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN)
-        plan_record = await self.flow.head(thread_id, plan_key)
-        if plan_record is None:
-            raise ServiceError(409, 'qaplan plan is unavailable')
+        import_key = ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST)
+        topic_key = ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST)
+        import_record = await self.flow.head(thread_id, import_key)
+        topic_record = await self.flow.head(thread_id, topic_key)
+        if import_record is None or topic_record is None:
+            raise ServiceError(409, 'generation plan prerequisites are unavailable')
         try:
-            plan = await self.flow.read(thread_id, plan_record.ref)
+            import_manifest = await self.flow.read(thread_id, import_record.ref)
+            topic_manifest = await self.flow.read(thread_id, topic_record.ref)
         except (DefinitionError, KeyError) as error:
-            raise ServiceError(409, 'qaplan plan is unavailable') from error
-        auto_case_count, eligible_counts = _qaplan_plan_capacity(plan)
+            raise ServiceError(409, 'generation plan prerequisites are unavailable') from error
+
+        auto_case_count = _auto_case_count_from_manifest(import_manifest)
+        eligible_counts = _eligible_lane_counts_from_manifest(topic_manifest)
         lane_case_counts = _lane_case_counts(request.distribution)
         if sum(lane_case_counts.values()) != auto_case_count:
             raise ServiceError(422, 'lane_case_counts total must equal auto_case_count')
         if any(lane_case_counts[lane] > eligible_counts[lane] for lane in lane_case_counts):
             raise ServiceError(422, 'lane_case_counts exceed eligible topic capacity')
-        return await self._commit_changed_values(
+
+        next_params = {**params, 'lane_case_counts': lane_case_counts}
+        result = await self._commit_changed_values(
             thread_id,
             f'dataset-generation-plan:{request.request_id}',
             'user:dataset-generation-plan',
             (params_ref,),
-            {params_key: {'lane_case_counts': lane_case_counts}},
+            {params_key: next_params},
         )
+        snapshot = await self.flow.snapshot(thread_id)
+        if snapshot.status == 'paused':
+            await self.flow.resume(thread_id)
+            await self._continue_automatic(thread_id)
+        return result
 
     async def patch_case(self, thread_id: str, case_id: str,
                          request: CasePatchBody | Mapping[str, Any]) -> dict[str, Any]:
@@ -837,34 +853,6 @@ def _lane_case_counts(distribution: Mapping[str, Mapping[str, int]]) -> dict[str
         for question_type in ('precision', 'reasoning')
         for difficulty in ('easy', 'medium', 'hard')
     }
-
-
-def _qaplan_plan_capacity(value: object) -> tuple[int, dict[str, int]]:
-    plan = _mapping_value(value, 'qaplan_plan')
-    stats = _mapping_value(plan.get('stats'), 'qaplan_plan.stats')
-    auto_case_count = stats.get('auto_case_count')
-    if isinstance(auto_case_count, bool) or not isinstance(auto_case_count, int) or auto_case_count < 0:
-        raise ServiceError(409, 'qaplan plan is invalid')
-    summaries = stats.get('lane_summaries')
-    if not isinstance(summaries, list):
-        raise ServiceError(409, 'qaplan plan is invalid')
-    capacities: dict[str, int] = {}
-    for item in summaries:
-        summary = _mapping_value(item, 'qaplan_plan.stats.lane_summaries[]')
-        lane = summary.get('lane')
-        capacity = summary.get('eligible_topic_count')
-        if not isinstance(lane, str) or isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 0:
-            raise ServiceError(409, 'qaplan plan is invalid')
-        if lane in capacities:
-            raise ServiceError(409, 'qaplan plan is invalid')
-        capacities[lane] = capacity
-    expected_lanes = {
-        'precision_easy', 'precision_medium', 'precision_hard',
-        'reasoning_easy', 'reasoning_medium', 'reasoning_hard',
-    }
-    if set(capacities) != expected_lanes:
-        raise ServiceError(409, 'qaplan plan is invalid')
-    return auto_case_count, capacities
 
 
 def _case_source(import_manifest: Mapping[str, Any], case_id: str) -> str:

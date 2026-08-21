@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Button } from "antd";
 import { datasetRoot, getJson } from "./api";
 import { CaseDetailDrawer } from "./CaseDetailDrawer";
 import { GenerationPlanDrawer } from "./GenerationPlanDrawer";
@@ -17,7 +18,15 @@ import {
   toVisualStatus,
 } from "./primitives";
 import { progressSummary } from "./topicLabelProgress";
+import {
+  caseGenerationDisplayStep,
+  caseGenerationSteps,
+  overlayCaseProgress,
+  shouldReconcileCaseExecution,
+  type CaseGenerationProgress,
+} from "./caseGenerationProgress";
 import { usePublishDatasetStageAction } from "./stageAction";
+import { shouldShowGenerationPlanPause } from "./datasetRefresh";
 import type {
   CaseRow,
   CaseSource,
@@ -28,13 +37,18 @@ import type {
   OperationStatus,
   PagedResponse,
   QuestionType,
+  VisualStatus,
 } from "./types";
 
 type Props = {
   threadId: string;
   refreshToken: number;
   overviewToken: number;
-  onOverviewRevision: (tab: "cases", revision: string | null) => void;
+  progress?: CaseGenerationProgress;
+  executionStatus: VisualStatus;
+  reconciliationToken: number;
+  onOverviewRevision: (tab: "cases", revision: string | null, executionRevision?: string) => void;
+  onExecutionReconciled: (executionRevision: string) => void;
   onSaveDraft: (draft: DatasetDraft) => boolean;
   onCaseSaved: () => void;
 };
@@ -47,10 +61,11 @@ const STAGE_LABEL: Record<CaseStageKey, string> = {
 };
 
 const STATUS_OPTIONS: Array<{ value: OperationStatus; label: string }> = [
-  { value: "succeeded", label: "已完成" },
+  { value: "completed", label: "已完成" },
   { value: "running", label: "执行中" },
   { value: "pending", label: "未开始" },
   { value: "failed", label: "失败" },
+  { value: "canceled", label: "已取消" },
 ];
 
 const QUESTION_TYPES: QuestionType[] = ["precision", "reasoning"];
@@ -62,7 +77,11 @@ export function CasesStage({
   threadId,
   refreshToken,
   overviewToken,
+  progress,
+  executionStatus,
+  reconciliationToken,
   onOverviewRevision,
+  onExecutionReconciled,
   onSaveDraft,
   onCaseSaved,
 }: Props) {
@@ -72,6 +91,7 @@ export function CasesStage({
   const [difficulty, setDifficulty] = useState<Difficulty>();
   const [openCase, setOpenCase] = useState<CaseRow>();
   const [planOpen, setPlanOpen] = useState(false);
+  const lastReconciledToken = useRef(0);
 
   const root = datasetRoot(threadId);
 
@@ -86,7 +106,7 @@ export function CasesStage({
   );
 
   useEffect(() => {
-    if (overview.data) onOverviewRevision("cases", overview.data.revision);
+    if (overview.data) onOverviewRevision("cases", overview.data.revision, overview.data.execution_revision);
   }, [onOverviewRevision, overview.data]);
 
   const fetchCases = useCallback(
@@ -105,11 +125,40 @@ export function CasesStage({
   );
   const cases = useDatasetList(fetchCases, refreshToken, "用例列表加载失败");
 
+  useEffect(() => {
+    const executionRevision = overview.data?.execution_revision;
+    if (shouldReconcileCaseExecution({
+      reconciliationToken,
+      lastReconciledToken: lastReconciledToken.current,
+      expectedOverviewToken: refreshToken + overviewToken,
+      loadedOverviewToken: overview.loadedToken,
+      expectedListToken: refreshToken,
+      loadedListToken: cases.loadedToken,
+      overviewExecutionRevision: executionRevision,
+      listExecutionRevision: cases.executionRevision,
+    })) {
+      lastReconciledToken.current = reconciliationToken;
+      onExecutionReconciled(executionRevision);
+    }
+  }, [
+    cases.executionRevision,
+    cases.loadedToken,
+    onExecutionReconciled,
+    overview.data?.execution_revision,
+    overview.loadedToken,
+    overviewToken,
+    reconciliationToken,
+    refreshToken,
+  ]);
+
   usePublishDatasetStageAction(
     useMemo(() => ({ label: "调整生成计划", onClick: () => setPlanOpen(true) }), []),
   );
 
   const plan = overview.data?.automatic_plan;
+  const generationPaused = shouldShowGenerationPlanPause(overview.data?.status);
+  const transientSteps = useMemo(() => caseGenerationSteps(progress), [progress]);
+  const displayedCases = useMemo(() => overlayCaseProgress(cases.items, progress), [cases.items, progress]);
   const hasFilters = Boolean(
     source || questionType || difficulty || Object.values(stageFilters).some(Boolean),
   );
@@ -122,6 +171,17 @@ export function CasesStage({
 
   return (
     <>
+      {generationPaused ? (
+        <section className="dataset-pause-notice" role="status">
+          <div>
+            <strong>用例生成已暂停</strong>
+            <span>当前生成计划超过可用主题配额，请调整生成计划后继续执行。</span>
+          </div>
+          <Button type="primary" onClick={() => setPlanOpen(true)}>
+            调整生成计划
+          </Button>
+        </section>
+      ) : null}
       <div className="dataset-overview-row">
         <OverviewPane
           title="生成进度"
@@ -136,21 +196,19 @@ export function CasesStage({
           ) : (
             <StageProgressTrack
               steps={STAGE_ORDER.map((key) => {
-                const progress = overview.data?.stages[key];
-                const status = toVisualStatus(progress?.status || "pending");
-                const completed = progress?.succeeded ?? 0;
-                const total = progress?.total ?? 0;
-                const counts = progress?.status_counts;
+                const stable = overview.data?.stages[key];
+                const transient = transientSteps.find((item) => item.key === key);
+                const displayed = caseGenerationDisplayStep(transient, stable, executionStatus);
                 return {
                   key,
                   label: STAGE_LABEL[key],
-                  completed,
-                  total,
-                  status,
-                  summary: progressSummary(status, completed, total, {
-                    running: counts?.running ?? 0,
-                    failed: counts?.failed ?? 0,
-                    pending: counts?.pending ?? 0,
+                  completed: displayed.completed,
+                  total: displayed.total,
+                  status: displayed.status,
+                  summary: progressSummary(displayed.status, displayed.completed, displayed.total, {
+                    running: displayed.running,
+                    failed: displayed.failed + displayed.canceled,
+                    pending: displayed.pending,
                   }),
                 };
               })}
@@ -244,7 +302,7 @@ export function CasesStage({
               </tr>
             </thead>
             <tbody>
-              {cases.items.map((row) => (
+              {displayedCases.map((row) => (
                 <tr
                   key={row.case_id}
                   tabIndex={0}

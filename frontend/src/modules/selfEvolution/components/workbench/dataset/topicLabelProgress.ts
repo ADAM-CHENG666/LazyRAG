@@ -1,4 +1,5 @@
 import type { VisualStatus } from './types';
+import { acceptsAttemptUpdate } from './executionStore';
 
 export const TOPIC_DISCOVERY_STAGE = 'dataset.topic_discovery';
 
@@ -38,6 +39,7 @@ export type TopicLabelPartitionEvent = {
   stage: string;
   tab?: string;
   operationId?: string;
+  attemptId?: string;
   stepId: string;
   partition?: { id?: string; total?: number };
   status?: string;
@@ -57,6 +59,7 @@ export type TopicPhaseState = {
 export type TopicDiscoveryProgress = {
   stepId: string;
   partitions: Partial<Record<TopicPhaseId, Record<string, PartitionStatus>>>;
+  attempts: Partial<Record<TopicPhaseId, Record<string, string>>>;
   phases: Record<TopicPhaseId, TopicPhaseState>;
 };
 
@@ -64,7 +67,7 @@ export type TopicDiscoveryStepView = {
   key: TopicPhaseId;
   label: string;
   completed: number;
-  total: number;
+  total: number | null;
   status: VisualStatus;
   summary: string;
 };
@@ -96,8 +99,16 @@ export function applyTopicLabelPartitionEvent(
 
   if (PARTITION_OPS.has(operationId) && event.partition?.id && isPartitionStatus(event.status)) {
     const statuses = { ...(base.partitions[phaseId] || {}) };
+    const attemptId = base.attempts[phaseId]?.[event.partition.id];
+    if (!acceptsAttemptUpdate(
+      statuses[event.partition.id] ? { attemptId, status: statuses[event.partition.id] } : undefined,
+      { attemptId: event.attemptId, status: event.status },
+    )) return current;
     statuses[event.partition.id] = event.status;
     base.partitions[phaseId] = statuses;
+    if (event.attemptId) {
+      base.attempts[phaseId] = { ...(base.attempts[phaseId] || {}), [event.partition.id]: event.attemptId };
+    }
     const total = event.partition.total ?? base.phases[phaseId].total;
     base.phases[phaseId] = summarizePartitionPhase(phaseId, statuses, total);
     return base;
@@ -107,7 +118,7 @@ export function applyTopicLabelPartitionEvent(
     const phase = base.phases[phaseId];
     const hintedTotal = Number(event.progress?.total ?? event.partition?.total ?? phase.total);
     if (COMPLETE_OPS.has(operationId) && event.status === 'completed') {
-      const total = Math.max(phase.total, hintedTotal, 1);
+      const total = Math.max(phase.total, hintedTotal);
       base.phases[phaseId] = {
         ...phase,
         completed: total,
@@ -117,7 +128,7 @@ export function applyTopicLabelPartitionEvent(
         status: 'done',
       };
     } else if (event.status === 'failed') {
-      base.phases[phaseId] = { ...phase, total: Math.max(phase.total, hintedTotal, 1), failed: 1, status: 'failed' };
+      base.phases[phaseId] = { ...phase, total: Math.max(phase.total, hintedTotal), failed: 1, status: 'failed' };
     } else if (phase.status !== 'done') {
       base.phases[phaseId] = {
         ...phase,
@@ -133,26 +144,37 @@ export function applyTopicLabelPartitionEvent(
 export function topicDiscoverySteps(
   progress: TopicDiscoveryProgress | undefined,
   overview?: { status?: string; total_topics?: number | null },
+  currentStageStatus?: VisualStatus,
 ): TopicDiscoveryStepView[] {
   const phases = progress?.phases ?? emptyProgress('').phases;
-  const overviewDone = overview?.status === 'completed' || overview?.status === 'succeeded';
+  // A prior published manifest may still report completed while a new topic
+  // discovery step is already emitting SSE. Its snapshot must not hide the
+  // current step's partial execution progress.
+  const hasPartialExecution = Boolean(progress) && TOPIC_PHASE_ORDER.some(
+    (id) => phases[id].status !== 'done',
+  ) && TOPIC_PHASE_ORDER.some(
+    (id) => phases[id].status !== 'pending' || phases[id].total > 0,
+  );
+  const overviewDone = currentStageStatus !== 'running' && !hasPartialExecution && (
+    overview?.status === 'completed' || overview?.status === 'succeeded'
+  );
   const topicCount = overview?.total_topics ?? null;
 
   return TOPIC_PHASE_ORDER.map((id) => {
     const phase = phases[id];
     let status = phase.status;
     let completed = phase.completed;
-    let total = phase.total;
+    let total: number | null = phase.total || null;
     if (overviewDone) {
       status = 'done';
       if (id === 'topics' && topicCount != null) {
         completed = topicCount;
         total = topicCount;
-      } else if (total > 0) {
+      } else if (total && total > 0) {
         completed = total;
       } else {
-        completed = 1;
-        total = 1;
+        completed = 0;
+        total = null;
       }
     } else if (id === 'topics' && status === 'done' && topicCount != null) {
       completed = topicCount;
@@ -167,7 +189,7 @@ export function topicDiscoverySteps(
       summary: progressSummary(status, completed, total, {
         running: phase.running,
         failed: phase.failed,
-        pending: Math.max(0, total - completed - phase.running - phase.failed),
+        pending: Math.max(0, (total || 0) - completed - phase.running - phase.failed),
       }),
     };
   });
@@ -176,10 +198,10 @@ export function topicDiscoverySteps(
 export function progressSummary(
   status: VisualStatus,
   completed: number,
-  total: number,
+  total: number | null,
   counts?: { running?: number; failed?: number; pending?: number; stale?: number },
 ) {
-  if (status === 'done' || (total > 0 && completed === total && (counts?.failed || 0) === 0)) {
+  if (status === 'done' || (total != null && total > 0 && completed === total && (counts?.failed || 0) === 0)) {
     return '全部完成';
   }
   const notes = [
@@ -216,6 +238,7 @@ function emptyProgress(stepId: string): TopicDiscoveryProgress {
   return {
     stepId,
     partitions: {},
+    attempts: {},
     phases: {
       entities: emptyPhase('entities'),
       semantic: emptyPhase('semantic'),
@@ -231,6 +254,11 @@ function cloneProgress(progress: TopicDiscoveryProgress): TopicDiscoveryProgress
       entities: { ...progress.partitions.entities },
       semantic: { ...progress.partitions.semantic },
       topics: { ...progress.partitions.topics },
+    },
+    attempts: {
+      entities: { ...progress.attempts.entities },
+      semantic: { ...progress.attempts.semantic },
+      topics: { ...progress.attempts.topics },
     },
     phases: {
       entities: { ...progress.phases.entities },
@@ -274,8 +302,12 @@ function completeEarlierPhases(progress: TopicDiscoveryProgress, active: TopicPh
   for (const id of TOPIC_PHASE_ORDER.slice(0, activeIndex)) {
     const phase = progress.phases[id];
     if (phase.status === 'done') continue;
-    const total = Math.max(phase.total, 1);
-    progress.phases[id] = { ...phase, completed: total, total, running: 0, status: 'done' };
+    progress.phases[id] = {
+      ...phase,
+      completed: phase.total,
+      running: 0,
+      status: 'done',
+    };
   }
 }
 
@@ -283,8 +315,12 @@ function completeAllPhases(progress: TopicDiscoveryProgress): TopicDiscoveryProg
   const next = cloneProgress(progress);
   for (const id of TOPIC_PHASE_ORDER) {
     const phase = next.phases[id];
-    const total = Math.max(phase.total, 1);
-    next.phases[id] = { ...phase, completed: total, total, running: 0, status: 'done' };
+    next.phases[id] = {
+      ...phase,
+      completed: phase.total,
+      running: 0,
+      status: 'done',
+    };
   }
   return next;
 }

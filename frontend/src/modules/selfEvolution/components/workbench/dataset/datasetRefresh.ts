@@ -1,5 +1,7 @@
 import type { DatasetDraft, DatasetTab } from './types';
 
+const DATASET_TAB_ORDER: DatasetTab[] = ['materials', 'topics', 'cases'];
+
 export const TERMINAL_STAGE_EVENTS = new Set([
   'step.finish',
   'checkpoint.continue',
@@ -15,6 +17,24 @@ export function draftAffectsTab(draft: DatasetDraft | undefined, tab: DatasetTab
     return draft.kind === 'topic-names';
   }
   return draft.kind === 'generation-plan';
+}
+
+/** Stages whose SSE-derived execution progress is invalidated by a write. */
+export function executionImpactTabs(kind: DatasetDraft['kind']): DatasetTab[] {
+  const first = kind === 'materials-config' || kind === 'chunk-selection'
+    ? 'materials'
+    : kind === 'topic-names'
+      ? 'topics'
+      : 'cases';
+  return DATASET_TAB_ORDER.slice(DATASET_TAB_ORDER.indexOf(first));
+}
+
+export function shouldShowGenerationPlanPause(status: string | undefined): boolean {
+  return status === 'paused';
+}
+
+export function shouldResumeDatasetStream(lastHandledToken: number, nextToken: number): boolean {
+  return nextToken !== lastHandledToken;
 }
 
 export function shouldPublishRefresh(

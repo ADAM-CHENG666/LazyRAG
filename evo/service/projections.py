@@ -20,6 +20,8 @@ from evo.artifact_runtime import (
 )
 from evo.operations.dataset.chunks_build import BuildChunksParams
 from evo.operations.dataset.kb_client import KnowledgeBaseClient
+from evo.operations.dataset.qaplan import LANES, _lane_counts
+from evo.operations.dataset.qaplan_capacity import project_automatic_plan as _project_cases_automatic_plan
 
 from .contracts import ServiceError
 from .public import public_thread_state, public_value
@@ -60,6 +62,19 @@ class ProjectionService:
         return _encode_context('r1', {'refs': payload})
 
     @staticmethod
+    def _build_execution_revision(statuses: Mapping[str, Mapping[str, str]]) -> str:
+        cases: list[list[object]] = []
+        for case_id, operations in sorted(statuses.items()):
+            if not isinstance(case_id, str) or not case_id:
+                raise ServiceError(400, 'execution revision case id is invalid')
+            cases.append([case_id, [
+                operations.get('dataset.qaplan_spec', 'pending'),
+                operations.get('dataset.generate_case', 'pending'),
+                operations.get('dataset.enhance_case', 'pending'),
+            ]])
+        return _encode_context('e1', {'cases': cases})
+
+    @staticmethod
     def _resolve_revision(revision: str) -> tuple[ArtifactRef, ...]:
         payload = _decode_context(revision, 'r1', 'revision')
         refs = payload.get('refs')
@@ -79,7 +94,8 @@ class ProjectionService:
 
     @staticmethod
     def _build_page_token(*, thread_id: str, list_name: str, revision: str,
-                          filters: tuple[tuple[str, object], ...], page_size: int, next_offset: int) -> str:
+                          filters: tuple[tuple[str, object], ...], page_size: int, next_offset: int,
+                          execution_revision: str = '') -> str:
         ProjectionService._resolve_revision(revision)
         size = ProjectionService._validate_page_size(page_size)
         if not isinstance(next_offset, int) or isinstance(next_offset, bool) or next_offset < 0:
@@ -87,14 +103,19 @@ class ProjectionService:
         normalized = ProjectionService._normalize_filters(dict(filters))
         if normalized != filters or not isinstance(thread_id, str) or not thread_id or not isinstance(list_name, str) or not list_name:
             raise ServiceError(400, 'page token context is invalid')
-        return _encode_context('p1', {
+        if execution_revision and not isinstance(execution_revision, str):
+            raise ServiceError(400, 'execution revision is invalid')
+        payload: dict[str, object] = {
             'thread_id': thread_id,
             'list_name': list_name,
             'revision': revision,
             'filters': [list(item) for item in normalized],
             'page_size': size,
             'next_offset': next_offset,
-        })
+        }
+        if execution_revision:
+            payload['execution_revision'] = execution_revision
+        return _encode_context('p1', payload)
 
     @staticmethod
     def _resolve_page_token(token: str, *, thread_id: str, list_name: str,
@@ -124,7 +145,14 @@ class ProjectionService:
         revision = payload.get('revision')
         if not isinstance(revision, str):
             raise ServiceError(400, 'page_token is invalid')
-        return {'revision': revision, 'next_offset': offset}
+        execution_revision = payload.get('execution_revision', '')
+        if not isinstance(execution_revision, str):
+            raise ServiceError(400, 'page_token is invalid')
+        return {
+            'revision': revision,
+            'execution_revision': execution_revision,
+            'next_offset': offset,
+        }
 
     async def gates(self, thread_id: str) -> dict[str, Any]:
         history = await self.flow.run_history(thread_id)
@@ -274,26 +302,55 @@ class ProjectionService:
         except ServiceError as error:
             if error.status_code != 404:
                 raise
-            return _empty_cases_overview(thread_id, status, revision=None)
+            return _empty_cases_overview(
+                thread_id,
+                status,
+                revision=None,
+                execution_revision=self._build_execution_revision({}),
+            )
 
         revision = self._build_revision((_public_artifact_ref(params['record']),))
         manifest = await _optional_overview_artifact(self, thread_id, A.DATASET_QAPLAN_MANIFEST)
+        topic_manifest = await _optional_overview_artifact(self, thread_id, A.DATASET_TOPIC_MANIFEST)
+        import_manifest = await _optional_overview_artifact(self, thread_id, A.DATASET_IMPORT_CASES_MANIFEST)
         requests = await _optional_overview_artifact(self, thread_id, A.EVAL_CASE_REQUESTS)
+        automatic_plan = _project_cases_automatic_plan(
+            manifest=None if manifest is None else manifest['value'],
+            params=params['value'],
+            topic_manifest=None if topic_manifest is None else topic_manifest['value'],
+            import_manifest=None if import_manifest is None else import_manifest['value'],
+        )
         if requests is None:
-            return _empty_cases_overview(thread_id, status, revision=revision)
+            return {
+                'thread_id': thread_id,
+                'revision': revision,
+                'execution_revision': self._build_execution_revision({}),
+                'status': status,
+                'stages': _pending_case_stage_overview(_planned_case_count(
+                    None if import_manifest is None else import_manifest['value'],
+                )),
+                'automatic_plan': automatic_plan,
+            }
 
         case_ids = _case_ids_from_partition_set(requests['value'])
-        stages = await self._case_stage_counts(thread_id, case_ids)
+        statuses = await self._case_operation_statuses(thread_id, case_ids)
+        stages = self._summarize_case_statuses(statuses)
         return {
             'thread_id': thread_id,
             'revision': revision,
+            'execution_revision': self._build_execution_revision(statuses),
             'status': status,
             'stages': stages,
-            'automatic_plan': None if manifest is None else _automatic_case_plan(manifest['value']),
+            'automatic_plan': automatic_plan,
         }
 
     async def _case_stage_counts(self, thread_id: str, case_ids: tuple[str, ...]) -> dict[str, Any]:
-        statuses_by_case = await self._case_operation_statuses(thread_id, case_ids)
+        return self._summarize_case_statuses(
+            await self._case_operation_statuses(thread_id, case_ids),
+        )
+
+    @staticmethod
+    def _summarize_case_statuses(statuses_by_case: Mapping[str, Mapping[str, str]]) -> dict[str, Any]:
         statuses_by_operation: dict[str, list[str]] = {
             'dataset.qaplan_spec': [],
             'dataset.generate_case': [],
@@ -329,9 +386,12 @@ class ProjectionService:
             statuses: dict[str, str] = {}
             for operation_id in operation_ids:
                 operation_status = by_id.get(operation_id)
-                if operation_status not in {'pending', 'running', 'succeeded', 'failed'}:
+                if operation_status not in {'pending', 'running', 'succeeded', 'failed', 'cancelled'}:
                     raise ServiceError(409, f'case snapshot has no valid status for {operation_id}')
-                statuses[operation_id] = operation_status
+                statuses[operation_id] = {
+                    'succeeded': 'completed',
+                    'cancelled': 'canceled',
+                }.get(operation_status, operation_status)
             result[case_id] = statuses
         return result
 
@@ -345,14 +405,19 @@ class ProjectionService:
             plan_status, generate_status, grading_status, source, question_type, difficulty,
         )
         normalized_filters = self._normalize_filters(filters)
-        keys = (
+        complete_keys = (
             ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST),
             ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN),
             ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST),
             ArtifactKey.scalar(A.EVAL_CASE_REQUESTS),
         )
+        planned_keys = (
+            ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST),
+            ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN_PARAMS),
+        )
         refs: tuple[ArtifactRef, ...] = ()
         revision = ''
+        execution_revision = ''
         offset = 0
         if page_token:
             context = self._resolve_page_token(
@@ -360,42 +425,67 @@ class ProjectionService:
                 filters=normalized_filters, page_size=size,
             )
             refs = self._resolve_revision(context['revision'])
-            if {ref.key for ref in refs} != set(keys):
+            if {ref.key for ref in refs} not in (set(complete_keys), set(planned_keys)):
                 raise ServiceError(400, 'page_token is invalid')
-            revision, offset = context['revision'], context['next_offset']
+            revision = context['revision']
+            execution_revision = context['execution_revision']
+            offset = context['next_offset']
 
         refs_by_key = {ref.key: ref for ref in refs}
+        keys = tuple(ref.key for ref in refs) if refs else complete_keys
         try:
             artifacts = await self._read_artifact_batch(thread_id, keys, refs_by_key)
         except ServiceError as error:
             if page_token and error.status_code == 404:
                 raise ServiceError(409, 'page_token pagination snapshot is unavailable') from None
             if not page_token and error.status_code == 404:
-                return {'thread_id': thread_id, 'revision': None, 'items': [], 'next_page_token': ''}
-            raise
+                try:
+                    keys = planned_keys
+                    artifacts = await self._read_artifact_batch(thread_id, keys, {})
+                except ServiceError as planned_error:
+                    if planned_error.status_code != 404:
+                        raise
+                    return {
+                        'thread_id': thread_id, 'revision': None,
+                        'execution_revision': self._build_execution_revision({}),
+                        'items': [], 'next_page_token': '',
+                    }
+            else:
+                raise
         if not page_token:
             revision = self._build_revision(tuple(_public_artifact_ref(artifacts[key]['record']) for key in keys))
 
-        case_ids = _case_ids_from_partition_set(artifacts[ArtifactKey.scalar(A.EVAL_CASE_REQUESTS)]['value'])
-        statuses = await self._case_operation_statuses(thread_id, case_ids)
-        rows = [
-            row for row in _case_rows(
+        if set(keys) == set(planned_keys):
+            rows = _planned_case_rows(
+                artifacts[planned_keys[0]]['value'], artifacts[planned_keys[1]]['value'],
+            )
+            statuses = _pending_case_statuses(tuple(row['case_id'] for row in rows))
+        else:
+            case_ids = _case_ids_from_partition_set(artifacts[ArtifactKey.scalar(A.EVAL_CASE_REQUESTS)]['value'])
+            statuses = await self._case_operation_statuses(thread_id, case_ids)
+            rows = _case_rows(
                 case_ids,
                 artifacts[ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST)]['value'],
                 artifacts[ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN)]['value'],
                 artifacts[ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST)]['value'],
                 statuses,
-            ) if _case_matches(row, filters)
-        ]
+            )
+        current_execution_revision = self._build_execution_revision(statuses)
+        if page_token and execution_revision != current_execution_revision:
+            raise ServiceError(409, 'page_token execution snapshot is unavailable')
+        execution_revision = current_execution_revision
+        rows = [row for row in rows if _case_matches(row, filters)]
         page = _page(rows, size, str(offset))
         next_offset = page['next_page_token']
         return {
             'thread_id': thread_id,
             'revision': revision,
+            'execution_revision': execution_revision,
             'items': page['items'],
             'next_page_token': '' if not next_offset else self._build_page_token(
                 thread_id=thread_id, list_name='dataset.cases', revision=revision,
                 filters=normalized_filters, page_size=size, next_offset=int(next_offset),
+                execution_revision=execution_revision,
             ),
         }
 
@@ -2104,17 +2194,85 @@ async def _optional_overview_artifact(service: ProjectionService, thread_id: str
         return None
 
 
-def _empty_cases_overview(thread_id: str, status: str, *, revision: str | None) -> dict[str, Any]:
+def _empty_cases_overview(thread_id: str, status: str, *, revision: str | None,
+                          execution_revision: str) -> dict[str, Any]:
     return {
         'thread_id': thread_id,
         'revision': revision,
+        'execution_revision': execution_revision,
         'status': status,
-        'stages': {
-            name: {'status': 'pending', 'succeeded': None, 'total': None, 'status_counts': None}
-            for name in ('plan', 'generate', 'grading')
-        },
+        'stages': _pending_case_stage_overview(),
         'automatic_plan': None,
     }
+
+
+def _pending_case_stage_overview(total: int | None = None) -> dict[str, Any]:
+    return {
+        name: {
+            'status': 'pending', 'completed': 0 if total is not None else None, 'total': total,
+            'status_counts': None if total is None else {
+                'pending': total, 'running': 0, 'completed': 0, 'failed': 0, 'canceled': 0,
+            },
+        }
+        for name in ('plan', 'generate', 'grading')
+    }
+
+
+def _planned_case_count(value: object | None) -> int | None:
+    if value is None:
+        return None
+    allocation = _overview_mapping(
+        _overview_mapping(_overview_mapping(value, 'case import manifest').get('stats'), 'case import manifest.stats').get('case_allocation'),
+        'case import manifest.case_allocation',
+    )
+    target = allocation.get('target_case_count')
+    return target if isinstance(target, int) and not isinstance(target, bool) and target >= 0 else None
+
+
+def _pending_case_statuses(case_ids: tuple[str, ...]) -> dict[str, dict[str, str]]:
+    return {case_id: {
+        'dataset.qaplan_spec': 'pending', 'dataset.generate_case': 'pending',
+        'dataset.enhance_case': 'pending',
+    } for case_id in case_ids}
+
+
+def _planned_case_rows(import_manifest_value: object, params_value: object) -> list[dict[str, Any]]:
+    imported = _overview_mapping(import_manifest_value, 'case import manifest')
+    allocation = _overview_mapping(
+        _overview_mapping(imported.get('stats'), 'case import manifest.stats').get('case_allocation'),
+        'case import manifest.case_allocation',
+    )
+    assignments = _overview_mapping(allocation.get('assignments'), 'case import manifest.assignments')
+    details = imported.get('details')
+    if not isinstance(details, list):
+        raise ServiceError(503, 'case import manifest.details is invalid')
+    imported_cases = {item.get('source_row_number'): item.get('case') for item in details if isinstance(item, Mapping)}
+    generated_ids = [case_id for case_id, assignment in assignments.items()
+                     if isinstance(assignment, Mapping) and assignment.get('mode') == 'generated']
+    lane_counts = _lane_counts(params_value, len(generated_ids))
+    generated_meta: dict[str, tuple[str, str]] = {}
+    index = 0
+    for lane, question_type, difficulty in LANES:
+        for _ in range(lane_counts[lane]):
+            generated_meta[generated_ids[index]] = (question_type, difficulty)
+            index += 1
+    statuses = _pending_case_statuses(tuple(assignments))
+    rows = []
+    for case_id, raw_assignment in assignments.items():
+        assignment = _overview_mapping(raw_assignment, f'case assignment {case_id}')
+        mode = assignment.get('mode')
+        if mode == 'imported':
+            case = _overview_mapping(imported_cases.get(assignment.get('source_row_number')), f'imported case {case_id}')
+            question_type = _case_choice(case.get('question_type'), {'precision', 'reasoning'}, 'question_type')
+            difficulty = _case_choice(case.get('difficulty'), {'easy', 'medium', 'hard'}, 'difficulty')
+        elif mode == 'generated' and case_id in generated_meta:
+            question_type, difficulty = generated_meta[case_id]
+        else:
+            raise ServiceError(503, f'case assignment mode is invalid: {case_id}')
+        rows.append({'case_id': case_id, 'stages': {'plan': statuses[case_id]['dataset.qaplan_spec'],
+                     'generate': statuses[case_id]['dataset.generate_case'], 'grading': statuses[case_id]['dataset.enhance_case']},
+                     'source': mode, 'question_type': question_type, 'difficulty': difficulty, 'topic': None})
+    return rows
 
 
 def _case_ids_from_partition_set(value: object) -> tuple[str, ...]:
@@ -2128,54 +2286,31 @@ def _case_ids_from_partition_set(value: object) -> tuple[str, ...]:
 
 
 def _case_operation_summary(statuses: list[str]) -> dict[str, Any]:
-    counts = {name: statuses.count(name) for name in ('pending', 'running', 'succeeded', 'failed')}
+    counts = {name: statuses.count(name) for name in ('pending', 'running', 'completed', 'failed', 'canceled')}
     if counts['failed']:
         status = 'failed'
     elif counts['running']:
         status = 'running'
-    elif statuses and counts['succeeded'] == len(statuses):
-        status = 'succeeded'
+    elif statuses and counts['completed'] == len(statuses):
+        status = 'completed'
+    elif statuses and counts['canceled'] == len(statuses):
+        status = 'canceled'
     else:
         status = 'pending'
     return {
         'status': status,
-        'succeeded': counts['succeeded'],
+        'completed': counts['completed'],
         'total': len(statuses),
         'status_counts': counts,
     }
 
 
-def _automatic_case_plan(value: object) -> dict[str, Any]:
-    manifest = _overview_mapping(value, 'cases overview manifest')
-    stats = _overview_mapping(manifest.get('stats'), 'cases overview manifest.stats')
-    total = _overview_count(stats.get('auto_case_count'), 'cases overview manifest.auto_case_count')
-    summaries = manifest.get('lane_summaries')
-    if not isinstance(summaries, list):
-        raise ServiceError(409, 'cases overview manifest.lane_summaries is invalid')
-    result = {
-        question_type: {'total': 0, 'difficulties': {'easy': 0, 'medium': 0, 'hard': 0}}
-        for question_type in ('precision', 'reasoning')
-    }
-    for item in summaries:
-        summary = _overview_mapping(item, 'cases overview manifest lane summary')
-        question_type = summary.get('question_type')
-        difficulty = summary.get('difficulty')
-        if question_type not in result or difficulty not in result[question_type]['difficulties']:
-            raise ServiceError(409, 'cases overview manifest lane summary is invalid')
-        count = _overview_count(summary.get('allocated_case_count'), 'cases overview lane allocated_case_count')
-        result[question_type]['total'] += count
-        result[question_type]['difficulties'][difficulty] += count
-    if sum(item['total'] for item in result.values()) != total:
-        raise ServiceError(409, 'cases overview manifest automatic totals are inconsistent')
-    return {'total': total, 'question_types': result}
-
-
 def _case_filters(plan_status: str, generate_status: str, grading_status: str, source: str,
                   question_type: str, difficulty: str) -> dict[str, object]:
     values = {
-        'plan_status': (plan_status, {'pending', 'running', 'succeeded', 'failed'}),
-        'generate_status': (generate_status, {'pending', 'running', 'succeeded', 'failed'}),
-        'grading_status': (grading_status, {'pending', 'running', 'succeeded', 'failed'}),
+        'plan_status': (plan_status, {'pending', 'running', 'completed', 'failed', 'canceled'}),
+        'generate_status': (generate_status, {'pending', 'running', 'completed', 'failed', 'canceled'}),
+        'grading_status': (grading_status, {'pending', 'running', 'completed', 'failed', 'canceled'}),
         'source': (source, {'imported', 'generated'}),
         'question_type': (question_type, {'precision', 'reasoning'}),
         'difficulty': (difficulty, {'easy', 'medium', 'hard'}),

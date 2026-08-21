@@ -7,10 +7,13 @@ import { datasetRoot, describeRequestError, newRequestId, postJson } from "./api
 import { STATUS_TEXT } from "./primitives";
 import {
   draftAffectsTab,
+  executionImpactTabs,
   resolveRevisionRefreshAction,
+  shouldResumeDatasetStream,
   TERMINAL_STAGE_EVENTS,
 } from "./datasetRefresh";
 import { applyTopicLabelPartitionEvent, type TopicDiscoveryProgress } from "./topicLabelProgress";
+import { applyCaseGenerationPartitionEvent, type CaseGenerationProgress } from "./caseGenerationProgress";
 import { DATASET_TABS, useDatasetStages, type DatasetStreamEvent } from "./useDatasetStages";
 import "./dataset.scss";
 import {
@@ -24,15 +27,26 @@ import {
 const STEP_SYMBOL: Record<string, string> = {
   done: "✓",
   running: "●",
+  paused: "⏸",
   stale: "↻",
   failed: "!",
 };
 
-export function DatasetWorkspace({ threadId, onWriteApplied }: { threadId?: string; onWriteApplied?: () => void }) {
+export function DatasetWorkspace({
+  threadId,
+  onWriteApplied,
+  executionResumeToken = 0,
+}: {
+  threadId?: string;
+  onWriteApplied?: () => void;
+  executionResumeToken?: number;
+}) {
   const [tab, setTab] = useState<DatasetTab>("materials");
   const [refreshToken, setRefreshToken] = useState(0);
   const [overviewToken, setOverviewToken] = useState(0);
   const [topicLabelProgress, setTopicLabelProgress] = useState<TopicDiscoveryProgress>();
+  const [caseGenerationProgress, setCaseGenerationProgress] = useState<CaseGenerationProgress>();
+  const [caseReconciliationToken, setCaseReconciliationToken] = useState(0);
   const [staleTab, setStaleTab] = useState<DatasetTab>();
   const [draft, setDraft] = useState<DatasetDraft>();
   const [applying, setApplying] = useState(false);
@@ -48,13 +62,16 @@ export function DatasetWorkspace({ threadId, onWriteApplied }: { threadId?: stri
   const draftRef = useRef<DatasetDraft>();
   draftRef.current = draft;
   const topicProgressRef = useRef<TopicDiscoveryProgress>();
+  const caseProgressRef = useRef<CaseGenerationProgress>();
   const progressFlushRef = useRef<number>();
+  const handledExecutionResumeToken = useRef(executionResumeToken);
 
   const scheduleProgressFlush = useCallback(() => {
     if (progressFlushRef.current) return;
     progressFlushRef.current = requestAnimationFrame(() => {
       progressFlushRef.current = 0;
       setTopicLabelProgress(topicProgressRef.current);
+      setCaseGenerationProgress(caseProgressRef.current);
     });
   }, []);
 
@@ -81,7 +98,17 @@ export function DatasetWorkspace({ threadId, onWriteApplied }: { threadId?: stri
         scheduleProgressFlush();
       }
     }
+    if (event.tab === "cases" || event.stage === "dataset.case_generation") {
+      const next = applyCaseGenerationPartitionEvent(caseProgressRef.current, event);
+      if (next !== caseProgressRef.current) {
+        caseProgressRef.current = next;
+        scheduleProgressFlush();
+      }
+    }
     if (!TERMINAL_STAGE_EVENTS.has(event.event)) return;
+    if (event.tab === "cases") {
+      setCaseReconciliationToken((token) => token + 1);
+    }
     if (event.tab === tabRef.current) {
       probing.current = event.tab;
       setOverviewToken((token) => token + 1);
@@ -113,12 +140,33 @@ export function DatasetWorkspace({ threadId, onWriteApplied }: { threadId?: stri
     } else if (action === "pending") {
       pendingRefresh.current.add(stageTab);
     }
-  }, []);
+  }, [scheduleProgressFlush]);
 
-  const { statuses, activeTab, resumeAfterWrite } = useDatasetStages(threadId, handleStageEvent);
+  const handleCaseExecutionReconciled = useCallback(() => {
+    if (!caseProgressRef.current) return;
+    caseProgressRef.current = undefined;
+    scheduleProgressFlush();
+  }, [scheduleProgressFlush]);
+
+  const clearExecutionProgress = useCallback((tabs: DatasetTab[]) => {
+    if (tabs.includes("topics")) topicProgressRef.current = undefined;
+    if (tabs.includes("cases")) caseProgressRef.current = undefined;
+    scheduleProgressFlush();
+  }, [scheduleProgressFlush]);
+
+  const { statuses, activeTab, refreshSteps, resumeAfterWrite } = useDatasetStages(threadId, handleStageEvent);
 
   useEffect(() => {
+    if (!shouldResumeDatasetStream(handledExecutionResumeToken.current, executionResumeToken)) return;
+    handledExecutionResumeToken.current = executionResumeToken;
+    resumeAfterWrite();
+  }, [executionResumeToken, resumeAfterWrite]);
+
+  useEffect(() => {
+    followActiveStage.current = true;
+    setTab("materials");
     topicProgressRef.current = undefined;
+    caseProgressRef.current = undefined;
     pendingRefresh.current.clear();
     revisions.current = {};
     probing.current = undefined;
@@ -127,6 +175,8 @@ export function DatasetWorkspace({ threadId, onWriteApplied }: { threadId?: stri
       progressFlushRef.current = 0;
     }
     setTopicLabelProgress(undefined);
+    setCaseGenerationProgress(undefined);
+    setCaseReconciliationToken(0);
     setStaleTab(undefined);
   }, [threadId]);
 
@@ -153,6 +203,7 @@ export function DatasetWorkspace({ threadId, onWriteApplied }: { threadId?: stri
     followActiveStage.current = false;
     setStaleTab(undefined);
     setTab(next);
+    void refreshSteps();
     flushPendingRefresh(next);
   };
 
@@ -182,6 +233,7 @@ export function DatasetWorkspace({ threadId, onWriteApplied }: { threadId?: stri
     if (!threadId || !draft) return;
     setApplying(true);
     try {
+      const affectedTabs = executionImpactTabs(draft.kind);
       const root = datasetRoot(threadId);
       const requestId = newRequestId();
       if (draft.kind === "materials-config") {
@@ -211,7 +263,9 @@ export function DatasetWorkspace({ threadId, onWriteApplied }: { threadId?: stri
       }
       setDraft(undefined);
       setStaleTab(undefined);
+      clearExecutionProgress(affectedTabs);
       setRefreshToken((token) => token + 1);
+      setOverviewToken((token) => token + 1);
       resumeAfterWrite();
       onWriteApplied?.();
       message.success("修改已应用，受影响的步骤将重新执行。");
@@ -313,6 +367,7 @@ export function DatasetWorkspace({ threadId, onWriteApplied }: { threadId?: stri
             refreshToken={refreshToken}
             overviewToken={overviewToken}
             labelProgress={topicLabelProgress}
+            executionStatus={statuses.topics}
             onOverviewRevision={handleOverviewRevision}
             draft={draft}
             onSaveDraft={saveDraft}
@@ -322,10 +377,16 @@ export function DatasetWorkspace({ threadId, onWriteApplied }: { threadId?: stri
             threadId={threadId}
             refreshToken={refreshToken}
             overviewToken={overviewToken}
+            progress={caseGenerationProgress}
+            executionStatus={statuses.cases}
+            reconciliationToken={caseReconciliationToken}
             onOverviewRevision={handleOverviewRevision}
+            onExecutionReconciled={handleCaseExecutionReconciled}
             onSaveDraft={saveDraft}
             onCaseSaved={() => {
+              clearExecutionProgress(["cases"]);
               setRefreshToken((token) => token + 1);
+              setOverviewToken((token) => token + 1);
               resumeAfterWrite();
               onWriteApplied?.();
             }}

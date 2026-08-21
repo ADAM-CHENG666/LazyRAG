@@ -548,12 +548,12 @@ def test_cases_projects_plan_metadata_and_runtime_operation_statuses() -> None:
     assert result['items'] == [
         {
             'case_id': 'case-1',
-            'stages': {'plan': 'succeeded', 'generate': 'succeeded', 'grading': 'succeeded'},
+            'stages': {'plan': 'completed', 'generate': 'completed', 'grading': 'completed'},
             'source': 'imported', 'question_type': 'reasoning', 'difficulty': 'hard', 'topic': None,
         },
         {
             'case_id': 'case-2',
-            'stages': {'plan': 'succeeded', 'generate': 'running', 'grading': 'pending'},
+            'stages': {'plan': 'completed', 'generate': 'running', 'grading': 'pending'},
             'source': 'generated', 'question_type': 'precision', 'difficulty': 'medium',
             'topic': {'topic_id': 'topic-b', 'name': '主题 B'},
         },
@@ -566,12 +566,45 @@ def test_cases_projects_plan_metadata_and_runtime_operation_statuses() -> None:
     ]
 
 
+def test_cases_returns_all_rows_before_qaplan_outputs_exist() -> None:
+    values = {
+        ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST): {1: {
+            'stats': {'case_allocation': {
+                'target_case_count': 3, 'import_case_count': 1, 'auto_case_count': 2,
+                'assignments': {
+                    'case_0001': {'mode': 'imported', 'source_row_number': 1},
+                    'case_0002': {'mode': 'generated'},
+                    'case_0003': {'mode': 'generated'},
+                },
+            }},
+            'details': [{'source_row_number': 1, 'case': {
+                'id': 'case_0001', 'question_type': 'reasoning', 'difficulty': 'hard',
+            }}],
+        }},
+        ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN_PARAMS): {2: {'lane_case_counts': {
+            'precision_easy': 1, 'precision_medium': 0, 'precision_hard': 0,
+            'reasoning_easy': 0, 'reasoning_medium': 1, 'reasoning_hard': 0,
+        }}},
+    }
+    result = _cases(_case_list_service(values=values))
+
+    assert [(row['case_id'], row['source'], row['question_type'], row['difficulty']) for row in result['items']] == [
+        ('case_0001', 'imported', 'reasoning', 'hard'),
+        ('case_0002', 'generated', 'precision', 'easy'),
+        ('case_0003', 'generated', 'reasoning', 'medium'),
+    ]
+    assert all(row['topic'] is None for row in result['items'])
+    assert all(row['stages'] == {'plan': 'pending', 'generate': 'pending', 'grading': 'pending'}
+               for row in result['items'])
+    assert result['revision']
+
+
 def test_cases_combines_all_status_and_business_filters_with_and_semantics() -> None:
     service = _case_list_service()
 
     result = _cases(
         service,
-        plan_status='succeeded', generate_status='running', grading_status='pending',
+        plan_status='completed', generate_status='running', grading_status='pending',
         source='generated', question_type='precision', difficulty='medium',
     )
 
@@ -598,8 +631,20 @@ def test_cases_pagination_keeps_its_artifact_snapshot_and_binds_query_behavior()
     assert error.value.status_code == 400
 
 
+def test_cases_pagination_rejects_a_changed_runtime_execution_snapshot() -> None:
+    service = _case_list_service()
+    first = _cases(service, page_size=1)
+
+    service.flow._cases['case-2']['runtime']['operations'][1]['status'] = 'succeeded'
+
+    with pytest.raises(ServiceError) as error:
+        _cases(service, page_size=1, page_token=first['next_page_token'])
+
+    assert error.value.status_code == 409
+
+
 @pytest.mark.parametrize(('kwargs', 'message'), [
-    ({'plan_status': 'completed'}, 'plan_status'),
+    ({'plan_status': 'succeeded'}, 'plan_status'),
     ({'source': 'manual'}, 'source'),
     ({'question_type': 'factual'}, 'question_type'),
     ({'difficulty': 'very-hard'}, 'difficulty'),
@@ -678,7 +723,7 @@ def test_cases_handler_delegates_the_documented_query_parameters(monkeypatch: py
         response = client.get(
             '/threads/thr-1/dataset/cases',
             params={
-                'plan_status': 'succeeded', 'generate_status': 'running', 'grading_status': 'pending',
+                'plan_status': 'completed', 'generate_status': 'running', 'grading_status': 'pending',
                 'source': 'generated', 'question_type': 'precision', 'difficulty': 'medium',
                 'page_size': '20', 'page_token': 'page-2',
             },
@@ -688,7 +733,7 @@ def test_cases_handler_delegates_the_documented_query_parameters(monkeypatch: py
     assert response.status_code == 200
     assert invalid_response.status_code == 400
     assert calls == [('thr-1', {
-        'plan_status': 'succeeded', 'generate_status': 'running', 'grading_status': 'pending',
+        'plan_status': 'completed', 'generate_status': 'running', 'grading_status': 'pending',
         'source': 'generated', 'question_type': 'precision', 'difficulty': 'medium',
         'page_size': 20, 'page_token': 'page-2',
     })]

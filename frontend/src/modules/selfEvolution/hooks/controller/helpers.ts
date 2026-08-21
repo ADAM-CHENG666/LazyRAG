@@ -1053,6 +1053,9 @@ export function resolveCheckpointAwareStepStatus(
   if (!status || status !== "paused") {
     return status;
   }
+  if (options?.stage === "dataset") {
+    return status;
+  }
   if (isCheckpointGateFlowStatus(options?.flowStatus)) {
     return "done";
   }

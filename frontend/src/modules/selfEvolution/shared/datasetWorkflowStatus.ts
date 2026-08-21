@@ -12,6 +12,11 @@ export function isDatasetSubStage(stage?: string): boolean {
   return !!stage && DATASET_FLOW_STAGE_SET.has(stage);
 }
 
+/** A plan-capacity gate pauses Dataset itself; it is not a completed checkpoint. */
+export function terminalDatasetWorkflowStatus(status?: string): StepStatus | undefined {
+  return status?.trim().toLowerCase() === 'paused' ? 'paused' : undefined;
+}
+
 const COARSE_STAGE_BY_NAME: Record<string, ThreadEventStage> = {
   dataset: 'dataset',
   eval: 'eval',

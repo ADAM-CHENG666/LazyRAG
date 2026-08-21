@@ -4,15 +4,16 @@ export type DatasetTab = "materials" | "topics" | "cases";
 export type FlowStatus =
   | "pending"
   | "running"
+  | "paused"
   | "completed"
   | "awaiting_approval"
   | "failed";
 
 /** Per-operation status used by the three case sub-stages. */
-export type OperationStatus = "pending" | "running" | "succeeded" | "failed";
+export type OperationStatus = "pending" | "running" | "completed" | "failed" | "canceled";
 
 /** Visual status vocabulary shared by the stepper, status icons and rings. */
-export type VisualStatus = "done" | "running" | "stale" | "pending" | "failed";
+export type VisualStatus = "done" | "running" | "paused" | "stale" | "pending" | "failed";
 
 export type QuestionType = "precision" | "reasoning";
 export type Difficulty = "easy" | "medium" | "hard";
@@ -24,6 +25,7 @@ export type Ref = { id: string; name: string };
 export type PagedResponse<T> = {
   thread_id: string;
   revision: string | null;
+  execution_revision?: string;
   items: T[];
   next_page_token: string;
 };
@@ -138,7 +140,7 @@ export type TopicDetail = {
 
 export type CaseStageProgress = {
   status: OperationStatus;
-  succeeded: number | null;
+  completed: number | null;
   total: number | null;
   status_counts: Record<OperationStatus, number | null> | null;
 };
@@ -148,11 +150,16 @@ export type CaseDifficultyCounts = Record<Difficulty, number | null>;
 export type CasesOverview = {
   thread_id: string;
   revision: string | null;
+  execution_revision: string;
   status: FlowStatus;
   stages: Record<CaseStageKey, CaseStageProgress>;
   automatic_plan: {
     total: number | null;
-    question_types: Record<QuestionType, { total: number | null; difficulties: CaseDifficultyCounts }>;
+    question_types: Record<QuestionType, {
+      total: number | null;
+      difficulties: CaseDifficultyCounts;
+      capacities?: CaseDifficultyCounts;
+    }>;
   } | null;
 };
 

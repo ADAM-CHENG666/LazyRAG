@@ -192,6 +192,25 @@ def test_cases_overview_projects_manifest_and_three_runtime_operation_counts(
                 ],
             }},
             ArtifactKey.scalar(A.EVAL_CASE_REQUESTS): {3: PartitionSet(('case-1', 'case-2', 'case-3'))},
+            ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST): {5: {'topics': [
+                {'topic_id': 'topic-p-e', 'name': 'PE', 'question_type': 'precision',
+                 'chunk_ids': ['c-1'], 'chunk_count': 1},
+                {'topic_id': 'topic-r-h', 'name': 'RH', 'question_type': 'reasoning',
+                 'chunk_ids': ['c-2', 'c-3', 'c-4'], 'chunk_count': 3},
+            ]}},
+            ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST): {6: {
+                'stats': {
+                    'case_allocation': {
+                        'target_case_count': 2,
+                        'import_case_count': 0,
+                        'auto_case_count': 2,
+                        'assignments': {
+                            'case-1': {'mode': 'generated'},
+                            'case-2': {'mode': 'generated'},
+                        },
+                    },
+                },
+            }},
         },
         statuses={_CASE_STAGE: 'failed'},
         cases={
@@ -216,26 +235,111 @@ def test_cases_overview_projects_manifest_and_three_runtime_operation_counts(
     assert asyncio.run(service.cases_overview('thr-1')) == {
         'thread_id': 'thr-1',
         'revision': service._build_revision((params_ref,)),
+        'execution_revision': service._build_execution_revision({
+            'case-1': {
+                'dataset.qaplan_spec': 'completed',
+                'dataset.generate_case': 'completed',
+                'dataset.enhance_case': 'completed',
+            },
+            'case-2': {
+                'dataset.qaplan_spec': 'completed',
+                'dataset.generate_case': 'running',
+                'dataset.enhance_case': 'pending',
+            },
+            'case-3': {
+                'dataset.qaplan_spec': 'failed',
+                'dataset.generate_case': 'pending',
+                'dataset.enhance_case': 'pending',
+            },
+        }),
         'status': 'failed',
         'stages': {
             'plan': {
-                'status': 'failed', 'succeeded': 2, 'total': 3,
-                'status_counts': {'pending': 0, 'running': 0, 'succeeded': 2, 'failed': 1},
+                'status': 'failed', 'completed': 2, 'total': 3,
+                'status_counts': {'pending': 0, 'running': 0, 'completed': 2, 'failed': 1, 'canceled': 0},
             },
             'generate': {
-                'status': 'running', 'succeeded': 1, 'total': 3,
-                'status_counts': {'pending': 1, 'running': 1, 'succeeded': 1, 'failed': 0},
+                'status': 'running', 'completed': 1, 'total': 3,
+                'status_counts': {'pending': 1, 'running': 1, 'completed': 1, 'failed': 0, 'canceled': 0},
             },
             'grading': {
-                'status': 'pending', 'succeeded': 1, 'total': 3,
-                'status_counts': {'pending': 2, 'running': 0, 'succeeded': 1, 'failed': 0},
+                'status': 'pending', 'completed': 1, 'total': 3,
+                'status_counts': {'pending': 2, 'running': 0, 'completed': 1, 'failed': 0, 'canceled': 0},
             },
         },
         'automatic_plan': {
             'total': 2,
             'question_types': {
-                'precision': {'total': 1, 'difficulties': {'easy': 1, 'medium': 0, 'hard': 0}},
-                'reasoning': {'total': 1, 'difficulties': {'easy': 0, 'medium': 0, 'hard': 1}},
+                'precision': {
+                    'total': 1,
+                    'difficulties': {'easy': 1, 'medium': 0, 'hard': 0},
+                    'capacities': {'easy': 1, 'medium': 0, 'hard': 0},
+                },
+                'reasoning': {
+                    'total': 1,
+                    'difficulties': {'easy': 0, 'medium': 0, 'hard': 1},
+                    'capacities': {'easy': 1, 'medium': 1, 'hard': 1},
+                },
+            },
+        },
+    }
+
+
+def test_cases_overview_projects_capacities_before_qaplan_manifest(
+        monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_case_stage(monkeypatch)
+    params_ref = ArtifactRef(ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN_PARAMS), 1)
+    service = _service(
+        values={
+            params_ref.key: {1: {}},
+            ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST): {2: {'topics': [
+                {'topic_id': 'topic-p-h', 'name': 'PH', 'question_type': 'precision',
+                 'chunk_ids': ['c-1', 'c-2', 'c-3'], 'chunk_count': 3},
+                {'topic_id': 'topic-r-h', 'name': 'RH', 'question_type': 'reasoning',
+                 'chunk_ids': ['c-4', 'c-5', 'c-6'], 'chunk_count': 3},
+            ]}},
+            ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST): {3: {
+                'stats': {
+                    'case_allocation': {
+                        'target_case_count': 2,
+                        'import_case_count': 0,
+                        'auto_case_count': 2,
+                        'assignments': {
+                            'case_0001': {'mode': 'generated'},
+                            'case_0002': {'mode': 'generated'},
+                        },
+                    },
+                },
+            }},
+        },
+        statuses={_CASE_STAGE: 'paused'},
+    )
+
+    assert asyncio.run(service.cases_overview('thr-1')) == {
+        'thread_id': 'thr-1',
+        'revision': service._build_revision((params_ref,)),
+        'execution_revision': service._build_execution_revision({}),
+        'status': 'paused',
+        'stages': {
+            name: {'status': 'pending', 'completed': 0, 'total': 2, 'status_counts': {
+                'pending': 2, 'running': 0, 'completed': 0, 'failed': 0, 'canceled': 0,
+            }}
+            for name in ('plan', 'generate', 'grading')
+        },
+        'automatic_plan': {
+            'total': 2,
+            'question_types': {
+                'precision': {
+                    'total': 2,
+                    'difficulties': {'easy': 1, 'medium': 1, 'hard': 0},
+                    'capacities': {'easy': 1, 'medium': 1, 'hard': 1},
+                },
+                'reasoning': {
+                    'total': 0,
+                    'difficulties': {'easy': 0, 'medium': 0, 'hard': 0},
+                    'capacities': {'easy': 1, 'medium': 1, 'hard': 1},
+                },
             },
         },
     }
@@ -247,16 +351,32 @@ def test_cases_overview_keeps_plan_revision_and_reports_pending_before_case_part
     _enable_case_stage(monkeypatch)
     params_ref = ArtifactRef(ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN_PARAMS), 1)
     service = _service(
-        values={params_ref.key: {1: {'lane_case_counts': {}}}},
+        values={
+            params_ref.key: {1: {'lane_case_counts': {}}},
+            ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST): {2: {'topics': []}},
+            ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST): {3: {
+                'stats': {
+                    'case_allocation': {
+                        'target_case_count': 0,
+                        'import_case_count': 0,
+                        'auto_case_count': 0,
+                        'assignments': {},
+                    },
+                },
+            }},
+        },
         statuses={_CASE_STAGE: 'pending'},
     )
 
     assert asyncio.run(service.cases_overview('thr-1')) == {
         'thread_id': 'thr-1',
         'revision': service._build_revision((params_ref,)),
+        'execution_revision': service._build_execution_revision({}),
         'status': 'pending',
         'stages': {
-            name: {'status': 'pending', 'succeeded': None, 'total': None, 'status_counts': None}
+            name: {'status': 'pending', 'completed': 0, 'total': 0, 'status_counts': {
+                'pending': 0, 'running': 0, 'completed': 0, 'failed': 0, 'canceled': 0,
+            }}
             for name in ('plan', 'generate', 'grading')
         },
         'automatic_plan': None,

@@ -8,7 +8,7 @@ import { buildCheckpointWaitPrompt, buildFailureRetryPrompt } from "./checkpoint
 import { buildAbtestEventDisplayText, buildAnalysisEventDisplayText, buildApplyEventDisplayText, buildDatasetEventDisplayText, buildEvalEventDisplayText, compactPayloadForDisplay } from "./eventDisplay";
 import { getEvalPayloadPhase, getWorkflowProgressSnapshot } from "./progress";
 import { localizeErrorCode } from "@/components/request";
-import { toThreadEventStage } from "./datasetWorkflowStatus";
+import { terminalDatasetWorkflowStatus, toThreadEventStage } from "./datasetWorkflowStatus";
 
 const THREAD_EVENT_STAGE_ORDER: ThreadEventStage[] = [
   "dataset",
@@ -142,9 +142,10 @@ export function buildTerminalStatusByStage(
     if (!stage) {
       continue;
     }
-    result[stage] = resolveTerminalStepStatusFromFlowStatus(
-      getFlowStatusFromPayload(event.payload),
-    );
+    const flowStatus = getFlowStatusFromPayload(event.payload);
+    result[stage] =
+      (stage === 'dataset' ? terminalDatasetWorkflowStatus(flowStatus) : undefined) ||
+      resolveTerminalStepStatusFromFlowStatus(flowStatus);
   }
   return result;
 }

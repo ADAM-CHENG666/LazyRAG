@@ -2,17 +2,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AgentAppsAuth } from "@/components/auth";
 import { getJson, threadRoot } from "./api";
 import type { DatasetTab, ThreadStepsResponse, VisualStatus } from "./types";
-import { toVisualStatus } from "./primitives";
-
-const STAGE_BY_TAB: Record<DatasetTab, string> = {
-  materials: "dataset.material_preparation",
-  topics: "dataset.topic_discovery",
-  cases: "dataset.case_generation",
-};
-
-const TAB_BY_STAGE: Record<string, DatasetTab> = Object.fromEntries(
-  Object.entries(STAGE_BY_TAB).map(([tab, stage]) => [stage, tab as DatasetTab]),
-) as Record<string, DatasetTab>;
+import {
+  activeDatasetTabForThread,
+  datasetTabForStage,
+  deriveDatasetStageState,
+  INITIAL_STAGE_STATUSES,
+  isCurrentDatasetExecutionEvent,
+} from "./stageState";
 
 export const DATASET_TABS: Array<{ id: DatasetTab; label: string }> = [
   { id: "materials", label: "材料准备" },
@@ -34,12 +30,6 @@ export type DatasetStreamEvent = {
   progress?: { current?: number | null; total?: number | null };
 };
 
-const INITIAL_STATUSES: StageStatuses = {
-  materials: "pending",
-  topics: "pending",
-  cases: "pending",
-};
-
 /**
  * Derives the three dataset step states from the shared thread step list and
  * keeps them live through the thread event stream.
@@ -52,47 +42,53 @@ const INITIAL_STATUSES: StageStatuses = {
  * whether it affects transient local progress or published stage data.
  */
 export function useDatasetStages(threadId: string | undefined, onStageEvent: (event: DatasetStreamEvent) => void) {
-  const [statuses, setStatuses] = useState<StageStatuses>(INITIAL_STATUSES);
+  const [statuses, setStatuses] = useState<StageStatuses>(INITIAL_STAGE_STATUSES);
   const [activeTab, setActiveTab] = useState<DatasetTab>();
+  const [activeTabThreadId, setActiveTabThreadId] = useState<string>();
   const eventHandler = useRef(onStageEvent);
   eventHandler.current = onStageEvent;
   const resumeStream = useRef<(force?: boolean) => void>(() => undefined);
+  const activeStepId = useRef<string>();
+  const inactiveStepIds = useRef(new Set<string>());
 
   const refreshSteps = useCallback(async () => {
-    if (!threadId) return;
+    if (!threadId) return undefined;
     try {
       const response = await getJson<ThreadStepsResponse>(`${threadRoot(threadId)}/steps`);
-      const next = { ...INITIAL_STATUSES };
-      let running: DatasetTab | undefined;
-      // Later entries are re-runs of the same stage and win over earlier ones.
-      for (const item of response.items || []) {
-        const tab = TAB_BY_STAGE[item.stage];
-        if (!tab) continue;
-        next[tab] = item.status === 'paused' ? 'done' : toVisualStatus(item.status);
-        if (item.step_id === response.active_step_id) running = tab;
-      }
-      setStatuses(next);
-      setActiveTab(running);
+      const next = deriveDatasetStageState(response);
+      activeStepId.current = next.activeStepId;
+      inactiveStepIds.current = new Set(
+        (response.items || [])
+          .map((item) => item.step_id)
+          .filter((stepId) => stepId && stepId !== next.activeStepId),
+      );
+      setStatuses(next.statuses);
+      setActiveTab(next.activeTab);
+      setActiveTabThreadId(threadId);
+      return next;
     } catch {
       // The stepper keeps its previous state; the stage panels report their own errors.
+      return undefined;
     }
   }, [threadId]);
 
   const resumeAfterWrite = useCallback(() => {
-    void refreshSteps();
     resumeStream.current(true);
-  }, [refreshSteps]);
+  }, []);
 
   useEffect(() => {
-    void refreshSteps();
-  }, [refreshSteps]);
+    setStatuses(INITIAL_STAGE_STATUSES);
+    setActiveTab(undefined);
+    setActiveTabThreadId(undefined);
+    activeStepId.current = undefined;
+    inactiveStepIds.current.clear();
+  }, [threadId]);
 
   useEffect(() => {
     if (!threadId) return undefined;
     let stopped = false;
     let round = 0;
     let activeController: AbortController | undefined;
-    const seenStepIds = new Set<string>();
     let lastEventId: string | undefined;
     let streamEnded = false;
 
@@ -103,6 +99,8 @@ export function useDatasetStages(threadId: string | undefined, onStageEvent: (ev
       const controller = new AbortController();
       activeController = controller;
       try {
+        await refreshSteps();
+        if (stopped || myRound !== round) return;
         const headers: Record<string, string> = {
           Accept: "text/event-stream",
           ...AgentAppsAuth.getAuthHeaders(),
@@ -123,7 +121,6 @@ export function useDatasetStages(threadId: string | undefined, onStageEvent: (ev
           const frames = buffer.split(/\r?\n\r?\n/);
           buffer = frames.pop() || "";
           let reachedDone = false;
-          let handledEvents = 0;
           for (const frame of frames) {
             const parsed = parseDatasetSseFrame(frame);
             if (!parsed) continue;
@@ -131,25 +128,21 @@ export function useDatasetStages(threadId: string | undefined, onStageEvent: (ev
             const event = toDatasetStreamEvent(parsed);
             if (parsed.event === "done") {
               streamEnded = true;
-              void refreshSteps();
+              await refreshSteps();
               if (event) eventHandler.current(event);
               reachedDone = true;
               break;
             }
             if (!event) continue;
             const isFlowEvent = event.event === "step.finish" || event.event === "checkpoint.continue";
-            if (isFlowEvent || (event.stepId && !seenStepIds.has(event.stepId))) {
-              if (event.stepId) seenStepIds.add(event.stepId);
-              void refreshSteps();
+            if (!isCurrentDatasetExecutionEvent(activeStepId.current, event.stepId)) {
+              if (inactiveStepIds.current.has(event.stepId)) continue;
+              const next = await refreshSteps();
+              if (!isCurrentDatasetExecutionEvent(next?.activeStepId, event.stepId)) continue;
             }
             eventHandler.current(event);
-            handledEvents += 1;
-            if (handledEvents >= 48) {
-              handledEvents = 0;
-              await new Promise<void>((resolve) => {
-                requestAnimationFrame(() => resolve());
-              });
-              if (stopped || myRound !== round) break;
+            if (isFlowEvent) {
+              await refreshSteps();
             }
           }
           if (reachedDone) {
@@ -178,7 +171,12 @@ export function useDatasetStages(threadId: string | undefined, onStageEvent: (ev
     };
   }, [refreshSteps, threadId]);
 
-  return { statuses, activeTab, refreshSteps, resumeAfterWrite };
+  return {
+    statuses,
+    activeTab: activeDatasetTabForThread(threadId, activeTabThreadId, activeTab),
+    refreshSteps,
+    resumeAfterWrite,
+  };
 }
 
 type ParsedDatasetFrame = {
@@ -222,7 +220,7 @@ function parseDatasetSseFrame(frame: string): ParsedDatasetFrame | undefined {
 function toDatasetStreamEvent(parsed: ParsedDatasetFrame): DatasetStreamEvent | undefined {
   const { event, payload } = parsed;
   const stage = payload.stage || payload.current_step;
-  const tab = stage ? TAB_BY_STAGE[stage] : undefined;
+  const tab = stage ? datasetTabForStage(stage) : undefined;
   return stage && tab && event
     ? {
         event,

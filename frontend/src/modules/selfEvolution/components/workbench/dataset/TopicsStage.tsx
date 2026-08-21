@@ -29,6 +29,7 @@ import type {
   TopicDetail,
   TopicRow,
   TopicsOverview,
+  VisualStatus,
 } from "./types";
 
 type Props = {
@@ -36,6 +37,7 @@ type Props = {
   refreshToken: number;
   overviewToken: number;
   labelProgress?: TopicDiscoveryProgress;
+  executionStatus: VisualStatus;
   onOverviewRevision: (tab: "topics", revision: string | null) => void;
   draft?: DatasetDraft;
   onSaveDraft: (draft: DatasetDraft) => boolean;
@@ -54,6 +56,7 @@ export function TopicsStage({
   refreshToken,
   overviewToken,
   labelProgress,
+  executionStatus,
   onOverviewRevision,
   draft,
   onSaveDraft,
@@ -99,8 +102,8 @@ export function TopicsStage({
   const stageStatus = toVisualStatus(overview.data?.status || "pending");
   const hasFilters = Boolean(questionType || chunkBucket);
   const discoverySteps = useMemo(
-    () => topicDiscoverySteps(labelProgress, overview.data),
-    [labelProgress, overview.data],
+    () => topicDiscoverySteps(labelProgress, overview.data, executionStatus),
+    [executionStatus, labelProgress, overview.data],
   );
   const clearFilters = () => {
     setQuestionType(undefined);

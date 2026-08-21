@@ -47,6 +47,14 @@ class _ApplyFlow:
     async def commit_values(self, thread_id: str, commit: ArtifactCommit) -> object:
         return await self.commit(thread_id, commit)
 
+    async def snapshot(self, _thread_id: str) -> object:
+        from types import SimpleNamespace
+
+        return SimpleNamespace(status='running')
+
+    async def resume(self, thread_id: str) -> None:
+        del thread_id
+
 
 def _service(values: dict[ArtifactKey, tuple[int, object]]) -> tuple[EvoService, _ApplyFlow]:
     flow = _ApplyFlow(values)
@@ -99,8 +107,12 @@ def _material_values() -> dict[ArtifactKey, tuple[int, object]]:
 
 
 def _generation_plan_values() -> dict[ArtifactKey, tuple[int, object]]:
+    return _generation_plan_values_with_plan()
+
+
+def _generation_plan_values_with_plan() -> dict[ArtifactKey, tuple[int, object]]:
     return {
-        ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN_PARAMS): (12, {}),
+        **_generation_plan_topic_values(),
         ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN): (13, {
             'stats': {
                 'auto_case_count': 4,
@@ -112,6 +124,58 @@ def _generation_plan_values() -> dict[ArtifactKey, tuple[int, object]]:
                     {'lane': 'reasoning_medium', 'eligible_topic_count': 1},
                     {'lane': 'reasoning_hard', 'eligible_topic_count': 1},
                 ],
+            },
+        }),
+    }
+
+
+def _generation_plan_topic_values(*, eligible: dict[str, int] | None = None) -> dict[ArtifactKey, tuple[int, object]]:
+    eligible = eligible or {
+        'precision_easy': 2,
+        'precision_medium': 1,
+        'precision_hard': 1,
+        'reasoning_easy': 2,
+        'reasoning_medium': 1,
+        'reasoning_hard': 1,
+    }
+
+    def _topics(count: int, *, question_type: str, chunks: int, start: int) -> list[dict[str, object]]:
+        return [{
+            'topic_id': f'{question_type}-{start + index}',
+            'name': f'{question_type} {start + index}',
+            'question_type': question_type,
+            'chunk_ids': [f'chunk-{question_type}-{start + index}-{part}' for part in range(chunks)],
+            'chunk_count': chunks,
+        } for index in range(count)]
+
+    next_id = 1
+    topic_groups = []
+    for question_type, chunks, lane_key in (
+        ('precision', 1, 'precision_easy'),
+        ('precision', 2, 'precision_medium'),
+        ('precision', 3, 'precision_hard'),
+        ('reasoning', 1, 'reasoning_easy'),
+        ('reasoning', 2, 'reasoning_medium'),
+        ('reasoning', 3, 'reasoning_hard'),
+    ):
+        count = eligible[lane_key]
+        topic_groups.extend(_topics(count, question_type=question_type, chunks=chunks, start=next_id))
+        next_id += count
+    topics = topic_groups
+    return {
+        ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN_PARAMS): (12, {}),
+        ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST): (14, {'topics': topics}),
+        ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST): (15, {
+            'stats': {
+                'case_allocation': {
+                    'target_case_count': 4,
+                    'import_case_count': 0,
+                    'auto_case_count': 4,
+                    'assignments': {
+                        f'case_{index:04d}': {'mode': 'generated'}
+                        for index in range(1, 5)
+                    },
+                },
             },
         }),
     }
@@ -295,9 +359,28 @@ def test_apply_generation_plan_converts_distribution_and_commits_params_with_rev
     }}
 
 
+def test_apply_generation_plan_works_without_qaplan_plan_using_topic_manifest() -> None:
+    values = _generation_plan_topic_values()
+    params_key = ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN_PARAMS)
+    params_ref = ArtifactRef(params_key, 12)
+    service, flow = _service(values)
+
+    asyncio.run(service.apply_generation_plan('thr-1', {
+        'request_id': 'plan-no-qaplan',
+        'expected_revision': _revision(params_ref),
+        'distribution': _distribution(),
+    }))
+
+    assert len(flow.commits) == 1
+    assert flow.commits[0].writes[0].value == {'lane_case_counts': {
+        'precision_easy': 1, 'precision_medium': 1, 'precision_hard': 0,
+        'reasoning_easy': 1, 'reasoning_medium': 1, 'reasoning_hard': 0,
+    }}
+
+
 @pytest.mark.parametrize(('distribution', 'message'), [
     (_distribution(precision_easy=2, precision_medium=1, reasoning_easy=1, reasoning_medium=1), 'total'),
-    (_distribution(precision_medium=2, reasoning_easy=1, reasoning_medium=0), 'capacity'),
+        (_distribution(precision_easy=1, precision_medium=3, reasoning_easy=0, reasoning_medium=0), 'capacity'),
 ])
 def test_apply_generation_plan_rejects_invalid_total_or_lane_capacity(distribution: dict[str, object], message: str) -> None:
     params_key = ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN_PARAMS)
@@ -314,7 +397,7 @@ def test_apply_generation_plan_rejects_invalid_total_or_lane_capacity(distributi
     assert flow.commits == []
 
 
-def test_apply_generation_plan_requires_the_overview_params_revision_and_a_current_plan() -> None:
+def test_apply_generation_plan_requires_the_overview_params_revision() -> None:
     params_key = ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN_PARAMS)
     plan_key = ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN)
     params_ref = ArtifactRef(params_key, 12)
@@ -329,14 +412,50 @@ def test_apply_generation_plan_requires_the_overview_params_revision_and_a_curre
         }))
     assert revision_error.value.status_code == 400
 
-    unavailable, _ = _service({params_key: (12, {})})
-    with pytest.raises(ServiceError) as plan_error:
-        asyncio.run(unavailable.apply_generation_plan('thr-1', {
-            'request_id': 'plan-unavailable',
-            'expected_revision': _revision(params_ref),
-            'distribution': _distribution(),
-        }))
-    assert plan_error.value.status_code == 409
+
+class _ResumableApplyFlow(_ApplyFlow):
+    def __init__(self, values: dict[ArtifactKey, tuple[int, object]], *, status: str = 'paused') -> None:
+        super().__init__(values)
+        self.status = status
+        self.resumed = False
+
+    async def snapshot(self, _thread_id: str) -> object:
+        from types import SimpleNamespace
+
+        return SimpleNamespace(status=self.status)
+
+    async def resume(self, thread_id: str) -> None:
+        del thread_id
+        self.resumed = True
+        self.status = 'running'
+
+
+def test_apply_generation_plan_resumes_paused_thread_after_apply() -> None:
+    values = _generation_plan_topic_values()
+    params_key = ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN_PARAMS)
+    params_ref = ArtifactRef(params_key, 12)
+    flow = _ResumableApplyFlow(values)
+    service, _ = _service_with_resumable_flow(flow)
+
+    asyncio.run(service.apply_generation_plan('thr-1', {
+        'request_id': 'plan-resume',
+        'expected_revision': _revision(params_ref),
+        'distribution': _distribution(),
+    }))
+
+    assert flow.resumed is True
+    assert len(flow.commits) == 1
+
+
+def _service_with_resumable_flow(flow: _ResumableApplyFlow) -> tuple[EvoService, _ResumableApplyFlow]:
+    service = object.__new__(EvoService)
+    service.flow = flow
+
+    async def _continue(_thread_id: str) -> None:
+        return None
+
+    service._continue_automatic = _continue  # type: ignore[method-assign]
+    return service, flow
 
 
 def test_apply_material_scan_config_commits_complete_changed_values_with_three_way_cas() -> None:

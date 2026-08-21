@@ -5,7 +5,7 @@ import type { PagedResponse } from "./types";
 export const PAGE_SIZE = 50;
 export const CHUNK_PAGE_SIZE = 100;
 
-type ResourceState<T> = { data?: T; loading: boolean; error?: string };
+type ResourceState<T> = { data?: T; loading: boolean; error?: string; loadedToken?: number };
 
 /** Loads a single dataset object (an overview, a detail, an option set). */
 export function useDatasetResource<T>(
@@ -25,7 +25,7 @@ export function useDatasetResource<T>(
     setState((prev) => ({ data: prev.data, loading: true }));
     fetchOne()
       .then((data) => {
-        if (!cancelled) setState({ data, loading: false });
+        if (!cancelled) setState({ data, loading: false, loadedToken: refreshToken });
       })
       .catch((error) => {
         if (!cancelled) setState({ loading: false, error: describeRequestError(error, failureText) });
@@ -43,12 +43,14 @@ export function useDatasetResource<T>(
 type ListState<T> = {
   items: T[];
   revision: string | null;
+  executionRevision?: string;
   nextPageToken: string;
   loading: boolean;
   error?: string;
+  loadedToken?: number;
 };
 
-const EMPTY_LIST = { items: [], revision: null, nextPageToken: "", loading: false };
+const EMPTY_LIST = { items: [], revision: null, executionRevision: undefined, nextPageToken: "", loading: false };
 
 /**
  * Cursor paginated list. `fetchPage` must be stable (memoised on its filters);
@@ -75,8 +77,10 @@ export function useDatasetList<T>(
         setState({
           items: page.items || [],
           revision: page.revision,
+          executionRevision: page.execution_revision,
           nextPageToken: page.next_page_token || "",
           loading: false,
+          loadedToken: refreshToken,
         });
       })
       .catch((error) => {
@@ -98,8 +102,10 @@ export function useDatasetList<T>(
       setState((prev) => ({
         items: [...prev.items, ...(page.items || [])],
         revision: page.revision,
+        executionRevision: page.execution_revision,
         nextPageToken: page.next_page_token || "",
         loading: false,
+        loadedToken: prev.loadedToken,
       }));
     } catch (error) {
       setState((prev) => ({

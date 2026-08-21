@@ -51,7 +51,7 @@ const toDraft = (detail: CaseDetail): Draft => ({
 /** Opens on the sub-stage that most needs attention: the first unfinished one. */
 const focusStage = (detail: CaseDetail): CaseStageKey => {
   const order: CaseStageKey[] = ["plan", "generate", "grading"];
-  return order.find((stage) => detail.stages[stage].status !== "succeeded") || "generate";
+  return order.find((stage) => detail.stages[stage].status !== "completed") || "generate";
 };
 
 export function CaseDetailDrawer({

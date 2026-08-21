@@ -84,6 +84,12 @@ $ds-line: #dbe8f9;
     color: $ds-amber;
   }
 
+  &.is-paused .dataset-step-dot {
+    border-color: #cbb6e6;
+    background: #f7f1ff;
+    color: $ds-purple;
+  }
+
   &.is-stale .dataset-step-dot {
     border-color: #cbb6e6;
     background: #f7f1ff;
@@ -148,6 +154,36 @@ $ds-line: #dbe8f9;
 
   .ant-btn {
     margin-left: auto;
+  }
+}
+
+.dataset-pause-notice {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin: 10px 12px 0;
+  padding: 12px 14px;
+  border: 1px solid #f0c36a;
+  border-radius: 9px;
+  background: #fff9eb;
+  color: #7d5710;
+
+  div {
+    display: grid;
+    gap: 3px;
+  }
+
+  strong {
+    font-size: 14px;
+  }
+
+  span {
+    font-size: 12px;
+  }
+
+  .ant-btn {
+    margin-left: auto;
+    flex: 0 0 auto;
   }
 }
 
@@ -431,6 +467,12 @@ $ds-line: #dbe8f9;
 
   &.is-running {
     --dataset-progress-color: #dda93d;
+  }
+
+  &.is-paused {
+    border-color: #cbb6e6;
+    background: #f7f1ff;
+    color: $ds-purple;
   }
 
   &.is-stale {
