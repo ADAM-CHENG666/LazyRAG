@@ -850,16 +850,16 @@ const ChatLayout: FC<IChatLayoutProps> = (props) => {
           className="task-panel-restore-btn"
           onClick={() => setIsTaskPanelCollapsed(false)}
           title={t("taskCenter.panelTitle")}
-        >
-          <span className="task-panel-restore-icon">&#8249;</span>
-          <span className="task-panel-restore-label">
-            {taskDisplayCount > 0
+          >
+            <span className="task-panel-restore-icon">&#8249;</span>
+            <span className="task-panel-restore-label">
+              {taskDisplayCount > 0
               ? `${t("taskCenter.panelTitle")} (${taskDisplayCount})`
               : t("taskCenter.panelTitle")}
           </span>
-        </button>
-      )}
-      {((hasTaskPanelContent && !workflowPanelExpanded && !isTaskPanelCollapsed) || workflowPanelExpanded) && (
+          </button>
+        )}
+        {((hasTaskPanelContent && !workflowPanelExpanded && !isTaskPanelCollapsed) || workflowPanelExpanded) && (
         <div
           className={`right-box${!developerModeActive && !workflowPanelExpanded ? " right-box--ordinary" : ""}${workflowPanelExpanded ? " right-box--expanded-tab" : ""}${workflowPanelExpanded && expandedRailTab !== "tasks" ? " right-box--tab-hidden" : ""}`}
           style={!workflowPanelExpanded && panelWidth ? { width: panelWidth, minWidth: panelWidth } : undefined}

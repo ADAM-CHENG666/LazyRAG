@@ -53,7 +53,17 @@ vi.mock("@/components/StateGraphModal", () => ({
   WORKFLOW_GRAPH_REFRESH_EVENT: "workflow-graph-refresh",
 }));
 
-import { useTaskCenterStore } from "./taskCenter";
+import { isTaskCenterVisibleTask, useTaskCenterStore } from "./taskCenter";
+
+describe("isTaskCenterVisibleTask", () => {
+  it("hides workflow execution tasks from the standalone developer task list", () => {
+    expect(isTaskCenterVisibleTask({ agent_type: "workflow_step" })).toBe(false);
+  });
+
+  it("keeps ordinary subagent tasks visible", () => {
+    expect(isTaskCenterVisibleTask({ agent_type: "subagent" })).toBe(true);
+  });
+});
 
 describe("task center workflow events", () => {
   beforeEach(() => {

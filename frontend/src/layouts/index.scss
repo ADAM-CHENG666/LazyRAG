@@ -583,6 +583,10 @@
   overflow: hidden;
 }
 
+.main-layout-content.is-chat-page.is-sidebar-collapsed .workflow-panel__header {
+  padding-inline-start: 48px;
+}
+
 .main-layout-content.is-sidebar-collapsed {
   .knowledge-list-page .knowledge-title,
   .dataset-page .dataset-page-header,

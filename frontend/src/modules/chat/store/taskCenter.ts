@@ -54,6 +54,8 @@ export interface TaskArtifactStream {
   stream_id: string;
   chunk_index: number;
   content: string;
+  /** Exact deltas received from the task SSE stream, in server order. */
+  deltas?: string[];
   state: "streaming" | "ended" | "aborted" | "ready";
   message?: string;
   artifact?: TaskArtifact;
@@ -116,7 +118,10 @@ export interface SubAgentTask {
   execution_log: TaskLogEntry[];
 }
 
-const WRITER_MARKDOWN_STREAM_SLOT_IDS = new Set(['outline_document', 'draft_document']);
+export function isTaskCenterVisibleTask(task: Pick<SubAgentTask, 'agent_type'>): boolean {
+  return task.agent_type !== 'workflow_step';
+}
+
 function artifactKey(a: TaskArtifact): string {
   return `${a.slot}#${a.seq}`;
 }
@@ -350,6 +355,7 @@ export const useTaskCenterStore = create<TaskCenterStore>()((set, get) => ({
             stream_id: event.stream_id,
             chunk_index: event.chunk_index ?? 1,
             content: "",
+            deltas: [],
             state: "streaming",
           });
           task.artifact_streams = next;
@@ -365,11 +371,15 @@ export const useTaskCenterStore = create<TaskCenterStore>()((set, get) => ({
           // The server guarantees monotonically increasing chunk indexes. Ignore replayed
           // or out-of-order chunks so reconnects never duplicate preview text.
           if (chunkIndex <= stream.chunk_index) break;
+          const delta = typeof event.delta === "string" ? event.delta : "";
           const nextStreams = streams.slice();
           nextStreams[streamIndex] = {
             ...stream,
             chunk_index: chunkIndex,
-            content: stream.content + (typeof event.delta === "string" ? event.delta : ""),
+            content: stream.content + delta,
+            // Preserve backend event boundaries. The renderer can expose every
+            // server delta even when XHR delivers several SSE frames together.
+            deltas: [...(stream.deltas ?? (stream.content ? [stream.content] : [])), delta],
             state: "streaming",
           };
           task.artifact_streams = nextStreams;
@@ -478,11 +488,19 @@ export const useTaskCenterStore = create<TaskCenterStore>()((set, get) => ({
   },
 
   loadArtifactStreamContent: async (conversationId, taskId, artifact) => {
-    if (!WRITER_MARKDOWN_STREAM_SLOT_IDS.has(artifact.slot) || artifact.content_type !== "file") return;
+    if (artifact.content_type !== "file") return;
     if (isWriterIRArtifact(artifact)) return;
     const rawUrl = typeof artifact.value?.url === "string" ? artifact.value.url : "";
     const url = resolveCoreAssetUrl(rawUrl);
     if (!url) return;
+    const task = (get().tasksByConversation[conversationId] ?? [])
+      .find((candidate) => candidate.task_id === taskId);
+    const hasMatchingTextStream = (task?.artifact_streams ?? []).some((stream) => (
+      stream.slot === artifact.slot
+      && stream.artifact?.value?.url === rawUrl
+      && stream.content_type === "text/markdown"
+    ));
+    if (!hasMatchingTextStream) return;
 
     try {
       const response = await axiosInstance.get<string>(url, { responseType: "text" });
@@ -677,6 +695,8 @@ export const useTaskCenterStore = create<TaskCenterStore>()((set, get) => ({
             if (payload.agent_type === 'workflow_step') {
               scheduleWorkflowSessionRefresh(conversationId);
             }
+            // Workflow steps stay out of TaskCenter UI, but their live events
+            // still drive Writer outline and draft previews in WorkflowPanel.
             get().upsertTask(conversationId, {
               task_id: payload.task_id,
               trigger_history_id: payload.trigger_history_id,
