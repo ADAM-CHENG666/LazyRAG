@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Alert, Button, Checkbox, Drawer, Input, Modal, message } from "antd";
-import { DeleteOutlined, PlusOutlined } from "@ant-design/icons";
+import { DeleteOutlined, EditOutlined, PlusOutlined } from "@ant-design/icons";
 import { datasetRoot, describeRequestError, getJson, newRequestId, patchJson } from "./api";
 import { PAGE_SIZE } from "./hooks";
 import {
@@ -33,7 +33,7 @@ type Draft = {
   answer: string;
   guidance: string;
   keyPoints: CaseKeyPoint[];
-  forbiddenClaims: string;
+  forbiddenClaims: string[];
 };
 
 const toDraft = (detail: CaseDetail): Draft => ({
@@ -45,7 +45,7 @@ const toDraft = (detail: CaseDetail): Draft => ({
     statement: point.statement,
     evidence_chunk_ids: [...point.evidence_chunk_ids],
   })),
-  forbiddenClaims: (detail.stages.grading.forbidden_claims || []).join("\n"),
+  forbiddenClaims: [...(detail.stages.grading.forbidden_claims || [])],
 });
 
 /** Opens on the sub-stage that most needs attention: the first unfinished one. */
@@ -71,6 +71,8 @@ export function CaseDetailDrawer({
   const [draft, setDraft] = useState<Draft>();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
+  const [editingGenerate, setEditingGenerate] = useState(false);
+  const [evidenceEditorIndex, setEvidenceEditorIndex] = useState<number>();
 
   const caseId = row?.case_id;
   const root = datasetRoot(threadId);
@@ -90,6 +92,8 @@ export function CaseDetailDrawer({
       setDetail(value);
       setDraft(toDraft(value));
       setStage(focusStage(value));
+      setEditingGenerate(false);
+      setEvidenceEditorIndex(undefined);
       setTopicOptions(options?.items || []);
     } catch (caught) {
       setError(describeRequestError(caught, "读取用例详情失败"));
@@ -138,10 +142,7 @@ export function CaseDetailDrawer({
       message.warning("更换主题后判分规则会基于新的引用重新生成，请先撤销判分规则的修改。");
       return;
     }
-    const forbidden = draft.forbiddenClaims
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean);
+    const forbidden = draft.forbiddenClaims.map((line) => line.trim()).filter(Boolean);
     if (gradingChanged) {
       if (draft.keyPoints.some((point) => !point.statement.trim())) {
         message.warning("关键得分点内容不能为空。");
@@ -369,14 +370,19 @@ export function CaseDetailDrawer({
                   ? "问答内容随 CSV 导入，在本阶段只读。"
                   : "问题、标准答案与评分说明共同属于当前 Case 修改。"}
               </div>
-              {imported ? (
+              {imported || !editingGenerate ? (
                 <div className="dataset-readonly-stack">
                   <ReadonlyItem label="问题" value={draft.question} />
                   <ReadonlyItem label="标准答案" value={draft.answer} />
                   <ReadonlyItem label="评分说明" value={draft.guidance} />
+                  {!imported ? (
+                    <Button size="small" icon={<EditOutlined />} onClick={() => setEditingGenerate(true)}>
+                      编辑问答
+                    </Button>
+                  ) : null}
                 </div>
               ) : (
-                <>
+                <div className="dataset-editable-section">
                   <FieldGroup
                     label="问题"
                     value={draft.question}
@@ -392,7 +398,8 @@ export function CaseDetailDrawer({
                     value={draft.guidance}
                     onChange={(value) => patch({ guidance: value })}
                   />
-                </>
+                  <Button size="small" onClick={() => setEditingGenerate(false)}>完成编辑</Button>
+                </div>
               )}
             </section>
           )}
@@ -410,8 +417,8 @@ export function CaseDetailDrawer({
 
               {draft.keyPoints.map((point, index) => (
                 <div className="dataset-score-point" key={`key-point-${index}`}>
-                  <label>
-                    关键得分点 {index + 1}
+                  <div className="dataset-score-point-head">
+                    <strong>关键得分点 {index + 1}</strong>
                     <button
                       type="button"
                       className="dataset-icon-action"
@@ -422,7 +429,7 @@ export function CaseDetailDrawer({
                     >
                       <DeleteOutlined />
                     </button>
-                  </label>
+                  </div>
                   <Input
                     value={point.statement}
                     onChange={(event) =>
@@ -433,56 +440,17 @@ export function CaseDetailDrawer({
                       })
                     }
                   />
-                  <div className="dataset-evidence-title">
+                  <button
+                    type="button"
+                    className="dataset-evidence-selector"
+                    onClick={() => setEvidenceEditorIndex(index)}
+                  >
                     <span>依据片段</span>
-                    <span>至少选择 1 个</span>
-                  </div>
-                  <div className="dataset-chunk-card-list">
-                    {detail.references.map((reference) => {
-                      const checked = point.evidence_chunk_ids.includes(reference.chunk_id);
-                      return (
-                        <article className="dataset-chunk-card" key={reference.chunk_id}>
-                          <div className="dataset-chunk-card-head">
-                            <strong title={reference.document.name}>{reference.document.name}</strong>
-                            <Checkbox
-                              checked={checked}
-                              onChange={(event) =>
-                                patch({
-                                  keyPoints: draft.keyPoints.map((item, at) =>
-                                    at === index
-                                      ? {
-                                          ...item,
-                                          evidence_chunk_ids: event.target.checked
-                                            ? [...item.evidence_chunk_ids, reference.chunk_id]
-                                            : item.evidence_chunk_ids.filter(
-                                                (id) => id !== reference.chunk_id,
-                                              ),
-                                        }
-                                      : item,
-                                  ),
-                                })
-                              }
-                            >
-                              绑定
-                            </Checkbox>
-                          </div>
-                          <div className="dataset-chunk-card-meta">
-                            <Chip>{reference.knowledge_base.name}</Chip>
-                            <span className="dataset-chunk-id">{reference.chunk_id}</span>
-                          </div>
-                          <ChunkText text={reference.text} />
-                        </article>
-                      );
-                    })}
-                    {!detail.references.length ? (
-                      <p className="dataset-note">当前用例还没有参考片段。</p>
-                    ) : null}
-                  </div>
+                    <strong>已绑定 {point.evidence_chunk_ids.length} 个 · 点击选择</strong>
+                  </button>
                 </div>
               ))}
-              <Button
-                size="small"
-                icon={<PlusOutlined />}
+              <Button className="dataset-add-row" block type="dashed" icon={<PlusOutlined />}
                 onClick={() =>
                   patch({ keyPoints: [...draft.keyPoints, { statement: "", evidence_chunk_ids: [] }] })
                 }
@@ -490,17 +458,37 @@ export function CaseDetailDrawer({
                 新增关键得分点
               </Button>
 
-              <div className="dataset-form-group">
-                <label htmlFor="dataset-forbidden">错误结论（每行一条，最多 3 条）</label>
-                <Input.TextArea
-                  id="dataset-forbidden"
-                  rows={3}
-                  value={draft.forbiddenClaims}
-                  onChange={(event) => patch({ forbiddenClaims: event.target.value })}
-                />
+              <div className="dataset-forbidden-list">
+                <label>错误结论（最多 3 条）</label>
+                {draft.forbiddenClaims.map((claim, index) => (
+                  <div className="dataset-forbidden-item" key={`forbidden-${index}`}>
+                    <Input value={claim} placeholder="输入错误结论" onChange={(event) => patch({
+                      forbiddenClaims: draft.forbiddenClaims.map((item, at) => at === index ? event.target.value : item),
+                    })} />
+                    <button type="button" className="dataset-icon-action" aria-label={`删除错误结论 ${index + 1}`}
+                      onClick={() => patch({ forbiddenClaims: draft.forbiddenClaims.filter((_, at) => at !== index) })}>
+                      <DeleteOutlined />
+                    </button>
+                  </div>
+                ))}
+                <Button className="dataset-add-row" block type="dashed" icon={<PlusOutlined />}
+                  disabled={draft.forbiddenClaims.length >= 3}
+                  onClick={() => patch({ forbiddenClaims: [...draft.forbiddenClaims, ""] })}>
+                  新增错误结论
+                </Button>
               </div>
             </section>
           )}
+          <EvidencePicker
+            open={evidenceEditorIndex != null}
+            point={evidenceEditorIndex == null ? undefined : draft.keyPoints[evidenceEditorIndex]}
+            references={detail.references}
+            onClose={() => setEvidenceEditorIndex(undefined)}
+            onChange={(ids) => evidenceEditorIndex != null && patch({
+              keyPoints: draft.keyPoints.map((item, at) => at === evidenceEditorIndex
+                ? { ...item, evidence_chunk_ids: ids } : item),
+            })}
+          />
         </>
       )}
     </Drawer>
@@ -513,6 +501,49 @@ function ReadonlyItem({ label, value }: { label: string; value: string }) {
       <small>{label}</small>
       <p>{value || "—"}</p>
     </div>
+  );
+}
+
+function EvidencePicker({
+  open,
+  point,
+  references,
+  onClose,
+  onChange,
+}: {
+  open: boolean;
+  point?: CaseKeyPoint;
+  references: CaseDetail["references"];
+  onClose: () => void;
+  onChange: (ids: string[]) => void;
+}) {
+  return (
+    <Modal open={open} title="选择依据片段" footer={null} onCancel={onClose} width={680}>
+      <p className="dataset-evidence-picker-note">至少选择 1 个片段；同一片段可绑定多个关键得分点。</p>
+      <div className="dataset-chunk-card-list">
+        {references.map((reference) => {
+          const checked = Boolean(point?.evidence_chunk_ids.includes(reference.chunk_id));
+          return (
+            <article className="dataset-chunk-card" key={reference.chunk_id}>
+              <div className="dataset-chunk-card-head">
+                <strong title={reference.document.name}>{reference.document.name}</strong>
+                <Checkbox checked={checked} onChange={(event) => onChange(
+                  event.target.checked
+                    ? [...(point?.evidence_chunk_ids || []), reference.chunk_id]
+                    : (point?.evidence_chunk_ids || []).filter((id) => id !== reference.chunk_id),
+                )}>绑定</Checkbox>
+              </div>
+              <div className="dataset-chunk-card-meta">
+                <Chip>{reference.knowledge_base.name}</Chip>
+                <span className="dataset-chunk-id">{reference.chunk_id}</span>
+              </div>
+              <ChunkText text={reference.text} />
+            </article>
+          );
+        })}
+        {!references.length ? <p className="dataset-note">当前用例还没有参考片段。</p> : null}
+      </div>
+    </Modal>
   );
 }
 

@@ -86,6 +86,9 @@ export function getStepStatusLabel(status: StepStatus) {
   if (status === "failed") {
     return t("selfEvolutionRun.statusFailed");
   }
+  if (status === "partial") {
+    return t("selfEvolutionRun.statusPartial");
+  }
   return t("selfEvolutionRun.statusPending");
 }
 
@@ -377,7 +380,7 @@ export function applyThreadStepStatusToWorkflowSteps(
   return steps.map((step) => {
     const stage = stepStageMap[step.id];
     let overrideStatus = stage ? threadStepStatusByStage[stage] : undefined;
-    if (checkpoint?.completedStage === stage) {
+    if (checkpoint?.completedStage === stage && overrideStatus !== "partial") {
       overrideStatus = "done";
     } else if (
       overrideStatus === "running" &&

@@ -40,7 +40,7 @@ function isRunning(status?: string) {
 
 function isTerminal(status?: string) {
   const normalized = status?.trim().toLowerCase();
-  return !!normalized && ['completed', 'done', 'success', '已完成'].includes(normalized);
+  return !!normalized && ['completed', 'done', 'success', 'partial_failed', 'partial', '已完成', '部分失败'].includes(normalized);
 }
 
 export function toThreadEventStage(value: unknown): ThreadEventStage | undefined {

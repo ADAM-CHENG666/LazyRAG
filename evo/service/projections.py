@@ -252,9 +252,14 @@ class ProjectionService:
     async def topics_overview(self, thread_id: str) -> dict[str, Any]:
         if not await self.flow.has_run(thread_id):
             raise ServiceError(404, f'thread not found: {thread_id}')
-        status = _overview_stage_status(
-            await self.stage_snapshot(thread_id, 'dataset.topic_discovery'),
+        stage_snapshot = await self.stage_snapshot(thread_id, 'dataset.topic_discovery')
+        status = _overview_stage_status(stage_snapshot)
+        chunk_requests, label_requests = await asyncio.gather(
+            _optional_overview_artifact(self, thread_id, A.DATASET_CHUNK_REQUESTS),
+            _optional_overview_artifact(self, thread_id, A.DATASET_EMBEDDING_LABEL_REQUESTS),
         )
+        entity_total = _partition_count(None if chunk_requests is None else chunk_requests['value'])
+        semantic_total = _partition_count(None if label_requests is None else label_requests['value'])
         try:
             artifact = await self.artifact(thread_id, A.DATASET_TOPIC_MANIFEST)
         except ServiceError as error:
@@ -266,6 +271,7 @@ class ProjectionService:
                 'status': status,
                 'total_topics': None,
                 'question_types': None,
+                'stages': _topic_execution_stages(status, entity_total, semantic_total, None),
             }
 
         stats = _overview_mapping(_overview_mapping(artifact['value'], 'topics overview').get('stats'),
@@ -289,6 +295,7 @@ class ProjectionService:
                 'precision': {'count': precision, 'rate': None if not total else precision / total},
                 'reasoning': {'count': reasoning, 'rate': None if not total else reasoning / total},
             },
+            'stages': _topic_execution_stages(status, entity_total, semantic_total, total),
         }
 
     async def cases_overview(self, thread_id: str) -> dict[str, Any]:
@@ -395,6 +402,19 @@ class ProjectionService:
             result[case_id] = statuses
         return result
 
+    async def _case_spec_values(self, thread_id: str, case_ids: tuple[str, ...]) -> dict[str, object]:
+        async def read_optional(case_id: str) -> tuple[str, object | None]:
+            try:
+                artifact = await self.artifact(thread_id, A.DATASET_QAPLAN_SPEC, case_id)
+            except ServiceError as error:
+                if error.status_code != 404:
+                    raise
+                return case_id, None
+            return case_id, artifact['value']
+
+        values = await asyncio.gather(*(read_optional(case_id) for case_id in case_ids))
+        return {case_id: value for case_id, value in values if value is not None}
+
     async def cases(self, thread_id: str, *, page_size: int | None = None, page_token: str = '',
                     plan_status: str = '', generate_status: str = '', grading_status: str = '', source: str = '',
                     question_type: str = '', difficulty: str = '') -> dict[str, Any]:
@@ -462,13 +482,17 @@ class ProjectionService:
             statuses = _pending_case_statuses(tuple(row['case_id'] for row in rows))
         else:
             case_ids = _case_ids_from_partition_set(artifacts[ArtifactKey.scalar(A.EVAL_CASE_REQUESTS)]['value'])
-            statuses = await self._case_operation_statuses(thread_id, case_ids)
+            statuses, specifications = await asyncio.gather(
+                self._case_operation_statuses(thread_id, case_ids),
+                self._case_spec_values(thread_id, case_ids),
+            )
             rows = _case_rows(
                 case_ids,
                 artifacts[ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST)]['value'],
                 artifacts[ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN)]['value'],
                 artifacts[ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST)]['value'],
                 statuses,
+                specifications,
             )
         current_execution_revision = self._build_execution_revision(statuses)
         if page_token and execution_revision != current_execution_revision:
@@ -510,14 +534,15 @@ class ProjectionService:
         if case_id not in case_ids:
             raise ServiceError(404, f'case not found: {case_id}')
         statuses = await self._case_operation_statuses(thread_id, (case_id,))
+        optional = await self._case_detail_artifacts(thread_id, case_id)
         row = _case_rows(
             (case_id,),
             artifacts[base_keys[1]]['value'],
             artifacts[base_keys[2]]['value'],
             artifacts[base_keys[3]]['value'],
             statuses,
+            {} if optional['spec'] is None else {case_id: optional['spec']['value']},
         )[0]
-        optional = await self._case_detail_artifacts(thread_id, case_id)
         spec = optional['spec']
         draft = optional['draft']
         enhancement = optional['enhancement']
@@ -1063,7 +1088,7 @@ class ProjectionService:
             for topic in topics if isinstance(topic, Mapping)
             and topic.get('question_type') == question_type
             and isinstance(topic.get('chunk_count'), int)
-            and topic['chunk_count'] >= required_chunks
+            and topic['chunk_count'] == required_chunks
             and topic.get('topic_id') not in occupied | {current_topic_id}
         ]
         rows.sort(key=lambda row: (row['name'], str(row['topic_id'])))
@@ -1227,6 +1252,13 @@ def _stage_status(stage_status: str, flow_status: str) -> str:
     if stage_status == 'awaiting_approval':
         return 'completed'
     return 'idle' if stage_status == 'pending' and flow_status == 'idle' else stage_status
+
+
+def _display_step_status(status: str, progress: StageProgress | None) -> str:
+    """Expose a completed checkpoint with failed partitions truthfully to clients."""
+    if status == 'completed' and progress is not None and progress.progress.case_failed:
+        return 'partial_failed'
+    return status
 
 
 def _comparison_rows(value: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -1895,6 +1927,11 @@ def _step_pages(snapshot: FlowSnapshot, items: list[dict[str, Any]]) -> list[dic
         current['status'] = _stage_status(progress.status, snapshot.status)
 
     for index, page in enumerate(pages):
+        stage_progress = next(
+            (progress for progress in snapshot.stages if progress.stage == page['stage']),
+            None,
+        )
+        page['status'] = _display_step_status(page['status'], stage_progress)
         page['order_index'] = index
         page['continues_previous'] = bool(
             index and pages[index - 1]['stage'] == page['stage']
@@ -2218,6 +2255,26 @@ def _pending_case_stage_overview(total: int | None = None) -> dict[str, Any]:
     }
 
 
+def _partition_count(value: object | None) -> int | None:
+    if value is None:
+        return None
+    return len(_case_ids_from_partition_set(value))
+
+
+def _topic_execution_stages(status: str, entity_total: int | None, semantic_total: int | None,
+                            topic_total: int | None) -> dict[str, dict[str, object]]:
+    totals = {'entities': entity_total, 'semantic': semantic_total, 'topics': topic_total}
+    if status in {'completed', 'succeeded'}:
+        return {
+            name: {'status': 'completed', 'completed': total or 0, 'total': total}
+            for name, total in totals.items()
+        }
+    return {
+        name: {'status': 'pending', 'completed': 0, 'total': total}
+        for name, total in totals.items()
+    }
+
+
 def _planned_case_count(value: object | None) -> int | None:
     if value is None:
         return None
@@ -2328,7 +2385,8 @@ def _case_filters(plan_status: str, generate_status: str, grading_status: str, s
 
 
 def _case_rows(case_ids: tuple[str, ...], import_manifest_value: object, plan_value: object,
-               topic_manifest_value: object, statuses: Mapping[str, Mapping[str, str]]) -> list[dict[str, Any]]:
+               topic_manifest_value: object, statuses: Mapping[str, Mapping[str, str]],
+               specifications: Mapping[str, object] | None = None) -> list[dict[str, Any]]:
     imported = _overview_mapping(import_manifest_value, 'case import manifest')
     allocation = _overview_mapping(
         _overview_mapping(imported.get('stats'), 'case import manifest.stats').get('case_allocation'),
@@ -2374,7 +2432,15 @@ def _case_rows(case_ids: tuple[str, ...], import_manifest_value: object, plan_va
             plan_item = _overview_mapping(plan_items.get(case_id), f'qaplan plan item {case_id}')
             question_type = _case_choice(plan_item.get('question_type'), {'precision', 'reasoning'}, 'question_type')
             difficulty = _case_choice(plan_item.get('difficulty'), {'easy', 'medium', 'hard'}, 'difficulty')
-            topic_id = plan_item.get('topic_id')
+            specification = None if specifications is None else specifications.get(case_id)
+            spec_topic = (
+                _overview_mapping(specification, f'qaplan spec {case_id}').get('topic')
+                if isinstance(specification, Mapping) else None
+            )
+            topic_id = (
+                _overview_mapping(spec_topic, f'qaplan spec {case_id}.topic').get('topic_id')
+                if isinstance(spec_topic, Mapping) else plan_item.get('topic_id')
+            )
             topic_value = _overview_mapping(topics_by_id.get(topic_id), f'topic {topic_id}')
             topic = {'topic_id': topic_id, 'name': _required_id(topic_value.get('name'), 'topic.name')}
         else:

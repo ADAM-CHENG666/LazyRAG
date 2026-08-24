@@ -4981,6 +4981,7 @@ const zhCN = {
     statusPending: "待执行",
     statusDone: "已完成",
     statusFailed: "已失败",
+    statusPartial: "部分失败",
     statusCanceled: "已取消",
     statusPaused: "已暂停",
     actionStart: "开始",

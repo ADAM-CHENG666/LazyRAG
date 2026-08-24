@@ -4,6 +4,7 @@ import {
   CheckCircleFilled,
   ClockCircleFilled,
   CloseOutlined,
+  ExclamationCircleFilled,
   FileTextOutlined,
 } from "@ant-design/icons";
 import { useTranslation } from "react-i18next";
@@ -40,6 +41,7 @@ export function WorkflowStepCard({
             {step.status === "running" && <ClockCircleFilled />}
             {step.status === "paused" && <ClockCircleFilled />}
             {step.status === "canceled" && <CloseOutlined />}
+            {step.status === "partial" && <ExclamationCircleFilled />}
             {step.status === "pending" && <FileTextOutlined />}
             <span>{statusLabel}</span>
           </span>

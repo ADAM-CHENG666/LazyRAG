@@ -13,7 +13,7 @@ export type FlowStatus =
 export type OperationStatus = "pending" | "running" | "completed" | "failed" | "canceled";
 
 /** Visual status vocabulary shared by the stepper, status icons and rings. */
-export type VisualStatus = "done" | "running" | "paused" | "stale" | "pending" | "failed";
+export type VisualStatus = "done" | "running" | "paused" | "stale" | "pending" | "failed" | "partial";
 
 export type QuestionType = "precision" | "reasoning";
 export type Difficulty = "easy" | "medium" | "hard";
@@ -113,6 +113,11 @@ export type TopicsOverview = {
   status: FlowStatus;
   total_topics: number | null;
   question_types: Record<QuestionType, { count: number | null; rate: number | null }> | null;
+  stages: Record<"entities" | "semantic" | "topics", {
+    status: FlowStatus;
+    completed: number;
+    total: number | null;
+  }>;
 };
 
 export type TopicRow = {

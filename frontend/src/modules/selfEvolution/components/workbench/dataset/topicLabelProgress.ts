@@ -95,8 +95,6 @@ export function applyTopicLabelPartitionEvent(
       ? cloneProgress(current)
       : emptyProgress(event.stepId);
 
-  completeEarlierPhases(base, phaseId);
-
   if (PARTITION_OPS.has(operationId) && event.partition?.id && isPartitionStatus(event.status)) {
     const statuses = { ...(base.partitions[phaseId] || {}) };
     const attemptId = base.attempts[phaseId]?.[event.partition.id];
@@ -143,7 +141,11 @@ export function applyTopicLabelPartitionEvent(
 
 export function topicDiscoverySteps(
   progress: TopicDiscoveryProgress | undefined,
-  overview?: { status?: string; total_topics?: number | null },
+  overview?: {
+    status?: string;
+    total_topics?: number | null;
+    stages?: Partial<Record<TopicPhaseId, { status: string; completed: number; total: number | null }>>;
+  },
   currentStageStatus?: VisualStatus,
 ): TopicDiscoveryStepView[] {
   const phases = progress?.phases ?? emptyProgress('').phases;
@@ -161,7 +163,12 @@ export function topicDiscoverySteps(
   const topicCount = overview?.total_topics ?? null;
 
   return TOPIC_PHASE_ORDER.map((id) => {
-    const phase = phases[id];
+    const snapshot = overview?.stages?.[id];
+    // Match case generation: the overview is the baseline for every phase,
+    // while SSE replaces only the phase for which it has actual evidence.
+    const phase = hasPhaseExecution(progress, id)
+      ? phases[id]
+      : snapshotPhase(id, snapshot) ?? phases[id];
     let status = phase.status;
     let completed = phase.completed;
     let total: number | null = phase.total || null;
@@ -193,6 +200,41 @@ export function topicDiscoverySteps(
       }),
     };
   });
+}
+
+function hasPhaseExecution(progress: TopicDiscoveryProgress | undefined, id: TopicPhaseId): boolean {
+  if (!progress) return false;
+  const phase = progress.phases[id];
+  return Boolean(
+    Object.keys(progress.partitions[id] || {}).length ||
+    Object.keys(progress.attempts[id] || {}).length ||
+    phase.status !== 'pending' ||
+    phase.total ||
+    phase.running ||
+    phase.failed,
+  );
+}
+
+function snapshotPhase(
+  id: TopicPhaseId,
+  snapshot: { status: string; completed: number; total: number | null } | undefined,
+): TopicPhaseState | undefined {
+  if (!snapshot) return undefined;
+  return {
+    id,
+    label: PHASE_LABEL[id],
+    completed: snapshot.completed,
+    total: snapshot.total ?? 0,
+    running: 0,
+    failed: snapshot.status === 'failed' ? 1 : 0,
+    status: snapshot.status === 'completed' || snapshot.status === 'succeeded'
+      ? 'done'
+      : snapshot.status === 'failed'
+        ? 'failed'
+        : snapshot.status === 'running'
+          ? 'running'
+          : 'pending',
+  };
 }
 
 export function progressSummary(
@@ -295,20 +337,6 @@ function summarizePartitionPhase(
     failed,
     status,
   };
-}
-
-function completeEarlierPhases(progress: TopicDiscoveryProgress, active: TopicPhaseId) {
-  const activeIndex = TOPIC_PHASE_ORDER.indexOf(active);
-  for (const id of TOPIC_PHASE_ORDER.slice(0, activeIndex)) {
-    const phase = progress.phases[id];
-    if (phase.status === 'done') continue;
-    progress.phases[id] = {
-      ...phase,
-      completed: phase.total,
-      running: 0,
-      status: 'done',
-    };
-  }
 }
 
 function completeAllPhases(progress: TopicDiscoveryProgress): TopicDiscoveryProgress {

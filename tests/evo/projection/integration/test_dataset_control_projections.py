@@ -256,9 +256,7 @@ def test_case_topic_options_filters_by_case_lane_and_excludes_current_and_occupi
     result = _topic_options(service)
 
     assert result['case_id'] == 'case-1'
-    assert [row['topic_id'] for row in result['items']] == ['candidate-a', 'candidate-b']
     assert result['items'] == [
-        {'topic_id': 'candidate-a', 'name': 'candidate-a name', 'chunk_count': 3},
         {'topic_id': 'candidate-b', 'name': 'candidate-b name', 'chunk_count': 2},
     ]
 

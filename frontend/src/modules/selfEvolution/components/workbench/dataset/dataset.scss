@@ -101,6 +101,12 @@ $ds-line: #dbe8f9;
     background: #fff1f0;
     color: $ds-red;
   }
+
+  &.is-partial .dataset-step-dot {
+    border-color: #edc87c;
+    background: #fff7e7;
+    color: $ds-amber;
+  }
 }
 
 .dataset-step-dot {
@@ -432,6 +438,10 @@ $ds-line: #dbe8f9;
     &.is-failed {
       color: $ds-red;
     }
+
+    &.is-partial {
+      color: $ds-amber;
+    }
   }
 }
 
@@ -481,6 +491,10 @@ $ds-line: #dbe8f9;
 
   &.is-failed {
     --dataset-progress-color: #c65349;
+  }
+
+  &.is-partial {
+    --dataset-progress-color: #dda93d;
   }
 
   &.is-pending {
@@ -1558,6 +1572,57 @@ $ds-line: #dbe8f9;
     font-size: 11px;
     font-weight: 800;
   }
+}
+
+.dataset-score-point-head,
+.dataset-forbidden-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 7px;
+  color: #284664;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.dataset-evidence-selector {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+  padding: 8px 9px;
+  border: 1px solid #dbe8f6;
+  border-radius: 7px;
+  background: #f6faff;
+  color: #587795;
+  cursor: pointer;
+  font-size: 11px;
+
+  strong { color: #3973ac; font-size: 10px; }
+}
+
+.dataset-add-row { margin: 4px 0 12px; color: #5780a8; }
+
+.dataset-forbidden-list {
+  display: grid;
+  gap: 7px;
+  margin-top: 14px;
+
+  > label { color: #284664; font-size: 12px; font-weight: 800; }
+}
+
+.dataset-forbidden-item {
+  margin: 0;
+
+  .ant-input { flex: 1; }
+}
+
+.dataset-evidence-picker-note {
+  margin: 0 0 10px;
+  color: #7188a4;
+  font-size: 11px;
 }
 
 .dataset-topic-option-meta {

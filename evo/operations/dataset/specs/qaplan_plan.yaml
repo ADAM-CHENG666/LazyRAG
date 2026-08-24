@@ -78,7 +78,7 @@ output_payload:
             lane: {type: string, enum: [precision_easy, precision_medium, precision_hard, reasoning_easy, reasoning_medium, reasoning_hard]}
             question_type: {type: string, enum: [precision, reasoning]}
             difficulty: {type: string, enum: [easy, medium, hard]}
-            # 每 Case 唯一、可由 PATCH 修改的事实；不在此处缓存 name 或 references。
+            # 首次分配的每 Case 唯一选题；单 Case 换主题不改写全局计划。
             topic_id: {type: string}
       stats:
         fields:

@@ -270,7 +270,7 @@ def _case_patch_revision() -> str:
     )
 
 
-def test_patch_case_combines_requested_changes_and_keeps_plan_topic_as_single_source_of_truth() -> None:
+def test_patch_case_topic_change_keeps_global_generation_plan_unchanged() -> None:
     case_id = 'case-1'
     service, flow = _service(_case_patch_values())
 
@@ -296,7 +296,7 @@ def test_patch_case_combines_requested_changes_and_keeps_plan_topic_as_single_so
         ArtifactKey.partition(A.DATASET_CHUNK, 'chunk-new-2'), 30,
     )
     writes = {write.key: write.value for write in commit.writes}
-    assert writes[ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN)]['items'][0]['topic_id'] == 'topic-new'
+    assert ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN) not in writes
     assert [item['chunk_id'] for item in writes[ArtifactKey.partition(A.DATASET_QAPLAN_SPEC, case_id)]['references']] == [
         'chunk-new-1', 'chunk-new-2',
     ]
@@ -317,6 +317,20 @@ def test_patch_case_rejects_imported_case_topic_changes_and_evidence_outside_eff
         }))
     assert source_error.value.status_code == 422
     assert imported_flow.commits == []
+
+    mismatched_values = _case_patch_values()
+    mismatched_topics = mismatched_values[ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST)][1]['topics']
+    next(topic for topic in mismatched_topics if topic['topic_id'] == 'topic-new').update({
+        'chunk_ids': ['chunk-new-1', 'chunk-new-2', 'chunk-new-3'], 'chunk_count': 3,
+    })
+    mismatched, mismatched_flow = _service(mismatched_values)
+    with pytest.raises(ServiceError) as difficulty_error:
+        asyncio.run(mismatched.patch_case('thr-1', 'case-1', {
+            'request_id': 'mismatched-topic', 'expected_revision': _case_patch_revision(),
+            'changes': {'plan': {'topic_id': 'topic-new'}},
+        }))
+    assert difficulty_error.value.status_code == 422
+    assert mismatched_flow.commits == []
 
     service, flow = _service(_case_patch_values())
     with pytest.raises(ServiceError) as evidence_error:

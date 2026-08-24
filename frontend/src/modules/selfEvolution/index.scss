@@ -2651,6 +2651,11 @@
   background: linear-gradient(180deg, #fffafa 0%, #fff1f0 100%);
 }
 
+.self-evolution-step-card.is-partial {
+  border-color: #ffd591;
+  background: linear-gradient(180deg, #fffdf7 0%, #fff7e6 100%);
+}
+
 .self-evolution-step-main {
   flex: 1;
   min-width: 0;
@@ -2708,6 +2713,11 @@
   &.is-failed {
     background: #fff1f0;
     color: #cf1322;
+  }
+
+  &.is-partial {
+    background: #fff7e6;
+    color: #ad6800;
   }
 }
 
@@ -6120,6 +6130,12 @@
     border-color: #ffcbc7;
     background: #fff1f0;
     color: #b42318;
+  }
+
+  &.is-partial {
+    border-color: #ffd591;
+    background: #fff7e6;
+    color: #ad6800;
   }
 }
 

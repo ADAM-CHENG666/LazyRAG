@@ -91,7 +91,7 @@ output_payload:
       question_type: {type: string, required: false, enum: [precision, reasoning]}
       difficulty: {type: string, required: false, enum: [easy, medium, hard]}
       topic:
-        # 完整派生展示信息；只有 topic_id 是 qaplan_plan 中可编辑的选题事实。
+        # 完整派生展示信息；全局计划首次分配 topic_id，单 Case 换主题直接更新该分区规格。
         type: object
         required: false
         fields:
@@ -116,7 +116,7 @@ output_payload:
 
 execution_flow:
   - 从当前输出分区在 assignments 中取得唯一 mode；imported 分区直接输出已校验的 imported_case，不读取 qaplan_plan 或 Topic。
-  - generated 分区必须以 case_id 在 qaplan_plan.items 中唯一匹配计划项；计划项的 topic_id 是唯一可编辑选题事实。
+  - generated 分区首次执行时，以 case_id 在 qaplan_plan.items 中唯一匹配计划项；单 Case 换主题由 Service 直接更新该分区规格，不改写全局计划。
   - 用 topic_id 在当前 topic_discovery_manifest.topics 中唯一查找 Topic，校验其 question_type 和 chunk_count 满足计划项题型、难度。
   - 依 Topic.chunk_ids 原顺序直接读取同名 dataset.chunk partition 的当前 available Chunk，解析完整 {kb_id, doc_id, chunk_id, text} references；禁止保留旧 Topic、旧 Chunk 或只存 chunk_id/text 的引用。
   - 由题型派生 instruction，并物化 topic={topic_id,name}、完整 references 与 qaplan 跟踪信息；这些均为只读派生字段。引用本身已包含实际 KB 来源，不再冗余保存 source.kb_ids。

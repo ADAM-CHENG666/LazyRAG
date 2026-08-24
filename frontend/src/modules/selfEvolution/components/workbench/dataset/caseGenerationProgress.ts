@@ -107,37 +107,54 @@ export function caseGenerationDisplayStep(
   stable: StableCaseGenerationStep | undefined,
   currentStageStatus: VisualStatus,
 ): CaseGenerationDisplayStep {
+  const stableTotal = stable?.total ?? 0;
+  const stableCounts = stable?.status_counts;
+  const stableCompleted = stable?.completed ?? 0;
+  const stableRunning = stableCounts?.running ?? 0;
+  const stableFailed = stableCounts?.failed ?? 0;
+  const stableCanceled = stableCounts?.canceled ?? 0;
+  const stablePending = stableCounts?.pending ?? 0;
   if (transient?.total) {
+    const total = Math.max(stableTotal, transient.total);
+    // SSE only contains changed partitions for the current execution. It must
+    // overlay the snapshot, not replace its completed partitions wholesale.
+    const displacedCompleted = transient.running + transient.failed + transient.canceled;
+    const completed = Math.max(0, stableCompleted - displacedCompleted);
+    const running = Math.max(stableRunning, transient.running);
+    const failed = Math.max(stableFailed, transient.failed);
+    const canceled = Math.max(stableCanceled, transient.canceled);
+    const pending = Math.max(0, total - completed - running - failed - canceled);
     return {
-      ...transient,
-      pending: Math.max(
-        0,
-        transient.total - transient.completed - transient.running - transient.failed - transient.canceled,
-      ),
+      completed,
+      total,
+      running,
+      failed,
+      canceled,
+      pending,
+      status: failed ? 'failed' : running ? 'running' : completed === total && total > 0 ? 'done' : 'pending',
     };
   }
 
-  const total = stable?.total ?? 0;
+  const total = stableTotal;
   if (currentStageStatus === 'running') {
     return {
-      completed: 0,
+      completed: stableCompleted,
       total,
-      running: 0,
-      failed: 0,
-      canceled: 0,
-      pending: total,
-      status: 'pending',
+      running: stableRunning,
+      failed: stableFailed,
+      canceled: stableCanceled,
+      pending: stablePending,
+      status: stableFailed ? 'failed' : stableRunning ? 'running' : stableCompleted === total && total > 0 ? 'done' : 'pending',
     };
   }
 
-  const counts = stable?.status_counts;
   return {
-    completed: stable?.completed ?? 0,
+    completed: stableCompleted,
     total,
-    running: counts?.running ?? 0,
-    failed: counts?.failed ?? 0,
-    canceled: counts?.canceled ?? 0,
-    pending: counts?.pending ?? 0,
+    running: stableRunning,
+    failed: stableFailed,
+    canceled: stableCanceled,
+    pending: stablePending,
     status: toVisualStatus(stable?.status),
   };
 }

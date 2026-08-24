@@ -793,6 +793,9 @@ export function normalizeThreadStepStatus(status?: string): StepStatus | undefin
   if (["failed", "failure", "error", "errored", "已失败", "失败"].includes(normalizedStatus)) {
     return "failed";
   }
+  if (["partial_failed", "partial", "部分失败"].includes(normalizedStatus)) {
+    return "partial";
+  }
   if (["pause", "paused", "waiting_checkpoint", "checkpoint_wait", "已暂停", "暂停"].includes(normalizedStatus)) {
     return "paused";
   }

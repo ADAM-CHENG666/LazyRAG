@@ -606,7 +606,6 @@ class EvoService:
             except ValueError as error:
                 raise ServiceError(422, str(error)) from error
             extra_refs = chunk_refs
-            writes[base_keys[2]] = plan
             writes[spec_key] = effective_spec
 
         effective_draft = draft
@@ -1027,7 +1026,7 @@ def _validate_topic_change(plan: Mapping[str, Any], topic_manifest: Mapping[str,
         raise ServiceError(404, 'topic not found')
     topic = matches[0]
     required = {'easy': 1, 'medium': 2, 'hard': 3}[difficulty]
-    if topic.get('question_type') != question_type or topic.get('chunk_count') != len(topic.get('chunk_ids', ())) or topic.get('chunk_count') < required:
+    if topic.get('question_type') != question_type or topic.get('chunk_count') != len(topic.get('chunk_ids', ())) or topic.get('chunk_count') != required:
         raise ServiceError(422, 'topic does not satisfy case requirements')
     items = plan.get('items')
     assert isinstance(items, list)

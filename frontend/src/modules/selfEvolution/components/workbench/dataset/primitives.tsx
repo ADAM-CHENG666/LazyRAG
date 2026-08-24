@@ -15,6 +15,7 @@ export const STATUS_TEXT: Record<VisualStatus, string> = {
   stale: "待更新",
   pending: "未开始",
   failed: "失败",
+  partial: "部分失败",
 };
 
 const STATUS_SYMBOL: Record<VisualStatus, string> = {
@@ -24,6 +25,7 @@ const STATUS_SYMBOL: Record<VisualStatus, string> = {
   stale: "↻",
   pending: "○",
   failed: "!",
+  partial: "!",
 };
 
 export const FLOW_STATUS_TEXT: Record<FlowStatus, string> = {
@@ -60,6 +62,9 @@ export function toVisualStatus(status: OperationStatus | FlowStatus | string): V
     case "canceled":
     case "cancelling":
       return "failed";
+    case "partial_failed":
+    case "partial":
+      return "partial";
     default:
       return "pending";
   }

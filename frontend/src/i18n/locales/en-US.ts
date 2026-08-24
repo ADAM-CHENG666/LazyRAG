@@ -5189,6 +5189,7 @@ const enUS = {
     statusPending: "Pending",
     statusDone: "Completed",
     statusFailed: "Failed",
+    statusPartial: "Partially failed",
     statusCanceled: "Canceled",
     statusPaused: "Paused",
     actionStart: "Start",

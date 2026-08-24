@@ -212,6 +212,7 @@ import {
   getFinalResultMetricLabel,
   humanizeFinalResultReason,
   normalizeThreadStepStatus,
+  isStepCheckpointWaiting,
   isThreadFlowRunning,
   getSilentRestoreRequestConfig,
   normalizeThreadStepListPayload,
@@ -674,10 +675,7 @@ export function SelfEvolutionPageController({
     const latestDatasetStep = [...threadStepList.steps]
       .reverse()
       .find((step) => step.stage?.startsWith("dataset."));
-    return Boolean(
-      latestDatasetStep?.nextStepRunId &&
-        normalizeThreadStepStatus(latestDatasetStep.status) === "done",
-    );
+    return Boolean(latestDatasetStep && isStepCheckpointWaiting(latestDatasetStep));
   }, [threadStepList]);
   const workflowSteps = useMemo<WorkflowStep[]>(
     () =>
@@ -2237,6 +2235,7 @@ export function SelfEvolutionPageController({
         paused: "selfEvolutionRun.status.paused",
         canceled: "selfEvolutionRun.status.canceled",
         failed: "selfEvolutionRun.status.failed",
+        partial: "selfEvolutionRun.statusPartial",
       };
       return t(statusKeyMap[status]);
     },

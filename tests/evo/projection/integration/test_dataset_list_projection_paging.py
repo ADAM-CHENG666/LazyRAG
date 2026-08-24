@@ -566,6 +566,19 @@ def test_cases_projects_plan_metadata_and_runtime_operation_statuses() -> None:
     ]
 
 
+def test_cases_uses_the_case_spec_topic_after_a_single_case_topic_change() -> None:
+    values = _case_list_values()
+    values[ArtifactKey(A.DATASET_QAPLAN_SPEC, 'case-2')] = {2: {
+        'id': 'case-2', 'mode': 'generated', 'question_type': 'precision', 'difficulty': 'medium',
+        'topic': {'topic_id': 'topic-a', 'name': '主题 A'},
+    }}
+
+    result = _cases(_case_list_service(values=values))
+
+    assert result['items'][1]['topic'] == {'topic_id': 'topic-a', 'name': '主题 A'}
+    assert result['items'][2]['topic'] == {'topic_id': 'topic-a', 'name': '主题 A'}
+
+
 def test_cases_returns_all_rows_before_qaplan_outputs_exist() -> None:
     values = {
         ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST): {1: {

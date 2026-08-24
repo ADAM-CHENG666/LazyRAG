@@ -118,12 +118,16 @@ def test_materials_overview_uses_null_rates_when_their_denominators_are_zero(mon
 def test_topics_overview_projects_current_manifest_and_calculates_rates(monkeypatch: pytest.MonkeyPatch) -> None:
     _enable_dataset_stages(monkeypatch)
     service = _service(
-        values={ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST): {3: {
-            'stats': {
-                'total_topic_count': 30,
-                'question_types': {'precision': {'count': 18}, 'reasoning': {'count': 12}},
-            },
-        }}},
+        values={
+            ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST): {3: {
+                'stats': {
+                    'total_topic_count': 30,
+                    'question_types': {'precision': {'count': 18}, 'reasoning': {'count': 12}},
+                },
+            }},
+            ArtifactKey.scalar(A.DATASET_CHUNK_REQUESTS): {1: PartitionSet(('chunk-1', 'chunk-2'))},
+            ArtifactKey.scalar(A.DATASET_EMBEDDING_LABEL_REQUESTS): {1: PartitionSet(('cluster-1',))},
+        },
         statuses={_TOPIC_STAGE: 'completed'},
     )
 
@@ -137,6 +141,11 @@ def test_topics_overview_projects_current_manifest_and_calculates_rates(monkeypa
         'question_types': {
             'precision': {'count': 18, 'rate': 0.6},
             'reasoning': {'count': 12, 'rate': 0.4},
+        },
+        'stages': {
+            'entities': {'status': 'completed', 'completed': 2, 'total': 2},
+            'semantic': {'status': 'completed', 'completed': 1, 'total': 1},
+            'topics': {'status': 'completed', 'completed': 30, 'total': 30},
         },
     }
 
@@ -158,6 +167,11 @@ def test_topics_overview_keeps_a_valid_empty_manifest_distinct_from_no_manifest(
     assert asyncio.run(missing.topics_overview('thr-1')) == {
         'thread_id': 'thr-1', 'revision': None, 'status': 'running',
         'total_topics': None, 'question_types': None,
+        'stages': {
+            'entities': {'status': 'pending', 'completed': 0, 'total': None},
+            'semantic': {'status': 'pending', 'completed': 0, 'total': None},
+            'topics': {'status': 'pending', 'completed': 0, 'total': None},
+        },
     }
 
 
