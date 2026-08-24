@@ -291,7 +291,7 @@ export function ChunkCard({
   action,
   pending,
 }: {
-  documentName: string;
+  documentName?: string;
   tags: string[];
   chunkId: string;
   text: string;
@@ -300,10 +300,12 @@ export function ChunkCard({
 }) {
   return (
     <article className={`dataset-chunk-card${pending ? " is-pending" : ""}`}>
-      <div className="dataset-chunk-card-head">
-        <strong title={documentName}>{documentName}</strong>
-        {action}
-      </div>
+      {documentName || action ? (
+        <div className={`dataset-chunk-card-head${documentName ? "" : " is-action-only"}`}>
+          {documentName ? <strong title={documentName}>{documentName}</strong> : null}
+          {action}
+        </div>
+      ) : null}
       <div className="dataset-chunk-card-meta">
         {tags.filter(Boolean).map((tag) => (
           <Chip key={tag}>{tag}</Chip>
@@ -342,6 +344,15 @@ export type StageProgressStep = {
   summary: string;
 };
 
+/** Keeps a dense live-state breakdown readable in the compact three-step card. */
+export function progressSummaryLines(summary: string): string[] {
+  const notes = summary.split(" · ").filter(Boolean);
+  const running = notes.find((note) => note.includes("执行中"));
+  const failed = notes.find((note) => note.includes("失败"));
+  const liveNotes = [running, failed].filter((note): note is string => Boolean(note));
+  return liveNotes.length ? liveNotes : notes.slice(0, 1);
+}
+
 export function StageProgressTrack({ steps }: { steps: StageProgressStep[] }) {
   return (
     <div className="dataset-stage-progress">
@@ -358,7 +369,11 @@ export function StageProgressTrack({ steps }: { steps: StageProgressStep[] }) {
               </strong>
             </div>
             <b>{step.label}</b>
-            <small className={`is-${step.status}`}>{step.summary}</small>
+            <small className={`is-${step.status}`} title={step.summary}>
+              {progressSummaryLines(step.summary).map((note) => (
+                <span key={note}>{note}</span>
+              ))}
+            </small>
           </div>
         </Fragment>
       ))}

@@ -24,36 +24,37 @@ $ds-line: #dbe8f9;
 /* Stepper */
 .dataset-stepper {
   flex: 0 0 auto;
+  position: relative;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   padding: 14px 14px 12px;
   border-bottom: 1px solid #dce8f7;
   background: rgba(255, 255, 255, 0.78);
+
+  &::before {
+    position: absolute;
+    z-index: 0;
+    top: 29.5px;
+    right: calc(16.6667% + 9px);
+    left: calc(16.6667% + 9px);
+    height: 1px;
+    content: "";
+    background: #cddced;
+  }
 }
 
 .dataset-step {
   position: relative;
   display: grid;
   min-width: 0;
-  grid-template-columns: 28px minmax(0, 1fr);
-  gap: 7px;
-  align-items: center;
-  padding: 0 9px 0 0;
+  grid-template-rows: 32px auto;
+  justify-items: center;
+  gap: 5px;
+  padding: 0;
   border: 0;
   background: transparent;
   cursor: pointer;
-  text-align: left;
-
-  &:not(:last-child)::after {
-    position: absolute;
-    z-index: 0;
-    top: 13px;
-    right: 0;
-    left: 28px;
-    height: 1px;
-    content: "";
-    background: #cddced;
-  }
+  text-align: center;
 
   &.is-selected {
     .dataset-step-name {
@@ -62,13 +63,14 @@ $ds-line: #dbe8f9;
 
     &::before {
       position: absolute;
-      right: 9px;
+      left: 50%;
+      width: calc(100% - 18px);
       bottom: -13px;
-      left: 0;
       height: 3px;
       content: "";
       border-radius: 3px 3px 0 0;
       background: #1e6dde;
+      transform: translateX(-50%);
     }
   }
 
@@ -112,8 +114,8 @@ $ds-line: #dbe8f9;
 .dataset-step-dot {
   z-index: 1;
   display: grid;
-  width: 28px;
-  height: 28px;
+  width: 32px;
+  height: 32px;
   place-items: center;
   border: 1px solid #cedceb;
   border-radius: 50%;
@@ -123,9 +125,27 @@ $ds-line: #dbe8f9;
   font-weight: 900;
 }
 
+.dataset-step.is-running .dataset-step-dot {
+  animation: dataset-step-breathe 1.25s ease-in-out infinite;
+}
+
+@keyframes dataset-step-breathe {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(221, 169, 61, 0.1);
+    transform: scale(1);
+  }
+
+  50% {
+    box-shadow: 0 0 0 5px rgba(221, 169, 61, 0.18);
+    transform: scale(1.06);
+  }
+}
+
 .dataset-step-copy {
   z-index: 1;
   min-width: 0;
+  text-align: center;
 }
 
 .dataset-step-name {
@@ -141,7 +161,7 @@ $ds-line: #dbe8f9;
 .dataset-step-status {
   display: block;
   color: #8497ad;
-  font-size: 10px;
+  font-size: 12px;
   white-space: nowrap;
 }
 
@@ -230,7 +250,7 @@ $ds-line: #dbe8f9;
   gap: 8px;
   margin-bottom: 9px;
   color: #536f8c;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 800;
 
   small {
@@ -277,7 +297,7 @@ $ds-line: #dbe8f9;
   small {
     display: block;
     color: #7188a4;
-    font-size: 9px;
+    font-size: 11px;
     white-space: nowrap;
   }
 
@@ -285,12 +305,12 @@ $ds-line: #dbe8f9;
     display: block;
     margin-top: 5px;
     color: #224669;
-    font-size: 20px;
+    font-size: 24px;
 
     span {
       margin-left: 2px;
       color: #7a90aa;
-      font-size: 9px;
+      font-size: 11px;
       font-weight: 500;
     }
   }
@@ -325,7 +345,7 @@ $ds-line: #dbe8f9;
   flex-wrap: wrap;
   gap: 4px 14px;
   color: #7188a4;
-  font-size: 10px;
+  font-size: 11px;
 
   strong {
     color: #385a7d;
@@ -346,7 +366,7 @@ $ds-line: #dbe8f9;
   gap: 8px;
   align-items: center;
   color: #607994;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .dataset-funnel-track {
@@ -379,7 +399,7 @@ $ds-line: #dbe8f9;
 .dataset-conversion-note {
   margin-top: 8px;
   color: #8295aa;
-  font-size: 9px;
+  font-size: 10px;
   text-align: right;
 }
 
@@ -391,37 +411,43 @@ $ds-line: #dbe8f9;
   grid-auto-flow: column;
   align-items: start;
   justify-content: center;
-  gap: 4px;
-  padding-top: 1px;
+  gap: 2px;
+  padding-top: 2px;
 }
 
 .dataset-stage-progress-link {
-  width: 18px;
+  width: 12px;
   height: 1px;
-  margin-top: 31px;
+  margin-top: 33px;
   background: #d7e2ee;
 }
 
 .dataset-stage-progress-step {
   display: grid;
-  width: 68px;
+  width: 74px;
   min-width: 0;
   justify-items: center;
   text-align: center;
 
   b {
-    margin-top: 7px;
+    margin-top: 8px;
     color: #315574;
-    font-size: 10px;
+    font-size: 12px;
     white-space: nowrap;
   }
 
   small {
-    min-height: 24px;
+    display: grid;
+    width: 100%;
+    min-height: 32px;
     margin-top: 4px;
     color: #7188a4;
-    font-size: 8px;
-    line-height: 1.4;
+    font-size: 10px;
+    line-height: 1.45;
+
+    span {
+      display: block;
+    }
 
     &.is-done {
       color: $ds-green;
@@ -449,16 +475,16 @@ $ds-line: #dbe8f9;
   --dataset-progress: 0deg;
   --dataset-progress-color: #93a5b8;
   display: grid;
-  width: 58px;
-  height: 58px;
+  width: 66px;
+  height: 66px;
   place-items: center;
   border-radius: 50%;
   background: conic-gradient(var(--dataset-progress-color) var(--dataset-progress), #e8eef5 0);
 
   &::before {
     grid-area: 1 / 1;
-    width: 46px;
-    height: 46px;
+    width: 54px;
+    height: 54px;
     content: "";
     border-radius: 50%;
     background: #fff;
@@ -468,7 +494,7 @@ $ds-line: #dbe8f9;
     z-index: 1;
     grid-area: 1 / 1;
     color: #294f73;
-    font-size: 14px;
+    font-size: 13px;
   }
 
   &.is-done {
@@ -868,6 +894,7 @@ $ds-line: #dbe8f9;
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .dataset-step.is-running .dataset-step-dot,
   .dataset-status-icon.is-running {
     animation: none;
   }

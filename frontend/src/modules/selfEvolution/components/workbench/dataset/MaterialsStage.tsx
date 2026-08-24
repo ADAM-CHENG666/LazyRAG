@@ -593,7 +593,6 @@ function DocumentDrawer({
                 {visibleChunks.map((chunk) => (
                   <ChunkCard
                     key={chunk.chunk_id}
-                    documentName={detail.document.name}
                     tags={chunkTags(capabilities, chunk)}
                     chunkId={chunk.chunk_id}
                     text={chunk.text}
