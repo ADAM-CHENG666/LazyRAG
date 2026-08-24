@@ -80,6 +80,7 @@ export function SelfEvolutionWorkbenchView({
   onSend,
   onConfirmIntentCheckpoint,
   onContinueCheckpoint,
+  canContinueDatasetStage = false,
   onOpenArtifact,
   onOpenObservation,
   onOpenCaseArtifact,
@@ -260,26 +261,34 @@ export function SelfEvolutionWorkbenchView({
       !shouldShowCutoverCard &&
       (!isAutoMode || requiresManualCheckpointAction(checkpointDecisionPrompt)),
   );
+  // Keep the Dataset advance control in the existing composer checkpoint slot.
+  // It is shown disabled outside an approval boundary so its placement can be
+  // reviewed without competing with the Dataset header actions.
+  const showDatasetContinuePreview = displayStage === "dataset" && !shouldShowCutoverCard;
+  const canContinueFromComposer = hasComposerCheckpoint || canContinueDatasetStage;
   const renderMainComposer = () => (
     <div className="self-evolution-main-composer">
-      {hasComposerCheckpoint && (
+      {(hasComposerCheckpoint || showDatasetContinuePreview) && (
         <div className="self-evolution-composer-checkpoint">
-          <span>{checkpointDecisionDesc}</span>
+          <span>
+            {canContinueFromComposer
+              ? checkpointDecisionDesc
+              : "当前阶段完成后，可在这里手动进入下一步。"}
+          </span>
           <button
             type="button"
-            disabled={!checkpointDecisionPrompt?.command || isSendingMessage}
+            disabled={!canContinueFromComposer || isSendingMessage}
             onClick={(event) => {
               event.stopPropagation();
-              if (checkpointDecisionPrompt?.command) {
-                if (isIntentConfirmation) {
-                  onConfirmIntentCheckpoint();
-                } else {
-                  onContinueCheckpoint();
-                }
+              if (!canContinueFromComposer) return;
+              if (isIntentConfirmation) {
+                onConfirmIntentCheckpoint();
+              } else {
+                onContinueCheckpoint();
               }
             }}
           >
-            {checkpointDecisionPrompt?.command || t("selfEvolutionRun.continueExecution")}
+            {checkpointDecisionPrompt?.command || "进入下一步"}
           </button>
         </div>
       )}

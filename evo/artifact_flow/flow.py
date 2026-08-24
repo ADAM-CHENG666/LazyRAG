@@ -118,6 +118,22 @@ class ArtifactFlow:
         await self._validate_structure_commit(run_id, commit)
         return await self._project(await self._runtime.commit(run_id, commit))
 
+    async def commit_structure_with_values(
+        self,
+        run_id: str,
+        commit: ArtifactCommit,
+        *,
+        value_keys: Iterable[ArtifactKey],
+    ) -> FlowSnapshot:
+        """Atomically replace a partition topology and its declared value snapshot."""
+        self._validate_user_commit(commit)
+        await self._validate_structure_commit(
+            run_id,
+            commit,
+            value_keys=frozenset(value_keys),
+        )
+        return await self._project(await self._runtime.commit(run_id, commit))
+
     async def commit_values(self, run_id: str, commit: ArtifactCommit) -> FlowSnapshot:
         """Write existing artifact content with a composite CAS.
 
@@ -431,7 +447,13 @@ class ArtifactFlow:
         if unknown_partitioned:
             raise DefinitionError(f'unknown partitioned artifacts: {", ".join(unknown_partitioned)}')
 
-    async def _validate_structure_commit(self, run_id: str, commit: ArtifactCommit) -> None:
+    async def _validate_structure_commit(
+        self,
+        run_id: str,
+        commit: ArtifactCommit,
+        *,
+        value_keys: frozenset[ArtifactKey] = frozenset(),
+    ) -> None:
         partition_set_ids = frozenset(self.definition.partition_set_by_artifact.values())
         set_writes = {
             write.key: write.value
@@ -444,6 +466,10 @@ class ArtifactFlow:
             raise DefinitionError('case structure writes must contain scalar PartitionSet values')
         if set(commit.expected_heads) != set(commit.output_keys):
             raise DefinitionError('case structure commits must compare every write and no unrelated artifact')
+        if any(key.partition_key for key in value_keys):
+            raise DefinitionError('atomic value keys must be scalar artifacts')
+        if not value_keys.issubset(commit.output_keys):
+            raise DefinitionError('atomic value keys must be committed values')
 
         base_refs = tuple(commit.expected_heads[key] for key in set_writes)
         if any(ref is None for ref in base_refs):
@@ -466,10 +492,14 @@ class ArtifactFlow:
         for write in commit.writes:
             if write.key in set_writes:
                 continue
+            if write.key in value_keys:
+                if commit.expected_heads[write.key] is None:
+                    raise DefinitionError('atomic values must update existing artifacts')
+                continue
             set_id = self.definition.partition_set_by_artifact.get(write.key.artifact_id)
             if not write.key.partition_key or set_id not in additions:
                 raise DefinitionError('case structure commits cannot write unrelated artifacts')
-            if write.key.partition_key not in additions[set_id] or commit.expected_heads[write.key] is not None:
+            if write.key.partition_key not in additions[set_id]:
                 raise DefinitionError('case structure commits can only seed newly added cases')
             added_seeds[set_id].add(write.key.partition_key)
         missing = sorted(

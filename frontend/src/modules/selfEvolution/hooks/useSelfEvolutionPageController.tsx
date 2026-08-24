@@ -670,6 +670,15 @@ export function SelfEvolutionPageController({
     [threadFlowStatus, threadStepList, threadStepStatusByStage],
   );
   const checkpointWaitPrompt = stepListCheckpointPrompt || liveCheckpointWaitPrompt;
+  const canContinueDatasetStage = useMemo(() => {
+    const latestDatasetStep = [...threadStepList.steps]
+      .reverse()
+      .find((step) => step.stage?.startsWith("dataset."));
+    return Boolean(
+      latestDatasetStep?.nextStepRunId &&
+        normalizeThreadStepStatus(latestDatasetStep.status) === "done",
+    );
+  }, [threadStepList]);
   const workflowSteps = useMemo<WorkflowStep[]>(
     () =>
       applyThreadStepStatusToWorkflowSteps(
@@ -6718,6 +6727,7 @@ export function SelfEvolutionPageController({
           onSend: (command) => void onSend(command),
           onConfirmIntentCheckpoint: () => void onConfirmIntentCheckpoint(),
           onContinueCheckpoint: () => void onContinueCheckpoint(),
+          canContinueDatasetStage,
           onOpenArtifact: openWorkflowArtifact,
           onOpenObservation: openObservationPage,
           onOpenCaseArtifact: openCaseArtifact,

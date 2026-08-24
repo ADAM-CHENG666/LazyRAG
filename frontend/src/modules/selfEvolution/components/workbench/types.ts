@@ -84,6 +84,7 @@ export type SelfEvolutionWorkbenchViewProps = {
   onSend: (command?: string) => void;
   onConfirmIntentCheckpoint: () => void;
   onContinueCheckpoint: () => void;
+  canContinueDatasetStage?: boolean;
   onOpenArtifact: (kind: WorkflowResultKind) => void;
   onOpenObservation: (kind: SelfEvolutionObservationKind) => void;
   onOpenCaseArtifact: (kind: WorkflowResultKind, artifactId: string, title: string, caseId?: string) => void;

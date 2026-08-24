@@ -279,8 +279,6 @@ class RunSession:
         self._decision = plan_next(self._definition, self._artifacts, self._retries)
         await self._refresh_snapshot_data()
 
-        if self._status == 'completed' and not isinstance(self._decision, PlanComplete):
-            await self._persist_status('paused')
         if self._status == 'running':
             await self._schedule()
         else:

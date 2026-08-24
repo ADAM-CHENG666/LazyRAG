@@ -208,6 +208,9 @@ class EvoService:
                 return _accepted(thread_id, request.command_id, 'continue')
 
             snapshot = await self.flow.snapshot(thread_id)
+            if snapshot.status == 'paused':
+                await self.flow.resume(thread_id)
+                snapshot = await self.flow.snapshot(thread_id)
             pending = snapshot.pending_approval
             if pending is None:
                 raise ServiceError(409, 'thread is not awaiting approval')
@@ -234,6 +237,8 @@ class EvoService:
             stage = request.stage or snapshot.current_stage
             if snapshot.status == 'paused' and stage == 'dataset.case_generation':
                 raise ServiceError(409, 'case generation requires an adjusted plan before retrying')
+            if stage == 'dataset.material_preparation':
+                await self._reconcile_material_chunk_request_topology(thread_id)
             await self.flow.retry_stage(thread_id, stage, request_id=command_id)
             await self._continue_automatic(thread_id)
             return _accepted(thread_id, command_id, 'retry')
@@ -409,10 +414,77 @@ class EvoService:
             seen.add(identity)
             by_identity[identity]['selected'] = selected
         _validate_candidate_quotas(chunks, candidates.get('quotas', ()))
-        return await self._commit_changed_values(
-            thread_id, f'dataset-materials-selection:{request_id}', 'user:dataset-materials-selection', refs,
-            {candidates_key: candidates},
+        selected_chunk_ids = tuple(
+            _text_value(item.get('chunk_id'), 'build_chunk_candidates.chunks[].chunk_id')
+            for item in chunks
+            if isinstance(item, Mapping) and item.get('selected') is True
         )
+        if len(set(selected_chunk_ids)) != len(selected_chunk_ids):
+            raise ServiceError(503, 'selected chunk ids are duplicated')
+
+        requests_key = ArtifactKey.scalar(A.DATASET_CHUNK_REQUESTS)
+        requests_record = await self.flow.head(thread_id, requests_key)
+        if requests_record is None:
+            raise ServiceError(409, 'chunk request partitions are unavailable')
+        try:
+            current_requests = await self.flow.read(thread_id, requests_record.ref)
+        except (DefinitionError, KeyError) as error:
+            raise ServiceError(409, 'chunk request partitions are unavailable') from error
+        if not isinstance(current_requests, PartitionSet):
+            raise ServiceError(503, 'chunk request partitions are invalid')
+
+        next_requests = PartitionSet(selected_chunk_ids)
+        if next_requests == current_requests:
+            return await self._commit_changed_values(
+                thread_id, f'dataset-materials-selection:{request_id}', 'user:dataset-materials-selection', refs,
+                {candidates_key: candidates},
+            )
+
+        candidate_ref = next(ref for ref in refs if ref.key == candidates_key)
+        added_request_ids = tuple(
+            chunk_id for chunk_id in next_requests.keys if chunk_id not in current_requests
+        )
+        request_writes = tuple(
+            ArtifactDraft(
+                ArtifactKey.partition(A.DATASET_CHUNK_REQUEST, chunk_id),
+                {'partition_key': chunk_id},
+            )
+            for chunk_id in added_request_ids
+        )
+        request_heads = await asyncio.gather(
+            *(self.flow.head(thread_id, write.key) for write in request_writes)
+        )
+        writes = (
+            ArtifactDraft(candidates_key, candidates),
+            ArtifactDraft(requests_key, next_requests),
+            *request_writes,
+        )
+        expected_heads = {
+            candidates_key: candidate_ref,
+            requests_key: requests_record.ref,
+            **{
+                write.key: record.ref if record is not None else None
+                for write, record in zip(request_writes, request_heads, strict=True)
+            },
+        }
+        commit_id = f'dataset-materials-selection:{request_id}'
+        try:
+            await self.flow.commit_structure_with_values(
+                thread_id,
+                ArtifactCommit(commit_id, 'user:dataset-materials-selection', writes, expected_heads),
+                value_keys=(candidates_key,),
+            )
+        except DefinitionError as error:
+            raise ServiceError(409, str(error)) from error
+        await self._resume_after_dataset_write(thread_id)
+        heads = await asyncio.gather(*(self.flow.head(thread_id, ref.key) for ref in refs))
+        if any(record is None for record in heads):
+            raise ServiceError(503, 'committed material selection is unavailable')
+        return {
+            'request_id': request_id,
+            'status': 'applied',
+            'revision': ProjectionService._build_revision(tuple(record.ref for record in heads if record is not None)),
+        }
 
     async def apply_topic_names(self, thread_id: str, request: TopicApplyBody | Mapping[str, Any]) -> dict[str, Any]:
         request = request if isinstance(request, TopicApplyBody) else TopicApplyBody.model_validate(request)
@@ -478,10 +550,6 @@ class EvoService:
             (params_ref,),
             {params_key: next_params},
         )
-        snapshot = await self.flow.snapshot(thread_id)
-        if snapshot.status == 'paused':
-            await self.flow.resume(thread_id)
-            await self._continue_automatic(thread_id)
         return result
 
     async def patch_case(self, thread_id: str, case_id: str,
@@ -607,6 +675,62 @@ class EvoService:
         return {(item.get('kb_id'), item.get('doc_id')) for item in _list_value(value.get('documents', ()), 'selected_docs.documents')
                 if isinstance(item, Mapping) and isinstance(item.get('kb_id'), str) and isinstance(item.get('doc_id'), str)}
 
+    async def _reconcile_material_chunk_request_topology(self, thread_id: str) -> None:
+        candidates_key = ArtifactKey.scalar(A.DATASET_BUILD_CHUNK_CANDIDATES)
+        requests_key = ArtifactKey.scalar(A.DATASET_CHUNK_REQUESTS)
+        candidates_record, requests_record = await asyncio.gather(
+            self.flow.head(thread_id, candidates_key),
+            self.flow.head(thread_id, requests_key),
+        )
+        if candidates_record is None or requests_record is None:
+            return
+        try:
+            candidates, current_requests = await asyncio.gather(
+                self.flow.read(thread_id, candidates_record.ref),
+                self.flow.read(thread_id, requests_record.ref),
+            )
+        except (DefinitionError, KeyError) as error:
+            raise ServiceError(409, 'chunk request partitions are unavailable') from error
+        if not isinstance(current_requests, PartitionSet):
+            raise ServiceError(503, 'chunk request partitions are invalid')
+        chunks = _list_value(
+            _mapping_value(candidates, 'build_chunk_candidates').get('chunks', ()),
+            'build_chunk_candidates.chunks',
+        )
+        selected_chunk_ids = tuple(
+            _text_value(item.get('chunk_id'), 'build_chunk_candidates.chunks[].chunk_id')
+            for item in chunks
+            if isinstance(item, Mapping) and item.get('selected') is True
+        )
+        if len(set(selected_chunk_ids)) != len(selected_chunk_ids):
+            raise ServiceError(503, 'selected chunk ids are duplicated')
+        next_requests = PartitionSet(selected_chunk_ids)
+        if next_requests == current_requests:
+            return
+        request_writes = tuple(
+            ArtifactDraft(
+                ArtifactKey.partition(A.DATASET_CHUNK_REQUEST, chunk_id),
+                {'partition_key': chunk_id},
+            )
+            for chunk_id in next_requests.keys
+            if chunk_id not in current_requests
+        )
+        try:
+            await self.flow.commit(
+                thread_id,
+                ArtifactCommit(
+                    f'dataset-materials-selection-reconcile:{time.time_ns()}',
+                    'user:dataset-materials-selection-reconcile',
+                    (ArtifactDraft(requests_key, next_requests), *request_writes),
+                    {
+                        requests_key: requests_record.ref,
+                        **{write.key: None for write in request_writes},
+                    },
+                ),
+            )
+        except DefinitionError as error:
+            raise ServiceError(409, str(error)) from error
+
     async def _commit_changed_values(self, thread_id: str, commit_id: str, producer: str,
                                      refs: tuple[ArtifactRef, ...], values: Mapping[ArtifactKey, object]) -> dict[str, Any]:
         current_values = await asyncio.gather(*(self.flow.read(thread_id, ref) for ref in refs))
@@ -623,7 +747,7 @@ class EvoService:
             )
         except DefinitionError as error:
             raise ServiceError(409, str(error)) from error
-        await self._continue_automatic(thread_id)
+        await self._resume_after_dataset_write(thread_id)
         heads = await asyncio.gather(*(self.flow.head(thread_id, ref.key) for ref in refs))
         if any(record is None for record in heads):
             raise ServiceError(503, 'committed configuration is unavailable')
@@ -767,6 +891,12 @@ class EvoService:
     async def _continue_automatic(self, thread_id: str) -> None:
         if await self._auto_enabled(thread_id):
             self._ensure_auto_task(thread_id)
+
+    async def _resume_after_dataset_write(self, thread_id: str) -> None:
+        snapshot = await self.flow.snapshot(thread_id)
+        if snapshot.status == 'paused':
+            await self.flow.resume(thread_id)
+        await self._continue_automatic(thread_id)
 
     def _ensure_auto_task(self, thread_id: str) -> None:
         if self._closing:

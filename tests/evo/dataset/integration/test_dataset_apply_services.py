@@ -27,6 +27,8 @@ class _ApplyFlow:
     def __init__(self, values: dict[ArtifactKey, tuple[int, object]]) -> None:
         self.values = values
         self.commits: list[ArtifactCommit] = []
+        self.status = 'running'
+        self.resume_calls: list[str] = []
 
     async def has_run(self, _thread_id: str) -> bool:
         return True
@@ -47,13 +49,19 @@ class _ApplyFlow:
     async def commit_values(self, thread_id: str, commit: ArtifactCommit) -> object:
         return await self.commit(thread_id, commit)
 
+    async def commit_structure_with_values(
+        self, thread_id: str, commit: ArtifactCommit, *, value_keys: tuple[ArtifactKey, ...],
+    ) -> object:
+        del value_keys
+        return await self.commit(thread_id, commit)
+
     async def snapshot(self, _thread_id: str) -> object:
         from types import SimpleNamespace
 
-        return SimpleNamespace(status='running')
+        return SimpleNamespace(status=self.status)
 
     async def resume(self, thread_id: str) -> None:
-        del thread_id
+        self.resume_calls.append(thread_id)
 
 
 def _service(values: dict[ArtifactKey, tuple[int, object]]) -> tuple[EvoService, _ApplyFlow]:
@@ -103,6 +111,8 @@ def _material_values() -> dict[ArtifactKey, tuple[int, object]]:
             ],
             'quotas': [{'kb_id': 'kb-a', 'doc_id': 'doc-1', 'group': 'block', 'required': 1}],
         }),
+        ArtifactKey.scalar(A.DATASET_CHUNK_REQUESTS): (8, PartitionSet(('chunk-1',))),
+        ArtifactKey.partition(A.DATASET_CHUNK_REQUEST, 'chunk-1'): (1, {'partition_key': 'chunk-1'}),
     }
 
 
@@ -563,8 +573,106 @@ def test_apply_material_chunk_selection_preserves_quota_and_uses_document_snapsh
 
     commit = flow.commits[0]
     assert commit.commit_id == 'dataset-materials-selection:selection-1'
-    assert commit.expected_heads == {docs.key: docs, candidates.key: candidates}
+    assert commit.expected_heads == {
+        candidates.key: candidates,
+        ArtifactKey.scalar(A.DATASET_CHUNK_REQUESTS): ArtifactRef(
+            ArtifactKey.scalar(A.DATASET_CHUNK_REQUESTS), 8,
+        ),
+        ArtifactKey.partition(A.DATASET_CHUNK_REQUEST, 'chunk-2'): None,
+    }
     assert [row['selected'] for row in commit.writes[0].value['chunks']] == [False, True]
+
+
+def test_apply_material_chunk_selection_replaces_chunk_request_partitions_atomically() -> None:
+    service, flow = _service(_material_values())
+    docs = ArtifactRef(ArtifactKey.scalar(A.DATASET_SELECTED_DOCS), 6)
+    candidates = ArtifactRef(ArtifactKey.scalar(A.DATASET_BUILD_CHUNK_CANDIDATES), 7)
+
+    asyncio.run(service.apply_material_chunk_selection('thr-1', {
+        'request_id': 'selection-replace',
+        'expected_revision': _revision(docs, candidates),
+        'changes': {'chunk_selection_changes': [
+            {'knowledge_base_id': 'kb-a', 'document_id': 'doc-1', 'chunk_id': 'chunk-1', 'selected': False},
+            {'knowledge_base_id': 'kb-a', 'document_id': 'doc-1', 'chunk_id': 'chunk-2', 'selected': True},
+        ]},
+    }))
+
+    commit = flow.commits[0]
+    candidates_key = ArtifactKey.scalar(A.DATASET_BUILD_CHUNK_CANDIDATES)
+    requests_key = ArtifactKey.scalar(A.DATASET_CHUNK_REQUESTS)
+    new_request_key = ArtifactKey.partition(A.DATASET_CHUNK_REQUEST, 'chunk-2')
+    assert [write.key for write in commit.writes] == [candidates_key, requests_key, new_request_key]
+    assert commit.writes[1].value == PartitionSet(('chunk-2',))
+    assert commit.writes[2].value == {'partition_key': 'chunk-2'}
+    assert commit.expected_heads == {
+        candidates_key: candidates,
+        requests_key: ArtifactRef(requests_key, 8),
+        new_request_key: None,
+    }
+
+
+def test_apply_material_chunk_selection_reuses_historical_partition_head_when_reselecting_chunk() -> None:
+    values = _material_values()
+    chunk_2_key = ArtifactKey.partition(A.DATASET_CHUNK_REQUEST, 'chunk-2')
+    # The chunk was selected in an earlier topology, then removed. Its artifact
+    # record remains in history even though the current PartitionSet excludes it.
+    values[chunk_2_key] = (3, {'partition_key': 'chunk-2'})
+    service, flow = _service(values)
+    docs = ArtifactRef(ArtifactKey.scalar(A.DATASET_SELECTED_DOCS), 6)
+    candidates = ArtifactRef(ArtifactKey.scalar(A.DATASET_BUILD_CHUNK_CANDIDATES), 7)
+
+    asyncio.run(service.apply_material_chunk_selection('thr-1', {
+        'request_id': 'selection-reselect',
+        'expected_revision': _revision(docs, candidates),
+        'changes': {'chunk_selection_changes': [
+            {'knowledge_base_id': 'kb-a', 'document_id': 'doc-1', 'chunk_id': 'chunk-1', 'selected': False},
+            {'knowledge_base_id': 'kb-a', 'document_id': 'doc-1', 'chunk_id': 'chunk-2', 'selected': True},
+        ]},
+    }))
+
+    commit = flow.commits[0]
+    assert commit.expected_heads[chunk_2_key] == ArtifactRef(chunk_2_key, 3)
+
+
+def test_apply_material_chunk_selection_resumes_a_paused_thread() -> None:
+    service, flow = _service(_material_values())
+    flow.status = 'paused'
+    docs = ArtifactRef(ArtifactKey.scalar(A.DATASET_SELECTED_DOCS), 6)
+    candidates = ArtifactRef(ArtifactKey.scalar(A.DATASET_BUILD_CHUNK_CANDIDATES), 7)
+
+    asyncio.run(service.apply_material_chunk_selection('thr-1', {
+        'request_id': 'selection-resume',
+        'expected_revision': _revision(docs, candidates),
+        'changes': {'chunk_selection_changes': [
+            {'knowledge_base_id': 'kb-a', 'document_id': 'doc-1', 'chunk_id': 'chunk-1', 'selected': False},
+            {'knowledge_base_id': 'kb-a', 'document_id': 'doc-1', 'chunk_id': 'chunk-2', 'selected': True},
+        ]},
+    }))
+
+    assert flow.resume_calls == ['thr-1']
+
+
+def test_apply_material_chunk_selection_rejects_duplicated_selected_chunk_ids() -> None:
+    values = _material_values()
+    candidates_key = ArtifactKey.scalar(A.DATASET_BUILD_CHUNK_CANDIDATES)
+    candidates = values[candidates_key][1]
+    assert isinstance(candidates, dict)
+    candidates['chunks'] = [
+        {'kb_id': 'kb-a', 'doc_id': 'doc-1', 'chunk_id': 'chunk-1', 'selected': True, 'group': 'block'},
+        {'kb_id': 'kb-a', 'doc_id': 'doc-1', 'chunk_id': 'chunk-1', 'selected': True, 'group': 'block'},
+    ]
+    candidates['quotas'] = [{'kb_id': 'kb-a', 'doc_id': 'doc-1', 'group': 'block', 'required': 2}]
+    service, _ = _service(values)
+    docs = ArtifactRef(ArtifactKey.scalar(A.DATASET_SELECTED_DOCS), 6)
+
+    with pytest.raises(ServiceError, match='selected chunk ids are duplicated'):
+        asyncio.run(service.apply_material_chunk_selection('thr-1', {
+            'request_id': 'selection-duplicate',
+            'expected_revision': _revision(docs, ArtifactRef(candidates_key, 7)),
+            'changes': {'chunk_selection_changes': [
+                {'knowledge_base_id': 'kb-a', 'document_id': 'doc-1', 'chunk_id': 'chunk-1', 'selected': True},
+            ]},
+        }))
 
 
 def test_apply_topic_names_changes_only_names_and_keeps_topic_discovery_out_of_the_commit() -> None:
@@ -704,6 +812,87 @@ def test_content_commit_is_rejected_by_structure_commit_and_accepted_by_commit_v
             assert selection_head is not None and selection_head.ref.version == 1
             assert chunks_head is not None and chunks_head.ref.version == 1
             assert (await flow.read('thr-1', source_head.ref))['target_case_count'] == 7
+        finally:
+            await flow.close()
+
+    asyncio.run(run())
+
+
+def test_atomic_material_selection_replaces_request_topology_in_real_flow(tmp_path) -> None:
+    async def run() -> None:
+        definition = FlowDefinition(
+            (dataset_module.build_chunk_candidates_operation,),
+            (FlowStage('materials', ArtifactKey.scalar(A.DATASET_BUILD_CHUNK_CANDIDATES)),),
+        )
+        flow = await ArtifactFlow.open(tmp_path / 'runtime-selection', definition)
+        candidates_key = ArtifactKey.scalar(A.DATASET_BUILD_CHUNK_CANDIDATES)
+        requests_key = ArtifactKey.scalar(A.DATASET_CHUNK_REQUESTS)
+        old_request_key = ArtifactKey.partition(A.DATASET_CHUNK_REQUEST, 'chunk-1')
+        new_request_key = ArtifactKey.partition(A.DATASET_CHUNK_REQUEST, 'chunk-2')
+        initial_candidates = {
+            'chunks': [{'chunk_id': 'chunk-1', 'selected': True}],
+            'quotas': [],
+        }
+        next_candidates = {
+            'chunks': [{'chunk_id': 'chunk-2', 'selected': True}],
+            'quotas': [],
+        }
+        try:
+            await flow.create('thr-1', ArtifactCommit(
+                'seed:selection',
+                'user:create',
+                (
+                    ArtifactDraft(candidates_key, initial_candidates),
+                    ArtifactDraft(requests_key, PartitionSet(('chunk-1',))),
+                    ArtifactDraft(old_request_key, {'partition_key': 'chunk-1'}),
+                ),
+                {candidates_key: None, requests_key: None, old_request_key: None},
+            ))
+            await flow.commit_structure_with_values('thr-1', ArtifactCommit(
+                'dataset-materials-selection:replace',
+                'user:dataset-materials-selection',
+                (
+                    ArtifactDraft(candidates_key, next_candidates),
+                    ArtifactDraft(requests_key, PartitionSet(('chunk-2',))),
+                    ArtifactDraft(new_request_key, {'partition_key': 'chunk-2'}),
+                ),
+                {
+                    candidates_key: ArtifactRef(candidates_key, 1),
+                    requests_key: ArtifactRef(requests_key, 1),
+                    new_request_key: None,
+                },
+            ), value_keys=(candidates_key,))
+
+            requests = await flow.head('thr-1', requests_key)
+            candidates = await flow.head('thr-1', candidates_key)
+            new_request = await flow.head('thr-1', new_request_key)
+            assert requests is not None and requests.ref.version == 2
+            assert candidates is not None and candidates.ref.version == 2
+            assert new_request is not None and new_request.ref.version == 1
+            assert await flow.read('thr-1', requests.ref) == PartitionSet(('chunk-2',))
+
+            # A removed partition's artifact remains in history. Re-adding the
+            # same partition must atomically reactivate it against that head.
+            await flow.commit_structure_with_values('thr-1', ArtifactCommit(
+                'dataset-materials-selection:reselect',
+                'user:dataset-materials-selection',
+                (
+                    ArtifactDraft(candidates_key, initial_candidates),
+                    ArtifactDraft(requests_key, PartitionSet(('chunk-1',))),
+                    ArtifactDraft(old_request_key, {'partition_key': 'chunk-1'}),
+                ),
+                {
+                    candidates_key: ArtifactRef(candidates_key, 2),
+                    requests_key: ArtifactRef(requests_key, 2),
+                    old_request_key: ArtifactRef(old_request_key, 1),
+                },
+            ), value_keys=(candidates_key,))
+
+            reselected_requests = await flow.head('thr-1', requests_key)
+            reselected_request = await flow.head('thr-1', old_request_key)
+            assert reselected_requests is not None and reselected_requests.ref.version == 3
+            assert reselected_request is not None and reselected_request.ref.version == 2
+            assert await flow.read('thr-1', reselected_requests.ref) == PartitionSet(('chunk-1',))
         finally:
             await flow.close()
 
