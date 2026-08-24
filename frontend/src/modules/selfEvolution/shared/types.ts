@@ -149,7 +149,7 @@ export type HistorySessionEntry = {
 };
 
 export type NewSessionDraft = {
-  selectedKb?: string;
+  selectedKbs?: string[];
   selectedEvalSet?: string;
   extraEvalStrategy?: ExtraEvalStrategy;
   mode?: EvolutionMode;

@@ -54,6 +54,11 @@ import {
   type SelfEvolutionWorkbenchViewProps,
 } from "../components/WorkbenchView";
 import { type SelfEvolutionWorkbenchTab } from "../components/types";
+import {
+  knowledgeBaseNamesFor,
+  pruneKnowledgeBaseSelection,
+  selectionSummary,
+} from "../shared/knowledgeBaseSelection";
 import "../index.scss";
 import {
   EvolutionMode,
@@ -165,7 +170,7 @@ import {
   isThreadEventAfter,
   reduceWorkflowRuntimeState,
   getThreadTitleFromPayload,
-  getThreadKnowledgeBaseId,
+  getThreadKnowledgeBaseIds,
   getThreadModeFromPayload,
   getTerminalFlowStepStatus,
   applyThreadStreamTerminalToState,
@@ -291,7 +296,7 @@ export function SelfEvolutionPageController({
   const [extraEvalStrategy, setExtraEvalStrategy] = useState<ExtraEvalStrategy>(
     FIXED_EXTRA_EVAL_STRATEGY,
   );
-  const [selectedKb, setSelectedKb] = useState<string>();
+  const [selectedKbs, setSelectedKbs] = useState<string[]>([]);
   const [knowledgeBaseOptions, setKnowledgeBaseOptions] = useState<
     KnowledgeBaseOption[]
   >([]);
@@ -465,17 +470,11 @@ export function SelfEvolutionPageController({
             }));
 
           setKnowledgeBaseOptions(nextOptions);
-          setSelectedKb((prev) =>
-            prev && nextOptions.some((item) => item.value === prev)
-              ? prev
-              : undefined,
-          );
-          setNewSessionDraft((prev) =>
-            prev.selectedKb &&
-            !nextOptions.some((item) => item.value === prev.selectedKb)
-              ? { ...prev, selectedKb: undefined }
-              : prev,
-          );
+          setSelectedKbs((prev) => pruneKnowledgeBaseSelection(prev, nextOptions));
+          setNewSessionDraft((prev) => ({
+            ...prev,
+            selectedKbs: pruneKnowledgeBaseSelection(prev.selectedKbs || [], nextOptions),
+          }));
         })
         .catch((error) => {
           if (isCanceledRequest(error)) {
@@ -493,9 +492,9 @@ export function SelfEvolutionPageController({
     [t],
   );
   const fetchExistingEvalSetOptions = useCallback(
-    (datasetId?: string, signal?: AbortSignal) => {
-      const normalizedDatasetId = `${datasetId || ""}`.trim();
-      if (!normalizedDatasetId) {
+    (datasetIds: string[] = [], signal?: AbortSignal) => {
+      const normalizedDatasetIds = [...new Set(datasetIds.map((id) => id.trim()).filter(Boolean))];
+      if (!normalizedDatasetIds.length) {
         setExistingEvalSetOptions([]);
         setExistingEvalSetError("");
         setIsExistingEvalSetLoading(false);
@@ -507,7 +506,7 @@ export function SelfEvolutionPageController({
       createCoreEvalSetsApiClient()
         .apiCoreEvalSetsGet(
           {
-            datasetIds: [normalizedDatasetId],
+            datasetIds: normalizedDatasetIds,
             page: 1,
             pageSize: 1000,
           },
@@ -548,9 +547,6 @@ export function SelfEvolutionPageController({
     },
     [],
   );
-  const selectedKnowledgeBaseLabel = knowledgeBaseOptions.find(
-    (item) => item.value === selectedKb,
-  )?.label;
   const knowledgeBasePlaceholder = knowledgeBaseError
     ? t("selfEvolutionRun.knowledgeBaseLoadFailed")
     : isKnowledgeBaseLoading
@@ -558,15 +554,14 @@ export function SelfEvolutionPageController({
       : knowledgeBaseOptions.length === 0
         ? t("selfEvolutionRun.noKnowledgeBase")
         : t("selfEvolutionRun.knowledgeBase");
-  const selectedKnowledgeBase =
-    selectedKnowledgeBaseLabel || knowledgeBasePlaceholder;
-  const knowledgeBaseLaunchLabel =
-    selectedKnowledgeBaseLabel ||
-    (knowledgeBaseError ||
-    isKnowledgeBaseLoading ||
-    knowledgeBaseOptions.length === 0
+  const selectedKnowledgeBase = selectionSummary(selectedKbs, knowledgeBaseOptions, knowledgeBasePlaceholder);
+  const knowledgeBaseLaunchLabel = selectionSummary(
+    selectedKbs,
+    knowledgeBaseOptions,
+    knowledgeBaseError || isKnowledgeBaseLoading || knowledgeBaseOptions.length === 0
       ? knowledgeBasePlaceholder
-      : t("selfEvolutionRun.knowledgeBaseNotSelected"));
+      : t("selfEvolutionRun.knowledgeBaseNotSelected"),
+  );
   const getExistingEvalSetLabel = useCallback(
     (value?: string) => {
       const option = [
@@ -596,23 +591,20 @@ export function SelfEvolutionPageController({
   const modeLabel = isAutoMode
     ? t("selfEvolutionRun.modeAuto")
     : t("selfEvolutionRun.modeInteractive");
-  const isKnowledgeBaseRequired = !selectedKb;
+  const isKnowledgeBaseRequired = selectedKbs.length === 0;
   const isLaunchConfigComplete = Boolean(
-    selectedKb && selectedEvalSet && extraEvalStrategy && mode,
+    selectedKbs.length > 0 && selectedEvalSet && extraEvalStrategy && mode,
   );
   const isLaunchConfigValid =
     isLaunchConfigComplete &&
     (!isExtraEvalRequired || extraEvalStrategy === "generate");
-  const draftSelectedKnowledgeBaseLabel = knowledgeBaseOptions.find(
-    (item) => item.value === newSessionDraft.selectedKb,
-  )?.label;
-  const draftKnowledgeBaseLaunchLabel =
-    draftSelectedKnowledgeBaseLabel ||
-    (knowledgeBaseError ||
-    isKnowledgeBaseLoading ||
-    knowledgeBaseOptions.length === 0
+  const draftKnowledgeBaseLaunchLabel = selectionSummary(
+    newSessionDraft.selectedKbs || [],
+    knowledgeBaseOptions,
+    knowledgeBaseError || isKnowledgeBaseLoading || knowledgeBaseOptions.length === 0
       ? knowledgeBasePlaceholder
-      : t("selfEvolutionRun.selectKnowledgeBase"));
+      : t("selfEvolutionRun.selectKnowledgeBase"),
+  );
   const draftSelectedEvalSetLabel = newSessionDraft.selectedEvalSet
     ? getExistingEvalSetLabel(newSessionDraft.selectedEvalSet)
     : undefined;
@@ -633,7 +625,7 @@ export function SelfEvolutionPageController({
         ? t("selfEvolutionRun.interventionAuto")
         : t("selfEvolutionRun.selectInterventionMode");
   const isNewSessionDraftComplete = Boolean(
-    newSessionDraft.selectedKb &&
+    newSessionDraft.selectedKbs?.length &&
     newSessionDraft.selectedEvalSet &&
     newSessionDraft.extraEvalStrategy &&
     newSessionDraft.mode,
@@ -642,13 +634,17 @@ export function SelfEvolutionPageController({
     isNewSessionDraftComplete &&
     (!isDraftExtraEvalRequired ||
       newSessionDraft.extraEvalStrategy === "generate");
-  const isNewSessionStepOneDone = Boolean(newSessionDraft.selectedKb);
+  const isNewSessionStepOneDone = Boolean(newSessionDraft.selectedKbs?.length);
   const isNewSessionStepTwoDone = Boolean(newSessionDraft.selectedEvalSet);
   const isNewSessionStepThreeDone = Boolean(newSessionDraft.extraEvalStrategy);
   const isNewSessionStepFourDone = Boolean(newSessionDraft.mode);
-  const evalSetDatasetId = isNewSessionConfigOpen
-    ? newSessionDraft.selectedKb
-    : selectedKb;
+  const evalSetDatasetIds = useMemo(
+    () =>
+      isNewSessionConfigOpen
+        ? newSessionDraft.selectedKbs || []
+        : selectedKbs,
+    [isNewSessionConfigOpen, newSessionDraft.selectedKbs, selectedKbs],
+  );
   const threadTerminalStatusByStage = useMemo(
     () => buildTerminalStatusByStage(threadEvents),
     [threadEvents],
@@ -1974,12 +1970,12 @@ export function SelfEvolutionPageController({
 
   useEffect(() => {
     const controller = new AbortController();
-    fetchExistingEvalSetOptions(evalSetDatasetId, controller.signal);
+    fetchExistingEvalSetOptions(evalSetDatasetIds, controller.signal);
 
     return () => {
       controller.abort();
     };
-  }, [evalSetDatasetId, fetchExistingEvalSetOptions]);
+  }, [evalSetDatasetIds, fetchExistingEvalSetOptions]);
 
   useEffect(() => {
     if (isExistingEvalSetLoading || existingEvalSetError) {
@@ -2113,21 +2109,6 @@ export function SelfEvolutionPageController({
     }));
   }, [isKnowledgeBaseLoading, knowledgeBaseError, knowledgeBaseOptions, t]);
 
-  const onKnowledgeBaseMenuClick = (
-    key: string,
-    onSelect: (nextKnowledgeBase: string) => void,
-  ) => {
-    if (key === "__retry__") {
-      fetchKnowledgeBaseOptions();
-      return;
-    }
-    if (key.startsWith("__")) {
-      return;
-    }
-
-    onSelect(key);
-  };
-
   const modeMenuItems: MenuProps["items"] = [
     { key: "auto", label: t("selfEvolutionRun.modeAuto") },
     { key: "interactive", label: t("selfEvolutionRun.modeInteractive") },
@@ -2157,7 +2138,7 @@ export function SelfEvolutionPageController({
       });
       return items;
     }
-    if (evalSetDatasetId && existingEvalSetOptions.length === 0) {
+    if (evalSetDatasetIds.length > 0 && existingEvalSetOptions.length === 0) {
       items.push({
         key: "__eval_set_empty__",
         label: t("selfEvolutionRun.noMatchingEvalSet"),
@@ -2176,7 +2157,7 @@ export function SelfEvolutionPageController({
     );
     return items;
   }, [
-    evalSetDatasetId,
+    evalSetDatasetIds,
     existingEvalSetError,
     existingEvalSetOptions,
     getExistingEvalSetLabel,
@@ -2189,7 +2170,7 @@ export function SelfEvolutionPageController({
     onSelect: (nextEvalSet: string) => void,
   ) => {
     if (key === "__eval_set_retry__") {
-      fetchExistingEvalSetOptions(evalSetDatasetId);
+      fetchExistingEvalSetOptions(evalSetDatasetIds);
       return;
     }
     if (key.startsWith("__eval_set_")) {
@@ -2293,12 +2274,12 @@ export function SelfEvolutionPageController({
 
   const createAndStartThread = async (config?: {
     mode: EvolutionMode;
-    selectedKb: string;
+    selectedKbs: string[];
     selectedKnowledgeBase: string;
     selectedEvalSet: string;
   }) => {
     const targetMode = config?.mode || mode;
-    const targetSelectedKb = config?.selectedKb || selectedKb;
+    const targetSelectedKbs = config?.selectedKbs || selectedKbs;
     const targetKnowledgeBase =
       config?.selectedKnowledgeBase || selectedKnowledgeBase;
     const targetEvalSet = config?.selectedEvalSet || selectedEvalSet;
@@ -2316,7 +2297,8 @@ export function SelfEvolutionPageController({
         mode: targetMode,
         title: targetKnowledgeBase || "self evolution test",
         inputs: {
-          kb_id: targetSelectedKb,
+          kb_id: targetSelectedKbs,
+          knowledge_base_names: knowledgeBaseNamesFor(targetSelectedKbs, knowledgeBaseOptions),
           algo_id: "general_algo",
           eval_name: evalName,
           ...(targetEvalSet && targetEvalSet !== FIXED_EVAL_SET
@@ -3500,9 +3482,9 @@ export function SelfEvolutionPageController({
 
       const threadPayload = threadResult.data as ThreadRestorePayload;
       const detailTitle = getThreadTitleFromPayload(threadPayload);
-      const knowledgeBaseId = getThreadKnowledgeBaseId(threadPayload);
-      if (knowledgeBaseId) {
-        setSelectedKb(knowledgeBaseId);
+      const knowledgeBaseIds = getThreadKnowledgeBaseIds(threadPayload);
+      if (knowledgeBaseIds.length) {
+        setSelectedKbs(knowledgeBaseIds);
       }
       const restoredMode = getThreadModeFromPayload(threadPayload);
       if (restoredMode) {
@@ -3968,7 +3950,7 @@ export function SelfEvolutionPageController({
     }
     if (!isLaunchConfigValid) {
       setHasLaunchValidationTriggered(true);
-      if (!selectedKb) {
+      if (!selectedKbs.length) {
         message.warning(
           t("selfEvolutionRun.message.selectKnowledgeBaseBeforeStart"),
           1.2,
@@ -4084,7 +4066,7 @@ export function SelfEvolutionPageController({
     }
     if (!isNewSessionDraftValid) {
       setHasNewSessionValidationTriggered(true);
-      if (!newSessionDraft.selectedKb) {
+      if (!newSessionDraft.selectedKbs?.length) {
         message.warning(
           t("selfEvolutionRun.message.selectKnowledgeBaseBeforeNewSession"),
           1.2,
@@ -4117,13 +4099,12 @@ export function SelfEvolutionPageController({
     }
 
     const nextMode = newSessionDraft.mode as EvolutionMode;
-    const nextKnowledgeBase = newSessionDraft.selectedKb as string;
+    const nextKnowledgeBases = newSessionDraft.selectedKbs as string[];
     const nextEvalSet = newSessionDraft.selectedEvalSet as string;
     const nextExtraEvalStrategy =
       newSessionDraft.extraEvalStrategy as ExtraEvalStrategy;
     const nextKnowledgeBaseLabel =
-      knowledgeBaseOptions.find((item) => item.value === nextKnowledgeBase)
-        ?.label || t("selfEvolutionRun.knowledgeBase");
+      selectionSummary(nextKnowledgeBases, knowledgeBaseOptions, t("selfEvolutionRun.knowledgeBase"));
     const nextEvalSetLabel = getExistingEvalSetLabel(nextEvalSet);
     const nextExtraEvalLabel =
       nextExtraEvalStrategy === "generate"
@@ -4141,7 +4122,7 @@ export function SelfEvolutionPageController({
     try {
       const { threadId } = await createAndStartThread({
         mode: nextMode,
-        selectedKb: nextKnowledgeBase,
+        selectedKbs: nextKnowledgeBases,
         selectedKnowledgeBase: nextKnowledgeBaseLabel,
         selectedEvalSet: nextEvalSet,
       });
@@ -4166,7 +4147,7 @@ export function SelfEvolutionPageController({
         ],
       };
 
-      setSelectedKb(nextKnowledgeBase);
+      setSelectedKbs(nextKnowledgeBases);
       setSelectedEvalSet(nextEvalSet);
       setExtraEvalStrategy(nextExtraEvalStrategy);
       setMode(nextMode);
@@ -4414,15 +4395,18 @@ export function SelfEvolutionPageController({
       menu={{
         items: knowledgeBaseMenuItems,
         selectable: true,
-        selectedKeys: selectedKb ? [selectedKb] : [],
-        onClick: ({ key }) => {
+        multiple: true,
+        selectedKeys: selectedKbs,
+        onSelect: ({ key, selectedKeys }) => {
           if (isLocked) {
             return;
           }
-          onKnowledgeBaseMenuClick(String(key), (nextKnowledgeBase) => {
-            setSelectedKb(nextKnowledgeBase);
-            setHasLaunchValidationTriggered(false);
-          });
+          if (String(key) === "__retry__") return fetchKnowledgeBaseOptions();
+          setSelectedKbs(pruneKnowledgeBaseSelection(selectedKeys.map(String), knowledgeBaseOptions));
+          setHasLaunchValidationTriggered(false);
+        },
+        onDeselect: ({ selectedKeys }) => {
+          setSelectedKbs(pruneKnowledgeBaseSelection(selectedKeys.map(String), knowledgeBaseOptions));
         },
       }}
     >
@@ -4585,24 +4569,28 @@ export function SelfEvolutionPageController({
       menu={{
         items: knowledgeBaseMenuItems,
         selectable: true,
-        selectedKeys: newSessionDraft.selectedKb
-          ? [newSessionDraft.selectedKb]
-          : [],
-        onClick: ({ key }) => {
-          onKnowledgeBaseMenuClick(String(key), (nextKnowledgeBase) => {
-            setNewSessionDraft((prev) => ({
-              ...prev,
-              selectedKb: nextKnowledgeBase,
-            }));
-            setHasNewSessionValidationTriggered(false);
-          });
+        multiple: true,
+        selectedKeys: newSessionDraft.selectedKbs || [],
+        onSelect: ({ key, selectedKeys }) => {
+          if (String(key) === "__retry__") return fetchKnowledgeBaseOptions();
+          setNewSessionDraft((prev) => ({
+            ...prev,
+            selectedKbs: pruneKnowledgeBaseSelection(selectedKeys.map(String), knowledgeBaseOptions),
+          }));
+          setHasNewSessionValidationTriggered(false);
+        },
+        onDeselect: ({ selectedKeys }) => {
+          setNewSessionDraft((prev) => ({
+            ...prev,
+            selectedKbs: pruneKnowledgeBaseSelection(selectedKeys.map(String), knowledgeBaseOptions),
+          }));
         },
       }}
     >
       <button
         type="button"
         className={`self-evolution-chatlike-tool is-launch-control${
-          hasNewSessionValidationTriggered && !newSessionDraft.selectedKb
+          hasNewSessionValidationTriggered && !newSessionDraft.selectedKbs?.length
             ? " is-warning"
             : ""
         }`}
@@ -4814,7 +4802,7 @@ export function SelfEvolutionPageController({
       toneClassName: "is-blue",
       icon: <DatabaseOutlined />,
       isHighlighted:
-        hasNewSessionValidationTriggered && !newSessionDraft.selectedKb,
+        hasNewSessionValidationTriggered && !newSessionDraft.selectedKbs?.length,
       isDescSingleLine: false,
       control: renderNewSessionKnowledgeBaseButton(),
     },

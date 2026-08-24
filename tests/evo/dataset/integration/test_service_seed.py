@@ -67,6 +67,18 @@ def test_service_seed_preserves_core_authoritative_knowledge_base_names() -> Non
     }
 
 
+def test_service_seed_initializes_every_selected_knowledge_base_for_materials() -> None:
+    seed = _seed_values('thr-1', _request(
+        kb_ids=['kb-2', 'kb-1'],
+        knowledge_base_names={'kb-1': '产品知识库', 'kb-2': '研究资料库'},
+    ))
+
+    assert seed['dataset.select_docs_params']['knowledge_bases'] == [
+        {'kb_id': 'kb-2', 'included': True},
+        {'kb_id': 'kb-1', 'included': True},
+    ]
+
+
 def test_thread_create_rejects_missing_dataset_sources() -> None:
     with pytest.raises(ValueError, match='inputs.kb_id or inputs.csv_data is required'):
         _request(kb_ids=[], csv_data=[])

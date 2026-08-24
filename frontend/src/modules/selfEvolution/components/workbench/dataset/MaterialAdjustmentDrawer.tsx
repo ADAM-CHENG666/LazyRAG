@@ -282,12 +282,7 @@ export function MaterialAdjustmentDrawer({
                                 setDocuments((prev) => ({ ...prev, [key]: event.target.checked }))
                               }
                             />
-                            <span>
-                              {item.name}
-                              <small>
-                                {documents[key] ? "可继续进入详情排除单个片段" : "当前禁止入选"}
-                              </small>
-                            </span>
+                            <span>{item.name}</span>
                           </label>
                         );
                       })
