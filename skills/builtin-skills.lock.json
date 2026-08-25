@@ -127,6 +127,36 @@
       "package_file": "packages/bsk_1B9DC2E9E2C3E911E34E9C8EA1AA.zip"
     },
     {
+      "key": "clawhub_wscats/interview-simulator",
+      "uid": "bsk_C1CB6B0CB3D8ACD9480D7F529AEE",
+      "source_url": "https://skillhub.cn/skills/clawhub_wscats/interview-simulator",
+      "resolved_url": "https://api.skillhub.cn/api/v1/download?slug=%40clawhub_wscats%2Finterview-simulator",
+      "version": "1.0.0",
+      "name": "interview-simulator",
+      "description": "Simulate role-specific mock interviews, score each answer, and provide concrete feedback and model responses for interview preparation.",
+      "category": "external",
+      "tags": [
+        "interview",
+        "career",
+        "coaching"
+      ],
+      "market_visible": false,
+      "origin_archive_sha256": "7f50d04bb52b68bcb6a53746dd7b0b1e5ba5b537279fc05b919dbe01295836e9",
+      "origin_tree_sha256": "4afb2807b9e4794019bfcf1cf8b442c8a22835d35b5cac7aacdc7f3b0edcd836",
+      "origin_archive_size": 7027,
+      "patch_set_sha256": "a31a514a944d1c6393536a62802c1503d4635f6991c0a06cd06951de3242698b",
+      "applied_patches": [
+        {
+          "id": "interview-simulator/add-required-frontmatter-v1",
+          "sha256": "ad589f919c7345afb5810e7181ecad0bb8a87da5b5a87017b004516e46220194"
+        }
+      ],
+      "archive_sha256": "c2e36114761add53f2e3070911c866eb8d96884aee3a784a43bb6e3fee7d5c8b",
+      "tree_sha256": "bcaaedf783e933a1a30f51a15f9ca713ff27523fcdf43dd9371d66d682c39290",
+      "archive_size": 7106,
+      "package_file": "packages/bsk_C1CB6B0CB3D8ACD9480D7F529AEE.zip"
+    },
+    {
       "key": "user_6d79eef2/k12-smart-teacher",
       "uid": "bsk_8540F063D5202C3CE7D9B6F93366",
       "source_url": "https://skillhub.cn/skills/user_6d79eef2/k12-smart-teacher",
