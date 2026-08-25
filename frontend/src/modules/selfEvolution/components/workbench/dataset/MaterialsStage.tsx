@@ -69,7 +69,7 @@ export function MaterialsStage({
   );
   const overview = useDatasetResource(
     fetchOverview,
-    refreshToken + overviewToken,
+    overviewToken,
     "材料概览加载失败",
   );
 

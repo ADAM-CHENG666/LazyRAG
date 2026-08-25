@@ -77,7 +77,7 @@ export function TopicsStage({
   );
   const overview = useDatasetResource(
     fetchOverview,
-    refreshToken + overviewToken,
+    overviewToken,
     "主题概览加载失败",
   );
 

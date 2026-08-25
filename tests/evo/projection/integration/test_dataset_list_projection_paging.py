@@ -74,11 +74,15 @@ class _CaseListFakeFlow:
         self._values = values
         self._cases = cases
         self._has_thread = has_thread
+        self.head_calls: list[ArtifactKey] = []
+        self.case_snapshot_calls: list[str] = []
+        self.case_operation_statuses_calls: list[tuple[str, ...]] = []
 
     async def has_run(self, _: str) -> bool:
         return self._has_thread
 
     async def head(self, _: str, key: ArtifactKey) -> ArtifactRecord | None:
+        self.head_calls.append(key)
         versions = self._values.get(key, {})
         return None if not versions else self._record(key, max(versions))
 
@@ -89,7 +93,20 @@ class _CaseListFakeFlow:
         return self._values[ref.key][ref.version]
 
     async def case_snapshot(self, _: str, case_id: str) -> object:
+        self.case_snapshot_calls.append(case_id)
         return self._cases[case_id]
+
+    async def case_operation_statuses(self, _: str, case_ids: tuple[str, ...],
+                                      operation_ids: tuple[str, ...]) -> dict[str, dict[str, str]]:
+        self.case_operation_statuses_calls.append(case_ids)
+        return {
+            case_id: {
+                operation['operation_id']: operation['status']
+                for operation in self._cases[case_id]['runtime']['operations']
+                if operation['operation_id'] in operation_ids
+            }
+            for case_id in case_ids
+        }
 
     @staticmethod
     def _record(key: ArtifactKey, version: int) -> ArtifactRecord:
@@ -577,6 +594,22 @@ def test_cases_uses_the_case_spec_topic_after_a_single_case_topic_change() -> No
 
     assert result['items'][1]['topic'] == {'topic_id': 'topic-a', 'name': '主题 A'}
     assert result['items'][2]['topic'] == {'topic_id': 'topic-a', 'name': '主题 A'}
+
+
+def test_cases_reads_runtime_once_and_only_reads_specs_for_the_visible_page() -> None:
+    service = _case_list_service()
+
+    result = _cases(service, page_size=1)
+
+    assert [item['case_id'] for item in result['items']] == ['case-1']
+    assert service.flow.case_operation_statuses_calls == [('case-1', 'case-2', 'case-3')]
+    assert service.flow.case_snapshot_calls == []
+    spec_heads = [
+        key.partition_key
+        for key in service.flow.head_calls
+        if key.artifact_id == A.DATASET_QAPLAN_SPEC
+    ]
+    assert spec_heads == ['case-1']
 
 
 def test_cases_returns_all_rows_before_qaplan_outputs_exist() -> None:

@@ -101,7 +101,7 @@ export function CasesStage({
   );
   const overview = useDatasetResource(
     fetchOverview,
-    refreshToken + overviewToken,
+    overviewToken,
     "用例概览加载失败",
   );
 
@@ -130,7 +130,7 @@ export function CasesStage({
     if (shouldReconcileCaseExecution({
       reconciliationToken,
       lastReconciledToken: lastReconciledToken.current,
-      expectedOverviewToken: refreshToken + overviewToken,
+      expectedOverviewToken: overviewToken,
       loadedOverviewToken: overview.loadedToken,
       expectedListToken: refreshToken,
       loadedListToken: cases.loadedToken,

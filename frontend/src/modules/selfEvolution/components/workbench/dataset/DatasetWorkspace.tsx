@@ -15,6 +15,7 @@ import {
 import { applyTopicLabelPartitionEvent, type TopicDiscoveryProgress } from "./topicLabelProgress";
 import { applyCaseGenerationPartitionEvent, type CaseGenerationProgress } from "./caseGenerationProgress";
 import { DATASET_TABS, useDatasetStages, type DatasetStreamEvent } from "./useDatasetStages";
+import { INITIAL_STAGE_STATUSES } from "./stageState";
 import "./dataset.scss";
 import {
   DRAFT_IMPACT_DETAIL,
@@ -22,6 +23,8 @@ import {
   DRAFT_LABELS,
   type DatasetDraft,
   type DatasetTab,
+  type ThreadStepsResponse,
+  type VisualStatus,
 } from "./types";
 
 const STEP_SYMBOL: Record<string, string> = {
@@ -34,10 +37,17 @@ const STEP_SYMBOL: Record<string, string> = {
 
 export function DatasetWorkspace({
   threadId,
+  stageStatuses = INITIAL_STAGE_STATUSES,
+  suggestedTab,
+  onStepsSnapshot,
   onWriteApplied,
   executionResumeToken = 0,
 }: {
   threadId?: string;
+  /** Derived from the Workbench-owned /steps list (deriveDatasetView). */
+  stageStatuses?: Record<DatasetTab, VisualStatus>;
+  suggestedTab?: DatasetTab;
+  onStepsSnapshot?: (response: ThreadStepsResponse) => void;
   onWriteApplied?: () => void;
   executionResumeToken?: number;
 }) {
@@ -90,6 +100,7 @@ export function DatasetWorkspace({
 
   // Terminal SSE events reload overview for the finished stage; when the
   // published revision changes, lists auto-refresh unless a draft would be lost.
+  // Navigation status comes from the parent /steps snapshot (onStepsSnapshot).
   const handleStageEvent = useCallback((event: DatasetStreamEvent) => {
     if (event.tab === "topics" || event.stage === "dataset.topic_discovery") {
       const next = applyTopicLabelPartitionEvent(topicProgressRef.current, event);
@@ -117,6 +128,24 @@ export function DatasetWorkspace({
     pendingRefresh.current.add(event.tab);
   }, [scheduleProgressFlush]);
 
+  const handleStepsSnapshot = useCallback(
+    (response: ThreadStepsResponse) => {
+      onStepsSnapshot?.(response);
+    },
+    [onStepsSnapshot],
+  );
+
+  const clearExecutionProgress = useCallback((tabs: DatasetTab[]) => {
+    if (tabs.includes("topics")) topicProgressRef.current = undefined;
+    if (tabs.includes("cases")) caseProgressRef.current = undefined;
+    scheduleProgressFlush();
+  }, [scheduleProgressFlush]);
+
+  const { refreshSteps, resumeAfterWrite } = useDatasetStages(threadId, {
+    onStepsSnapshot: handleStepsSnapshot,
+    onStageEvent: handleStageEvent,
+  });
+
   const handleOverviewRevision = useCallback((stageTab: DatasetTab, revision: string | null) => {
     const previous = revisions.current[stageTab];
     const wasProbing = probing.current === stageTab;
@@ -140,21 +169,13 @@ export function DatasetWorkspace({
     } else if (action === "pending") {
       pendingRefresh.current.add(stageTab);
     }
-  }, [scheduleProgressFlush]);
+  }, []);
 
   const handleCaseExecutionReconciled = useCallback(() => {
     if (!caseProgressRef.current) return;
     caseProgressRef.current = undefined;
     scheduleProgressFlush();
   }, [scheduleProgressFlush]);
-
-  const clearExecutionProgress = useCallback((tabs: DatasetTab[]) => {
-    if (tabs.includes("topics")) topicProgressRef.current = undefined;
-    if (tabs.includes("cases")) caseProgressRef.current = undefined;
-    scheduleProgressFlush();
-  }, [scheduleProgressFlush]);
-
-  const { statuses, activeTab, refreshSteps, resumeAfterWrite } = useDatasetStages(threadId, handleStageEvent);
 
   useEffect(() => {
     if (!shouldResumeDatasetStream(handledExecutionResumeToken.current, executionResumeToken)) return;
@@ -192,12 +213,12 @@ export function DatasetWorkspace({
   // The executing stage only decides the default tab on first entry; later
   // progress must not pull the view away from what the user is reading.
   useEffect(() => {
-    if (activeTab && followActiveStage.current) {
+    if (suggestedTab && followActiveStage.current) {
       followActiveStage.current = false;
-      setTab(activeTab);
-      flushPendingRefresh(activeTab);
+      setTab(suggestedTab);
+      flushPendingRefresh(suggestedTab);
     }
-  }, [activeTab, flushPendingRefresh]);
+  }, [suggestedTab, flushPendingRefresh]);
 
   const selectTab = (next: DatasetTab) => {
     followActiveStage.current = false;
@@ -321,7 +342,7 @@ export function DatasetWorkspace({
     <section className="dataset-workspace" aria-label="数据集自动构建">
       <nav className="dataset-stepper" aria-label="数据集内部步骤">
         {DATASET_TABS.map((item, index) => {
-          const status = statuses[item.id];
+          const status = stageStatuses[item.id];
           return (
             <button
               type="button"
@@ -367,7 +388,7 @@ export function DatasetWorkspace({
             refreshToken={refreshToken}
             overviewToken={overviewToken}
             labelProgress={topicLabelProgress}
-            executionStatus={statuses.topics}
+            executionStatus={stageStatuses.topics}
             onOverviewRevision={handleOverviewRevision}
             draft={draft}
             onSaveDraft={saveDraft}
@@ -378,7 +399,7 @@ export function DatasetWorkspace({
             refreshToken={refreshToken}
             overviewToken={overviewToken}
             progress={caseGenerationProgress}
-            executionStatus={statuses.cases}
+            executionStatus={stageStatuses.cases}
             reconciliationToken={caseReconciliationToken}
             onOverviewRevision={handleOverviewRevision}
             onExecutionReconciled={handleCaseExecutionReconciled}

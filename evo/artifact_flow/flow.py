@@ -321,6 +321,10 @@ class ArtifactFlow:
             case.retries,
         )
 
+    async def case_operation_statuses(self, run_id: str, case_ids: Iterable[str],
+                                      operation_ids: Iterable[str]) -> dict[str, dict[str, str]]:
+        return await self._runtime.case_operation_statuses(run_id, case_ids, operation_ids)
+
     async def run_history(self, run_id: str) -> FlowRunHistory:
         history = await self._runtime.run_history(run_id)
         snapshot = project_flow(self.definition, history.snapshot, history.retry_requests)

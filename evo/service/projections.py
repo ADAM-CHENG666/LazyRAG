@@ -374,32 +374,42 @@ class ProjectionService:
 
     async def _case_operation_statuses(self, thread_id: str,
                                        case_ids: tuple[str, ...]) -> dict[str, dict[str, str]]:
-        snapshots = await asyncio.gather(*(self.case_snapshot(thread_id, case_id) for case_id in case_ids))
-        result: dict[str, dict[str, str]] = {}
         operation_ids = ('dataset.qaplan_spec', 'dataset.generate_case', 'dataset.enhance_case')
-        for case_id, snapshot in zip(case_ids, snapshots, strict=True):
-            runtime = _overview_mapping(
-                _overview_mapping(snapshot, 'case snapshot').get('snapshot'),
-                'case snapshot.snapshot',
-            ).get('runtime')
-            operations = _overview_mapping(runtime, 'case snapshot.runtime').get('operations')
-            if not isinstance(operations, list):
-                raise ServiceError(409, 'case snapshot.runtime.operations is invalid')
-            by_id = {
-                operation.get('operation_id'): operation.get('status')
-                for operation in operations
-                if isinstance(operation, Mapping)
+        batch = getattr(self.flow, 'case_operation_statuses', None)
+        if callable(batch):
+            raw_statuses = await batch(thread_id, case_ids, operation_ids)
+            return {
+                case_id: self._normalized_case_operation_statuses(case_id, raw_statuses.get(case_id))
+                for case_id in case_ids
             }
-            statuses: dict[str, str] = {}
-            for operation_id in operation_ids:
-                operation_status = by_id.get(operation_id)
-                if operation_status not in {'pending', 'running', 'succeeded', 'failed', 'cancelled'}:
-                    raise ServiceError(409, f'case snapshot has no valid status for {operation_id}')
-                statuses[operation_id] = {
-                    'succeeded': 'completed',
-                    'cancelled': 'canceled',
-                }.get(operation_status, operation_status)
-            result[case_id] = statuses
+        snapshots = await asyncio.gather(*(self.case_snapshot(thread_id, case_id) for case_id in case_ids))
+        return {
+            case_id: self._normalized_case_operation_statuses(
+                case_id,
+                {
+                    operation.get('operation_id'): operation.get('status')
+                    for operation in _overview_mapping(
+                        _overview_mapping(snapshot, 'case snapshot').get('snapshot'),
+                        'case snapshot.snapshot',
+                    ).get('runtime', {}).get('operations', [])
+                    if isinstance(operation, Mapping)
+                },
+            )
+            for case_id, snapshot in zip(case_ids, snapshots, strict=True)
+        }
+
+    @staticmethod
+    def _normalized_case_operation_statuses(case_id: str, raw_statuses: object) -> dict[str, str]:
+        by_id = _overview_mapping(raw_statuses, f'case {case_id} operation statuses')
+        result: dict[str, str] = {}
+        for operation_id in ('dataset.qaplan_spec', 'dataset.generate_case', 'dataset.enhance_case'):
+            operation_status = by_id.get(operation_id)
+            if operation_status not in {'pending', 'running', 'succeeded', 'failed', 'cancelled'}:
+                raise ServiceError(409, f'case snapshot has no valid status for {operation_id}')
+            result[operation_id] = {
+                'succeeded': 'completed',
+                'cancelled': 'canceled',
+            }.get(operation_status, operation_status)
         return result
 
     async def _case_spec_values(self, thread_id: str, case_ids: tuple[str, ...]) -> dict[str, object]:
@@ -482,17 +492,14 @@ class ProjectionService:
             statuses = _pending_case_statuses(tuple(row['case_id'] for row in rows))
         else:
             case_ids = _case_ids_from_partition_set(artifacts[ArtifactKey.scalar(A.EVAL_CASE_REQUESTS)]['value'])
-            statuses, specifications = await asyncio.gather(
-                self._case_operation_statuses(thread_id, case_ids),
-                self._case_spec_values(thread_id, case_ids),
-            )
+            statuses = await self._case_operation_statuses(thread_id, case_ids)
             rows = _case_rows(
                 case_ids,
                 artifacts[ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST)]['value'],
                 artifacts[ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN)]['value'],
                 artifacts[ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST)]['value'],
                 statuses,
-                specifications,
+                {},
             )
         current_execution_revision = self._build_execution_revision(statuses)
         if page_token and execution_revision != current_execution_revision:
@@ -500,6 +507,17 @@ class ProjectionService:
         execution_revision = current_execution_revision
         rows = [row for row in rows if _case_matches(row, filters)]
         page = _page(rows, size, str(offset))
+        if set(keys) == set(complete_keys) and page['items']:
+            page_case_ids = tuple(item['case_id'] for item in page['items'])
+            specifications = await self._case_spec_values(thread_id, page_case_ids)
+            page['items'] = _case_rows(
+                page_case_ids,
+                artifacts[ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST)]['value'],
+                artifacts[ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN)]['value'],
+                artifacts[ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST)]['value'],
+                statuses,
+                specifications,
+            )
         next_offset = page['next_page_token']
         return {
             'thread_id': thread_id,

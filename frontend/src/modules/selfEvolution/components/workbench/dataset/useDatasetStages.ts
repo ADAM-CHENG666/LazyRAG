@@ -1,12 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { AgentAppsAuth } from "@/components/auth";
 import { getJson, threadRoot } from "./api";
-import type { DatasetTab, ThreadStepsResponse, VisualStatus } from "./types";
+import type { DatasetTab, ThreadStepsResponse } from "./types";
 import {
-  activeDatasetTabForThread,
   datasetTabForStage,
   deriveDatasetStageState,
-  INITIAL_STAGE_STATUSES,
   isCurrentDatasetExecutionEvent,
 } from "./stageState";
 
@@ -15,8 +13,6 @@ export const DATASET_TABS: Array<{ id: DatasetTab; label: string }> = [
   { id: "topics", label: "主题发现" },
   { id: "cases", label: "用例生成" },
 ];
-
-export type StageStatuses = Record<DatasetTab, VisualStatus>;
 
 export type DatasetStreamEvent = {
   event: string;
@@ -30,23 +26,27 @@ export type DatasetStreamEvent = {
   progress?: { current?: number | null; total?: number | null };
 };
 
+type UseDatasetStagesOptions = {
+  /** Push every /steps snapshot to the Workbench owner (sole nav state writer). */
+  onStepsSnapshot: (response: ThreadStepsResponse) => void;
+  onStageEvent: (event: DatasetStreamEvent) => void;
+};
+
 /**
- * Derives the three dataset step states from the shared thread step list and
- * keeps them live through the thread event stream.
+ * Dataset SSE + /steps refresh trigger.
  *
- * One GET /events:stream lasts until Flow reaches a terminal snapshot (`done`).
- * Writes that start a new round call `resumeAfterWrite`, which reopens the
- * stream with `Last-Event-ID` only when that previous GET has already ended.
- *
- * @param onStageEvent receives every Dataset stream event.  Callers decide
- * whether it affects transient local progress or published stage data.
+ * Navigation status is NOT stored here — the parent writes threadStepList from
+ * onStepsSnapshot and derives top / sub-nav / continue via deriveDatasetView.
+ * This hook only keeps the stream alive and filters stale step_id events.
  */
-export function useDatasetStages(threadId: string | undefined, onStageEvent: (event: DatasetStreamEvent) => void) {
-  const [statuses, setStatuses] = useState<StageStatuses>(INITIAL_STAGE_STATUSES);
-  const [activeTab, setActiveTab] = useState<DatasetTab>();
-  const [activeTabThreadId, setActiveTabThreadId] = useState<string>();
+export function useDatasetStages(
+  threadId: string | undefined,
+  { onStepsSnapshot, onStageEvent }: UseDatasetStagesOptions,
+) {
   const eventHandler = useRef(onStageEvent);
   eventHandler.current = onStageEvent;
+  const snapshotHandler = useRef(onStepsSnapshot);
+  snapshotHandler.current = onStepsSnapshot;
   const resumeStream = useRef<(force?: boolean) => void>(() => undefined);
   const activeStepId = useRef<string>();
   const inactiveStepIds = useRef(new Set<string>());
@@ -55,6 +55,7 @@ export function useDatasetStages(threadId: string | undefined, onStageEvent: (ev
     if (!threadId) return undefined;
     try {
       const response = await getJson<ThreadStepsResponse>(`${threadRoot(threadId)}/steps`);
+      snapshotHandler.current(response);
       const next = deriveDatasetStageState(response);
       activeStepId.current = next.activeStepId;
       inactiveStepIds.current = new Set(
@@ -62,12 +63,8 @@ export function useDatasetStages(threadId: string | undefined, onStageEvent: (ev
           .map((item) => item.step_id)
           .filter((stepId) => stepId && stepId !== next.activeStepId),
       );
-      setStatuses(next.statuses);
-      setActiveTab(next.activeTab);
-      setActiveTabThreadId(threadId);
       return next;
     } catch {
-      // The stepper keeps its previous state; the stage panels report their own errors.
       return undefined;
     }
   }, [threadId]);
@@ -77,9 +74,6 @@ export function useDatasetStages(threadId: string | undefined, onStageEvent: (ev
   }, []);
 
   useEffect(() => {
-    setStatuses(INITIAL_STAGE_STATUSES);
-    setActiveTab(undefined);
-    setActiveTabThreadId(undefined);
     activeStepId.current = undefined;
     inactiveStepIds.current.clear();
   }, [threadId]);
@@ -129,7 +123,15 @@ export function useDatasetStages(threadId: string | undefined, onStageEvent: (ev
             if (parsed.event === "done") {
               streamEnded = true;
               await refreshSteps();
-              if (event) eventHandler.current(event);
+              eventHandler.current(
+                event ?? {
+                  event: "done",
+                  tab: "materials",
+                  stage: parsed.payload.stage || parsed.payload.current_step || "dataset.material_preparation",
+                  stepId: parsed.payload.step_id || "",
+                  status: parsed.payload.status,
+                },
+              );
               reachedDone = true;
               break;
             }
@@ -172,8 +174,6 @@ export function useDatasetStages(threadId: string | undefined, onStageEvent: (ev
   }, [refreshSteps, threadId]);
 
   return {
-    statuses,
-    activeTab: activeDatasetTabForThread(threadId, activeTabThreadId, activeTab),
     refreshSteps,
     resumeAfterWrite,
   };

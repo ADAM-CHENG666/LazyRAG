@@ -67,6 +67,7 @@ export function CaseDetailDrawer({
 }) {
   const [detail, setDetail] = useState<CaseDetail>();
   const [topicOptions, setTopicOptions] = useState<CaseTopicOption[]>([]);
+  const [topicOptionsLoading, setTopicOptionsLoading] = useState(false);
   const [stage, setStage] = useState<CaseStageKey>("generate");
   const [draft, setDraft] = useState<Draft>();
   const [saving, setSaving] = useState(false);
@@ -82,19 +83,13 @@ export function CaseDetailDrawer({
     setError(undefined);
     try {
       const detailUrl = `${root}/cases/${encodeURIComponent(caseId)}`;
-      const [value, options] = await Promise.all([
-        getJson<CaseDetail>(detailUrl),
-        // Topic options only drive the optional re-assignment picker.
-        getJson<PagedResponse<CaseTopicOption>>(`${detailUrl}/topic-options`, {
-          page_size: PAGE_SIZE,
-        }).catch(() => undefined),
-      ]);
+      const value = await getJson<CaseDetail>(detailUrl);
       setDetail(value);
       setDraft(toDraft(value));
       setStage(focusStage(value));
       setEditingGenerate(false);
       setEvidenceEditorIndex(undefined);
-      setTopicOptions(options?.items || []);
+      setTopicOptions([]);
     } catch (caught) {
       setError(describeRequestError(caught, "读取用例详情失败"));
     }
@@ -105,10 +100,33 @@ export function CaseDetailDrawer({
       setDetail(undefined);
       setDraft(undefined);
       setTopicOptions([]);
+      setTopicOptionsLoading(false);
       return;
     }
     void load();
   }, [caseId, load]);
+
+  const loadTopicOptions = useCallback(async () => {
+    if (!caseId) return;
+    setTopicOptionsLoading(true);
+    try {
+      const value = await getJson<PagedResponse<CaseTopicOption>>(
+        `${root}/cases/${encodeURIComponent(caseId)}/topic-options`,
+        { page_size: PAGE_SIZE },
+      );
+      setTopicOptions(value.items);
+    } catch {
+      // The picker is optional; detail editing remains available if candidates cannot load.
+      setTopicOptions([]);
+    } finally {
+      setTopicOptionsLoading(false);
+    }
+  }, [caseId, root]);
+
+  useEffect(() => {
+    if (stage !== "plan" || !detail || detail.source === "imported") return;
+    void loadTopicOptions();
+  }, [detail, loadTopicOptions, stage]);
 
   const imported = detail?.source === "imported";
   const initial = useMemo(() => (detail ? toDraft(detail) : undefined), [detail]);
@@ -350,7 +368,9 @@ export function CaseDetailDrawer({
                           </div>
                         </button>
                       ))}
-                      {!detail.topic && !topicOptions.length ? (
+                      {topicOptionsLoading ? (
+                        <p className="dataset-note">正在读取可替换主题…</p>
+                      ) : !detail.topic && !topicOptions.length ? (
                         <p className="dataset-note">当前没有可替换的主题。</p>
                       ) : null}
                     </div>

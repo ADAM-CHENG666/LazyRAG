@@ -57,6 +57,30 @@ describe('dataset refresh policy', () => {
     expect(shouldResumeDatasetStream(3, 4)).toBe(true);
   });
 
+  it('keeps overview reloads independent from list refreshes', () => {
+    for (const file of ['MaterialsStage.tsx', 'TopicsStage.tsx', 'CasesStage.tsx']) {
+      const source = readFrontendFile(
+        `src/modules/selfEvolution/components/workbench/dataset/${file}`,
+      );
+
+      expect(source).toContain('fetchOverview,\n    overviewToken,');
+      expect(source).not.toContain('refreshToken + overviewToken');
+    }
+  });
+
+  it('loads topic options only when the generated case plan is visible', () => {
+    const source = readFrontendFile(
+      'src/modules/selfEvolution/components/workbench/dataset/CaseDetailDrawer.tsx',
+    );
+    const loadStart = source.indexOf('const load = useCallback');
+    const loadEnd = source.indexOf('useEffect(() => {', loadStart);
+    const detailLoad = source.slice(loadStart, loadEnd);
+
+    expect(detailLoad).not.toContain('topic-options');
+    expect(source).toContain('const loadTopicOptions = useCallback');
+    expect(source).toContain('if (stage !== "plan" || !detail || detail.source === "imported") return;');
+  });
+
   it('notifies the Dataset workspace when the continue request is accepted', () => {
     const source = readFrontendFile(
       'src/modules/selfEvolution/hooks/useSelfEvolutionPageController.tsx',
@@ -69,6 +93,34 @@ describe('dataset refresh policy', () => {
 
     expect(requestAccepted).toBeGreaterThan(-1);
     expect(notification).toBeGreaterThan(requestAccepted);
+  });
+
+  it('keeps Dataset nav status owned by the Workbench /steps snapshot', () => {
+    const controller = readFrontendFile(
+      'src/modules/selfEvolution/hooks/useSelfEvolutionPageController.tsx',
+    );
+    expect(controller).toContain('deriveDatasetView');
+    expect(controller).toContain('onDatasetStepsSnapshot:');
+    expect(controller).toContain('datasetStageStatuses');
+    expect(controller).not.toContain('onDatasetExecutionSettled:');
+
+    const writeApplied = controller.indexOf('onDatasetWriteApplied:');
+    const writeBlock = controller.slice(writeApplied, writeApplied + 1200);
+    expect(writeBlock).toContain('waitForSubscribableThreadStep');
+    expect(writeBlock).toContain('subscribeNextStepWithEventsFirst');
+
+    const workspace = readFrontendFile(
+      'src/modules/selfEvolution/components/workbench/dataset/DatasetWorkspace.tsx',
+    );
+    expect(workspace).toContain('onStepsSnapshot');
+    expect(workspace).toContain('stageStatuses');
+    expect(workspace).not.toContain('onExecutionSettled');
+
+    const stagesHook = readFrontendFile(
+      'src/modules/selfEvolution/components/workbench/dataset/useDatasetStages.ts',
+    );
+    expect(stagesHook).toContain('onStepsSnapshot');
+    expect(stagesHook).not.toContain('setStatuses');
   });
 
   it('notifies the Dataset workspace when a message starts the next step', () => {

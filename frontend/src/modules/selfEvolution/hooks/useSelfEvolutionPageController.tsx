@@ -178,6 +178,8 @@ import {
   getStageLabel,
   toThreadEventStage,
   mergeWorkflowStepStatus,
+  deriveDatasetView,
+  toDatasetNavStatus,
   fetchThreadGateContent,
   fetchThreadGateDownload,
   getGateEvalCaseCount,
@@ -217,7 +219,6 @@ import {
   getFinalResultMetricLabel,
   humanizeFinalResultReason,
   normalizeThreadStepStatus,
-  isStepCheckpointWaiting,
   isThreadFlowRunning,
   getSilentRestoreRequestConfig,
   normalizeThreadStepListPayload,
@@ -667,12 +668,20 @@ export function SelfEvolutionPageController({
     [threadFlowStatus, threadStepList, threadStepStatusByStage],
   );
   const checkpointWaitPrompt = stepListCheckpointPrompt || liveCheckpointWaitPrompt;
-  const canContinueDatasetStage = useMemo(() => {
-    const latestDatasetStep = [...threadStepList.steps]
-      .reverse()
-      .find((step) => step.stage?.startsWith("dataset."));
-    return Boolean(latestDatasetStep && isStepCheckpointWaiting(latestDatasetStep));
-  }, [threadStepList]);
+  const datasetWorkflowView = useMemo(
+    () => deriveDatasetView(threadStepList.steps, threadStepList.activeStepId),
+    [threadStepList],
+  );
+  const canContinueDatasetStage = datasetWorkflowView.canContinue;
+  const datasetStageStatuses = useMemo(
+    () => ({
+      materials: toDatasetNavStatus(datasetWorkflowView.subStatuses.materials),
+      topics: toDatasetNavStatus(datasetWorkflowView.subStatuses.topics),
+      cases: toDatasetNavStatus(datasetWorkflowView.subStatuses.cases),
+    }),
+    [datasetWorkflowView],
+  );
+  const datasetSuggestedTab = datasetWorkflowView.suggestedTab;
   const workflowSteps = useMemo<WorkflowStep[]>(
     () =>
       applyThreadStepStatusToWorkflowSteps(
@@ -6715,13 +6724,49 @@ export function SelfEvolutionPageController({
           onConfirmIntentCheckpoint: () => void onConfirmIntentCheckpoint(),
           onContinueCheckpoint: () => void onContinueCheckpoint(),
           canContinueDatasetStage,
+          datasetStageStatuses,
+          datasetSuggestedTab,
+          onDatasetStepsSnapshot: (response) => {
+            if (!routeThreadId) return;
+            const stepList = normalizeThreadStepListPayload(
+              response as ThreadRestorePayload,
+            );
+            syncThreadStepListState(routeThreadId, stepList);
+          },
           onOpenArtifact: openWorkflowArtifact,
           onOpenObservation: openObservationPage,
           onOpenCaseArtifact: openCaseArtifact,
           onDatasetWriteApplied: () => {
-            if (routeThreadId) {
-              void refreshThreadStepList(routeThreadId);
+            if (!routeThreadId) {
+              return;
             }
+            // Apply starts a new Dataset round — refresh /steps and follow the
+            // running step so top status / continue stay aligned through settle.
+            void (async () => {
+              const waited = await waitForSubscribableThreadStep(() =>
+                refreshThreadStepList(routeThreadId),
+              );
+              if (!waited || !ownsThreadStepList(routeThreadId)) {
+                return;
+              }
+              const running = waited.steps.find(
+                (step) => step.active || isThreadStepRunning(step),
+              );
+              if (running?.stepId) {
+                await subscribeNextStepWithEventsFirst(
+                  routeThreadId,
+                  running.stepId,
+                  activeSessionId,
+                );
+                return;
+              }
+              await restoreLatestThreadStep(
+                routeThreadId,
+                activeSessionId,
+                undefined,
+                waited,
+              );
+            })();
           },
           datasetExecutionResumeToken,
           onWorkbenchTabChange: handleWorkbenchTabChange,

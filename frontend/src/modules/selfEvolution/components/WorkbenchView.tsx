@@ -81,6 +81,9 @@ export function SelfEvolutionWorkbenchView({
   onConfirmIntentCheckpoint,
   onContinueCheckpoint,
   canContinueDatasetStage = false,
+  datasetStageStatuses,
+  datasetSuggestedTab,
+  onDatasetStepsSnapshot,
   onOpenArtifact,
   onOpenObservation,
   onOpenCaseArtifact,
@@ -406,6 +409,9 @@ export function SelfEvolutionWorkbenchView({
                 {shouldShowStageDetail && displayStage === "dataset" ? (
                   <DatasetWorkspace
                     threadId={routeThreadId}
+                    stageStatuses={datasetStageStatuses}
+                    suggestedTab={datasetSuggestedTab}
+                    onStepsSnapshot={onDatasetStepsSnapshot}
                     onWriteApplied={onDatasetWriteApplied}
                     executionResumeToken={datasetExecutionResumeToken}
                   />

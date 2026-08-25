@@ -95,6 +95,23 @@ describe('case generation SSE progress', () => {
     expect(displayed).toMatchObject({ status: 'pending', completed: 0, total: 20 });
   });
 
+  it('uses completed partitions from the same SSE store that updates case rows', () => {
+    let progress;
+    progress = applyCaseGenerationPartitionEvent(progress, event({ status: 'running' }));
+    progress = applyCaseGenerationPartitionEvent(progress, event({
+      partition: { id: 'case-002', total: 2 },
+      status: 'completed',
+    }));
+
+    const displayed = caseGenerationDisplayStep(
+      caseGenerationSteps(progress)[0],
+      { status: 'pending', completed: 0, total: 0, status_counts: { pending: 0 } },
+      'running',
+    );
+
+    expect(displayed).toMatchObject({ completed: 1, running: 1, total: 2, status: 'running' });
+  });
+
   it('clears execution progress only after the terminal-triggered overview and list requests both finish', () => {
     const base = {
       reconciliationToken: 2,

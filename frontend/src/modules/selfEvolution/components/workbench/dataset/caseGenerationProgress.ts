@@ -116,13 +116,13 @@ export function caseGenerationDisplayStep(
   const stablePending = stableCounts?.pending ?? 0;
   if (transient?.total) {
     const total = Math.max(stableTotal, transient.total);
-    // SSE only contains changed partitions for the current execution. It must
-    // overlay the snapshot, not replace its completed partitions wholesale.
-    const displacedCompleted = transient.running + transient.failed + transient.canceled;
-    const completed = Math.max(0, stableCompleted - displacedCompleted);
-    const running = Math.max(stableRunning, transient.running);
-    const failed = Math.max(stableFailed, transient.failed);
-    const canceled = Math.max(stableCanceled, transient.canceled);
+    // The execution store contains every observed partition of the current
+    // step. The Case table and overview must derive from that same source;
+    // stable counts can belong to the previous execution round.
+    const completed = transient.completed;
+    const running = transient.running;
+    const failed = transient.failed;
+    const canceled = transient.canceled;
     const pending = Math.max(0, total - completed - running - failed - canceled);
     return {
       completed,
@@ -138,13 +138,13 @@ export function caseGenerationDisplayStep(
   const total = stableTotal;
   if (currentStageStatus === 'running') {
     return {
-      completed: stableCompleted,
+      completed: 0,
       total,
-      running: stableRunning,
-      failed: stableFailed,
-      canceled: stableCanceled,
-      pending: stablePending,
-      status: stableFailed ? 'failed' : stableRunning ? 'running' : stableCompleted === total && total > 0 ? 'done' : 'pending',
+      running: 0,
+      failed: 0,
+      canceled: 0,
+      pending: total,
+      status: 'pending',
     };
   }
 

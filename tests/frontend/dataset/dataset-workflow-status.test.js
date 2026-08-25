@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   datasetWorkflowStepFromSteps,
+  deriveDatasetView,
+  getDatasetCheckpointWaitingStep,
   mergeWorkflowStepStatus,
   terminalDatasetWorkflowStatus,
   toThreadEventStage,
@@ -8,78 +10,162 @@ import {
 
 function steps(items) {
   return items.map((item, index) => ({
+    ...item,
     stage: item.stage,
     status: item.status,
     orderIndex: index,
-    stepId: `step-${index}`,
+    stepId: item.stepId || `step-${index}`,
   }));
 }
 
-describe('dataset workflow status from /steps', () => {
+describe('deriveDatasetView', () => {
   it('uses the latest started dataset stage as 数据集生成', () => {
-    const chosen = datasetWorkflowStepFromSteps(steps([
+    const view = deriveDatasetView(steps([
       { stage: 'dataset.material_preparation', status: 'completed' },
       { stage: 'dataset.topic_discovery', status: 'running' },
       { stage: 'dataset.case_generation', status: 'pending' },
       { stage: 'eval', status: 'pending' },
     ]));
-    expect(chosen?.stage).toBe('dataset.topic_discovery');
-    expect(chosen?.status).toBe('running');
+    expect(view.representative?.stage).toBe('dataset.topic_discovery');
+    expect(view.topStatus).toBe('running');
+    expect(view.canContinue).toBe(false);
+    expect(view.subStatuses).toEqual({
+      materials: 'completed',
+      topics: 'running',
+      cases: 'pending',
+    });
   });
 
   it('uses the latest row when the same dataset stage appears twice', () => {
-    const chosen = datasetWorkflowStepFromSteps(steps([
+    const view = deriveDatasetView(steps([
       { stage: 'dataset.material_preparation', status: 'completed' },
       { stage: 'dataset.topic_discovery', status: 'pending' },
       { stage: 'dataset.case_generation', status: 'pending' },
       { stage: 'dataset.material_preparation', status: 'running' },
     ]));
-    expect(chosen?.stage).toBe('dataset.material_preparation');
-    expect(chosen?.status).toBe('running');
+    expect(view.representative?.stage).toBe('dataset.material_preparation');
+    expect(view.topStatus).toBe('running');
+    expect(view.subStatuses.materials).toBe('running');
   });
 
-  it('prefers a running earlier stage over a completed later stage (re-trigger scenario)', () => {
-    const chosen = datasetWorkflowStepFromSteps(steps([
+  it('prefers a running earlier stage over a completed later stage (re-trigger)', () => {
+    const view = deriveDatasetView(steps([
       { stage: 'dataset.material_preparation', status: 'running' },
       { stage: 'dataset.topic_discovery', status: 'completed' },
       { stage: 'dataset.case_generation', status: 'pending' },
     ]));
-    expect(chosen?.stage).toBe('dataset.material_preparation');
-    expect(chosen?.status).toBe('running');
+    expect(view.topStatus).toBe('running');
+    expect(view.canContinue).toBe(false);
   });
 
-  it('shows running when a middle stage is completed but later stages are still pending', () => {
-    const chosen = datasetWorkflowStepFromSteps(steps([
+  it('keeps the real completed status when later stages are pending without a checkpoint', () => {
+    // Do not invent "running" — that desyncs the top bar from the continue button.
+    const view = deriveDatasetView(steps([
       { stage: 'dataset.material_preparation', status: 'completed' },
       { stage: 'dataset.topic_discovery', status: 'completed' },
       { stage: 'dataset.case_generation', status: 'pending' },
     ]));
-    expect(chosen?.stage).toBe('dataset.topic_discovery');
-    expect(chosen?.status).toBe('running');
+    expect(view.representative?.stage).toBe('dataset.topic_discovery');
+    expect(view.topStatus).toBe('completed');
+    expect(view.canContinue).toBe(false);
   });
 
   it('shows completed only when all dataset stages are done', () => {
-    const chosen = datasetWorkflowStepFromSteps(steps([
+    const view = deriveDatasetView(steps([
       { stage: 'dataset.material_preparation', status: 'completed' },
       { stage: 'dataset.topic_discovery', status: 'completed' },
       { stage: 'dataset.case_generation', status: 'completed' },
     ]));
-    expect(chosen?.stage).toBe('dataset.case_generation');
-    expect(chosen?.status).toBe('completed');
+    expect(view.representative?.stage).toBe('dataset.case_generation');
+    expect(view.topStatus).toBe('completed');
   });
 
-  it('keeps a completed materials checkpoint when later dataset stages are still pending', () => {
-    const chosen = datasetWorkflowStepFromSteps(steps([
+  it('keeps a paused materials stage while later stages are pending', () => {
+    const view = deriveDatasetView(steps([
       { stage: 'dataset.material_preparation', status: 'paused' },
       { stage: 'dataset.topic_discovery', status: 'pending' },
       { stage: 'dataset.case_generation', status: 'pending' },
     ]));
-    expect(chosen?.stage).toBe('dataset.material_preparation');
-    expect(chosen?.status).toBe('paused');
+    expect(view.topStatus).toBe('paused');
   });
 
-  it('keeps the dataset workflow paused when case generation waits for a plan adjustment', () => {
-    expect(terminalDatasetWorkflowStatus('paused')).toBe('paused');
+  it('aligns top status and continue when materials waits at a checkpoint', () => {
+    const items = steps([
+      {
+        stage: 'dataset.material_preparation',
+        status: 'completed',
+        nextStepRunId: 'topic-step-1',
+      },
+      { stage: 'dataset.topic_discovery', status: 'pending' },
+      { stage: 'dataset.case_generation', status: 'pending' },
+    ]);
+
+    const view = deriveDatasetView(items);
+    expect(view.canContinue).toBe(true);
+    expect(view.continueStepId).toBe('topic-step-1');
+    expect(view.topStatus).toBe('completed');
+    expect(view.suggestedTab).toBe('materials');
+    expect(getDatasetCheckpointWaitingStep(items)?.stage).toBe('dataset.material_preparation');
+  });
+
+  it('after materials re-apply completes, top stays completed and next-step stays available', () => {
+    const items = steps([
+      {
+        stage: 'dataset.material_preparation',
+        status: 'completed',
+        nextStepRunId: 'topics-old',
+      },
+      { stage: 'dataset.topic_discovery', status: 'pending' },
+      { stage: 'dataset.case_generation', status: 'pending' },
+      {
+        stage: 'dataset.material_preparation',
+        status: 'completed',
+        nextStepRunId: 'topics-new',
+      },
+    ]);
+
+    const view = deriveDatasetView(items);
+    expect(view.canContinue).toBe(true);
+    expect(view.continueStepId).toBe('topics-new');
+    expect(view.topStatus).toBe('completed');
+    expect(view.subStatuses.materials).toBe('completed');
+  });
+
+  it('does not treat a still-running materials re-run as a continue checkpoint', () => {
+    const view = deriveDatasetView(steps([
+      { stage: 'dataset.topic_discovery', status: 'pending' },
+      {
+        stage: 'dataset.material_preparation',
+        status: 'running',
+        nextStepRunId: 'topics-new',
+      },
+    ]));
+
+    expect(view.canContinue).toBe(false);
+    expect(view.topStatus).toBe('running');
+  });
+
+  it('suggests the active step tab when provided', () => {
+    const view = deriveDatasetView(
+      steps([
+        { stage: 'dataset.material_preparation', status: 'completed', stepId: 'm1' },
+        { stage: 'dataset.topic_discovery', status: 'running', stepId: 't1' },
+      ]),
+      't1',
+    );
+    expect(view.suggestedTab).toBe('topics');
+    expect(view.activeStepId).toBe('t1');
+  });
+});
+
+describe('datasetWorkflowStepFromSteps compat', () => {
+  it('matches deriveDatasetView.representative', () => {
+    const items = steps([
+      { stage: 'dataset.material_preparation', status: 'completed', nextStepRunId: 't1' },
+      { stage: 'dataset.topic_discovery', status: 'pending' },
+    ]);
+    expect(datasetWorkflowStepFromSteps(items)?.status)
+      .toBe(deriveDatasetView(items).representative?.status);
   });
 });
 
@@ -100,5 +186,11 @@ describe('workflow step status merge', () => {
       { dataset: 'running' },
     );
     expect(status.dataset).toBe('running');
+  });
+});
+
+describe('terminal dataset status', () => {
+  it('keeps the dataset workflow paused when case generation waits for a plan adjustment', () => {
+    expect(terminalDatasetWorkflowStatus('paused')).toBe('paused');
   });
 });
