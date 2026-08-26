@@ -239,6 +239,21 @@
       "package_file": "packages/bsk_1E1AE354017CAB635F423BC76790.zip"
     },
     {
+      "key": "user_5b28ea14/smart-charts",
+      "uid": "bsk_FFB9D957F2E7E6045A01B28AA5D1",
+      "source_url": "https://skillhub.cn/skills/user_5b28ea14/smart-charts",
+      "resolved_url": "https://api.skillhub.cn/api/v1/download?slug=%40user_5b28ea14%2Fsmart-charts",
+      "version": "6.2.1",
+      "name": "smart-charts",
+      "description": "Intelligent chart generation and data analysis skill. Reads user-supplied data files (CSV/Excel/JSON), analyzes data characteristics with LLM assistance, auto-recommends and generates interactive ECharts visualizations. Use when the user asks to analyze data, generate charts, create visualizations, or work with tabular data files.",
+      "category": "external",
+      "market_visible": false,
+      "archive_sha256": "8b0a8082021633dd12c298b7878cbfb579f956858d812deb5bd41253660d8d24",
+      "tree_sha256": "3e11d139172c812f178c8b0e1f9de6ad906d5293ca83d127095ce2db03e8a937",
+      "archive_size": 401375,
+      "package_file": "packages/bsk_FFB9D957F2E7E6045A01B28AA5D1.zip"
+    },
+    {
       "key": "skill",
       "uid": "bsk_3DAD0016C2AC0817C61F3533A3EB",
       "source_url": "builtin://featured/xiaohongshu-copywriter/skill",
