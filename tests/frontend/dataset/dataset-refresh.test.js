@@ -123,16 +123,21 @@ describe('dataset refresh policy', () => {
     expect(stagesHook).not.toContain('setStatuses');
   });
 
-  it('uses the final dataset result only to settle the top-level Dataset status', () => {
+  it('aggregates top-level Dataset status from /steps only, not /dataset/result', () => {
     const controller = readFrontendFile(
       'src/modules/selfEvolution/hooks/useSelfEvolutionPageController.tsx',
     );
-    expect(controller).toContain('datasetFinalizationStep(threadStepList.steps)');
-    expect(controller).toContain('/dataset/result`');
-    expect(controller).toContain('completed_with_problems ? "partial" : "done"');
+    expect(controller).toContain('deriveDatasetTopStatus(threadStepList.steps)');
+    expect(controller).not.toContain('datasetFinalizationStep(threadStepList.steps)');
     expect(controller).toContain(
       'buildThreadStepStatusByStage(threadStepList, threadFlowStatus, datasetTopStatus)',
     );
+    const workflow = readFrontendFile(
+      'src/modules/selfEvolution/shared/datasetWorkflowStatus.ts',
+    );
+    expect(workflow).toContain('isRunning(step.status)');
+    expect(workflow).toContain("return 'done'");
+    expect(workflow).toContain("return 'waiting'");
   });
 
   it('notifies the Dataset workspace when a message starts the next step', () => {

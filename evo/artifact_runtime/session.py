@@ -480,7 +480,10 @@ class RunSession:
         await self._schedule()
 
     async def _commit_artifacts(self, commit: ArtifactCommit) -> None:
-        if self._status not in _EDITABLE_STATUSES:
+        # Dataset applies (topic rename, material edits, …) must work after a
+        # failed run so the user can fix inputs and continue without an explicit
+        # retry first. Recompute already allows 'failed'; keep commits aligned.
+        if self._status not in {*_EDITABLE_STATUSES, 'failed'}:
             raise DefinitionError(f'cannot commit artifact from {self._status}')
         self._definition.validate_commit(commit)
         previous_status = self._status
@@ -509,7 +512,9 @@ class RunSession:
             except _TerminationFailure:
                 await self._publish()
                 return
-        if previous_status == 'completed' and not isinstance(self._decision, PlanComplete):
+        if previous_status == 'failed':
+            await self._enter_running()
+        elif previous_status == 'completed' and not isinstance(self._decision, PlanComplete):
             await self._persist_status('running')
             await self._schedule()
         elif previous_status == 'running':

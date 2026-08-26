@@ -181,7 +181,6 @@ import {
   mergeWorkflowStepStatus,
   deriveDatasetView,
   deriveDatasetTopStatus,
-  datasetFinalizationStep,
   toDatasetNavStatus,
   fetchThreadGateContent,
   fetchThreadGateDownload,
@@ -191,7 +190,6 @@ import {
   getGateEvalQuestionTypeSummaries,
   hasEmbeddedGateEvalCases,
   type ThreadEventStage,
-  type DatasetFinalResultStatus,
 } from "../shared";
 import { buildRepairTraceRows, isRepairTraceRawEventType } from "../shared/repairTrace";
 import {
@@ -390,8 +388,6 @@ export function SelfEvolutionPageController({
     steps: [],
   });
   const [threadFlowStatus, setThreadFlowStatus] = useState<string>();
-  const [datasetFinalResultStatus, setDatasetFinalResultStatus] =
-    useState<DatasetFinalResultStatus>();
   const [datasetExecutionResumeToken, setDatasetExecutionResumeToken] = useState(0);
   const threadStepListRef = useRef(threadStepList);
   threadStepListRef.current = threadStepList;
@@ -411,7 +407,6 @@ export function SelfEvolutionPageController({
     threadStepListOwnerRef.current = undefined;
     threadStepListRef.current = initialState;
     setThreadStepList(initialState);
-    setDatasetFinalResultStatus(undefined);
   }, []);
   const [selectedViewStage, setSelectedViewStage] = useState<string>();
   const [selectedThreadStepId, setSelectedThreadStepId] = useState<string>();
@@ -657,33 +652,9 @@ export function SelfEvolutionPageController({
     () => deriveDatasetView(threadStepList.steps, threadStepList.activeStepId),
     [threadStepList],
   );
-  const finalizationStep = useMemo(
-    () => datasetFinalizationStep(threadStepList.steps),
-    [threadStepList.steps],
-  );
-  const finalizationKey = finalizationStep
-    ? `${routeThreadId || ""}:${finalizationStep.stepId || ""}:${finalizationStep.status || ""}:${finalizationStep.orderIndex || ""}`
-    : "";
-  useEffect(() => {
-    let disposed = false;
-    if (!routeThreadId || !finalizationKey) {
-      setDatasetFinalResultStatus(undefined);
-      return () => { disposed = true; };
-    }
-    setDatasetFinalResultStatus(undefined);
-    void axiosInstance.get<{ completed_with_problems: boolean }>(
-      `${EVO_API_BASE}/threads/${encodeURIComponent(routeThreadId)}/dataset/result`,
-      { params: { page_size: 1 }, silentError: true } as never,
-    ).then((response) => {
-      if (!disposed) {
-        setDatasetFinalResultStatus(response.data.completed_with_problems ? "partial" : "done");
-      }
-    }).catch(() => undefined);
-    return () => { disposed = true; };
-  }, [finalizationKey, routeThreadId]);
   const datasetTopStatus = useMemo(
-    () => deriveDatasetTopStatus(threadStepList.steps, datasetFinalResultStatus),
-    [datasetFinalResultStatus, threadStepList.steps],
+    () => deriveDatasetTopStatus(threadStepList.steps),
+    [threadStepList.steps],
   );
   const threadTerminalStatusByStage = useMemo(
     () => buildTerminalStatusByStage(threadEvents),

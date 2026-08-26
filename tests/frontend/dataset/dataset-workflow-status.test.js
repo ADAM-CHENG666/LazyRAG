@@ -6,6 +6,7 @@ import {
   getDatasetCheckpointWaitingStep,
   mergeWorkflowStepStatus,
   terminalDatasetWorkflowStatus,
+  toDatasetNavStatus,
   toThreadEventStage,
 } from '../../../frontend/src/modules/selfEvolution/shared/datasetWorkflowStatus.ts';
 
@@ -160,7 +161,7 @@ describe('deriveDatasetView', () => {
 });
 
 describe('dataset top status', () => {
-  it('does not complete when materials is the checkpoint waiting for the next stage', () => {
+  it('stays waiting at a materials checkpoint instead of inventing running', () => {
     const items = steps([
       {
         stage: 'dataset.material_preparation',
@@ -174,30 +175,65 @@ describe('dataset top status', () => {
     expect(deriveDatasetTopStatus(items)).toBe('waiting');
   });
 
-  it('completes only after case generation has its final dataset result', () => {
+  it('does not invent running after topic discovery finishes while cases are still pending', () => {
+    const items = steps([
+      { stage: 'dataset.material_preparation', status: 'completed' },
+      {
+        stage: 'dataset.topic_discovery',
+        status: 'completed',
+        nextStepRunId: 'case-step-1',
+      },
+      { stage: 'dataset.case_generation', status: 'pending' },
+    ]);
+
+    expect(deriveDatasetTopStatus(items)).toBe('waiting');
+  });
+
+  it('does not invent running when a finished sub-stage has no next_step_run_id yet', () => {
+    const items = steps([
+      { stage: 'dataset.material_preparation', status: 'completed' },
+      { stage: 'dataset.topic_discovery', status: 'completed' },
+      { stage: 'dataset.case_generation', status: 'pending' },
+    ]);
+
+    expect(deriveDatasetTopStatus(items)).not.toBe('running');
+    expect(deriveDatasetTopStatus(items)).toBe('paused');
+  });
+
+  it('marks the top bar done when all three dataset stages are completed', () => {
     const items = steps([
       { stage: 'dataset.material_preparation', status: 'completed' },
       { stage: 'dataset.topic_discovery', status: 'completed' },
       { stage: 'dataset.case_generation', status: 'completed' },
     ]);
 
-    expect(deriveDatasetTopStatus(items)).toBe('running');
-    expect(deriveDatasetTopStatus(items, 'done')).toBe('done');
-    expect(deriveDatasetTopStatus(items, 'partial')).toBe('partial');
+    expect(deriveDatasetTopStatus(items)).toBe('done');
   });
 
-  it('does not reuse an earlier dataset result after materials are re-applied', () => {
-    const items = steps([
-      { stage: 'dataset.case_generation', status: 'completed', stepId: 'cases-old' },
-      {
-        stage: 'dataset.material_preparation',
-        status: 'completed',
-        nextStepRunId: 'topics-new',
-        stepId: 'materials-new',
-      },
-    ]);
+  it('keeps pausing and cancelling as running until the terminal status lands', () => {
+    expect(deriveDatasetTopStatus(steps([
+      { stage: 'dataset.material_preparation', status: 'pausing' },
+      { stage: 'dataset.topic_discovery', status: 'pending' },
+    ]))).toBe('running');
+    expect(deriveDatasetTopStatus(steps([
+      { stage: 'dataset.topic_discovery', status: 'cancelling' },
+    ]))).toBe('running');
+  });
 
-    expect(deriveDatasetTopStatus(items, 'done')).toBe('waiting');
+  it('surfaces a failed dataset stage on the top bar', () => {
+    expect(deriveDatasetTopStatus(steps([
+      { stage: 'dataset.material_preparation', status: 'completed' },
+      { stage: 'dataset.topic_discovery', status: 'failed' },
+      { stage: 'dataset.case_generation', status: 'pending' },
+    ]))).toBe('failed');
+  });
+
+  it('treats legacy partial_failed step rows as completed for top-bar aggregation', () => {
+    expect(deriveDatasetTopStatus(steps([
+      { stage: 'dataset.material_preparation', status: 'completed' },
+      { stage: 'dataset.topic_discovery', status: 'partial_failed' },
+      { stage: 'dataset.case_generation', status: 'completed' },
+    ]))).toBe('done');
   });
 });
 
@@ -235,5 +271,13 @@ describe('workflow step status merge', () => {
 describe('terminal dataset status', () => {
   it('keeps the dataset workflow paused when case generation waits for a plan adjustment', () => {
     expect(terminalDatasetWorkflowStatus('paused')).toBe('paused');
+  });
+});
+
+describe('dataset sub-nav status', () => {
+  it('does not surface partition partial failure on the sub-nav', () => {
+    expect(toDatasetNavStatus('partial_failed')).toBe('done');
+    expect(toDatasetNavStatus('completed')).toBe('done');
+    expect(toDatasetNavStatus('failed')).toBe('failed');
   });
 });

@@ -16,7 +16,6 @@ import {
   StatusIcon,
   percentText,
   ratio,
-  toVisualStatus,
 } from "./primitives";
 import { usePublishDatasetStageAction } from "./stageAction";
 import { topicDiscoverySteps, type TopicDiscoveryProgress } from "./topicLabelProgress";
@@ -43,12 +42,12 @@ type Props = {
   onSaveDraft: (draft: DatasetDraft) => boolean;
 };
 
-type ChunkBucket = "small" | "medium" | "large";
+type ChunkBucket = "one" | "two" | "threePlus";
 
 const CHUNK_BUCKETS: Record<ChunkBucket, { label: string; min?: number; max?: number }> = {
-  small: { label: "1–3 个", min: 1, max: 3 },
-  medium: { label: "4–6 个", min: 4, max: 6 },
-  large: { label: "7 个及以上", min: 7 },
+  one: { label: "1", min: 1, max: 1 },
+  two: { label: "2", min: 2, max: 2 },
+  threePlus: { label: "3+", min: 3 },
 };
 
 export function TopicsStage({
@@ -99,7 +98,6 @@ export function TopicsStage({
   const topics = useDatasetList(fetchTopics, refreshToken, "主题列表加载失败");
 
   const distribution = overview.data?.question_types;
-  const stageStatus = toVisualStatus(overview.data?.status || "pending");
   const hasFilters = Boolean(questionType || chunkBucket);
   const discoverySteps = useMemo(
     () => topicDiscoverySteps(labelProgress, overview.data, executionStatus),
@@ -189,7 +187,7 @@ export function TopicsStage({
                 </th>
                 <th>
                   <ColumnFilter<ChunkBucket>
-                    label="片段数"
+                    label="支撑片段数"
                     value={chunkBucket}
                     onChange={setChunkBucket}
                     options={(Object.keys(CHUNK_BUCKETS) as ChunkBucket[]).map((value) => ({
@@ -221,7 +219,7 @@ export function TopicsStage({
                       <strong className="dataset-identity">{row.topic_id}</strong>
                     </td>
                     <td>
-                      <StatusIcon status={pendingName ? "stale" : stageStatus} />
+                      <StatusIcon status={pendingName ? "stale" : "done"} />
                     </td>
                     <td>
                       <div className="dataset-ellipsis" title={displayName}>

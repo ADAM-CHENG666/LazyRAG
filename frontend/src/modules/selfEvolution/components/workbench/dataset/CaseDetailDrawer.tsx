@@ -68,6 +68,7 @@ export function CaseDetailDrawer({
   const [detail, setDetail] = useState<CaseDetail>();
   const [topicOptions, setTopicOptions] = useState<CaseTopicOption[]>([]);
   const [topicOptionsLoading, setTopicOptionsLoading] = useState(false);
+  const [topicOptionsError, setTopicOptionsError] = useState<string>();
   const [stage, setStage] = useState<CaseStageKey>("generate");
   const [draft, setDraft] = useState<Draft>();
   const [saving, setSaving] = useState(false);
@@ -90,6 +91,7 @@ export function CaseDetailDrawer({
       setEditingGenerate(false);
       setEvidenceEditorIndex(undefined);
       setTopicOptions([]);
+      setTopicOptionsError(undefined);
     } catch (caught) {
       setError(describeRequestError(caught, "读取用例详情失败"));
     }
@@ -101,6 +103,7 @@ export function CaseDetailDrawer({
       setDraft(undefined);
       setTopicOptions([]);
       setTopicOptionsLoading(false);
+      setTopicOptionsError(undefined);
       return;
     }
     void load();
@@ -109,15 +112,16 @@ export function CaseDetailDrawer({
   const loadTopicOptions = useCallback(async () => {
     if (!caseId) return;
     setTopicOptionsLoading(true);
+    setTopicOptionsError(undefined);
     try {
       const value = await getJson<PagedResponse<CaseTopicOption>>(
         `${root}/cases/${encodeURIComponent(caseId)}/topic-options`,
         { page_size: PAGE_SIZE },
       );
       setTopicOptions(value.items);
-    } catch {
-      // The picker is optional; detail editing remains available if candidates cannot load.
+    } catch (caught) {
       setTopicOptions([]);
+      setTopicOptionsError(describeRequestError(caught, "读取可替换主题失败"));
     } finally {
       setTopicOptionsLoading(false);
     }
@@ -142,7 +146,7 @@ export function CaseDetailDrawer({
     draft &&
       initial &&
       (JSON.stringify(draft.keyPoints) !== JSON.stringify(initial.keyPoints) ||
-        draft.forbiddenClaims !== initial.forbiddenClaims),
+        JSON.stringify(draft.forbiddenClaims) !== JSON.stringify(initial.forbiddenClaims)),
   );
   const dirty = planChanged || generateChanged || gradingChanged;
 
@@ -284,7 +288,7 @@ export function CaseDetailDrawer({
                 label: "来源",
                 value: (
                   <Chip tone={imported ? "imported" : "neutral"}>
-                    {imported ? "CSV 导入" : "自动生成"}
+                    {imported ? "外部导入" : "自动生成"}
                   </Chip>
                 ),
               },
@@ -324,8 +328,8 @@ export function CaseDetailDrawer({
             <section>
               <div className="dataset-case-panel-summary">
                 {imported
-                  ? "该用例随 CSV 导入，不绑定主题。"
-                  : "只展示符合当前题型、难度及占用规则的可选主题。"}
+                  ? "该用例随外部导入，不绑定主题。"
+                  : "只展示符合当前题型、难度下限及占用规则的可选主题。"}
               </div>
               {imported ? (
                 <div className="dataset-detail-block">
@@ -370,7 +374,9 @@ export function CaseDetailDrawer({
                       ))}
                       {topicOptionsLoading ? (
                         <p className="dataset-note">正在读取可替换主题…</p>
-                      ) : !detail.topic && !topicOptions.length ? (
+                      ) : topicOptionsError ? (
+                        <p className="dataset-note">{topicOptionsError}</p>
+                      ) : !topicOptions.length ? (
                         <p className="dataset-note">当前没有可替换的主题。</p>
                       ) : null}
                     </div>
@@ -387,7 +393,7 @@ export function CaseDetailDrawer({
             <section>
               <div className="dataset-case-panel-summary">
                 {imported
-                  ? "问答内容随 CSV 导入，在本阶段只读。"
+                  ? "问答内容随外部导入，在本阶段只读。"
                   : "问题、标准答案与评分说明共同属于当前 Case 修改。"}
               </div>
               {imported || !editingGenerate ? (

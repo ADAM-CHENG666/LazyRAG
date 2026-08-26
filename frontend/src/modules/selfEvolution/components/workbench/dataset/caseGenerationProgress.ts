@@ -67,23 +67,41 @@ type CaseExecutionReconciliation = {
   listExecutionRevision?: string;
 };
 
+export type CaseGenerationEventResult = {
+  progress: CaseGenerationProgress | undefined;
+  /** Overview baseline should reload when live progress starts or switches step. */
+  shouldRefreshBaseline: boolean;
+};
+
+/**
+ * Apply one partition event. A new step_id replaces the live store — that is the
+ * anti-flash boundary; callers should refresh the overview baseline afterward.
+ */
 export function applyCaseGenerationPartitionEvent(
   current: CaseGenerationProgress | undefined,
   event: CaseGenerationEvent,
-): CaseGenerationProgress | undefined {
-  if (event.stage !== CASE_GENERATION_STAGE && event.tab !== 'cases') return current;
+): CaseGenerationEventResult {
+  if (event.stage !== CASE_GENERATION_STAGE && event.tab !== 'cases') {
+    return { progress: current, shouldRefreshBaseline: false };
+  }
   const key = CASE_STAGE_BY_OPERATION[event.operationId || event.event];
   const caseId = event.partition?.id;
   const status = toOperationStatus(event.status);
-  if (!key || !event.stepId || !caseId || !status) return current;
+  if (!key || !event.stepId || !caseId || !status) {
+    return { progress: current, shouldRefreshBaseline: false };
+  }
 
-  const next = current?.stepId === event.stepId ? cloneProgress(current) : emptyProgress(event.stepId);
+  const stepChanged = Boolean(current && current.stepId !== event.stepId);
+  const startedLive = !current;
+  const next = !current || stepChanged ? emptyProgress(event.stepId) : cloneProgress(current);
   const currentStatus = next.partitions[key]?.[caseId];
   const currentAttemptId = next.attempts[key]?.[caseId];
   if (!acceptsAttemptUpdate(
     currentStatus ? { attemptId: currentAttemptId, status: currentStatus } : undefined,
     { attemptId: event.attemptId, status },
-  )) return current;
+  )) {
+    return { progress: current, shouldRefreshBaseline: false };
+  }
   next.partitions[key] = { ...(next.partitions[key] || {}), [caseId]: status };
   if (event.attemptId) {
     next.attempts[key] = { ...(next.attempts[key] || {}), [caseId]: event.attemptId };
@@ -91,7 +109,10 @@ export function applyCaseGenerationPartitionEvent(
   if (event.partition?.total != null) {
     next.totals[key] = Math.max(next.totals[key] || 0, event.partition.total);
   }
-  return next;
+  return {
+    progress: next,
+    shouldRefreshBaseline: stepChanged || startedLive,
+  };
 }
 
 export function caseGenerationSteps(progress: CaseGenerationProgress | undefined): CaseGenerationStep[] {
@@ -102,61 +123,69 @@ export function caseGenerationSteps(progress: CaseGenerationProgress | undefined
   ));
 }
 
+/**
+ * Overview rings: overview counts are the baseline (imports already completed);
+ * SSE only covers cases that emitted events. Unobserved cases keep the baseline.
+ */
 export function caseGenerationDisplayStep(
-  transient: CaseGenerationStep | undefined,
-  stable: StableCaseGenerationStep | undefined,
-  currentStageStatus: VisualStatus,
+  live: CaseGenerationStep | undefined,
+  baseline: StableCaseGenerationStep | undefined,
 ): CaseGenerationDisplayStep {
-  const stableTotal = stable?.total ?? 0;
-  const stableCounts = stable?.status_counts;
-  const stableCompleted = stable?.completed ?? 0;
-  const stableRunning = stableCounts?.running ?? 0;
-  const stableFailed = stableCounts?.failed ?? 0;
-  const stableCanceled = stableCounts?.canceled ?? 0;
-  const stablePending = stableCounts?.pending ?? 0;
-  if (transient?.total) {
-    const total = Math.max(stableTotal, transient.total);
-    // The execution store contains every observed partition of the current
-    // step. The Case table and overview must derive from that same source;
-    // stable counts can belong to the previous execution round.
-    const completed = transient.completed;
-    const running = transient.running;
-    const failed = transient.failed;
-    const canceled = transient.canceled;
-    const pending = Math.max(0, total - completed - running - failed - canceled);
-    return {
-      completed,
-      total,
-      running,
-      failed,
-      canceled,
-      pending,
-      status: failed ? 'failed' : running ? 'running' : completed === total && total > 0 ? 'done' : 'pending',
-    };
-  }
-
-  const total = stableTotal;
-  if (currentStageStatus === 'running') {
-    return {
-      completed: 0,
-      total,
-      running: 0,
-      failed: 0,
-      canceled: 0,
-      pending: total,
-      status: 'pending',
-    };
-  }
-
-  return {
-    completed: stableCompleted,
-    total,
-    running: stableRunning,
-    failed: stableFailed,
-    canceled: stableCanceled,
-    pending: stablePending,
-    status: toVisualStatus(stable?.status),
+  const total = Math.max(baseline?.total ?? 0, live?.total ?? 0);
+  const base = {
+    completed: baseline?.completed ?? 0,
+    running: baseline?.status_counts?.running ?? 0,
+    failed: baseline?.status_counts?.failed ?? 0,
+    canceled: baseline?.status_counts?.canceled ?? 0,
   };
+  const basePending = baseline?.status_counts?.pending
+    ?? Math.max(0, total - base.completed - base.running - base.failed - base.canceled);
+
+  const liveSeen = live
+    ? live.completed + live.running + live.failed + live.canceled
+    : 0;
+  if (!live || liveSeen === 0) {
+    return {
+      completed: base.completed,
+      total,
+      running: base.running,
+      failed: base.failed,
+      canceled: base.canceled,
+      pending: basePending,
+      status: toVisualStatus(baseline?.status),
+    };
+  }
+
+  // Previous-run "all completed" snapshot while a new step is already live.
+  // Trust live only until overview refresh brings the real baseline.
+  if (base.completed >= total && total > 0 && liveSeen < total) {
+    return finalizeCounts({
+      completed: live.completed,
+      total,
+      running: live.running,
+      failed: live.failed,
+      canceled: live.canceled,
+      pending: Math.max(0, total - liveSeen),
+    });
+  }
+
+  const unobserved = Math.max(0, total - liveSeen);
+  let remaining = unobserved;
+  const unobservedCompleted = Math.min(remaining, base.completed);
+  remaining -= unobservedCompleted;
+  const unobservedFailed = Math.min(remaining, base.failed);
+  remaining -= unobservedFailed;
+  const unobservedCanceled = Math.min(remaining, base.canceled);
+  remaining -= unobservedCanceled;
+
+  return finalizeCounts({
+    completed: live.completed + unobservedCompleted,
+    total,
+    running: live.running,
+    failed: live.failed + unobservedFailed,
+    canceled: live.canceled + unobservedCanceled,
+    pending: remaining,
+  });
 }
 
 export function shouldReconcileCaseExecution(input: CaseExecutionReconciliation): boolean {
@@ -186,6 +215,28 @@ export function overlayCaseProgress<T extends { case_id: string; stages: Record<
     }
     return changed ? { ...row, stages } : row;
   });
+}
+
+function finalizeCounts(input: {
+  completed: number;
+  total: number;
+  running: number;
+  failed: number;
+  canceled: number;
+  pending: number;
+}): CaseGenerationDisplayStep {
+  const pending = Math.max(0, input.total - input.completed - input.running - input.failed - input.canceled);
+  return {
+    ...input,
+    pending,
+    status: input.failed || input.canceled
+      ? 'failed'
+      : input.running
+        ? 'running'
+        : input.total > 0 && input.completed === input.total
+          ? 'done'
+          : 'pending',
+  };
 }
 
 function toOperationStatus(status?: string): OperationStatus | undefined {

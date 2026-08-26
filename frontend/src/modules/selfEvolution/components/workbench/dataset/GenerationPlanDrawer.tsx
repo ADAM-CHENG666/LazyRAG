@@ -125,7 +125,7 @@ export function GenerationPlanDrawer({
             当前合计 {total} / {expected}
           </div>
           <div className="dataset-warning-note">
-            应用后会重新分配全部自动生成用例，并覆盖此前逐个用例的主题更换；CSV 导入用例不受影响。
+            应用后会重新分配全部自动生成用例，并覆盖此前逐个用例的主题更换；外部导入用例不受影响。
           </div>
         </>
       )}

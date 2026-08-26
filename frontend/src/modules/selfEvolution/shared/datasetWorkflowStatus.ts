@@ -61,7 +61,7 @@ function isPending(status?: string) {
 
 function isRunning(status?: string) {
   const normalized = status?.trim().toLowerCase();
-  return !!normalized && ['running', 'executing', 'pausing', '执行中', '运行中'].includes(normalized);
+  return !!normalized && ['running', 'executing', 'pausing', 'cancelling', '执行中', '运行中'].includes(normalized);
 }
 
 function isCheckpointStatus(status?: string) {
@@ -87,8 +87,6 @@ type DatasetStepLike = {
   orderIndex?: number;
   stepId?: string;
 };
-
-export type DatasetFinalResultStatus = 'done' | 'partial';
 
 export type DatasetWorkflowView<T extends DatasetStepLike = DatasetStepLike> = {
   /** Step that represents the coarse「数据集生成」status. */
@@ -175,44 +173,41 @@ export function deriveDatasetView<T extends DatasetStepLike>(
 }
 
 /**
- * The top-level Dataset card represents the final dataset, not whichever
- * sub-stage happened to finish most recently. A result status is supplied only
- * after `GET .../dataset/result` confirms that the current case-generation
- * run produced `eval.dataset`.
+ * Top bar for「数据集生成」: aggregate the three Dataset sub-steps from /steps.
+ * `/dataset/result` is a result API, not part of this status machine.
  */
 export function deriveDatasetTopStatus<T extends DatasetStepLike>(
   steps: T[],
-  resultStatus?: DatasetFinalResultStatus,
 ): StepStatus {
   const ordered = datasetStepsInOrder(steps);
   const lastByStage = new Map<DatasetFlowStage, T>();
   for (const step of ordered) {
     lastByStage.set(step.stage as DatasetFlowStage, step);
   }
-  const latestStarted = [...ordered].reverse().find((step) => !isPending(step.status));
-  if (!latestStarted) return 'pending';
-  if ([...lastByStage.values()].some((step) => isRunning(step.status))) return 'running';
+  const stageSteps = DATASET_FLOW_STAGES.map((stage) => lastByStage.get(stage));
+  const present = stageSteps.filter((step): step is T => step != null);
+  if (!present.length) return 'pending';
 
-  const latestStatus = latestStarted.status?.trim().toLowerCase();
-  if (['failed', 'error'].includes(latestStatus || '')) return 'failed';
-  if (['canceled', 'cancelled'].includes(latestStatus || '')) return 'canceled';
-  if (latestStatus === 'paused' && !getDatasetCheckpointWaitingStep(steps)) return 'paused';
-  if (getDatasetCheckpointWaitingStep(steps)) return 'waiting';
+  if (present.some((step) => isRunning(step.status))) return 'running';
 
-  if (latestStarted.stage === 'dataset.case_generation' && isFinalizedStep(latestStarted.status)) {
-    return resultStatus || 'running';
+  const normalized = present.map((step) => step.status?.trim().toLowerCase() || '');
+  if (normalized.some((status) => ['failed', 'error'].includes(status))) return 'failed';
+  if (normalized.some((status) => ['canceled', 'cancelled'].includes(status))) return 'canceled';
+
+  const allPresent = DATASET_FLOW_STAGES.every((stage) => lastByStage.has(stage));
+  if (allPresent && present.every((step) => isFinalizedCompleted(step.status))) {
+    return 'done';
   }
-  return 'running';
+  if (present.every((step) => isPending(step.status))) return 'pending';
+
+  if (getDatasetCheckpointWaitingStep(steps)) return 'waiting';
+  return 'paused';
 }
 
-/** The latest started Dataset step only qualifies after its final root is due. */
-export function datasetFinalizationStep<T extends DatasetStepLike>(steps: T[]): T | undefined {
-  const latestStarted = [...datasetStepsInOrder(steps)]
-    .reverse()
-    .find((step) => !isPending(step.status));
-  return latestStarted?.stage === 'dataset.case_generation' && isFinalizedStep(latestStarted.status)
-    ? latestStarted
-    : undefined;
+function isFinalizedCompleted(status?: string) {
+  const normalized = status?.trim().toLowerCase();
+  // Legacy projection may still emit partial_failed; nav/top treat it as completed.
+  return ['completed', 'done', 'success', 'partial_failed', 'partial', '已完成', '部分失败'].includes(normalized || '');
 }
 
 function datasetStepsInOrder<T extends DatasetStepLike>(steps: T[]): T[] {
@@ -221,11 +216,6 @@ function datasetStepsInOrder<T extends DatasetStepLike>(steps: T[]): T[] {
     .filter(({ step }) => step.stage && DATASET_FLOW_STAGE_SET.has(step.stage))
     .sort((left, right) => (left.step.orderIndex ?? left.index) - (right.step.orderIndex ?? right.index))
     .map(({ step }) => step);
-}
-
-function isFinalizedStep(status?: string) {
-  const normalized = status?.trim().toLowerCase();
-  return ['completed', 'done', 'success', 'partial', 'partial_failed', '已完成', '部分失败'].includes(normalized || '');
 }
 
 /** @deprecated Prefer deriveDatasetView().representative — kept for coarse stage merge. */
@@ -270,11 +260,13 @@ export type DatasetNavStatus =
 export function toDatasetNavStatus(status?: string): DatasetNavStatus {
   const normalized = status?.trim().toLowerCase();
   if (!normalized) return 'pending';
-  if (['completed', 'done', 'success', '已完成'].includes(normalized)) return 'done';
-  if (['running', 'pausing', 'executing', '执行中', '运行中'].includes(normalized)) return 'running';
+  // Partition partial failure stays on the progress layer; nav keeps completed.
+  if (['completed', 'done', 'success', 'partial_failed', 'partial', '已完成', '部分失败'].includes(normalized)) {
+    return 'done';
+  }
+  if (['running', 'pausing', 'cancelling', 'executing', '执行中', '运行中'].includes(normalized)) return 'running';
   if (['paused', '已暂停', '暂停'].includes(normalized)) return 'paused';
-  if (['failed', 'cancelled', 'canceled', 'cancelling', '失败'].includes(normalized)) return 'failed';
-  if (['partial_failed', 'partial', '部分失败'].includes(normalized)) return 'partial';
+  if (['failed', 'cancelled', 'canceled', '失败'].includes(normalized)) return 'failed';
   return 'pending';
 }
 

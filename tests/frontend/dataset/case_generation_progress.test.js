@@ -21,20 +21,24 @@ function event(overrides = {}) {
   };
 }
 
+function apply(progress, overrides = {}) {
+  return applyCaseGenerationPartitionEvent(progress, event(overrides)).progress;
+}
+
 describe('case generation SSE progress', () => {
   it('aggregates partition events into the three overview steps and loaded case rows', () => {
     let progress;
-    progress = applyCaseGenerationPartitionEvent(progress, event());
-    progress = applyCaseGenerationPartitionEvent(progress, event({
+    progress = apply(progress);
+    progress = apply(progress, {
       partition: { id: 'case-002', total: 2 },
       status: 'completed',
-    }));
-    progress = applyCaseGenerationPartitionEvent(progress, event({
+    });
+    progress = apply(progress, {
       event: 'dataset.generate_case',
       operationId: 'dataset.generate_case',
       partition: { id: 'case-002', total: 2 },
       status: 'running',
-    }));
+    });
 
     const steps = caseGenerationSteps(progress);
     expect(steps.map((step) => [step.key, step.completed, step.total, step.status])).toEqual([
@@ -53,29 +57,30 @@ describe('case generation SSE progress', () => {
   });
 
   it('uses the newest event for a retried partition and resets on a new step', () => {
-    let progress = applyCaseGenerationPartitionEvent(undefined, event({ status: 'failed' }));
-    progress = applyCaseGenerationPartitionEvent(progress, event({ attemptId: 'attempt-2', status: 'running' }));
+    let progress = apply(undefined, { status: 'failed' });
+    progress = apply(progress, { attemptId: 'attempt-2', status: 'running' });
     expect(caseGenerationSteps(progress)[0]).toMatchObject({ status: 'running', failed: 0, running: 1 });
 
-    progress = applyCaseGenerationPartitionEvent(progress, event({
+    const switched = applyCaseGenerationPartitionEvent(progress, event({
       stepId: 'step-cases-2',
       partition: { id: 'case-003', total: 1 },
       status: 'completed',
     }));
-    expect(caseGenerationSteps(progress)[0]).toMatchObject({ completed: 1, total: 1, status: 'done' });
+    expect(switched.shouldRefreshBaseline).toBe(true);
+    expect(caseGenerationSteps(switched.progress)[0]).toMatchObject({ completed: 1, total: 1, status: 'done' });
     expect(overlayCaseProgress([
       { case_id: 'case-001', stages: { plan: 'failed', generate: 'pending', grading: 'pending' } },
       { case_id: 'case-003', stages: { plan: 'pending', generate: 'pending', grading: 'pending' } },
-    ], progress)).toEqual([
+    ], switched.progress)).toEqual([
       { case_id: 'case-001', stages: { plan: 'failed', generate: 'pending', grading: 'pending' } },
       { case_id: 'case-003', stages: { plan: 'completed', generate: 'pending', grading: 'pending' } },
     ]);
   });
 
   it('does not let an earlier attempt overwrite a retry or a completed API snapshot', () => {
-    let progress = applyCaseGenerationPartitionEvent(undefined, event({ status: 'failed' }));
-    progress = applyCaseGenerationPartitionEvent(progress, event({ attemptId: 'attempt-2', status: 'running' }));
-    progress = applyCaseGenerationPartitionEvent(progress, event({ attemptId: 'attempt-1', status: 'completed' }));
+    let progress = apply(undefined, { status: 'failed' });
+    progress = apply(progress, { attemptId: 'attempt-2', status: 'running' });
+    progress = apply(progress, { attemptId: 'attempt-1', status: 'completed' });
 
     expect(caseGenerationSteps(progress)[0]).toMatchObject({ status: 'running', completed: 0, running: 1 });
     expect(overlayCaseProgress([
@@ -85,31 +90,75 @@ describe('case generation SSE progress', () => {
     ]);
   });
 
-  it('does not flash a previous completed overview while /steps says this stage is running', () => {
-    const displayed = caseGenerationDisplayStep(
-      undefined,
-      { status: 'completed', completed: 20, total: 20, status_counts: { completed: 20 } },
-      'running',
-    );
-
-    expect(displayed).toMatchObject({ status: 'pending', completed: 0, total: 20 });
-  });
-
-  it('uses completed partitions from the same SSE store that updates case rows', () => {
+  it('keeps imported completed baseline while live SSE only covers generated cases', () => {
     let progress;
-    progress = applyCaseGenerationPartitionEvent(progress, event({ status: 'running' }));
-    progress = applyCaseGenerationPartitionEvent(progress, event({
-      partition: { id: 'case-002', total: 2 },
-      status: 'completed',
-    }));
+    progress = apply(progress, {
+      partition: { id: 'case-0011', total: 20 },
+      status: 'running',
+    });
 
     const displayed = caseGenerationDisplayStep(
       caseGenerationSteps(progress)[0],
-      { status: 'pending', completed: 0, total: 0, status_counts: { pending: 0 } },
-      'running',
+      {
+        status: 'pending',
+        completed: 10,
+        total: 20,
+        status_counts: { completed: 10, pending: 10, running: 0, failed: 0, canceled: 0 },
+      },
     );
 
-    expect(displayed).toMatchObject({ completed: 1, running: 1, total: 2, status: 'running' });
+    expect(displayed).toMatchObject({
+      completed: 10,
+      running: 1,
+      pending: 9,
+      total: 20,
+      status: 'running',
+    });
+  });
+
+  it('ignores a previous-run all-completed baseline until overview refreshes', () => {
+    let progress;
+    progress = apply(progress, {
+      partition: { id: 'case-0011', total: 20 },
+      status: 'running',
+    });
+
+    const displayed = caseGenerationDisplayStep(
+      caseGenerationSteps(progress)[0],
+      {
+        status: 'completed',
+        completed: 20,
+        total: 20,
+        status_counts: { completed: 20, pending: 0, running: 0, failed: 0, canceled: 0 },
+      },
+    );
+
+    expect(displayed).toMatchObject({
+      completed: 0,
+      running: 1,
+      pending: 19,
+      total: 20,
+      status: 'running',
+    });
+  });
+
+  it('uses overview baseline alone when there is no live SSE yet', () => {
+    const displayed = caseGenerationDisplayStep(
+      undefined,
+      {
+        status: 'pending',
+        completed: 10,
+        total: 20,
+        status_counts: { completed: 10, pending: 10, running: 0, failed: 0, canceled: 0 },
+      },
+    );
+
+    expect(displayed).toMatchObject({
+      completed: 10,
+      pending: 10,
+      total: 20,
+      status: 'pending',
+    });
   });
 
   it('clears execution progress only after the terminal-triggered overview and list requests both finish', () => {

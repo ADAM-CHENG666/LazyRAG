@@ -321,7 +321,7 @@ def test_patch_case_rejects_imported_case_topic_changes_and_evidence_outside_eff
     mismatched_values = _case_patch_values()
     mismatched_topics = mismatched_values[ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST)][1]['topics']
     next(topic for topic in mismatched_topics if topic['topic_id'] == 'topic-new').update({
-        'chunk_ids': ['chunk-new-1', 'chunk-new-2', 'chunk-new-3'], 'chunk_count': 3,
+        'chunk_ids': ['chunk-new-1'], 'chunk_count': 1,
     })
     mismatched, mismatched_flow = _service(mismatched_values)
     with pytest.raises(ServiceError) as difficulty_error:

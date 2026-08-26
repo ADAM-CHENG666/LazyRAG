@@ -113,10 +113,16 @@ export function DatasetWorkspace({
       }
     }
     if (event.tab === "cases" || event.stage === "dataset.case_generation") {
-      const next = applyCaseGenerationPartitionEvent(caseProgressRef.current, event);
+      const { progress: next, shouldRefreshBaseline } = applyCaseGenerationPartitionEvent(
+        caseProgressRef.current,
+        event,
+      );
       if (next !== caseProgressRef.current) {
         caseProgressRef.current = next;
         scheduleProgressFlush();
+      }
+      if (shouldRefreshBaseline) {
+        setOverviewToken((token) => token + 1);
       }
     }
     if (!TERMINAL_STAGE_EVENTS.has(event.event)) return;
@@ -408,7 +414,6 @@ export function DatasetWorkspace({
             refreshToken={refreshToken}
             overviewToken={overviewToken}
             progress={caseGenerationProgress}
-            executionStatus={stageStatuses.cases}
             reconciliationToken={caseReconciliationToken}
             onOverviewRevision={handleOverviewRevision}
             onExecutionReconciled={handleCaseExecutionReconciled}

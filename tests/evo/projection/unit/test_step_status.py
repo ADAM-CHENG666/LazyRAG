@@ -3,7 +3,8 @@ from evo.artifact_runtime import ArtifactKey, RuntimeProgress
 from evo.service.projections import _display_step_status
 
 
-def test_completed_checkpoint_with_failed_cases_is_reported_as_partial_failed() -> None:
+def test_completed_checkpoint_with_failed_cases_stays_completed() -> None:
+    """Partition failures belong on the progress layer, not an extended /steps status."""
     progress = StageProgress(
         'dataset.case_generation',
         ArtifactKey.scalar('dataset.assemble_manifest'),
@@ -19,7 +20,7 @@ def test_completed_checkpoint_with_failed_cases_is_reported_as_partial_failed() 
         ),
     )
 
-    assert _display_step_status('completed', progress) == 'partial_failed'
+    assert _display_step_status('completed', progress) == 'completed'
 
 
 def test_completed_checkpoint_without_failed_cases_remains_completed() -> None:

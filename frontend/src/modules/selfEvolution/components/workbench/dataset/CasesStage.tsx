@@ -37,7 +37,6 @@ import type {
   OperationStatus,
   PagedResponse,
   QuestionType,
-  VisualStatus,
 } from "./types";
 
 type Props = {
@@ -45,7 +44,6 @@ type Props = {
   refreshToken: number;
   overviewToken: number;
   progress?: CaseGenerationProgress;
-  executionStatus: VisualStatus;
   reconciliationToken: number;
   onOverviewRevision: (tab: "cases", revision: string | null, executionRevision?: string) => void;
   onExecutionReconciled: (executionRevision: string) => void;
@@ -78,7 +76,6 @@ export function CasesStage({
   refreshToken,
   overviewToken,
   progress,
-  executionStatus,
   reconciliationToken,
   onOverviewRevision,
   onExecutionReconciled,
@@ -198,7 +195,7 @@ export function CasesStage({
               steps={STAGE_ORDER.map((key) => {
                 const stable = overview.data?.stages[key];
                 const transient = transientSteps.find((item) => item.key === key);
-                const displayed = caseGenerationDisplayStep(transient, stable, executionStatus);
+                const displayed = caseGenerationDisplayStep(transient, stable);
                 return {
                   key,
                   label: STAGE_LABEL[key],
@@ -275,7 +272,7 @@ export function CasesStage({
                     onChange={setSource}
                     options={[
                       { value: "generated", label: "自动生成" },
-                      { value: "imported", label: "CSV 导入" },
+                      { value: "imported", label: "外部导入" },
                     ]}
                   />
                 </th>
@@ -330,7 +327,7 @@ export function CasesStage({
                   ))}
                   <td>
                     <Chip tone={row.source === "imported" ? "imported" : "neutral"}>
-                      {row.source === "imported" ? "CSV 导入" : "自动生成"}
+                      {row.source === "imported" ? "外部导入" : "自动生成"}
                     </Chip>
                   </td>
                   <td>

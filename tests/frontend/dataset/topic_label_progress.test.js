@@ -39,7 +39,10 @@ describe('topic discovery 3-phase progress', () => {
 
   it('starts semantic discovery after clustering and tracks cluster labels', () => {
     let progress;
-    progress = applyTopicLabelPartitionEvent(progress, event({ status: 'completed' }));
+    progress = applyTopicLabelPartitionEvent(progress, event({
+      partition: { id: 'chunk-1', total: 1 },
+      status: 'completed',
+    }));
     progress = applyTopicLabelPartitionEvent(progress, event({
       event: 'dataset.cluster_embeddings',
       operationId: 'dataset.cluster_embeddings',
@@ -130,5 +133,44 @@ describe('topic discovery 3-phase progress', () => {
     progress = applyTopicLabelPartitionEvent(progress, event({ attemptId: 'attempt-1', status: 'completed' }));
 
     expect(topicDiscoverySteps(progress)[0]).toMatchObject({ status: 'running', completed: 0 });
+  });
+
+  it('keeps partition failures visible after step.finish instead of claiming all done', () => {
+    let progress = applyTopicLabelPartitionEvent(undefined, event({
+      partition: { id: 'chunk-1', total: 2 },
+      status: 'completed',
+    }));
+    progress = applyTopicLabelPartitionEvent(progress, event({
+      partition: { id: 'chunk-2', total: 2 },
+      attemptId: 'attempt-2',
+      status: 'failed',
+    }));
+    progress = applyTopicLabelPartitionEvent(progress, {
+      event: 'step.finish',
+      stage: 'dataset.topic_discovery',
+      stepId: 'thread-1:dataset.topic_discovery:1',
+    });
+
+    const steps = topicDiscoverySteps(progress);
+    expect(steps[0].status).toBe('partial');
+    expect(steps[0].summary).toContain('失败');
+    expect(steps[0].summary).not.toBe('全部完成');
+  });
+
+  it('does not blank later phases after step.finish before overview refresh returns', () => {
+    let progress = applyTopicLabelPartitionEvent(undefined, event({
+      partition: { id: 'chunk-1', total: 2 },
+      status: 'completed',
+    }));
+    progress = applyTopicLabelPartitionEvent(progress, {
+      event: 'step.finish',
+      stage: 'dataset.topic_discovery',
+      stepId: 'thread-1:dataset.topic_discovery:1',
+    });
+
+    const steps = topicDiscoverySteps(progress);
+    expect(steps[0].status).toBe('done');
+    expect(steps[1].status).toBe('done');
+    expect(steps[2].status).toBe('done');
   });
 });

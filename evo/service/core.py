@@ -87,7 +87,7 @@ class EvoService:
         self._closing = False
 
     @classmethod
-    async def open(cls, root: str | Path, definition: FlowDefinition | None = None, *, max_concurrency: int = 4,
+    async def open(cls, root: str | Path, definition: FlowDefinition | None = None, *, max_concurrency: int = 10,
                    terminate_timeout: float = 1.0) -> EvoService:
         root = Path(root)
         definition = definition or evo_flow_definition()
@@ -1039,7 +1039,15 @@ def _validate_topic_change(plan: Mapping[str, Any], topic_manifest: Mapping[str,
         raise ServiceError(404, 'topic not found')
     topic = matches[0]
     required = {'easy': 1, 'medium': 2, 'hard': 3}[difficulty]
-    if topic.get('question_type') != question_type or topic.get('chunk_count') != len(topic.get('chunk_ids', ())) or topic.get('chunk_count') != required:
+    chunk_count = topic.get('chunk_count')
+    chunk_ids = topic.get('chunk_ids', ())
+    if (
+        topic.get('question_type') != question_type
+        or not isinstance(chunk_count, int)
+        or not isinstance(chunk_ids, (list, tuple))
+        or chunk_count != len(chunk_ids)
+        or chunk_count < required
+    ):
         raise ServiceError(422, 'topic does not satisfy case requirements')
     items = plan.get('items')
     assert isinstance(items, list)

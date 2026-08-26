@@ -6,6 +6,7 @@ import csv
 import io
 import json
 import math
+import re
 import uuid
 from collections.abc import Mapping
 from typing import Any
@@ -590,6 +591,9 @@ class ProjectionService:
                 statuses,
                 {},
             )
+        rows = _ordered_case_rows(
+            rows, artifacts[ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST)]['value'],
+        )
         current_execution_revision = self._build_execution_revision(statuses)
         if page_token and execution_revision != current_execution_revision:
             raise ServiceError(409, 'page_token execution snapshot is unavailable')
@@ -753,7 +757,7 @@ class ProjectionService:
             for topic in source_topics
             if isinstance(topic, Mapping) and _topic_matches(topic, filters)
         ]
-        rows.sort(key=lambda item: (str(item['name']), str(item['topic_id'])))
+        rows.sort(key=lambda item: str(item['topic_id']))
         page = _page(rows, size, str(offset))
         next_offset = page['next_page_token']
         return {
@@ -1196,10 +1200,11 @@ class ProjectionService:
             for topic in topics if isinstance(topic, Mapping)
             and topic.get('question_type') == question_type
             and isinstance(topic.get('chunk_count'), int)
-            and topic['chunk_count'] == required_chunks
+            # Same eligibility as qaplan: difficulty needs at least 1/2/3 chunks.
+            and topic['chunk_count'] >= required_chunks
             and topic.get('topic_id') not in occupied | {current_topic_id}
         ]
-        rows.sort(key=lambda row: (row['name'], str(row['topic_id'])))
+        rows.sort(key=lambda row: str(row['topic_id']))
         page = _page(rows, size, str(offset))
         next_offset = page['next_page_token']
         return {
@@ -1363,9 +1368,8 @@ def _stage_status(stage_status: str, flow_status: str) -> str:
 
 
 def _display_step_status(status: str, progress: StageProgress | None) -> str:
-    """Expose a completed checkpoint with failed partitions truthfully to clients."""
-    if status == 'completed' and progress is not None and progress.progress.case_failed:
-        return 'partial_failed'
+    """Pass through /steps status without Dataset-specific extensions."""
+    del progress
     return status
 
 
@@ -2540,6 +2544,34 @@ def _case_ids_from_partition_set(value: object) -> tuple[str, ...]:
     if len(set(raw)) != len(raw):
         raise ServiceError(409, 'case partition set.keys is invalid')
     return tuple(raw)
+
+
+def _natural_case_id_key(case_id: str) -> tuple[object, ...]:
+    """Sort case_0010 before case_0011 (and before case_0009 when reversed in storage)."""
+    return tuple(int(part) if part.isdigit() else part.casefold() for part in re.split(r'(\d+)', case_id) if part)
+
+
+def _ordered_case_rows(rows: list[dict[str, Any]], import_manifest_value: object) -> list[dict[str, Any]]:
+    """Order imported cases by natural case_id, then generated cases the same way."""
+    imported = _overview_mapping(import_manifest_value, 'case import manifest')
+    allocation = _overview_mapping(
+        _overview_mapping(imported.get('stats'), 'case import manifest.stats').get('case_allocation'),
+        'case import manifest.case_allocation',
+    )
+    assignments = _overview_mapping(allocation.get('assignments'), 'case import manifest.assignments')
+
+    def sort_key(item: tuple[int, Mapping[str, Any]]) -> tuple[int, tuple[object, ...], int]:
+        index, row = item
+        case_id = str(row.get('case_id') or '')
+        raw_assignment = assignments.get(case_id)
+        group = (
+            0
+            if isinstance(raw_assignment, Mapping) and raw_assignment.get('mode') == 'imported'
+            else 1
+        )
+        return (group, _natural_case_id_key(case_id), index)
+
+    return [row for _, row in sorted(enumerate(rows), key=sort_key)]
 
 
 def _case_operation_summary(statuses: list[str]) -> dict[str, Any]:

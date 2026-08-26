@@ -146,7 +146,7 @@ export function MaterialsStage({
             <OverviewMetrics
               items={[
                 { label: "目标", value: casePlan?.target, unit: "个" },
-                { label: "CSV 导入", value: casePlan?.imported, unit: "个" },
+                { label: "外部导入", value: casePlan?.imported, unit: "个" },
                 { label: "自动生成", value: casePlan?.automatic, unit: "个" },
               ]}
             />

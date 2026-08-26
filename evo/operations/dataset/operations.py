@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping
 from types import SimpleNamespace
 from typing import Any
@@ -123,7 +124,7 @@ async def build_chunk_candidates_operation(
         'candidates': one(A.DATASET_BUILD_CHUNK_CANDIDATES),
     },
     outputs={'chunk': partitioned(A.DATASET_CHUNK)},
-    max_concurrency=4,
+    max_concurrency=10,
 )
 async def build_chunk_operation(
     ctx: OperationContext,
@@ -173,7 +174,7 @@ async def build_chunks_manifest_operation(
         'material_approval': one(A.APPROVAL_DATASET_MATERIAL_PREPARATION),
     },
     outputs={'entity': partitioned(A.DATASET_CHUNK_ENTITY)},
-    max_concurrency=4,
+    max_concurrency=10,
 )
 async def extract_chunk_entities_operation(
     ctx: OperationContext,
@@ -312,7 +313,7 @@ async def cluster_embeddings_operation(
         'run_config': one(A.RUN_CONFIG),
     },
     outputs={'cluster': partitioned(A.DATASET_EMBEDDING_CLUSTER)},
-    max_concurrency=4,
+    max_concurrency=10,
 )
 async def label_embedding_cluster_operation(
     ctx: OperationContext,
@@ -432,7 +433,7 @@ async def qaplan_plan_operation(
         'chunks_manifest': one(A.DATASET_BUILD_CHUNKS_MANIFEST),
     },
     outputs={'specification': partitioned(A.DATASET_QAPLAN_SPEC)},
-    max_concurrency=4,
+    max_concurrency=10,
 )
 async def qaplan_spec_operation(
     ctx: OperationContext,
@@ -485,7 +486,7 @@ async def qaplan_manifest_operation(
         'run_config': one(A.RUN_CONFIG),
     },
     outputs={'draft': partitioned(A.DATASET_CASE_DRAFT)},
-    max_concurrency=4,
+    max_concurrency=10,
 )
 async def generate_case_operation(
     ctx: OperationContext,
@@ -531,7 +532,7 @@ async def generate_manifest_operation(
         'run_config': one(A.RUN_CONFIG),
     },
     outputs={'enhancement': partitioned(A.DATASET_CASE_ENHANCEMENT)},
-    max_concurrency=4,
+    max_concurrency=10,
 )
 async def enhance_case_operation(
     ctx: OperationContext,
@@ -578,7 +579,7 @@ async def enhance_manifest_operation(
         'enhancement': keyed(A.DATASET_CASE_ENHANCEMENT),
     },
     outputs={'case': partitioned(A.EVAL_CASE)},
-    max_concurrency=4,
+    max_concurrency=10,
 )
 async def finalize_case_operation(
     ctx: OperationContext,
@@ -805,11 +806,26 @@ def _entities_with_failures(value: object, manifest: Mapping[str, Any]) -> tuple
     return tuple(output)
 
 
+def _natural_case_id_key(case_id: str) -> tuple[object, ...]:
+    return tuple(int(part) if part.isdigit() else part.casefold() for part in re.split(r'(\d+)', case_id) if part)
+
+
 def _case_ids(import_manifest: Mapping[str, Any]) -> tuple[str, ...]:
     stats = _mapping(import_manifest.get('stats'), 'import_manifest.stats')
     allocation = _mapping(stats.get('case_allocation'), 'import_manifest.stats.case_allocation')
     assignments = _mapping(allocation.get('assignments'), 'case_allocation.assignments')
-    case_ids = tuple(assignments)
+    imported: list[str] = []
+    generated: list[str] = []
+    for case_id, raw in assignments.items():
+        assignment = _mapping(raw, f'case_allocation.assignments.{case_id}')
+        mode = assignment.get('mode')
+        if mode == 'imported':
+            imported.append(str(case_id))
+        elif mode == 'generated':
+            generated.append(str(case_id))
+        else:
+            raise ValueError(f'case assignment mode is invalid: {case_id}')
+    case_ids = tuple(sorted(imported, key=_natural_case_id_key) + sorted(generated, key=_natural_case_id_key))
     if not case_ids or len(set(case_ids)) != len(case_ids):
         raise ValueError('case assignments must contain unique case ids')
     return case_ids

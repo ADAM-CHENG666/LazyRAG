@@ -153,22 +153,35 @@ export function topicDiscoverySteps(
   // discovery step is already emitting SSE. Its snapshot must not hide the
   // current step's partial execution progress.
   const hasPartialExecution = Boolean(progress) && TOPIC_PHASE_ORDER.some(
-    (id) => phases[id].status !== 'done',
+    (id) => phases[id].status !== 'done' && phases[id].status !== 'partial' && phases[id].status !== 'failed',
   ) && TOPIC_PHASE_ORDER.some(
     (id) => phases[id].status !== 'pending' || phases[id].total > 0,
   );
-  const overviewDone = currentStageStatus !== 'running' && !hasPartialExecution && (
-    overview?.status === 'completed' || overview?.status === 'succeeded'
-  );
+  const progressHasFailures = TOPIC_PHASE_ORDER.some((id) => phases[id].failed > 0);
+  const overviewDone = currentStageStatus !== 'running'
+    && !hasPartialExecution
+    && !progressHasFailures
+    && (overview?.status === 'completed' || overview?.status === 'succeeded');
   const topicCount = overview?.total_topics ?? null;
+  const latestActiveIndex = TOPIC_PHASE_ORDER.reduce((latest, id, index) => (
+    hasPhaseExecution(progress, id) ? index : latest
+  ), -1);
 
-  return TOPIC_PHASE_ORDER.map((id) => {
+  return TOPIC_PHASE_ORDER.map((id, index) => {
     const snapshot = overview?.stages?.[id];
     // Match case generation: the overview is the baseline for every phase,
     // while SSE replaces only the phase for which it has actual evidence.
-    const phase = hasPhaseExecution(progress, id)
+    let phase = hasPhaseExecution(progress, id)
       ? phases[id]
       : snapshotPhase(id, snapshot) ?? phases[id];
+    if (
+      !hasPhaseExecution(progress, id)
+      && latestActiveIndex > index
+      && phase.status === 'pending'
+      && !snapshot
+    ) {
+      phase = { ...phase, status: 'done' };
+    }
     let status = phase.status;
     let completed = phase.completed;
     let total: number | null = phase.total || null;
@@ -243,9 +256,6 @@ export function progressSummary(
   total: number | null,
   counts?: { running?: number; failed?: number; pending?: number; stale?: number },
 ) {
-  if (status === 'done' || (total != null && total > 0 && completed === total && (counts?.failed || 0) === 0)) {
-    return '全部完成';
-  }
   const notes = [
     counts?.failed ? `${counts.failed} 失败` : '',
     counts?.running ? `${counts.running} 执行中` : '',
@@ -255,11 +265,14 @@ export function progressSummary(
   if (notes.length) {
     return notes.join(' · ');
   }
+  if (status === 'done' || (total != null && total > 0 && completed === total && (counts?.failed || 0) === 0)) {
+    return '全部完成';
+  }
   if (status === 'running') {
     return '执行中';
   }
-  if (status === 'failed') {
-    return '失败';
+  if (status === 'failed' || status === 'partial') {
+    return status === 'partial' ? '部分失败' : '失败';
   }
   return '未开始';
 }
@@ -325,9 +338,13 @@ function summarizePartitionPhase(
   }
   const resolvedTotal = Math.max(total, Object.keys(statuses).length);
   let status: VisualStatus = 'pending';
-  if (failed && !running && completed + failed >= resolvedTotal) status = 'failed';
-  else if (running || (completed > 0 && completed < resolvedTotal)) status = 'running';
-  else if (resolvedTotal > 0 && completed >= resolvedTotal) status = 'done';
+  if (running || (completed + failed > 0 && completed + failed < resolvedTotal)) {
+    status = 'running';
+  } else if (failed && completed + failed >= resolvedTotal) {
+    status = completed > 0 ? 'partial' : 'failed';
+  } else if (resolvedTotal > 0 && completed >= resolvedTotal) {
+    status = 'done';
+  }
   return {
     id,
     label: PHASE_LABEL[id],
@@ -343,10 +360,20 @@ function completeAllPhases(progress: TopicDiscoveryProgress): TopicDiscoveryProg
   const next = cloneProgress(progress);
   for (const id of TOPIC_PHASE_ORDER) {
     const phase = next.phases[id];
+    if (phase.failed > 0) {
+      next.phases[id] = {
+        ...phase,
+        running: 0,
+        status: phase.completed > 0 ? 'partial' : 'failed',
+      };
+      continue;
+    }
     next.phases[id] = {
       ...phase,
-      completed: phase.total,
+      completed: phase.total || phase.completed,
       running: 0,
+      // Once the stage emits step.finish, any phase without an explicit failure
+      // has settled. Keep it visually complete until the overview snapshot lands.
       status: 'done',
     };
   }

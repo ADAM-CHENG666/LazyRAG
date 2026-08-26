@@ -371,6 +371,18 @@ def test_topics_first_page_returns_revision_and_continuation() -> None:
     assert result['next_page_token'] == ''
 
 
+def test_topics_default_order_is_by_topic_id_not_name() -> None:
+    service = _service(versions={1: _manifest(
+        ('topic-3', 'Alpha', 'precision', 1),
+        ('topic-1', 'Zeta', 'precision', 1),
+        ('topic-2', 'Beta', 'precision', 1),
+    )})
+
+    result = _topics(service, page_size=50)
+
+    assert [item['topic_id'] for item in result['items']] == ['topic-1', 'topic-2', 'topic-3']
+
+
 def test_topics_projects_only_the_documented_topic_list_dto() -> None:
     manifest = _manifest(('topic-1', 'Alpha', 'precision', 2))
     manifest['topics'][0]['internal_cluster_id'] = 'cluster-1'
@@ -444,7 +456,7 @@ def test_topics_next_page_keeps_same_revision_without_duplicates_or_omissions() 
 
     assert first['revision'] == second['revision'] == third['revision']
     assert [item['topic_id'] for item in first['items'] + second['items'] + third['items']] == [
-        'topic-1', 'topic-2', 'topic-4', 'topic-5', 'topic-3',
+        'topic-1', 'topic-2', 'topic-3', 'topic-4', 'topic-5',
     ]
     assert third['next_page_token'] == ''
 
@@ -580,6 +592,55 @@ def test_cases_projects_plan_metadata_and_runtime_operation_statuses() -> None:
             'source': 'generated', 'question_type': 'reasoning', 'difficulty': 'easy',
             'topic': {'topic_id': 'topic-a', 'name': '主题 A'},
         },
+    ]
+
+
+def test_cases_orders_imported_then_generated_by_natural_case_id() -> None:
+    values = _case_list_values()
+    values[ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST)] = {1: {
+        'stats': {'case_allocation': {'assignments': {
+            'case_0010': {'mode': 'imported', 'source_row_number': 1},
+            'case_0001': {'mode': 'imported', 'source_row_number': 10},
+            'case_0011': {'mode': 'generated'},
+            'case_0002': {'mode': 'imported', 'source_row_number': 9},
+        }}},
+        'details': [
+            {'source_row_number': 1, 'case': {
+                'id': 'case_0010', 'question_type': 'precision', 'difficulty': 'easy',
+            }},
+            {'source_row_number': 9, 'case': {
+                'id': 'case_0002', 'question_type': 'precision', 'difficulty': 'easy',
+            }},
+            {'source_row_number': 10, 'case': {
+                'id': 'case_0001', 'question_type': 'reasoning', 'difficulty': 'hard',
+            }},
+        ],
+    }}
+    values[ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN)] = {1: {'items': [
+        {'case_id': 'case_0011', 'question_type': 'precision', 'difficulty': 'medium', 'topic_id': 'topic-b'},
+    ]}}
+    # Storage order is intentionally reverse for imported cases (10 → 1).
+    values[ArtifactKey.scalar(A.EVAL_CASE_REQUESTS)] = {1: PartitionSet(
+        ('case_0010', 'case_0002', 'case_0001', 'case_0011'),
+    )}
+    snapshots = {
+        'case_0001': _case_snapshots()['case-1'],
+        'case_0002': _case_snapshots()['case-1'],
+        'case_0010': _case_snapshots()['case-1'],
+        'case_0011': _case_snapshots()['case-2'],
+    }
+    service = ProjectionService(
+        _CaseListFakeFlow(values, snapshots),
+        definition=None,
+    )
+
+    result = _cases(service)
+
+    assert [item['case_id'] for item in result['items']] == [
+        'case_0001', 'case_0002', 'case_0010', 'case_0011',
+    ]
+    assert [item['source'] for item in result['items']] == [
+        'imported', 'imported', 'imported', 'generated',
     ]
 
 
