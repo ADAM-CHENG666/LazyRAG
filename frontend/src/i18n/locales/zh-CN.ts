@@ -4979,6 +4979,7 @@ const zhCN = {
     stageRepair: "代码优化",
     stageAbtest: "A/B 测试",
     statusPending: "待执行",
+    statusWaitingNext: "等待进入下一步",
     statusDone: "已完成",
     statusFailed: "已失败",
     statusPartial: "部分失败",

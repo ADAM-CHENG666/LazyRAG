@@ -74,6 +74,9 @@ export function getStepStatusLabel(status: StepStatus) {
   if (status === "running") {
     return t("selfEvolutionRun.statusRunning");
   }
+  if (status === "waiting") {
+    return t("selfEvolutionRun.statusWaitingNext");
+  }
   if (status === "done") {
     return t("selfEvolutionRun.statusDone");
   }

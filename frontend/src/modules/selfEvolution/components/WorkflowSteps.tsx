@@ -39,6 +39,7 @@ export function WorkflowStepCard({
           <span className={`self-evolution-step-status is-${step.status}`}>
             {step.status === "done" && <CheckCircleFilled />}
             {step.status === "running" && <ClockCircleFilled />}
+            {step.status === "waiting" && <ClockCircleFilled />}
             {step.status === "paused" && <ClockCircleFilled />}
             {step.status === "canceled" && <CloseOutlined />}
             {step.status === "partial" && <ExclamationCircleFilled />}

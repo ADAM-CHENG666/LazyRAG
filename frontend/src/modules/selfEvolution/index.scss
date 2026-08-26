@@ -2636,7 +2636,8 @@
   background: linear-gradient(180deg, #f8fbff 0%, #f2f8ff 100%);
 }
 
-.self-evolution-step-card.is-paused {
+.self-evolution-step-card.is-paused,
+.self-evolution-step-card.is-waiting {
   border-color: #ffd591;
   background: linear-gradient(180deg, #fffdf7 0%, #fff7e6 100%);
 }
@@ -2700,7 +2701,8 @@
     color: #6f83a1;
   }
 
-  &.is-paused {
+  &.is-paused,
+  &.is-waiting {
     background: #fff7e6;
     color: #ad6800;
   }

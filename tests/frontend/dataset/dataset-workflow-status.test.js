@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  deriveDatasetTopStatus,
   datasetWorkflowStepFromSteps,
   deriveDatasetView,
   getDatasetCheckpointWaitingStep,
@@ -155,6 +156,48 @@ describe('deriveDatasetView', () => {
     );
     expect(view.suggestedTab).toBe('topics');
     expect(view.activeStepId).toBe('t1');
+  });
+});
+
+describe('dataset top status', () => {
+  it('does not complete when materials is the checkpoint waiting for the next stage', () => {
+    const items = steps([
+      {
+        stage: 'dataset.material_preparation',
+        status: 'completed',
+        nextStepRunId: 'topic-step-1',
+      },
+      { stage: 'dataset.topic_discovery', status: 'pending' },
+      { stage: 'dataset.case_generation', status: 'pending' },
+    ]);
+
+    expect(deriveDatasetTopStatus(items)).toBe('waiting');
+  });
+
+  it('completes only after case generation has its final dataset result', () => {
+    const items = steps([
+      { stage: 'dataset.material_preparation', status: 'completed' },
+      { stage: 'dataset.topic_discovery', status: 'completed' },
+      { stage: 'dataset.case_generation', status: 'completed' },
+    ]);
+
+    expect(deriveDatasetTopStatus(items)).toBe('running');
+    expect(deriveDatasetTopStatus(items, 'done')).toBe('done');
+    expect(deriveDatasetTopStatus(items, 'partial')).toBe('partial');
+  });
+
+  it('does not reuse an earlier dataset result after materials are re-applied', () => {
+    const items = steps([
+      { stage: 'dataset.case_generation', status: 'completed', stepId: 'cases-old' },
+      {
+        stage: 'dataset.material_preparation',
+        status: 'completed',
+        nextStepRunId: 'topics-new',
+        stepId: 'materials-new',
+      },
+    ]);
+
+    expect(deriveDatasetTopStatus(items, 'done')).toBe('waiting');
   });
 });
 

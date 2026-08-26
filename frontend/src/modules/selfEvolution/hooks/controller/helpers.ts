@@ -866,6 +866,7 @@ export function normalizeThreadStepListPayload(payload: ThreadRestorePayload): T
 export function buildThreadStepStatusByStage(
   stepList: ThreadStepListState,
   flowStatus?: string,
+  datasetTopStatus?: StepStatus,
 ): Partial<Record<ThreadEventStage, StepStatus>> {
   const result: Partial<Record<ThreadEventStage, StepStatus>> = {};
   for (const step of stepList.steps) {
@@ -882,7 +883,9 @@ export function buildThreadStepStatusByStage(
     }
   }
   const datasetStep = datasetWorkflowStepFromSteps(stepList.steps);
-  if (datasetStep) {
+  if (datasetTopStatus) {
+    result.dataset = datasetTopStatus;
+  } else if (datasetStep) {
     const normalizedStatus = resolveCheckpointAwareStepStatus(
       normalizeThreadStepStatus(datasetStep.status),
       { flowStatus, step: datasetStep, stage: "dataset" },

@@ -123,6 +123,18 @@ describe('dataset refresh policy', () => {
     expect(stagesHook).not.toContain('setStatuses');
   });
 
+  it('uses the final dataset result only to settle the top-level Dataset status', () => {
+    const controller = readFrontendFile(
+      'src/modules/selfEvolution/hooks/useSelfEvolutionPageController.tsx',
+    );
+    expect(controller).toContain('datasetFinalizationStep(threadStepList.steps)');
+    expect(controller).toContain('/dataset/result`');
+    expect(controller).toContain('completed_with_problems ? "partial" : "done"');
+    expect(controller).toContain(
+      'buildThreadStepStatusByStage(threadStepList, threadFlowStatus, datasetTopStatus)',
+    );
+  });
+
   it('notifies the Dataset workspace when a message starts the next step', () => {
     const source = readFrontendFile(
       'src/modules/selfEvolution/hooks/useSelfEvolutionPageController.tsx',

@@ -5187,6 +5187,7 @@ const enUS = {
     stageRepair: "Code Optimization",
     stageAbtest: "A/B Test",
     statusPending: "Pending",
+    statusWaitingNext: "Waiting for next step",
     statusDone: "Completed",
     statusFailed: "Failed",
     statusPartial: "Partially failed",
