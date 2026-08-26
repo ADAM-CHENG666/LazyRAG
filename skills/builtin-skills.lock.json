@@ -217,6 +217,26 @@
       "tree_sha256": "e62bc2fc61a640b7c9b3eeec5ccd773bdcca162002c762a7e6e6f157aafe5ca3",
       "archive_size": 55567,
       "package_file": "packages/bsk_D9126B2E88201F74F8728E46A1C2.zip"
+    },
+    {
+      "key": "skill",
+      "uid": "bsk_1E1AE354017CAB635F423BC76790",
+      "source_url": "builtin://featured/novel-generator/skill",
+      "resolved_url": "builtin://featured/novel-generator/skill",
+      "version": "1.0.0",
+      "name": "novel-generator",
+      "description": "作为一个完整的中文网络小说与爽文连载专家，把一句话灵感扩展为创作设定、全局大纲、分卷节奏和连续章节，并通过 LazyMind 对话工作区维护角色、地点、时间线、伏笔和世界规则的一致性。用于用户要求写小说、续写章节、生成网文或爽文、设计修仙/玄幻/都市/重生/系统流/末世/网游故事、扩展创意、制作大纲、检查剧情穿帮、修订章节或继续长期连载时；短篇一次性创作可直接回答，长篇项目必须建立并更新结构化创作记忆。",
+      "category": "writing",
+      "tags": [
+        "novel-writing",
+        "serialized-fiction",
+        "creative-writing"
+      ],
+      "market_visible": false,
+      "archive_sha256": "c85078ac1ffc078766862c78c14a56837dfc6db0ae02ec76e4c067aca9a274e7",
+      "tree_sha256": "b22857ba8156de0ad833c26d7e71ed74401e12c4c28f08562fe556ab72ec916b",
+      "archive_size": 12568,
+      "package_file": "packages/bsk_1E1AE354017CAB635F423BC76790.zip"
     }
   ]
 }
