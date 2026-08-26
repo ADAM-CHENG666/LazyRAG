@@ -1,9 +1,9 @@
-# STEP1 CSV 导入契约：完整行级详情按需读取；默认页只消费最终 STEP1 Manifest 中的数量摘要。
+# 导入已有 case；CSV 文件与 Core 评测集投影共用同一行级契约。
 operation:
   op_id: dataset.import_cases
   flow: dataset
   stage: import_cases
-  description: 可选地读取 CSV 基础 QA case，在静态 case 分区创建前冻结导入与自动生成的分配决策。
+  description: 在 case 分区创建前校验并冻结导入结果；没有导入源时按生成计划创建 case。
 
 fixed_op:
   inputs:
@@ -26,192 +26,90 @@ input_payload:
   source_config:
     fields:
       kb_ids:
-        # 本轮 CSV 引用允许溯源的知识库范围。
         type: list[string]
         required: true
-        validation:
-          - non_empty
-          - non_empty_after_strip_items
-          - unique_items
-      csv_path:
-        # 为空时不导入，全部 case 走自动生成。
-        type: string
+      csv_sources:
+        type: array
         required: false
-        default: ""
+        item:
+          fields:
+            kb_id: {type: string}
+            path: {type: string}
+      imported_cases:
+        # Core 评测集按导入字段投影；行为与 CSV 行一致。
+        type: array
+        required: false
+        item: {type: object}
       target_case_count:
-        # DAG 预先创建的稳定 case 分区总数。
         type: integer
         required: true
-        validation:
-          - positive_integer
-          - max_value: 100000
+        validation: [positive_integer]
+
+case_contract:
+  required: [question, question_type, ground_truth, grading_guidance]
+  optional:
+    - case_id
+    - difficulty
+    - key_points
+    - forbidden_claims
+    - reference_context
+    - reference_doc
+    - reference_doc_ids
+    - reference_chunk_ids
+    - generate_reason
+    - is_deleted
+  question_type:
+    enum: [precision, reasoning]
+  reference_validation:
+    - 仅校验已提供的 doc_id、chunk_id 是否存在于本轮知识库。
+    - 不按引用文本匹配，不补全缺失引用，不执行回退。
 
 output_payload:
   import_cases_manifest:
-    json_compatible: true
     fields:
       source:
-        # CSV 文件指纹，只用于审计与重跑一致性判断。
-        type: object
         fields:
-          csv_path:
-            type: string
-          csv_sha256:
-            type: string
-            required: false
-          csv_size_bytes:
-            type: integer
-            required: false
+          csv_sources: {type: array}
       stats:
-        # 只含 CSV 整体读取情况与 case 分配情况；逐行信息统一见 details。
-        type: object
         fields:
           csv_reading:
-            # CSV 的整体读取结果，直接支撑“数据源设置”抽屉；无需前端遍历 details 计数。
-            type: object
             fields:
-              total_row_count:
-                type: integer
-              valid_row_count:
-                type: integer
-              loaded_row_count:
-                type: integer
-              invalid_row_count:
-                type: integer
-              truncated_row_count:
-                type: integer
+              total_row_count: {type: integer}
+              valid_row_count: {type: integer}
+              loaded_row_count: {type: integer}
+              invalid_row_count: {type: integer}
+              deleted_row_count: {type: integer}
+              truncated_row_count: {type: integer}
           case_allocation:
-            # 静态总数 = import_case_count + auto_case_count。
-            type: object
             fields:
-              target_case_count:
-                type: integer
-              import_case_count:
-                type: integer
-              auto_case_count:
-                type: integer
-              assignments:
-                # 以 case_0001 等稳定分区为 key，冻结 mode 与对应 source_row_number。
-                type: object
-                description: "case_id -> {mode: imported|generated, source_row_number?: integer}"
+              target_case_count: {type: integer}
+              import_case_count: {type: integer}
+              auto_case_count: {type: integer}
+              assignments: {type: object}
       details:
-        # 每个 CSV 数据行恰有一条 detail；文件级错误直接失败，不产生 manifest。
         type: array
         item:
-          type: object
           fields:
-            source_row_number:
-              type: integer
-            source_id:
-              type: string
-              required: false
+            source_row_number: {type: integer}
             load_status:
               type: string
-              enum:
-                - loaded
-                - invalid
-                - truncated
-            case_id:
-              # 仅 loaded 行存在，对应其实际占用的稳定 case 分区。
-              type: string
-              required: false
-            error:
-              # 仅 invalid 行存在；truncated 是合法但未加载，不视为错误。
-              type: object
-              required: false
-              fields:
-                code:
-                  type: string
-                reason:
-                  type: string
-            case:
-              # 仅 loaded 行存在，是已规范化且可直接透传至 generate 的基础 case。
-              type: object
-              required: false
-              fields:
-                id:
-                  type: string
-                question:
-                  type: string
-                answer:
-                  type: string
-                question_type:
-                  type: string
-                  enum:
-                    - precision
-                    - reasoning
-                difficulty:
-                  type: string
-                  enum:
-                    - easy
-                    - medium
-                    - hard
-                grading_guidance:
-                  type: string
-                references:
-                  # 与自动生成 Case 相同的完整引用结构；同时保留拆分兼容字段。
-                  type: array
-                  item:
-                    fields:
-                      kb_id: {type: string}
-                      doc_id: {type: string}
-                      chunk_id: {type: string}
-                      text: {type: string}
-                # 以下为既有 Case 输出字段；从 references 同步派生，继续供下游消费。
-                reference_context: {type: array}
-                reference_chunk_ids: {type: 'list[string]'}
-                reference_doc_ids: {type: 'list[string]'}
-                source_preparation:
-                  type: object
-                  fields:
-                    kb_ids: {type: 'list[string]'}
+              enum: [loaded, invalid, deleted]
+            case_id: {type: string, required: false}
+            error: {type: object, required: false}
+            case: {type: object, required: false}
 
 execution_flow:
-  - 读取并校验 source_config.kb_ids 与 target_case_count；kb_ids 是本次可溯源知识库的完整范围。
-  - 当 csv_path 为空时，不读取 CSV；details=[]，并在 stats.case_allocation.assignments 中为全部稳定分区写入 mode=generated。
-  - 当 csv_path 非空时，读取一次文件并记录路径、字节数与 SHA256；文件不存在、不可读、CSV 无法解析或表头非法时直接失败，不回退为纯自动生成。
-  - CSV 仅允许列 id（可选）、question、answer、question_type、difficulty、grading_guidance、reference_context；CSV 仍以 {chunk_id,text} 提交，未知列或缺少任一必填列属于文件级错误。
-  - question、answer、grading_guidance 必须为非空字符串；question_type 仅允许 precision 或 reasoning；difficulty 仅允许 easy、medium、hard。
-  - reference_context 必须是 JSON list，项结构严格为 {chunk_id, text}；禁止空值和同一 case 内重复 chunk_id，且引用数量必须满足 easy=1、medium=2、hard=3。
-  - 对每个 reference，将换行统一为 LF、去除首尾空白后，与 source_config.kb_ids 所连接知识库中的同一 chunk_id 正文精确比对；未找到、无法溯源、跨知识库歧义或正文不一致均使该行 load_status=invalid，并在 detail.error 写入原因。
-  - 对通过引用复核的行，从知识库解析并按 CSV 顺序物化完整 references=[{kb_id,doc_id,chunk_id,text}]；同时派生既有 reference_context、reference_chunk_ids、reference_doc_ids 与 source_preparation.kb_ids；question 按 trim、压缩空白、忽略大小写进行去重，后出现的重复行同样标记 invalid。
-  - 按源文件顺序压缩全部合法行，选取前 min(合法行数, target_case_count) 行；选中行标记 loaded，超过目标的合法行标记 truncated。
-  - 将 loaded 行依次固定写入 case_0001 至 case_00NN 的 stats.case_allocation.assignments，mode=imported；对应 detail.case.id 必须等于该 runtime case id；剩余稳定分区写入 mode=generated。
-  - 汇总 stats.csv_reading 的总/有效/加载/无效/截断行数，以及 stats.case_allocation 的目标/导入/自动 Case 数和 assignments；后续 operation 只消费该 manifest，不重新读取或重新分配 CSV。
-  - 要求 total_row_count = valid_row_count + invalid_row_count，valid_row_count = loaded_row_count + truncated_row_count，target_case_count = import_case_count + auto_case_count。
-  - 返回 {"import_cases_manifest": payload}。
+  - 没有导入源时，按 target_case_count 生成 assignments，全部标记为 generated。
+  - 有导入源时逐行校验；无效行与删除行不进入最终数据集。
+  - 至少存在一个有效导入 case，否则 operation 失败。
+  - 导入模式不截断；未启用补充时，target_case_count 等于有效导入 case 数。
+  - 启用补充时，target_case_count 不小于有效导入 case 数，其余分区标记为 generated。
+  - 导入 case 直接进入完成态，未提供的可选字段保持为空。
 
 tests:
-  file_contract:
-    # 文件级错误必须终止本次运行，避免不可读或错误格式被静默当成“没有导入”。
-    cases:
-      # csv_path 为空时形成纯自动生成的完整 assignments，不访问文件系统。
-      - absent_csv_creates_all_generated_assignments
-      # 文件不存在、不可读、CSV 解析失败、未知表头或缺少必填列时直接失败。
-      - unreadable_or_invalid_csv_error
-      # 可选 id 列可整体缺席；不得兼容旧字段名、旧问题类型或旧难度枚举。
-      - accepts_only_new_minimal_schema
-  row_validation:
-    # 行级错误只淘汰当前行，并把可审计的原因写入 manifest，不妨碍其余合法行被选取。
-    cases:
-      # 必填文本、枚举、reference JSON、难度对应引用数与同 case 重复 chunk_id 均严格校验。
-      - base_case_and_reference_contract
-      # chunk 必须能在配置的知识库中唯一溯源，且清洗后的 CSV 文本必须与知识库正文精确一致；成功行物化完整 references 和既有派生字段。
-      - kb_reference_resolution_text_match_and_compatible_reference_materialization
-      # 完整 references 与 reference_context、Chunk/文档 ID 列表、KB 摘要必须由同一解析结果派生，顺序一致。
-      - complete_and_legacy_reference_fields_are_consistent
-      # question 在简单归一化后重复时，后出现行标记为 duplicate_question。
-      - duplicate_question_is_invalid
-  assignment_and_audit:
-    # 分配在导入 operation 一次冻结，后续节点不得依赖 CSV 文件重新计算或自行挑选 case。
-    cases:
-      # 合法行按源顺序压缩，前 target_case_count 行导入到连续 runtime case 分区。
-      - assigns_selected_rows_to_stable_case_partitions
-      # 合法行超过目标时只截取前 N 行，并令 truncated_count=valid_count-selected_count，不报错。
-      - truncates_valid_rows_with_manifest_stats
-      # 无效行不占用 case 分区；invalid_count 等于 invalid_details 数量，不足部分全部由 generated assignments 补齐。
-      - invalid_details_do_not_consume_capacity
-      # manifest 保存 CSV 指纹、行级错误和完整引用溯源字段，不保存原始 CSV 内容；所有计数可相互对账。
-      - records_reproducible_audit_metadata
-      # 相同 CSV 文件、知识库快照和目标总数重复执行时，loaded/truncated 行及 Case 分区绑定必须可复现。
-      - repeated_import_produces_deterministic_case_assignments
+  - minimal_required_fields
+  - supported_question_types_only
+  - optional_reference_ids_are_validated
+  - inline_eval_set_and_csv_share_contract
+  - imported_count_defines_target
+  - imported_case_finalizes_without_generation

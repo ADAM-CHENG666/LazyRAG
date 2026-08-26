@@ -576,7 +576,6 @@ async def enhance_manifest_operation(
     inputs={
         'draft': each(A.DATASET_CASE_DRAFT, over=A.EVAL_CASE_REQUESTS),
         'enhancement': keyed(A.DATASET_CASE_ENHANCEMENT),
-        'case_approval': one(A.APPROVAL_DATASET),
     },
     outputs={'case': partitioned(A.EVAL_CASE)},
     max_concurrency=4,
@@ -585,9 +584,7 @@ async def finalize_case_operation(
     ctx: OperationContext,
     draft: object,
     enhancement: object,
-    case_approval: object,
 ) -> OperationResult:
-    del case_approval
     case = _finalize_case(
         _mapping(draft, 'draft'),
         _mapping(enhancement, 'enhancement'),
@@ -855,25 +852,30 @@ def _finalize_case(
 ) -> dict[str, Any]:
     if str(draft.get('id') or '') != case_id:
         raise ValueError('draft id must match case partition')
+    source_preparation = dict(_mapping(draft.get('source_preparation'), 'draft.source_preparation'))
+    mode = str(source_preparation.get('dataset_mode') or 'generated')
     raw_context = draft.get('reference_context')
-    if not isinstance(raw_context, list) or not raw_context:
+    if mode == 'imported' and raw_context in (None, ''):
+        raw_context = []
+    if not isinstance(raw_context, list) or (not raw_context and mode != 'imported'):
         raise ValueError('draft.reference_context must be a non-empty list')
-    context = [_mapping(item, 'draft.reference_context[]') for item in raw_context]
-    context_texts = [str(item.get('text') or '').strip() for item in context]
-    if any(not text for text in context_texts):
+    context = [dict(item) if isinstance(item, Mapping) else str(item).strip() for item in raw_context]
+    context_texts = [str(item.get('text') or '').strip() if isinstance(item, Mapping) else item for item in context]
+    if mode != 'imported' and any(not text for text in context_texts):
         raise ValueError('draft.reference_context text must be non-empty')
 
     key_points = enhancement.get('key_points')
-    if not isinstance(key_points, list) or not key_points:
+    if not isinstance(key_points, list) or (not key_points and mode != 'imported'):
         raise ValueError('enhancement.key_points must be a non-empty list')
-    reasoning_steps = [str(_mapping(item, 'key_points[]').get('statement') or '').strip() for item in key_points]
-    if any(not statement for statement in reasoning_steps):
+    reasoning_steps = [
+        str(item.get('statement') or '').strip() if isinstance(item, Mapping) else str(item).strip()
+        for item in key_points
+    ]
+    if mode != 'imported' and any(not statement for statement in reasoning_steps):
         raise ValueError('enhancement key point statements must be non-empty')
 
-    source_preparation = dict(_mapping(draft.get('source_preparation'), 'draft.source_preparation'))
-    source_preparation['context_reference'] = [dict(item) for item in context]
+    source_preparation['context_reference'] = [dict(item) if isinstance(item, Mapping) else item for item in context]
     source_preparation['dataset_enhancement'] = dict(enhancement)
-    mode = str(source_preparation.get('dataset_mode') or 'generated')
     case_source = dict(_mapping(source_preparation.get('case_source', {}), 'case_source'))
     case_source.update({
         'final_id': case_id,
@@ -883,35 +885,32 @@ def _finalize_case(
     source_preparation['case_source'] = case_source
 
     reference_doc_ids = [str(value).strip() for value in draft.get('reference_doc_ids') or []]
-    if not reference_doc_ids or any(not value for value in reference_doc_ids):
+    if (not reference_doc_ids and mode != 'imported') or any(not value for value in reference_doc_ids):
         raise ValueError('draft.reference_doc_ids must contain non-empty values')
-    question_type = _current_question_type(str(draft.get('question_type') or ''), reference_doc_ids)
+    question_type = str(draft.get('question_type') or '').strip()
+    if question_type not in {'precision', 'reasoning'}:
+        raise ValueError(f'unsupported dataset question type: {question_type}')
     difficulty = str(draft.get('difficulty') or '').strip()
     return normalize_eval_case({
         'id': case_id,
         'question': draft.get('question'),
         'answer': draft.get('answer'),
+        'ground_truth': draft.get('answer'),
         'question_type': question_type,
         'difficulty': difficulty,
         'grading_guidance': draft.get('grading_guidance'),
+        'key_points': [dict(item) if isinstance(item, Mapping) else item for item in key_points],
+        'forbidden_claims': list(enhancement.get('forbidden_claims') or []),
+        'generate_reason': draft.get('generate_reason'),
+        'is_deleted': bool(draft.get('is_deleted', False)),
         'reasoning_steps': reasoning_steps,
         'difficulty_rationale': f'{difficulty} case using {len(context)} reference chunks',
         'type_rationale': f'adapted from dataset question type {draft.get("question_type")}',
         'reference_chunk_ids': list(draft.get('reference_chunk_ids') or []),
-        'reference_context': context_texts,
-        'reference_doc': context_texts,
+        'reference_context': context if mode == 'imported' else context_texts,
+        'reference_doc': list(draft.get('reference_doc') or []) if mode == 'imported' else context_texts,
         'reference_doc_ids': reference_doc_ids,
         'source_message_id': '',
         'source_preparation': source_preparation,
     }, default_id=case_id)
-
-
-def _current_question_type(question_type: str, reference_doc_ids: list[str]) -> str:
-    if question_type == 'precision':
-        return 'single_hop'
-    if question_type == 'reasoning':
-        return 'multi_doc_multi_hop' if len(set(reference_doc_ids)) > 1 else 'single_doc_multi_hop'
-    raise ValueError(f'unsupported dataset question type: {question_type}')
-
-
 __all__ = ['dataset_operations']

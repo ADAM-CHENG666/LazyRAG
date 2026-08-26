@@ -519,6 +519,62 @@ def test_material_apply_rejects_mixing_scan_configuration_and_chunk_selection() 
     assert error.value.status_code == 400
 
 
+def test_material_apply_cannot_reduce_supplement_target_below_imported_cases() -> None:
+    values = _material_values()
+    source_key = ArtifactKey.scalar(A.CORPUS_SOURCE_CONFIG)
+    source_version, source_value = values[source_key]
+    values[source_key] = (source_version, {
+        **source_value,
+        'supplement_existing_eval_set': True,
+        'imported_cases': [
+            {'case_id': 'external-1'},
+            {'case_id': 'external-2'},
+            {'case_id': 'external-3'},
+        ],
+    })
+    service, _ = _service(values)
+    source = ArtifactRef(source_key, 3)
+    selection = ArtifactRef(ArtifactKey.scalar(A.DATASET_SELECT_DOCS_PARAMS), 4)
+    chunks = ArtifactRef(ArtifactKey.scalar(A.DATASET_BUILD_CHUNKS_PARAMS), 5)
+
+    with pytest.raises(ServiceError) as error:
+        asyncio.run(service.apply_material_scan_config('thr-1', {
+            'request_id': 'below-imported',
+            'expected_revision': _revision(source, selection, chunks),
+            'changes': {'target_case_count': 2},
+        }))
+
+    assert error.value.status_code == 422
+    assert 'at least 3' in str(error.value)
+
+
+def test_material_adjustment_options_exposes_imported_case_count_as_target_minimum() -> None:
+    values = _material_values()
+    source_key = ArtifactKey.scalar(A.CORPUS_SOURCE_CONFIG)
+    source_version, source_value = values[source_key]
+    values[source_key] = (source_version, {
+        **source_value,
+        'supplement_existing_eval_set': True,
+        'imported_cases': [
+            {'case_id': 'external-1'},
+            {'case_id': 'external-2'},
+            {'case_id': 'deleted-external', 'is_deleted': True},
+        ],
+    })
+    projection = object.__new__(ProjectionService)
+    projection.flow = _ApplyFlow(values)
+    projection.capability_client = _CapabilityClient({
+        'kb-a': {
+            'split_rules': [{'id': 'block', 'name': '段落'}],
+            'layout_types': [{'id': 'text', 'name': '文本'}],
+        },
+    })
+
+    options = asyncio.run(projection.material_adjustment_options('thr-1'))
+
+    assert options['min_target_case_count'] == 2
+
+
 def test_material_apply_rejects_enabling_a_capability_not_supported_by_current_sources() -> None:
     service, _ = _service(_material_values())
     service.capability_client = _CapabilityClient({

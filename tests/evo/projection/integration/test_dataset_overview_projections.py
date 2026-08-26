@@ -98,6 +98,24 @@ def test_materials_overview_returns_current_status_without_a_stable_manifest(mon
     }
 
 
+def test_materials_overview_projects_import_plan_before_chunk_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
+    _enable_dataset_stages(monkeypatch)
+    key = ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST)
+    service = _service(
+        values={key: {2: {'stats': {'case_allocation': {
+            'target_case_count': 2, 'import_case_count': 2, 'auto_case_count': 0,
+            'assignments': {'external-1': {'mode': 'imported'}, 'external-2': {'mode': 'imported'}},
+        }}}}},
+        statuses={_MATERIAL_STAGE: 'running'},
+    )
+
+    result = asyncio.run(service.materials_overview('thr-1'))
+
+    assert result['case_plan'] == {'target': 2, 'imported': 2, 'automatic': 0}
+    assert result['chunks'] is None
+    assert result['revision'] == service._build_revision((ArtifactRef(key, 2),))
+
+
 def test_materials_overview_uses_null_rates_when_their_denominators_are_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     _enable_dataset_stages(monkeypatch)
     service = _service(
@@ -357,6 +375,34 @@ def test_cases_overview_projects_capacities_before_qaplan_manifest(
             },
         },
     }
+
+
+def test_cases_overview_counts_imported_cases_as_complete_before_runtime_requests(
+        monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_case_stage(monkeypatch)
+    params_key = ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN_PARAMS)
+    import_key = ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST)
+    service = _service(
+        values={
+            params_key: {1: {}},
+            import_key: {2: {'stats': {'case_allocation': {
+                'target_case_count': 2,
+                'import_case_count': 2,
+                'auto_case_count': 0,
+                'assignments': {
+                    'external-1': {'mode': 'imported', 'source_row_number': 1},
+                    'external-2': {'mode': 'imported', 'source_row_number': 2},
+                },
+            }}, 'details': []}},
+        },
+        statuses={_CASE_STAGE: 'running'},
+    )
+
+    result = asyncio.run(service.cases_overview('thr-1'))
+
+    assert all(stage['status'] == 'completed' for stage in result['stages'].values())
+    assert all(stage['completed'] == 2 for stage in result['stages'].values())
 
 
 def test_cases_overview_keeps_plan_revision_and_reports_pending_before_case_partitions_exist(

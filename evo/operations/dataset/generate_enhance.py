@@ -36,6 +36,18 @@ def generate_enhance(
     llm_complete: Callable[[str], str] | None = None,
 ) -> dict[str, object]:
     case = _mapping(inputs.get('case'), 'case')
+    preparation = case.get('source_preparation')
+    if isinstance(preparation, Mapping) and preparation.get('dataset_mode') == 'imported':
+        key_points = case.get('key_points', [])
+        forbidden_claims = case.get('forbidden_claims', [])
+        if not isinstance(key_points, list):
+            raise ValueError('case.key_points must be a list')
+        if not isinstance(forbidden_claims, list):
+            raise ValueError('case.forbidden_claims must be a list')
+        return {'case_enhance': {
+            'key_points': [dict(item) if isinstance(item, Mapping) else item for item in key_points],
+            'forbidden_claims': list(forbidden_claims),
+        }}
     question = _text(case.get('question'), 'case.question')
     answer = _text(case.get('answer'), 'case.answer')
     references = _references(case)

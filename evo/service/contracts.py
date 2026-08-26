@@ -20,6 +20,8 @@ class ThreadInputs(StrictModel):
     kb_id: list[str] = Field(default_factory=list)
     knowledge_base_names: dict[str, str] = Field(default_factory=dict)
     csv_data: list[dict[str, str]] = Field(default_factory=list)
+    imported_cases: list[dict[str, Any]] = Field(default_factory=list)
+    supplement_existing_eval_set: bool = False
     router_chat_url: str = Field(min_length=1)
     router_admin_url: str = Field(min_length=1)
     algorithm_id: str = Field(min_length=1)

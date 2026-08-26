@@ -210,6 +210,25 @@ def create_app(root: str | Path | None = None) -> FastAPI:
         _query_keys(request, set())
         return await _service(app).projections.cases_overview(thread_id)
 
+    @app.get('/threads/{thread_id}/dataset/result')
+    async def dataset_result(thread_id: str, page_size: str = '', page_token: str = '') -> dict[str, Any]:
+        return await _service(app).projections.dataset_result(
+            thread_id,
+            page_size=_optional_query_int(page_size, 'page_size'),
+            page_token=page_token,
+        )
+
+    @app.get('/threads/{thread_id}/dataset/result:download')
+    async def dataset_result_download(thread_id: str, format: str, revision: str) -> Response:  # noqa: A002
+        if format != 'csv':
+            raise ServiceError(400, 'format must be csv')
+        filename, payload = await _service(app).projections.dataset_result_download(thread_id, revision)
+        return Response(
+            payload,
+            media_type='text/csv; charset=utf-8',
+            headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+        )
+
     @app.get('/threads/{thread_id}/dataset/cases')
     async def dataset_cases(thread_id: str, plan_status: str = '', generate_status: str = '',
                             grading_status: str = '', source: str = '', question_type: str = '',

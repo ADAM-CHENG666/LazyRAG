@@ -624,7 +624,7 @@ def test_cases_returns_all_rows_before_qaplan_outputs_exist() -> None:
                 },
             }},
             'details': [{'source_row_number': 1, 'case': {
-                'id': 'case_0001', 'question_type': 'reasoning', 'difficulty': 'hard',
+                'id': 'case_0001', 'question_type': 'reasoning', 'difficulty': '',
             }}],
         }},
         ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN_PARAMS): {2: {'lane_case_counts': {
@@ -635,14 +635,20 @@ def test_cases_returns_all_rows_before_qaplan_outputs_exist() -> None:
     result = _cases(_case_list_service(values=values))
 
     assert [(row['case_id'], row['source'], row['question_type'], row['difficulty']) for row in result['items']] == [
-        ('case_0001', 'imported', 'reasoning', 'hard'),
+        ('case_0001', 'imported', 'reasoning', None),
         ('case_0002', 'generated', 'precision', 'easy'),
         ('case_0003', 'generated', 'reasoning', 'medium'),
     ]
     assert all(row['topic'] is None for row in result['items'])
+    assert result['items'][0]['stages'] == {
+        'plan': 'completed', 'generate': 'completed', 'grading': 'completed',
+    }
     assert all(row['stages'] == {'plan': 'pending', 'generate': 'pending', 'grading': 'pending'}
-               for row in result['items'])
+               for row in result['items'][1:])
     assert result['revision']
+
+    imported = _cases(_case_list_service(values=values), source='imported')
+    assert [row['case_id'] for row in imported['items']] == ['case_0001']
 
 
 def test_cases_combines_all_status_and_business_filters_with_and_semantics() -> None:

@@ -280,7 +280,7 @@ def _checkpoint_resume_context_errors(context: dict[str, Any]) -> list[str]:
 SCHEMAS: dict[str, ArtifactSchema] = {
     'DatasetCase': ArtifactSchema(
         required=('id', 'question', 'answer', 'question_type', 'difficulty', 'grading_guidance'),
-        nonempty=('id', 'question', 'answer', 'question_type', 'difficulty', 'grading_guidance'),
+        nonempty=('id', 'question', 'answer', 'question_type', 'grading_guidance'),
         types={'id': str, 'question': str, 'answer': str, 'question_type': str, 'difficulty': str,
                'grading_guidance': str, 'reference_context': list, 'reference_doc': list,
                'reference_doc_ids': list, 'reference_chunk_ids': list},

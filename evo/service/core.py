@@ -346,6 +346,9 @@ class EvoService:
             target = changes['target_case_count']
             if isinstance(target, bool) or not isinstance(target, int) or target < 1:
                 raise ServiceError(422, 'target_case_count must be a positive integer')
+            imported_count = _active_imported_case_count(source)
+            if source.get('supplement_existing_eval_set') is True and target < imported_count:
+                raise ServiceError(422, f'target_case_count must be at least {imported_count}')
             source['target_case_count'] = target
             source['min_case_count'] = target
         if 'knowledge_bases' in changes:
@@ -976,6 +979,16 @@ def _revision_refs(revision: str, keys: tuple[ArtifactKey, ...]) -> tuple[Artifa
     return tuple(next(ref for ref in refs if ref.key == key) for key in keys)
 
 
+def _active_imported_case_count(source: Mapping[str, Any]) -> int:
+    imported_cases = source.get('imported_cases', ())
+    if not isinstance(imported_cases, list):
+        return 0
+    return sum(
+        isinstance(case, Mapping) and case.get('is_deleted') is not True
+        for case in imported_cases
+    )
+
+
 def _lane_case_counts(distribution: Mapping[str, Mapping[str, int]]) -> dict[str, int]:
     return {
         f'{question_type}_{difficulty}': distribution[question_type][difficulty]
@@ -1229,6 +1242,8 @@ def _seed_values(thread_id: str, request: ThreadCreate) -> dict[str, object]:
         'kb_id': request.inputs.kb_id,
         'knowledge_base_names': request.inputs.knowledge_base_names,
         'csv_data': request.inputs.csv_data,
+        'imported_cases': request.inputs.imported_cases,
+        'supplement_existing_eval_set': request.inputs.supplement_existing_eval_set,
         'target_case_count': request.inputs.num_case,
         'min_case_count': request.inputs.num_case,
     }

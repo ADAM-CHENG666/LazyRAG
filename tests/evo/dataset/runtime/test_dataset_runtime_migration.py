@@ -41,7 +41,7 @@ def test_current_flow_splits_dataset_before_eval() -> None:
         A.DATASET_TOPIC_MANIFEST,
     )
     assert definition.stages[2].result_key == ArtifactKey.scalar(
-        A.DATASET_ENHANCE_MANIFEST,
+        A.EVAL_DATASET,
     )
 
     assert {operation.spec.op_id for operation in definition.stage_operations(0)} == {
@@ -69,10 +69,12 @@ def test_current_flow_splits_dataset_before_eval() -> None:
         'dataset.generate_manifest',
         'dataset.enhance_case',
         'dataset.enhance_manifest',
+        'dataset.finalize_case',
+        'dataset.assemble',
     }
-    assert {'dataset.finalize_case', 'dataset.assemble'} <= {
+    assert {'dataset.finalize_case', 'dataset.assemble'}.isdisjoint({
         operation.spec.op_id for operation in definition.stage_operations(3)
-    }
+    })
 
 
 def test_source_config_adapts_current_service_shape() -> None:
@@ -97,6 +99,11 @@ def test_source_config_adapts_current_service_shape() -> None:
         'csv_sources': [{'kb_id': 'kb-a', 'path': '/tmp/a.csv'}],
         'target_case_count': 1,
     }
+    assert normalize_source_config({
+        'kb_ids': ['kb-a'],
+        'imported_cases': [{'question': 'Q'}],
+        'target_case_count': 1,
+    })['imported_cases'] == [{'question': 'Q'}]
 
 
 def test_default_isolated_operation_executes_in_subprocess(tmp_path) -> None:
@@ -146,20 +153,19 @@ def test_multi_knowledge_base_csv_import_uses_current_source_shape(tmp_path) -> 
         path = tmp_path / f'{kb_id}.csv'
         with path.open('w', encoding='utf-8-sig', newline='') as handle:
             writer = csv.DictWriter(handle, fieldnames=(
-                'id', 'question', 'answer', 'question_type', 'difficulty',
-                'grading_guidance', 'reference_context',
+                'case_id', 'question', 'ground_truth', 'question_type', 'difficulty',
+                'grading_guidance', 'reference_context', 'reference_chunk_ids',
             ))
             writer.writeheader()
             writer.writerow({
-                'id': f'source-{index}',
+                'case_id': f'source-{index}',
                 'question': f'Question {index}?',
-                'answer': f'Fact {index}',
+                'ground_truth': f'Fact {index}',
                 'question_type': 'precision',
                 'difficulty': 'easy',
                 'grading_guidance': f'Require Fact {index}',
-                'reference_context': json.dumps([
-                    {'chunk_id': f'chunk-{index}', 'text': f'Fact {index}'},
-                ]),
+                'reference_context': f'Fact {index}',
+                'reference_chunk_ids': f'chunk-{index}',
             })
         paths.append(path)
 
@@ -180,7 +186,7 @@ def test_multi_knowledge_base_csv_import_uses_current_source_shape(tmp_path) -> 
     allocation = manifest['stats']['case_allocation']
     assert allocation['import_case_count'] == 2
     assert allocation['auto_case_count'] == 0
-    assert tuple(allocation['assignments']) == ('case_0001', 'case_0002')
+    assert tuple(allocation['assignments']) == ('source-1', 'source-2')
     assert [item['source_row_number'] for item in manifest['details']] == [1, 2]
     assert manifest['details'][1]['case']['source_preparation']['case_source']['kb_id'] == 'kb-b'
 
@@ -229,10 +235,9 @@ def test_import_only_pipeline_runs_on_new_artifact_runtime(monkeypatch, tmp_path
                 ArtifactKey.scalar(A.CORPUS_SOURCE_CONFIG),
                 ArtifactKey.scalar(A.DATASET_SELECT_DOCS_PARAMS),
                 ArtifactKey.scalar(A.DATASET_BUILD_CHUNKS_PARAMS),
-                ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN_PARAMS),
-                ArtifactKey.scalar(A.APPROVAL_DATASET_MATERIAL_PREPARATION),
-                ArtifactKey.scalar(A.APPROVAL_DATASET_TOPIC_DISCOVERY),
-                ArtifactKey.scalar(A.APPROVAL_DATASET),
+                    ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN_PARAMS),
+                    ArtifactKey.scalar(A.APPROVAL_DATASET_MATERIAL_PREPARATION),
+                    ArtifactKey.scalar(A.APPROVAL_DATASET_TOPIC_DISCOVERY),
             )
             await flow.create('run-imported', ArtifactCommit(
                 'seed:run-imported',
@@ -250,9 +255,8 @@ def test_import_only_pipeline_runs_on_new_artifact_runtime(monkeypatch, tmp_path
                     }),
                     ArtifactDraft(keys[3], {}),
                     ArtifactDraft(keys[4], {}),
-                    ArtifactDraft(keys[5], {}),
-                    ArtifactDraft(keys[6], {}),
-                    ArtifactDraft(keys[7], {}),
+                        ArtifactDraft(keys[5], {}),
+                        ArtifactDraft(keys[6], {}),
                 ),
                 {key: None for key in keys},
             ))
@@ -268,7 +272,7 @@ def test_import_only_pipeline_runs_on_new_artifact_runtime(monkeypatch, tmp_path
             dataset = await flow.read('run-imported', dataset_record.ref)
             assert dataset['case_num'] == 1
             assert dataset['failed_case_num'] == 0
-            assert dataset['cases'][0]['question_type'] == 'single_hop'
+            assert dataset['cases'][0]['question_type'] == 'precision'
             assert dataset['cases'][0]['reasoning_steps'] == ['Imported fact']
 
             case_record = await flow.head(
@@ -311,10 +315,9 @@ def test_generated_pipeline_runs_with_dynamic_chunk_and_case_partitions(monkeypa
                 ArtifactKey.scalar(A.CORPUS_SOURCE_CONFIG),
                 ArtifactKey.scalar(A.DATASET_SELECT_DOCS_PARAMS),
                 ArtifactKey.scalar(A.DATASET_BUILD_CHUNKS_PARAMS),
-                ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN_PARAMS),
-                ArtifactKey.scalar(A.APPROVAL_DATASET_MATERIAL_PREPARATION),
-                ArtifactKey.scalar(A.APPROVAL_DATASET_TOPIC_DISCOVERY),
-                ArtifactKey.scalar(A.APPROVAL_DATASET),
+                    ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN_PARAMS),
+                    ArtifactKey.scalar(A.APPROVAL_DATASET_MATERIAL_PREPARATION),
+                    ArtifactKey.scalar(A.APPROVAL_DATASET_TOPIC_DISCOVERY),
             )
             await flow.create('run-generated', ArtifactCommit(
                 'seed:run-generated',
@@ -332,9 +335,8 @@ def test_generated_pipeline_runs_with_dynamic_chunk_and_case_partitions(monkeypa
                     }),
                     ArtifactDraft(keys[3], {}),
                     ArtifactDraft(keys[4], {}),
-                    ArtifactDraft(keys[5], {}),
-                    ArtifactDraft(keys[6], {}),
-                    ArtifactDraft(keys[7], {}),
+                        ArtifactDraft(keys[5], {}),
+                        ArtifactDraft(keys[6], {}),
                 ),
                 {key: None for key in keys},
             ))

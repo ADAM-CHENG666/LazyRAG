@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import csv
+import io
 import json
 import math
 import uuid
@@ -199,6 +201,78 @@ class ProjectionService:
             'value': public_value(await self.flow.read(thread_id, record.ref)),
         }
 
+    async def dataset_result(self, thread_id: str, *, page_size: int | None = None,
+                             page_token: str = '') -> dict[str, Any]:
+        if not await self.flow.has_run(thread_id):
+            raise ServiceError(404, f'thread not found: {thread_id}')
+        size = self._validate_page_size(page_size)
+        filters = self._normalize_filters({})
+        version: int | None = None
+        if page_token:
+            context = self._resolve_page_token(
+                page_token,
+                thread_id=thread_id,
+                list_name='dataset.result',
+                filters=filters,
+                page_size=size,
+            )
+            refs = self._resolve_revision(context['revision'])
+            if len(refs) != 1 or refs[0].key != ArtifactKey.scalar(A.EVAL_DATASET):
+                raise ServiceError(400, 'page_token is invalid')
+            revision = context['revision']
+            version = refs[0].version
+            offset = context['next_offset']
+        else:
+            revision = ''
+            offset = 0
+
+        try:
+            artifact = await self.artifact(thread_id, A.EVAL_DATASET, version=version)
+        except ServiceError as error:
+            if page_token and error.status_code == 404:
+                raise ServiceError(409, 'page_token pagination snapshot is unavailable') from None
+            raise
+        if not page_token:
+            revision = self._build_revision((_public_artifact_ref(artifact['record']),))
+
+        value = _overview_mapping(artifact['value'], 'dataset result')
+        raw_cases = value.get('cases', ())
+        if not isinstance(raw_cases, list):
+            raise ServiceError(503, 'dataset result cases are invalid')
+        rows = [_dataset_result_case(item) for item in raw_cases if isinstance(item, Mapping)]
+        page = _page(rows, size, str(offset))
+        next_offset = page['next_page_token']
+        return {
+            'thread_id': thread_id,
+            'revision': revision,
+            'completed_with_problems': bool(value.get('completed_with_problems', False)),
+            'total_size': len(rows),
+            'failed_case_count': _overview_count(value.get('failed_case_num', 0), 'dataset result.failed_case_num'),
+            'items': page['items'],
+            'next_page_token': '' if not next_offset else self._build_page_token(
+                thread_id=thread_id,
+                list_name='dataset.result',
+                revision=revision,
+                filters=filters,
+                page_size=size,
+                next_offset=int(next_offset),
+            ),
+        }
+
+    async def dataset_result_download(self, thread_id: str, revision: str) -> tuple[str, bytes]:
+        if not await self.flow.has_run(thread_id):
+            raise ServiceError(404, f'thread not found: {thread_id}')
+        refs = self._resolve_revision(revision)
+        if len(refs) != 1 or refs[0].key != ArtifactKey.scalar(A.EVAL_DATASET):
+            raise ServiceError(400, 'revision is invalid')
+        artifact = await self.artifact(thread_id, A.EVAL_DATASET, version=refs[0].version)
+        value = _overview_mapping(artifact['value'], 'dataset result')
+        raw_cases = value.get('cases', ())
+        if not isinstance(raw_cases, list):
+            raise ServiceError(503, 'dataset result cases are invalid')
+        rows = [_dataset_result_case(item) for item in raw_cases if isinstance(item, Mapping)]
+        return f'dataset-{thread_id}.csv', _dataset_result_csv(rows)
+
     async def materials_overview(self, thread_id: str) -> dict[str, Any]:
         if not await self.flow.has_run(thread_id):
             raise ServiceError(404, f'thread not found: {thread_id}')
@@ -210,11 +284,19 @@ class ProjectionService:
         except ServiceError as error:
             if error.status_code != 404:
                 raise
+            imported = await _optional_overview_artifact(
+                self, thread_id, A.DATASET_IMPORT_CASES_MANIFEST,
+            )
+            case_plan = None
+            revision = None
+            if imported is not None:
+                case_plan = _import_case_plan(imported['value'])
+                revision = self._build_revision((_public_artifact_ref(imported['record']),))
             return {
                 'thread_id': thread_id,
-                'revision': None,
+                'revision': revision,
                 'status': status,
-                'case_plan': None,
+                'case_plan': case_plan,
                 'chunks': None,
                 'warnings': [],
             }
@@ -328,14 +410,21 @@ class ProjectionService:
             import_manifest=None if import_manifest is None else import_manifest['value'],
         )
         if requests is None:
+            initial_statuses = (
+                {} if import_manifest is None
+                else _initial_case_statuses(import_manifest['value'])
+            )
             return {
                 'thread_id': thread_id,
                 'revision': revision,
                 'execution_revision': self._build_execution_revision({}),
                 'status': status,
-                'stages': _pending_case_stage_overview(_planned_case_count(
-                    None if import_manifest is None else import_manifest['value'],
-                )),
+                'stages': (
+                    self._summarize_case_statuses(initial_statuses)
+                    if initial_statuses else _pending_case_stage_overview(_planned_case_count(
+                        None if import_manifest is None else import_manifest['value'],
+                    ))
+                ),
                 'automatic_plan': automatic_plan,
             }
 
@@ -1022,6 +1111,7 @@ class ProjectionService:
             'thread_id': thread_id,
             'revision': self._build_revision(refs),
             'target_case_count': source.get('target_case_count'),
+            'min_target_case_count': _material_target_minimum(source),
             'knowledge_bases': [
                 {
                     'id': kb_id,
@@ -1616,6 +1706,55 @@ def _public_artifact_ref(record: object) -> ArtifactRef:
         )
     except (KeyError, TypeError, ValueError):
         raise ServiceError(503, 'artifact record projection is invalid') from None
+
+
+_DATASET_RESULT_FIELDS = (
+    'case_id', 'question', 'question_type', 'difficulty', 'ground_truth', 'grading_guidance',
+    'key_points', 'forbidden_claims', 'reference_context', 'reference_doc', 'reference_doc_ids',
+    'reference_chunk_ids', 'generate_reason', 'is_deleted',
+)
+
+
+def _dataset_result_case(value: Mapping[str, Any]) -> dict[str, Any]:
+    preparation = value.get('source_preparation') if isinstance(value.get('source_preparation'), Mapping) else {}
+    enhancement = preparation.get('dataset_enhancement') \
+        if isinstance(preparation.get('dataset_enhancement'), Mapping) else {}
+    return {
+        'case_id': str(value.get('case_id') or value.get('id') or ''),
+        'question': str(value.get('question') or ''),
+        'question_type': str(value.get('question_type') or ''),
+        'difficulty': str(value.get('difficulty') or ''),
+        'ground_truth': value.get('ground_truth', value.get('answer', '')),
+        'grading_guidance': str(value.get('grading_guidance') or ''),
+        'key_points': list(value.get('key_points') or enhancement.get('key_points') or []),
+        'forbidden_claims': list(value.get('forbidden_claims') or enhancement.get('forbidden_claims') or []),
+        'reference_context': value.get('reference_context') or [],
+        'reference_doc': list(value.get('reference_doc') or []),
+        'reference_doc_ids': list(value.get('reference_doc_ids') or []),
+        'reference_chunk_ids': list(value.get('reference_chunk_ids') or []),
+        'generate_reason': str(value.get('generate_reason') or ''),
+        'is_deleted': bool(value.get('is_deleted', False)),
+    }
+
+
+def _dataset_result_csv(rows: list[dict[str, Any]]) -> bytes:
+    output = io.StringIO(newline='')
+    writer = csv.DictWriter(output, fieldnames=_DATASET_RESULT_FIELDS)
+    writer.writeheader()
+    for row in rows:
+        serialized = dict(row)
+        for field in ('key_points', 'forbidden_claims'):
+            serialized[field] = json.dumps(serialized[field], ensure_ascii=False, separators=(',', ':'))
+        context = serialized['reference_context']
+        serialized['reference_context'] = (
+            json.dumps(context, ensure_ascii=False, separators=(',', ':'))
+            if isinstance(context, (list, dict)) else str(context or '')
+        )
+        for field in ('reference_doc', 'reference_doc_ids', 'reference_chunk_ids'):
+            serialized[field] = ','.join(str(item) for item in serialized[field])
+        serialized['is_deleted'] = 'true' if serialized['is_deleted'] else 'false'
+        writer.writerow(serialized)
+    return ('\ufeff' + output.getvalue()).encode('utf-8')
 
 
 def _page(rows: list[dict[str, Any]], size: int, token: str) -> dict[str, Any]:
@@ -2227,6 +2366,18 @@ def _overview_mapping(value: object, name: str) -> Mapping[str, Any]:
     return value
 
 
+def _material_target_minimum(source: Mapping[str, object]) -> int:
+    if source.get('supplement_existing_eval_set') is not True:
+        return 1
+    imported_cases = source.get('imported_cases', ())
+    if not isinstance(imported_cases, list):
+        return 1
+    return max(1, sum(
+        isinstance(case, Mapping) and case.get('is_deleted') is not True
+        for case in imported_cases
+    ))
+
+
 def _overview_count(value: object, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ServiceError(409, f'{name} must be a non-negative integer')
@@ -2304,11 +2455,42 @@ def _planned_case_count(value: object | None) -> int | None:
     return target if isinstance(target, int) and not isinstance(target, bool) and target >= 0 else None
 
 
+def _import_case_plan(value: object) -> dict[str, int]:
+    allocation = _overview_mapping(
+        _overview_mapping(_overview_mapping(value, 'case import manifest').get('stats'), 'case import manifest.stats').get('case_allocation'),
+        'case import manifest.case_allocation',
+    )
+    return {
+        'target': _overview_count(allocation.get('target_case_count'), 'case import target'),
+        'imported': _overview_count(allocation.get('import_case_count'), 'case import imported'),
+        'automatic': _overview_count(allocation.get('auto_case_count'), 'case import automatic'),
+    }
+
+
 def _pending_case_statuses(case_ids: tuple[str, ...]) -> dict[str, dict[str, str]]:
     return {case_id: {
         'dataset.qaplan_spec': 'pending', 'dataset.generate_case': 'pending',
         'dataset.enhance_case': 'pending',
     } for case_id in case_ids}
+
+
+def _initial_case_statuses(import_manifest_value: object) -> dict[str, dict[str, str]]:
+    imported = _overview_mapping(import_manifest_value, 'case import manifest')
+    allocation = _overview_mapping(
+        _overview_mapping(imported.get('stats'), 'case import manifest.stats').get('case_allocation'),
+        'case import manifest.case_allocation',
+    )
+    assignments = _overview_mapping(allocation.get('assignments'), 'case import manifest.assignments')
+    statuses = _pending_case_statuses(tuple(assignments))
+    for case_id, raw_assignment in assignments.items():
+        assignment = _overview_mapping(raw_assignment, f'case assignment {case_id}')
+        if assignment.get('mode') == 'imported':
+            statuses[case_id] = {
+                'dataset.qaplan_spec': 'completed',
+                'dataset.generate_case': 'completed',
+                'dataset.enhance_case': 'completed',
+            }
+    return statuses
 
 
 def _planned_case_rows(import_manifest_value: object, params_value: object) -> list[dict[str, Any]]:
@@ -2331,7 +2513,7 @@ def _planned_case_rows(import_manifest_value: object, params_value: object) -> l
         for _ in range(lane_counts[lane]):
             generated_meta[generated_ids[index]] = (question_type, difficulty)
             index += 1
-    statuses = _pending_case_statuses(tuple(assignments))
+    statuses = _initial_case_statuses(import_manifest_value)
     rows = []
     for case_id, raw_assignment in assignments.items():
         assignment = _overview_mapping(raw_assignment, f'case assignment {case_id}')
@@ -2339,7 +2521,7 @@ def _planned_case_rows(import_manifest_value: object, params_value: object) -> l
         if mode == 'imported':
             case = _overview_mapping(imported_cases.get(assignment.get('source_row_number')), f'imported case {case_id}')
             question_type = _case_choice(case.get('question_type'), {'precision', 'reasoning'}, 'question_type')
-            difficulty = _case_choice(case.get('difficulty'), {'easy', 'medium', 'hard'}, 'difficulty')
+            difficulty = _case_optional_choice(case.get('difficulty'), {'easy', 'medium', 'hard'}, 'difficulty')
         elif mode == 'generated' and case_id in generated_meta:
             question_type, difficulty = generated_meta[case_id]
         else:
@@ -2444,7 +2626,7 @@ def _case_rows(case_ids: tuple[str, ...], import_manifest_value: object, plan_va
             source_row = assignment.get('source_row_number')
             case = _overview_mapping(imported_cases.get(source_row), f'imported case {case_id}')
             question_type = _case_choice(case.get('question_type'), {'precision', 'reasoning'}, 'question_type')
-            difficulty = _case_choice(case.get('difficulty'), {'easy', 'medium', 'hard'}, 'difficulty')
+            difficulty = _case_optional_choice(case.get('difficulty'), {'easy', 'medium', 'hard'}, 'difficulty')
             topic = None
         elif mode == 'generated':
             plan_item = _overview_mapping(plan_items.get(case_id), f'qaplan plan item {case_id}')
@@ -2482,6 +2664,12 @@ def _case_choice(value: object, allowed: set[str], name: str) -> str:
     if not isinstance(value, str) or value not in allowed:
         raise ServiceError(503, f'case {name} is invalid')
     return value
+
+
+def _case_optional_choice(value: object, allowed: set[str], name: str) -> str | None:
+    if value in (None, ''):
+        return None
+    return _case_choice(value, allowed, name)
 
 
 def _case_matches(row: Mapping[str, object], filters: Mapping[str, object]) -> bool:

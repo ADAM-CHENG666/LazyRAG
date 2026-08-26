@@ -88,7 +88,7 @@ SEEDS = (
 ROOTS = MappingProxyType({
     'dataset.material_preparation': DATASET_BUILD_CHUNKS_MANIFEST,
     'dataset.topic_discovery': DATASET_TOPIC_MANIFEST,
-    'dataset.case_generation': DATASET_ENHANCE_MANIFEST,
+    'dataset.case_generation': EVAL_DATASET,
     'eval': EVAL_SUMMARY,
     'analysis': ANALYSIS_SUMMARY,
     'repair': REPAIR_VERIFIED_PATCH,

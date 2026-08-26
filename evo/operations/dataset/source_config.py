@@ -60,6 +60,13 @@ def normalize_source_config(value: object) -> dict[str, Any]:
     if isinstance(target, bool) or not isinstance(target, int) or target < 1:
         raise ValueError('source_config.target_case_count must be a positive integer')
 
+    imported_cases = value.get('imported_cases', [])
+    if not isinstance(imported_cases, list) or not all(isinstance(row, Mapping) for row in imported_cases):
+        raise ValueError('source_config.imported_cases must be a list of mappings')
+    supplement_existing_eval_set = value.get('supplement_existing_eval_set', False)
+    if not isinstance(supplement_existing_eval_set, bool):
+        raise ValueError('source_config.supplement_existing_eval_set must be a boolean')
+
     deduplicated: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for source in csv_sources:
@@ -68,12 +75,16 @@ def normalize_source_config(value: object) -> dict[str, Any]:
             seen.add(key)
             deduplicated.append(source)
 
-    return {
+    normalized = {
         'kb_ids': kb_ids,
         'knowledge_base_names': knowledge_base_names,
         'csv_sources': deduplicated,
         'target_case_count': target,
+        'supplement_existing_eval_set': supplement_existing_eval_set,
     }
+    if imported_cases:
+        normalized['imported_cases'] = [dict(row) for row in imported_cases]
+    return normalized
 
 
 def _unique_text(values: list[object], name: str) -> list[str]:
