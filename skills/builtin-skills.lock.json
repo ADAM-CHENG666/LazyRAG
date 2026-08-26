@@ -162,6 +162,28 @@
       "package_file": "packages/bsk_2BDE2388F7E15A43C0559AC4DFC0.zip"
     },
     {
+      "key": "skill",
+      "uid": "bsk_6ACDCFC9A48A7A276D31323C0D65",
+      "source_url": "builtin://featured/data-report/skill",
+      "resolved_url": "builtin://featured/data-report/skill",
+      "version": "0.1.0",
+      "name": "data-report",
+      "description": "Turns CSV, Excel, or JSON data into a polished visual report page.",
+      "category": "data",
+      "tags": [
+        "data",
+        "report",
+        "chart",
+        "数据",
+        "报告"
+      ],
+      "market_visible": false,
+      "archive_sha256": "9b3b093c949ebb40d9e66e090ae28fe1b127480b5a45df2eb13e97454eb3d5fc",
+      "tree_sha256": "64a98a17b2b913bbc2e40fb3590c4eea0251ff9173df3700cfad76c23785c2d6",
+      "archive_size": 7674,
+      "package_file": "packages/bsk_6ACDCFC9A48A7A276D31323C0D65.zip"
+    },
+    {
       "key": "user_7c4df347/gaokao-volunteer-advisor",
       "uid": "bsk_C8C501AEDCEC9283F2C9F9F59AD8",
       "source_url": "https://skillhub.cn/skills/user_7c4df347/gaokao-volunteer-advisor",
