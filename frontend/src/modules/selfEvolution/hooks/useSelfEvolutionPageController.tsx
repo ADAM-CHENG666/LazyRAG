@@ -2256,6 +2256,7 @@ export function SelfEvolutionPageController({
       const statusKeyMap: Record<WorkflowStep["status"], string> = {
         running: "selfEvolutionRun.status.running",
         pending: "selfEvolutionRun.status.pending",
+        waiting: "selfEvolutionRun.statusWaitingNext",
         done: "selfEvolutionRun.status.done",
         paused: "selfEvolutionRun.status.paused",
         canceled: "selfEvolutionRun.status.canceled",
@@ -2321,12 +2322,14 @@ export function SelfEvolutionPageController({
     selectedKbs: string[];
     selectedKnowledgeBase: string;
     selectedEvalSet: string;
+    extraEvalStrategy: ExtraEvalStrategy;
   }) => {
     const targetMode = config?.mode || mode;
     const targetSelectedKbs = config?.selectedKbs || selectedKbs;
     const targetKnowledgeBase =
       config?.selectedKnowledgeBase || selectedKnowledgeBase;
     const targetEvalSet = config?.selectedEvalSet || selectedEvalSet;
+    const targetExtraEvalStrategy = config?.extraEvalStrategy || extraEvalStrategy;
     const evalName =
       targetEvalSet && targetEvalSet !== FIXED_EVAL_SET
         ? targetEvalSet
@@ -2348,6 +2351,7 @@ export function SelfEvolutionPageController({
           ...(targetEvalSet && targetEvalSet !== FIXED_EVAL_SET
             ? { eval_set_id: targetEvalSet }
             : {}),
+          extra_eval_strategy: targetExtraEvalStrategy,
           num_cases: DEFAULT_EVAL_CASE_COUNT,
         },
       },
@@ -4169,6 +4173,7 @@ export function SelfEvolutionPageController({
         selectedKbs: nextKnowledgeBases,
         selectedKnowledgeBase: nextKnowledgeBaseLabel,
         selectedEvalSet: nextEvalSet,
+        extraEvalStrategy: nextExtraEvalStrategy,
       });
       activeThreadIdRef.current = threadId;
       const newSession: ChatSession = {

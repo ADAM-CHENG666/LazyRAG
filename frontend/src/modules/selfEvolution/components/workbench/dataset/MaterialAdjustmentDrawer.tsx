@@ -167,7 +167,7 @@ export function MaterialAdjustmentDrawer({
   const canSave =
     Boolean(options) &&
     target != null &&
-    target > 0 &&
+    target >= options.min_target_case_count &&
     selectedRuleIds.length > 0 &&
     selectedLayoutIds.length > 0 &&
     Object.keys(changes).length > 0;
@@ -243,13 +243,17 @@ export function MaterialAdjustmentDrawer({
               <label htmlFor="dataset-target-cases">目标用例</label>
               <InputNumber
                 id="dataset-target-cases"
-                min={1}
+                min={options.min_target_case_count}
                 max={100000}
                 value={target}
                 onChange={setTarget}
               />
             </div>
-            <div className="dataset-warning-note">修改目标用例将重新执行数据集全部步骤。</div>
+            <div className="dataset-warning-note">
+              {options.min_target_case_count > 1
+                ? `已导入 ${options.min_target_case_count} 个用例；目标不能低于该数量，只生成其余用例。`
+                : "修改目标用例将重新执行数据集全部步骤。"}
+            </div>
           </section>
 
           <section className="dataset-control-point">

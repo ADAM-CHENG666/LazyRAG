@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button, Empty, Modal, message } from "antd";
 import { CasesStage } from "./CasesStage";
+import { DatasetResultModal } from "./DatasetResultModal";
 import { MaterialsStage } from "./MaterialsStage";
 import { TopicsStage } from "./TopicsStage";
 import { datasetRoot, describeRequestError, newRequestId, postJson } from "./api";
@@ -16,6 +17,7 @@ import { applyTopicLabelPartitionEvent, type TopicDiscoveryProgress } from "./to
 import { applyCaseGenerationPartitionEvent, type CaseGenerationProgress } from "./caseGenerationProgress";
 import { DATASET_TABS, useDatasetStages, type DatasetStreamEvent } from "./useDatasetStages";
 import { INITIAL_STAGE_STATUSES } from "./stageState";
+import { usePublishDatasetResultAction } from "./stageAction";
 import "./dataset.scss";
 import {
   DRAFT_IMPACT_DETAIL,
@@ -60,6 +62,7 @@ export function DatasetWorkspace({
   const [staleTab, setStaleTab] = useState<DatasetTab>();
   const [draft, setDraft] = useState<DatasetDraft>();
   const [applying, setApplying] = useState(false);
+  const [resultOpen, setResultOpen] = useState(false);
   const followActiveStage = useRef(true);
   const revisions = useRef<Partial<Record<DatasetTab, string | null>>>({});
   // Set while an event-triggered overview reload is in flight, so that manual
@@ -145,6 +148,12 @@ export function DatasetWorkspace({
     onStepsSnapshot: handleStepsSnapshot,
     onStageEvent: handleStageEvent,
   });
+
+  const openResult = useCallback(() => setResultOpen(true), []);
+  const resultAvailable = stageStatuses.cases === "done" || stageStatuses.cases === "partial";
+  usePublishDatasetResultAction(
+    resultAvailable ? { label: "查看生成结果", onClick: openResult } : undefined,
+  );
 
   const handleOverviewRevision = useCallback((stageTab: DatasetTab, revision: string | null) => {
     const previous = revisions.current[stageTab];
@@ -414,6 +423,12 @@ export function DatasetWorkspace({
           />
         )}
       </div>
+
+      <DatasetResultModal
+        threadId={threadId}
+        open={resultOpen}
+        onClose={() => setResultOpen(false)}
+      />
 
       {draft ? (
         <footer className="dataset-change-bar">

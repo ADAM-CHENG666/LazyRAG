@@ -21,6 +21,20 @@ $ds-line: #dbe8f9;
   background: linear-gradient(180deg, #fbfdff, #f5f9ff);
 }
 
+.dataset-result-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 0 16px;
+}
+
+.dataset-result-more {
+  display: flex;
+  justify-content: center;
+  padding-top: 16px;
+}
+
 /* Stepper */
 .dataset-stepper {
   flex: 0 0 auto;

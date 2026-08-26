@@ -54,3 +54,12 @@ export async function patchJson<T>(url: string, body: unknown): Promise<T> {
   const response = await axiosInstance.patch<T>(url, body, silentConfig());
   return response.data;
 }
+
+export async function downloadDatasetResult(threadId: string, revision: string) {
+  const response = await axiosInstance.get<Blob>(`${datasetRoot(threadId)}/result:download`, {
+    params: { format: "csv", revision },
+    responseType: "blob",
+    silentError: true,
+  } as never);
+  return response.data;
+}

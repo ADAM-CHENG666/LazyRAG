@@ -1,15 +1,18 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { Button } from "antd";
+import { Button, Space } from "antd";
 
 type StageAction = { label: string; onClick: () => void };
 
 type StageActionStore = {
   action?: StageAction;
+  resultAction?: StageAction;
   setAction: (action?: StageAction) => void;
+  setResultAction: (action?: StageAction) => void;
 };
 
 const DatasetStageActionContext = createContext<StageActionStore>({
   setAction: () => undefined,
+  setResultAction: () => undefined,
 });
 
 /**
@@ -19,7 +22,11 @@ const DatasetStageActionContext = createContext<StageActionStore>({
  */
 export function DatasetStageActionProvider({ children }: { children: ReactNode }) {
   const [action, setAction] = useState<StageAction>();
-  const store = useMemo(() => ({ action, setAction }), [action]);
+  const [resultAction, setResultAction] = useState<StageAction>();
+  const store = useMemo(
+    () => ({ action, resultAction, setAction, setResultAction }),
+    [action, resultAction],
+  );
   return (
     <DatasetStageActionContext.Provider value={store}>
       {children}
@@ -28,19 +35,43 @@ export function DatasetStageActionProvider({ children }: { children: ReactNode }
 }
 
 export function DatasetStageActionButton() {
-  const { action } = useContext(DatasetStageActionContext);
-  if (!action) return null;
+  const { action, resultAction } = useContext(DatasetStageActionContext);
+  if (!action && !resultAction) return null;
   return (
-    <Button
-      className="self-evolution-dataset-adjust-button"
-      onClick={(event) => {
-        event.stopPropagation();
-        action.onClick();
-      }}
-    >
-      {action.label}
-    </Button>
+    <Space>
+      {resultAction ? (
+        <Button
+          onClick={(event) => {
+            event.stopPropagation();
+            resultAction.onClick();
+          }}
+        >
+          {resultAction.label}
+        </Button>
+      ) : null}
+      {action ? (
+        <Button
+          className="self-evolution-dataset-adjust-button"
+          onClick={(event) => {
+            event.stopPropagation();
+            action.onClick();
+          }}
+        >
+          {action.label}
+        </Button>
+      ) : null}
+    </Space>
   );
+}
+
+export function usePublishDatasetResultAction(action?: StageAction) {
+  const { setResultAction } = useContext(DatasetStageActionContext);
+  const label = action?.label;
+  const onClick = action?.onClick;
+  useEffect(() => {
+    setResultAction(label && onClick ? { label, onClick } : undefined);
+    return () => setResultAction(undefined);
+  }, [label, onClick, setResultAction]);
 }
 
 export function usePublishDatasetStageAction(action?: StageAction) {

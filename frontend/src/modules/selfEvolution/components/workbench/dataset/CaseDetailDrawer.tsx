@@ -291,7 +291,7 @@ export function CaseDetailDrawer({
               {
                 label: "题型与难度",
                 value: `${QUESTION_TYPE_TEXT[detail.question_type]} · ${
-                  DIFFICULTY_TEXT[detail.difficulty]
+                  detail.difficulty ? DIFFICULTY_TEXT[detail.difficulty] : "—"
                 }`,
               },
               { label: "主题", value: currentTopicName },

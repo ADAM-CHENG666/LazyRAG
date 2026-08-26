@@ -127,7 +127,7 @@ export function CasesStage({
 
   useEffect(() => {
     const executionRevision = overview.data?.execution_revision;
-    if (shouldReconcileCaseExecution({
+    if (executionRevision && shouldReconcileCaseExecution({
       reconciliationToken,
       lastReconciledToken: lastReconciledToken.current,
       expectedOverviewToken: overviewToken,
@@ -339,8 +339,8 @@ export function CasesStage({
                     </Chip>
                   </td>
                   <td>
-                    <Chip tone={row.difficulty === "easy" ? "neutral" : row.difficulty}>
-                      {DIFFICULTY_TEXT[row.difficulty]}
+                    <Chip tone={!row.difficulty || row.difficulty === "easy" ? "neutral" : row.difficulty}>
+                      {row.difficulty ? DIFFICULTY_TEXT[row.difficulty] : "—"}
                     </Chip>
                   </td>
                   <td>

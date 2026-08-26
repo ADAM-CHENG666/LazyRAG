@@ -102,6 +102,7 @@ export type AdjustmentOptions = {
   thread_id: string;
   revision: string;
   target_case_count: number;
+  min_target_case_count: number;
   knowledge_bases: Array<{ id: string; name: string; included: boolean }>;
   split_rules: CapabilityEntry[];
   layout_types: CapabilityEntry[];
@@ -173,7 +174,7 @@ export type CaseRow = {
   stages: Record<CaseStageKey, OperationStatus>;
   source: CaseSource;
   question_type: QuestionType;
-  difficulty: Difficulty;
+  difficulty: Difficulty | null;
   topic: { topic_id: string; name: string } | null;
 };
 
@@ -192,7 +193,7 @@ export type CaseDetail = {
   case_id: string;
   source: CaseSource;
   question_type: QuestionType;
-  difficulty: Difficulty;
+  difficulty: Difficulty | null;
   topic: { topic_id: string; name: string; chunk_count: number } | null;
   references: CaseReference[];
   stages: {
@@ -212,6 +213,30 @@ export type CaseDetail = {
 };
 
 export type CaseTopicOption = { topic_id: string; name: string; chunk_count: number };
+
+export type DatasetResultCase = {
+  case_id: string;
+  question: string;
+  question_type: QuestionType;
+  difficulty: Difficulty | "";
+  ground_truth: string;
+  grading_guidance: string;
+  key_points: CaseKeyPoint[];
+  forbidden_claims: string[];
+  reference_context: unknown;
+  reference_doc: string[];
+  reference_doc_ids: string[];
+  reference_chunk_ids: string[];
+  generate_reason: string;
+  is_deleted: boolean;
+};
+
+export type DatasetResultResponse = PagedResponse<DatasetResultCase> & {
+  revision: string;
+  completed_with_problems: boolean;
+  total_size: number;
+  failed_case_count: number;
+};
 
 export type PlanDistribution = Record<QuestionType, Record<Difficulty, number>>;
 
