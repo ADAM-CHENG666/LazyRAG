@@ -222,6 +222,79 @@ func TestAttachThreadCreateKnowledgeBaseNamesUsesCoreDatasetNames(t *testing.T) 
 	}
 }
 
+func TestAttachThreadCreateEvalSetCasesProjectsItemsForEvo(t *testing.T) {
+	db := newAgentTestDB(t)
+	if err := db.DB.AutoMigrate(&orm.EvalSet{}, &orm.EvalSetItem{}); err != nil {
+		t.Fatalf("auto migrate eval set: %v", err)
+	}
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	item := orm.EvalSetItem{
+		ShardID: "shard-1", ID: "item-1", EvalSetID: "eval-1", CaseID: "external-1",
+		Question: "Q", GroundTruth: "A", QuestionType: "precision", GradingGuidance: "G",
+		KeyPoints: `[{"statement":"point"}]`, ForbiddenClaims: `["wrong"]`,
+		Source: "upload", CreateUserID: "user-1", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.DB.Exec(`INSERT INTO eval_sets
+		(id, name, description, dataset_ids, owner_id, group_id, shard_id, status, item_count, create_user_id, create_user_name, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"eval-1", "imported", "", "[]", "user-1", "", "shard-1", "active", 1, "user-1", "", now, now).Error; err != nil {
+		t.Fatalf("create eval set: %v", err)
+	}
+	if err := db.DB.Create(&item).Error; err != nil {
+		t.Fatalf("create eval item: %v", err)
+	}
+	payload := map[string]any{"inputs": map[string]any{"kb_id": []any{"kb-1"}, "eval_set_id": "eval-1", "num_cases": 20}}
+
+	if err := attachThreadCreateEvalSetCases(context.Background(), db.DB, "user-1", payload); err != nil {
+		t.Fatalf("attach eval set cases: %v", err)
+	}
+	upstream := buildEvoThreadCreatePayload(payload)
+	inputs := upstream["inputs"].(map[string]any)
+	cases := inputs["imported_cases"].([]map[string]any)
+	if got := len(cases); got != 1 {
+		t.Fatalf("unexpected cases: %#v", cases)
+	}
+	if cases[0]["case_id"] != "external-1" || cases[0]["grading_guidance"] != "G" {
+		t.Fatalf("unexpected projected case: %#v", cases[0])
+	}
+	if inputs["num_case"] != 1 {
+		t.Fatalf("import count must define target: %#v", inputs["num_case"])
+	}
+}
+
+func TestAttachThreadCreateEvalSetCasesAddsSupplementTarget(t *testing.T) {
+	db := newAgentTestDB(t)
+	if err := db.DB.AutoMigrate(&orm.EvalSet{}, &orm.EvalSetItem{}); err != nil {
+		t.Fatalf("auto migrate eval set: %v", err)
+	}
+	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	if err := db.DB.Exec(`INSERT INTO eval_sets
+		(id, name, description, dataset_ids, owner_id, group_id, shard_id, status, item_count, create_user_id, create_user_name, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"eval-supplement", "imported", "", "[]", "user-1", "", "shard-1", "active", 1, "user-1", "", now, now).Error; err != nil {
+		t.Fatalf("create eval set: %v", err)
+	}
+	if err := db.DB.Create(&orm.EvalSetItem{
+		ShardID: "shard-1", ID: "item-1", EvalSetID: "eval-supplement", CaseID: "external-1",
+		Question: "Q", GroundTruth: "A", QuestionType: "precision", GradingGuidance: "G",
+		Source: "upload", CreateUserID: "user-1", CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("create eval item: %v", err)
+	}
+	payload := map[string]any{"inputs": map[string]any{
+		"kb_id": []any{"kb-1"}, "eval_set_id": "eval-supplement", "extra_eval_strategy": "generate",
+	}}
+
+	if err := attachThreadCreateEvalSetCases(context.Background(), db.DB, "user-1", payload); err != nil {
+		t.Fatalf("attach eval set cases: %v", err)
+	}
+	upstream := buildEvoThreadCreatePayload(payload)
+	inputs := upstream["inputs"].(map[string]any)
+	if inputs["num_case"] != 21 || inputs["supplement_existing_eval_set"] != true {
+		t.Fatalf("expected one imported case plus default supplement target, got %#v", inputs)
+	}
+}
+
 func TestCreateThreadRequiresConfiguredThreadLLMs(t *testing.T) {
 	db := newAgentTestDB(t)
 	if err := db.DB.AutoMigrate(&orm.Dataset{}); err != nil {
@@ -399,6 +472,24 @@ func TestBuildEvoThreadCreatePayloadForwardsRouterTarget(t *testing.T) {
 	}
 	if fmt.Sprint(inputs["kb_id"]) != "[kb-1]" || inputs["num_case"] != 2 {
 		t.Fatalf("unexpected Evo inputs: %#v", inputs)
+	}
+}
+
+
+func TestBuildEvoThreadCreatePayloadMapsAutoModeToAutomaticInteractiveThread(t *testing.T) {
+	payload := map[string]any{
+		"mode":       "auto",
+		"title":      "automatic eval",
+		"llm_config": map[string]any{"llm": map[string]any{}},
+		"inputs": map[string]any{
+			"kb_id":     "kb-1",
+			"num_cases": 2,
+		},
+	}
+
+	got := buildEvoThreadCreatePayload(payload)
+	if got["mode"] != "interactive" || got["automatic"] != true {
+		t.Fatalf("expected an automatic interactive Evo thread, got %#v", got)
 	}
 }
 
