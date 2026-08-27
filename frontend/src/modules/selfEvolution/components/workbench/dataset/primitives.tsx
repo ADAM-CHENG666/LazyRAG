@@ -56,6 +56,7 @@ export function toVisualStatus(status: OperationStatus | FlowStatus | string): V
     case "pausing":
       return "running";
     case "paused":
+    case "awaiting_approval":
       return "paused";
     case "failed":
     case "cancelled":

@@ -168,6 +168,35 @@ def test_topics_overview_projects_current_manifest_and_calculates_rates(monkeypa
     }
 
 
+def test_topics_overview_calibrates_stage_counts_when_manifest_exists_at_gate(
+        monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_dataset_stages(monkeypatch)
+    service = _service(
+        values={
+            ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST): {3: {
+                'stats': {
+                    'total_topic_count': 184,
+                    'question_types': {'precision': {'count': 100}, 'reasoning': {'count': 84}},
+                },
+            }},
+            ArtifactKey.scalar(A.DATASET_CHUNK_REQUESTS): {1: PartitionSet(tuple(f'chunk-{i}' for i in range(30)))},
+            ArtifactKey.scalar(A.DATASET_EMBEDDING_LABEL_REQUESTS): {1: PartitionSet(('cluster-1', 'cluster-2'))},
+        },
+        statuses={_TOPIC_STAGE: 'paused'},
+    )
+
+    result = asyncio.run(service.topics_overview('thr-1'))
+
+    assert result['status'] == 'paused'
+    assert result['total_topics'] == 184
+    assert result['stages'] == {
+        'entities': {'status': 'completed', 'completed': 30, 'total': 30},
+        'semantic': {'status': 'completed', 'completed': 2, 'total': 2},
+        'topics': {'status': 'completed', 'completed': 184, 'total': 184},
+    }
+
+
 def test_topics_overview_keeps_a_valid_empty_manifest_distinct_from_no_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
     _enable_dataset_stages(monkeypatch)
     empty = _service(

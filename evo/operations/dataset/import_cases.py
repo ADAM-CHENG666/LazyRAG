@@ -31,42 +31,9 @@ def import_cases(ctx: Any, inputs: Mapping[str, object], kb_client: KnowledgeBas
     if not sources and not inline_cases:
         return {'import_cases_manifest': _manifest([], configured_target, [], imported=False)}
 
-    chunks, documents = _knowledge_index(kb_client or KnowledgeBaseClient(), kb_ids)
-    details: list[dict[str, object]] = []
-    questions: set[str] = set()
-    case_ids: set[str] = set()
+    client = kb_client or KnowledgeBaseClient()
+    csv_payloads: list[tuple[dict[str, str], list[dict[str, str]]]] = []
     source_records: list[dict[str, object]] = []
-    source_row_number = 0
-    for row_number, raw_row in enumerate(inline_cases, 1):
-        row = _mapping(raw_row, f'imported_cases[{row_number - 1}]')
-        detail: dict[str, object] = {
-            'source_row_number': row_number,
-            'source_id': str(row.get('case_id') or '').strip(),
-        }
-        try:
-            case, deleted = _case(row, chunks, documents, questions, case_ids)
-        except ValueError as exc:
-            details.append({**detail, 'load_status': 'invalid', 'error': {
-                'code': str(exc).split(':', 1)[0], 'reason': str(exc),
-            }})
-            continue
-        if deleted:
-            details.append({**detail, 'load_status': 'deleted'})
-            continue
-        case_id = str(case.get('id') or '')
-        if not case_id:
-            case_id = _next_case_id(case_ids)
-            case['id'] = case_id
-            case_ids.add(case_id)
-        preparation = dict(_mapping(case.get('source_preparation'), 'case.source_preparation'))
-        preparation['case_source'] = {
-            'final_id': case_id,
-            'original_id': str(detail.get('source_id') or case_id),
-            'source': 'imported_eval_set',
-        }
-        case['source_preparation'] = preparation
-        details.append({**detail, 'load_status': 'loaded', 'case_id': case_id, 'case': case})
-    source_row_number = len(inline_cases)
     for source in sources:
         path = source['path']
         try:
@@ -82,41 +49,47 @@ def import_cases(ctx: Any, inputs: Mapping[str, object], kb_client: KnowledgeBas
             'kb_id': source['kb_id'], 'csv_path': path,
             'csv_sha256': hashlib.sha256(raw).hexdigest(), 'csv_size_bytes': len(raw),
         })
+        csv_payloads.append((source, rows))
+
+    chunk_ids: list[str] = []
+    for index, raw_row in enumerate(inline_cases):
+        row = _mapping(raw_row, f'imported_cases[{index}]')
+        chunk_ids.extend(_peek_chunk_ids(row))
+    for _, rows in csv_payloads:
+        for row in rows:
+            chunk_ids.extend(_peek_chunk_ids(row))
+    chunks, documents = _knowledge_index(client, kb_ids, chunk_ids)
+
+    details: list[dict[str, object]] = []
+    questions: set[str] = set()
+    case_ids: set[str] = set()
+    source_row_number = 0
+    for row_number, raw_row in enumerate(inline_cases, 1):
+        row = _mapping(raw_row, f'imported_cases[{row_number - 1}]')
+        detail: dict[str, object] = {
+            'source_row_number': row_number,
+            'source_id': str(row.get('case_id') or '').strip(),
+        }
+        _append_imported_detail(
+            details, detail, row, chunks, documents, questions, case_ids, 'imported_eval_set',
+        )
+    source_row_number = len(inline_cases)
+    for source, rows in csv_payloads:
+        path = source['path']
         for csv_row_number, row in enumerate(rows, 2):
             source_row_number += 1
-            detail: dict[str, object] = {
+            detail = {
                 'source_row_number': source_row_number,
                 'csv_row_number': csv_row_number,
                 'source_kb_id': source['kb_id'],
                 'source_path': path,
                 'source_id': str(row.get('case_id') or '').strip(),
             }
-            try:
-                case, deleted = _case(row, chunks, documents, questions, case_ids)
-            except ValueError as exc:
-                details.append({**detail, 'load_status': 'invalid', 'error': {
-                    'code': str(exc).split(':', 1)[0], 'reason': str(exc),
-                }})
-                continue
-            if deleted:
-                details.append({**detail, 'load_status': 'deleted'})
-                continue
-
-            case_id = str(case.get('id') or '')
-            if not case_id:
-                case_id = _next_case_id(case_ids)
-                case['id'] = case_id
-                case_ids.add(case_id)
-            preparation = dict(_mapping(case.get('source_preparation'), 'case.source_preparation'))
-            preparation['case_source'] = {
-                'final_id': case_id,
-                'original_id': str(detail.get('source_id') or case_id),
-                'source': 'imported_csv',
-                'kb_id': str(detail.get('source_kb_id') or ''),
-                'csv_path': str(detail.get('source_path') or ''),
-            }
-            case['source_preparation'] = preparation
-            details.append({**detail, 'load_status': 'loaded', 'case_id': case_id, 'case': case})
+            _append_imported_detail(
+                details, detail, row, chunks, documents, questions, case_ids, 'imported_csv',
+                extra_source={'kb_id': str(detail.get('source_kb_id') or ''),
+                              'csv_path': str(detail.get('source_path') or '')},
+            )
 
     if not any(item['load_status'] == 'loaded' for item in details):
         raise ValueError('no valid imported cases')
@@ -127,6 +100,45 @@ def import_cases(ctx: Any, inputs: Mapping[str, object], kb_client: KnowledgeBas
         imported=True,
         supplement=bool(config.get('supplement_existing_eval_set', False)),
     )}
+
+
+def _append_imported_detail(
+    details: list[dict[str, object]],
+    detail: dict[str, object],
+    row: Mapping[str, object],
+    chunks: Mapping[str, dict[str, str]],
+    documents: Mapping[str, set[str]],
+    questions: set[str],
+    case_ids: set[str],
+    source: str,
+    extra_source: Mapping[str, str] | None = None,
+) -> None:
+    try:
+        case, deleted = _case(row, chunks, documents, questions, case_ids)
+    except ValueError as exc:
+        details.append({**detail, 'load_status': 'invalid', 'error': {
+            'code': str(exc).split(':', 1)[0], 'reason': str(exc),
+        }})
+        return
+    if deleted:
+        details.append({**detail, 'load_status': 'deleted'})
+        return
+    case_id = str(case.get('id') or '')
+    if not case_id:
+        case_id = _next_case_id(case_ids)
+        case['id'] = case_id
+        case_ids.add(case_id)
+    preparation = dict(_mapping(case.get('source_preparation'), 'case.source_preparation'))
+    case_source = {
+        'final_id': case_id,
+        'original_id': str(detail.get('source_id') or case_id),
+        'source': source,
+    }
+    if extra_source:
+        case_source.update(extra_source)
+    preparation['case_source'] = case_source
+    case['source_preparation'] = preparation
+    details.append({**detail, 'load_status': 'loaded', 'case_id': case_id, 'case': case})
 
 
 def _manifest(sources: list[dict[str, object]], target: int, details: list[dict[str, object]], *,
@@ -260,13 +272,27 @@ def _case(row: Mapping[str, str], chunks: Mapping[str, dict[str, str]], document
     }, False
 
 
-def _knowledge_index(client: KnowledgeBaseClient, kb_ids: list[str]) -> tuple[dict[str, dict[str, str]], dict[str, set[str]]]:
+def _knowledge_index(
+    client: KnowledgeBaseClient,
+    kb_ids: list[str],
+    chunk_ids: list[str] | None = None,
+) -> tuple[dict[str, dict[str, str]], dict[str, set[str]]]:
     chunks: dict[str, dict[str, str]] = {}
     documents: dict[str, set[str]] = {}
+    lookup = getattr(client, 'lookup_chunks', None)
     for kb_id in kb_ids:
+        kb_docs = []
         for doc in client.list_documents(kb_id):
             doc_id = str(doc['doc_id'])
             documents.setdefault(doc_id, set()).add(kb_id)
+            kb_docs.append(doc_id)
+        if lookup is not None:
+            for chunk_id, payload in lookup(kb_id, list(chunk_ids or ())).items():
+                if chunk_id in chunks:
+                    raise ValueError(f'ambiguous_chunk_id: {chunk_id}')
+                chunks[chunk_id] = payload
+            continue
+        for doc_id in kb_docs:
             for batch in client.iter_chunks(kb_id, [doc_id], ['block', 'line'], 200, require_embeddings=False):
                 for node in batch:
                     chunk_id = str(getattr(node, 'uid', '') or getattr(node, '_uid', '') or '')
@@ -278,6 +304,16 @@ def _knowledge_index(client: KnowledgeBaseClient, kb_ids: list[str]) -> tuple[di
                         'text': str(getattr(node, 'text', '') or ''),
                     }
     return chunks, documents
+
+
+def _peek_chunk_ids(row: Mapping[str, object]) -> list[str]:
+    value = row.get('reference_chunk_ids')
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    try:
+        return _string_list(value, 'reference_chunk_ids')
+    except ValueError:
+        return []
 
 
 def _next_case_id(case_ids: set[str]) -> str:

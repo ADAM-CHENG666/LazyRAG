@@ -265,7 +265,7 @@ export function toDatasetNavStatus(status?: string): DatasetNavStatus {
     return 'done';
   }
   if (['running', 'pausing', 'cancelling', 'executing', '执行中', '运行中'].includes(normalized)) return 'running';
-  if (['paused', '已暂停', '暂停'].includes(normalized)) return 'paused';
+  if (['paused', 'awaiting_approval', '已暂停', '暂停'].includes(normalized)) return 'paused';
   if (['failed', 'cancelled', 'canceled', '失败'].includes(normalized)) return 'failed';
   return 'pending';
 }

@@ -6,8 +6,11 @@ from types import SimpleNamespace
 import pytest
 
 from evo.artifact_runtime import ArtifactKey
-from evo.operations.dataset import BuildChunksParams, build_chunk_candidates, build_chunks, build_chunks_manifest, select_docs
+from evo.operations.dataset import (
+    BuildChunksParams, build_chunk_candidates, build_chunks, build_chunks_manifest, select_docs,
+)
 from evo.operations.dataset.chunks_build import validate_chunk_selection
+from evo.operations.dataset.kb_client import KnowledgeBaseClient
 
 
 class FakeDiscoveryClient:
@@ -36,6 +39,28 @@ class FakeCandidateClient:
         values = list(self.chunks.get((kb_id, doc_id, group), []))
         values.sort(key=lambda item: hashlib.sha256(item.uid.encode()).hexdigest())
         return values[:limit]
+
+    def scan_valid_chunks(self, kb_id, doc_ids, groups, allowed_types, max_scan_chunks, **kwargs):
+        stats = self.count_valid_chunks(kb_id, doc_ids, groups, allowed_types, max_scan_chunks, **kwargs)
+        nodes = {}
+        for doc_id in doc_ids:
+            for group in groups:
+                capacity = stats['capacities'][group][doc_id]
+                nodes[doc_id, group] = self.fetch_valid_chunks(
+                    kb_id, doc_id, group, allowed_types, capacity, order_by='stable_chunk_id_hash',
+                )
+        return {**stats, 'nodes': nodes}
+
+
+class RecordingDocument:
+    def __init__(self, pages):
+        self.pages = pages
+        self.calls = []
+
+    def get_nodes(self, **kwargs):
+        self.calls.append(kwargs)
+        key = (kwargs['doc_ids'][0], kwargs['group'], kwargs['offset'])
+        return self.pages.get(key, ([], 0))
 
 
 def node(uid, *, doc_id='doc-1', group='block', number=1, kind='text'):
@@ -203,6 +228,23 @@ def test_docs_reject_knowledge_base_configuration_outside_source_scope(knowledge
 
 
 # chunk_candidates.yaml: effective_chunk_snapshot
+def test_candidates_scan_included_documents_once_and_keep_all_effective_chunks():
+    document = RecordingDocument({
+        ('one', 'block', 0): (
+            [node('one-0', doc_id='one', number=0), node('one-1', doc_id='one', number=1)],
+            2,
+        ),
+    })
+    selected = documents({'kb-a': [{'doc_id': 'one'}, {'doc_id': 'two'}]}, [('kb-a', 'two')])
+
+    output = candidates(selected, KnowledgeBaseClient(document=document), target=1)
+
+    assert [item['chunk_id'] for item in output['chunks']] == ['one-0', 'one-1']
+    assert [item['discovery_index'] for item in output['chunks']] == [0, 1]
+    assert len(document.calls) == 1
+    assert document.calls[0]['doc_ids'] == ['one']
+
+
 def test_candidates_scan_only_included_documents_and_keep_all_effective_chunks():
     selected = documents({'kb-a': [{'doc_id': 'one'}, {'doc_id': 'two'}]}, [('kb-a', 'two')])
     client = FakeCandidateClient(

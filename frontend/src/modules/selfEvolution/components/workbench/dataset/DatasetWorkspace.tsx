@@ -403,7 +403,6 @@ export function DatasetWorkspace({
             refreshToken={refreshToken}
             overviewToken={overviewToken}
             labelProgress={topicLabelProgress}
-            executionStatus={stageStatuses.topics}
             onOverviewRevision={handleOverviewRevision}
             draft={draft}
             onSaveDraft={saveDraft}

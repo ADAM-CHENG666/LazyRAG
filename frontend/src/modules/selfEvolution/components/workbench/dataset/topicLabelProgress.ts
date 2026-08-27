@@ -146,36 +146,29 @@ export function topicDiscoverySteps(
     total_topics?: number | null;
     stages?: Partial<Record<TopicPhaseId, { status: string; completed: number; total: number | null }>>;
   },
-  currentStageStatus?: VisualStatus,
 ): TopicDiscoveryStepView[] {
   const phases = progress?.phases ?? emptyProgress('').phases;
-  // A prior published manifest may still report completed while a new topic
-  // discovery step is already emitting SSE. Its snapshot must not hide the
-  // current step's partial execution progress.
-  const hasPartialExecution = Boolean(progress) && TOPIC_PHASE_ORDER.some(
-    (id) => phases[id].status !== 'done' && phases[id].status !== 'partial' && phases[id].status !== 'failed',
-  ) && TOPIC_PHASE_ORDER.some(
-    (id) => phases[id].status !== 'pending' || phases[id].total > 0,
-  );
-  const progressHasFailures = TOPIC_PHASE_ORDER.some((id) => phases[id].failed > 0);
-  const overviewDone = currentStageStatus !== 'running'
-    && !hasPartialExecution
-    && !progressHasFailures
-    && (overview?.status === 'completed' || overview?.status === 'succeeded');
+  const live = hasLiveExecution(progress);
   const topicCount = overview?.total_topics ?? null;
+  const overviewSettled = !live && (
+    overview?.status === 'completed'
+    || overview?.status === 'succeeded'
+    || overview?.status === 'paused'
+    || overview?.status === 'awaiting_approval'
+    || overview?.total_topics != null
+  );
   const latestActiveIndex = TOPIC_PHASE_ORDER.reduce((latest, id, index) => (
     hasPhaseExecution(progress, id) ? index : latest
   ), -1);
 
   return TOPIC_PHASE_ORDER.map((id, index) => {
     const snapshot = overview?.stages?.[id];
-    // Match case generation: the overview is the baseline for every phase,
-    // while SSE replaces only the phase for which it has actual evidence.
-    let phase = hasPhaseExecution(progress, id)
-      ? phases[id]
-      : snapshotPhase(id, snapshot) ?? phases[id];
+    const sseOwned = hasPhaseExecution(progress, id);
+    let phase = !live && snapshot
+      ? settlePhase(id, phases[id], snapshot, topicCount)
+      : phases[id];
     if (
-      !hasPhaseExecution(progress, id)
+      !sseOwned
       && latestActiveIndex > index
       && phase.status === 'pending'
       && !snapshot
@@ -185,20 +178,14 @@ export function topicDiscoverySteps(
     let status = phase.status;
     let completed = phase.completed;
     let total: number | null = phase.total || null;
-    if (overviewDone) {
+    if (id === 'topics' && topicCount != null && (status === 'done' || overviewSettled) && !total) {
       status = 'done';
-      if (id === 'topics' && topicCount != null) {
-        completed = topicCount;
-        total = topicCount;
-      } else if (total && total > 0) {
-        completed = total;
-      } else {
-        completed = 0;
-        total = null;
-      }
-    } else if (id === 'topics' && status === 'done' && topicCount != null) {
       completed = topicCount;
       total = topicCount;
+    } else if (overviewSettled && !snapshot && !sseOwned) {
+      status = 'done';
+      total = total && total > 0 ? total : null;
+      completed = total ?? 0;
     }
     return {
       key: id,
@@ -213,6 +200,38 @@ export function topicDiscoverySteps(
       }),
     };
   });
+}
+
+function hasLiveExecution(progress: TopicDiscoveryProgress | undefined): boolean {
+  if (!progress) return false;
+  return TOPIC_PHASE_ORDER.some((id) => progress.phases[id].status === 'running');
+}
+
+function settlePhase(
+  id: TopicPhaseId,
+  sse: TopicPhaseState,
+  snapshot: { status: string; completed: number; total: number | null },
+  publishedTopicCount: number | null,
+): TopicPhaseState {
+  const settled = snapshotPhase(id, snapshot);
+  if (!settled) return sse;
+  let next = settled;
+  if (
+    publishedTopicCount != null
+    && next.total > 0
+    && next.completed === 0
+    && (next.status === 'pending' || next.status === 'running')
+  ) {
+    next = { ...next, completed: next.total, running: 0, status: 'done' };
+  }
+  if (sse.failed > 0) {
+    return {
+      ...next,
+      failed: sse.failed,
+      status: sse.status === 'partial' || sse.status === 'failed' ? sse.status : next.status,
+    };
+  }
+  return next;
 }
 
 function hasPhaseExecution(progress: TopicDiscoveryProgress | undefined, id: TopicPhaseId): boolean {
@@ -370,11 +389,8 @@ function completeAllPhases(progress: TopicDiscoveryProgress): TopicDiscoveryProg
     }
     next.phases[id] = {
       ...phase,
-      completed: phase.total || phase.completed,
       running: 0,
-      // Once the stage emits step.finish, any phase without an explicit failure
-      // has settled. Keep it visually complete until the overview snapshot lands.
-      status: 'done',
+      status: phase.total > 0 && phase.completed >= phase.total ? 'done' : phase.status,
     };
   }
   return next;

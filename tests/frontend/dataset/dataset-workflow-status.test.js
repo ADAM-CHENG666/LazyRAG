@@ -280,4 +280,55 @@ describe('dataset sub-nav status', () => {
     expect(toDatasetNavStatus('completed')).toBe('done');
     expect(toDatasetNavStatus('failed')).toBe('failed');
   });
+
+  it('treats the approval gate as paused, not as not-started', () => {
+    expect(toDatasetNavStatus('awaiting_approval')).toBe('paused');
+    expect(toDatasetNavStatus('idle')).toBe('pending');
+  });
+});
+
+describe('dataset sub-nav follows /steps', () => {
+  it('does not invent running when /steps still reports a pending current stage', () => {
+    const view = deriveDatasetView(steps([
+      {
+        stage: 'dataset.material_preparation',
+        status: 'completed',
+        stepId: 'm1',
+        nextStepRunId: 't1',
+      },
+      { stage: 'dataset.topic_discovery', status: 'pending', stepId: 't1' },
+      { stage: 'dataset.material_preparation', status: 'pending', stepId: 'm2' },
+    ]), 'm2');
+
+    expect(view.subStatuses.materials).toBe('pending');
+    expect(view.subStatuses.topics).toBe('pending');
+  });
+
+  it('shows case generation running when /steps reports the current stage running', () => {
+    const view = deriveDatasetView(steps([
+      { stage: 'dataset.material_preparation', status: 'completed' },
+      { stage: 'dataset.topic_discovery', status: 'completed' },
+      { stage: 'dataset.case_generation', status: 'running' },
+    ]));
+
+    expect(view.subStatuses.cases).toBe('running');
+    expect(toDatasetNavStatus(view.subStatuses.cases)).toBe('running');
+    expect(view.topStatus).toBe('running');
+  });
+
+  it('keeps the next stage pending while the current stage waits at a checkpoint', () => {
+    const view = deriveDatasetView(steps([
+      {
+        stage: 'dataset.material_preparation',
+        status: 'completed',
+        stepId: 'm1',
+        nextStepRunId: 't1',
+      },
+      { stage: 'dataset.topic_discovery', status: 'pending', stepId: 't1' },
+    ]), 'm1');
+
+    expect(view.subStatuses.materials).toBe('completed');
+    expect(view.subStatuses.topics).toBe('pending');
+    expect(view.topStatus).toBe('completed');
+  });
 });

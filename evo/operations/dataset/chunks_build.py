@@ -46,21 +46,21 @@ def build_chunk_candidates(ctx: Any, inputs: Mapping[str, object], kb_client: Kn
     for doc in docs:
         by_kb.setdefault(doc['kb_id'], []).append(doc)
     client = kb_client or KnowledgeBaseClient()
-    counts = {}
+    scans = {}
     for kb_id, values in by_kb.items():
         if len(values) > params.max_scan_docs_per_kb:
             raise ValueError(f'max_scan_docs_per_kb exceeded for {kb_id}')
-        counts[kb_id] = client.count_valid_chunks(kb_id, [item['doc_id'] for item in values], params.groups,
-                                                   params.allowed_types, params.max_scan_chunks)
-    scanned = sum(_integer(value.get('scanned_count'), 'scanned_count') for value in counts.values())
+        scans[kb_id] = client.scan_valid_chunks(kb_id, [item['doc_id'] for item in values], params.groups,
+                                                params.allowed_types, params.max_scan_chunks)
+    scanned = sum(_integer(value.get('scanned_count'), 'scanned_count') for value in scans.values())
     if scanned > params.max_scan_chunks:
         raise ValueError(f'max_scan_chunks exceeded: {scanned} > {params.max_scan_chunks}')
-    effective = sum(_integer(value.get('effective_count'), 'effective_count') for value in counts.values())
+    effective = sum(_integer(value.get('effective_count'), 'effective_count') for value in scans.values())
     if effective == 0:
         raise ValueError('dataset.build_chunk_candidates effective capacity is zero')
-    full = _read_effective_chunks(client, docs, counts, params)
+    full = _payloads_from_scan(docs, scans, params)
     limit = (auto_count * 3 + 1) // 2
-    quotas, selected_keys = _initial_selection(docs, counts, full, params.groups, limit)
+    quotas, selected_keys = _initial_selection(docs, full, params.groups, limit)
     chunks = []
     for doc in docs:
         for group in params.groups:
@@ -132,15 +132,18 @@ def validate_chunk_selection(value: Mapping[str, object]) -> None:
         raise ValueError('quota selection mismatch')
 
 
-def _read_effective_chunks(client: Any, docs: list[dict[str, Any]], counts: Mapping[str, Mapping[str, Any]], params: BuildChunksParams):
+def _payloads_from_scan(docs: list[dict[str, Any]], scans: Mapping[str, Mapping[str, Any]], params: BuildChunksParams):
     result = {}
     seen = set()
     for doc in docs:
         kb_id, doc_id = doc['kb_id'], doc['doc_id']
-        capacities = _mapping(counts[kb_id].get('capacities'), 'capacities')
+        capacities = _mapping(scans[kb_id].get('capacities'), 'capacities')
+        nodes_by_key = scans[kb_id].get('nodes') or {}
+        if not isinstance(nodes_by_key, Mapping):
+            raise ValueError('scan nodes must be a mapping')
         for group in params.groups:
             capacity = _integer(_mapping(capacities.get(group, {}), f'capacities.{group}').get(doc_id, 0), 'capacity')
-            nodes = client.fetch_valid_chunks(kb_id, doc_id, group, params.allowed_types, capacity, order_by='stable_chunk_id_hash') if capacity else []
+            nodes = list(nodes_by_key.get((doc_id, group), []))
             nodes = sorted(nodes, key=lambda node: (getattr(node, 'number', 0), str(getattr(node, 'uid', ''))))
             values = []
             for node in nodes:
@@ -156,7 +159,7 @@ def _read_effective_chunks(client: Any, docs: list[dict[str, Any]], counts: Mapp
     return result
 
 
-def _initial_selection(docs, counts, full, groups, limit):
+def _initial_selection(docs, full, groups, limit):
     remaining, selected, quotas = limit, [], []
     for group in groups:
         capacities = {(doc['kb_id'], doc['doc_id']): len(full.get((doc['kb_id'], doc['doc_id'], group), [])) for doc in docs}

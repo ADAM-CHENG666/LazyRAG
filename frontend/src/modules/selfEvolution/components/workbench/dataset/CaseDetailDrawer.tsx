@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Alert, Button, Checkbox, Drawer, Input, Modal, message } from "antd";
-import { DeleteOutlined, EditOutlined, PlusOutlined } from "@ant-design/icons";
+import { DeleteOutlined } from "@ant-design/icons";
 import { datasetRoot, describeRequestError, getJson, newRequestId, patchJson } from "./api";
 import { PAGE_SIZE } from "./hooks";
 import {
@@ -9,7 +9,6 @@ import {
   DIFFICULTY_TEXT,
   DrawerAttributes,
   QUESTION_TYPE_TEXT,
-  StatusIcon,
   toVisualStatus,
 } from "./primitives";
 import type {
@@ -73,7 +72,6 @@ export function CaseDetailDrawer({
   const [draft, setDraft] = useState<Draft>();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
-  const [editingGenerate, setEditingGenerate] = useState(false);
   const [evidenceEditorIndex, setEvidenceEditorIndex] = useState<number>();
 
   const caseId = row?.case_id;
@@ -88,7 +86,6 @@ export function CaseDetailDrawer({
       setDetail(value);
       setDraft(toDraft(value));
       setStage(focusStage(value));
-      setEditingGenerate(false);
       setEvidenceEditorIndex(undefined);
       setTopicOptions([]);
       setTopicOptionsError(undefined);
@@ -150,8 +147,9 @@ export function CaseDetailDrawer({
   );
   const dirty = planChanged || generateChanged || gradingChanged;
 
+  const selectedTopic = topicOptions.find((option) => option.topic_id === draft?.topicId);
   const currentTopicName =
-    topicOptions.find((option) => option.topic_id === draft?.topicId)?.name ||
+    selectedTopic?.name ||
     (draft?.topicId === detail?.topic?.topic_id ? detail?.topic?.name : undefined) ||
     "—";
 
@@ -253,7 +251,7 @@ export function CaseDetailDrawer({
       destroyOnClose
       footer={
         <div className="dataset-drawer-foot">
-          <Button onClick={onClose}>关闭</Button>
+          <Button onClick={onClose}>取消</Button>
           <Button type="primary" disabled={!dirty} loading={saving} onClick={() => void submit()}>
             保存
           </Button>
@@ -309,17 +307,20 @@ export function CaseDetailDrawer({
           ) : null}
 
           <nav className="dataset-case-roadmap" aria-label="用例阶段">
-            {(Object.keys(STAGE_LABEL) as CaseStageKey[]).map((key) => (
+            {(Object.keys(STAGE_LABEL) as CaseStageKey[]).map((key, index) => (
               <button
                 type="button"
                 key={key}
                 className={`dataset-roadmap-step${stage === key ? " is-selected" : ""}`}
                 onClick={() => setStage(key)}
               >
+                <span
+                  className={`dataset-roadmap-mark is-${toVisualStatus(detail.stages[key].status)}`}
+                  aria-hidden="true"
+                >
+                  {toVisualStatus(detail.stages[key].status) === "done" ? "✓" : index + 1}
+                </span>
                 <strong>{STAGE_LABEL[key]}</strong>
-                <small>
-                  <StatusIcon status={toVisualStatus(detail.stages[key].status)} />
-                </small>
               </button>
             ))}
           </nav>
@@ -339,21 +340,23 @@ export function CaseDetailDrawer({
               ) : (
                 <>
                   <div className="dataset-detail-block">
-                    <h4>更换主题</h4>
+                    <h4>当前绑定主题</h4>
+                    <div className="dataset-current-topic">
+                      <div>
+                        <strong>{currentTopicName}</strong>
+                        <small>
+                          {draft.topicId || "—"} · {selectedTopic?.chunk_count ?? detail.topic?.chunk_count ?? 0} 个片段
+                        </small>
+                      </div>
+                      <span>从下方更换</span>
+                    </div>
+                  </div>
+                  <div className="dataset-detail-block">
+                    <h4>可选主题</h4>
                     <div className="dataset-topic-option-list">
-                      {(detail.topic
-                        ? [
-                            {
-                              topic_id: detail.topic.topic_id,
-                              name: detail.topic.name,
-                              chunk_count: detail.topic.chunk_count,
-                            },
-                            ...topicOptions.filter(
-                              (option) => option.topic_id !== detail.topic?.topic_id,
-                            ),
-                          ]
-                        : topicOptions
-                      ).map((option) => (
+                      {topicOptions
+                        .filter((option) => option.topic_id !== detail.topic?.topic_id)
+                        .map((option) => (
                         <button
                           type="button"
                           key={option.topic_id}
@@ -365,10 +368,7 @@ export function CaseDetailDrawer({
                           <strong>{option.name}</strong>
                           <div className="dataset-topic-option-meta">
                             <span>{option.topic_id}</span>
-                            <span>
-                              {option.chunk_count} 个片段
-                              {option.topic_id === detail.topic?.topic_id ? " · 当前" : ""}
-                            </span>
+                            <span>{option.chunk_count} 个片段</span>
                           </div>
                         </button>
                       ))}
@@ -396,55 +396,47 @@ export function CaseDetailDrawer({
                   ? "问答内容随外部导入，在本阶段只读。"
                   : "问题、标准答案与评分说明共同属于当前 Case 修改。"}
               </div>
-              {imported || !editingGenerate ? (
-                <div className="dataset-readonly-stack">
-                  <ReadonlyItem label="问题" value={draft.question} />
-                  <ReadonlyItem label="标准答案" value={draft.answer} />
-                  <ReadonlyItem label="评分说明" value={draft.guidance} />
-                  {!imported ? (
-                    <Button size="small" icon={<EditOutlined />} onClick={() => setEditingGenerate(true)}>
-                      编辑问答
-                    </Button>
-                  ) : null}
-                </div>
-              ) : (
-                <div className="dataset-editable-section">
-                  <FieldGroup
-                    label="问题"
-                    value={draft.question}
-                    onChange={(value) => patch({ question: value })}
-                  />
-                  <FieldGroup
-                    label="标准答案"
-                    value={draft.answer}
-                    onChange={(value) => patch({ answer: value })}
-                  />
-                  <FieldGroup
-                    label="评分说明"
-                    value={draft.guidance}
-                    onChange={(value) => patch({ guidance: value })}
-                  />
-                  <Button size="small" onClick={() => setEditingGenerate(false)}>完成编辑</Button>
-                </div>
-              )}
+              <div className="dataset-inline-editable-stack">
+                <InlineEditableField
+                  label="问题"
+                  value={draft.question}
+                  readOnly={imported}
+                  onChange={(value) => patch({ question: value })}
+                />
+                <InlineEditableField
+                  label="标准答案"
+                  value={draft.answer}
+                  readOnly={imported}
+                  onChange={(value) => patch({ answer: value })}
+                />
+                <InlineEditableField
+                  label="评分说明"
+                  value={draft.guidance}
+                  readOnly={imported}
+                  onChange={(value) => patch({ guidance: value })}
+                />
+              </div>
             </section>
           )}
 
           {stage === "grading" && (
             <section>
-              <div className="dataset-case-panel-summary">
-                问答内容只读；关键得分点只能绑定当前 Case 的参考片段。
+              <div className="dataset-section-heading">
+                <h4>关键得分点</h4>
+                <button
+                  type="button"
+                  className="dataset-text-action"
+                  onClick={() =>
+                    patch({ keyPoints: [...draft.keyPoints, { statement: "", evidence_chunk_ids: [] }] })
+                  }
+                >
+                  + 添加得分点
+                </button>
               </div>
-              <div className="dataset-readonly-stack">
-                <ReadonlyItem label="问题" value={draft.question} />
-                <ReadonlyItem label="标准答案" value={draft.answer} />
-                <ReadonlyItem label="评分说明" value={draft.guidance} />
-              </div>
-
               {draft.keyPoints.map((point, index) => (
                 <div className="dataset-score-point" key={`key-point-${index}`}>
                   <div className="dataset-score-point-head">
-                    <strong>关键得分点 {index + 1}</strong>
+                    <span className="dataset-score-number">{String(index + 1).padStart(2, "0")}</span>
                     <button
                       type="button"
                       className="dataset-icon-action"
@@ -456,12 +448,13 @@ export function CaseDetailDrawer({
                       <DeleteOutlined />
                     </button>
                   </div>
-                  <Input
+                  <InlineEditableField
+                    label=""
                     value={point.statement}
-                    onChange={(event) =>
+                    onChange={(value) =>
                       patch({
                         keyPoints: draft.keyPoints.map((item, at) =>
-                          at === index ? { ...item, statement: event.target.value } : item,
+                          at === index ? { ...item, statement: value } : item,
                         ),
                       })
                     }
@@ -476,32 +469,39 @@ export function CaseDetailDrawer({
                   </button>
                 </div>
               ))}
-              <Button className="dataset-add-row" block type="dashed" icon={<PlusOutlined />}
-                onClick={() =>
-                  patch({ keyPoints: [...draft.keyPoints, { statement: "", evidence_chunk_ids: [] }] })
-                }
-              >
-                新增关键得分点
-              </Button>
-
               <div className="dataset-forbidden-list">
-                <label>错误结论（最多 3 条）</label>
+                <div className="dataset-section-heading">
+                  <h4>错误结论（最多 3 条）</h4>
+                  <button
+                    type="button"
+                    className="dataset-text-action"
+                    disabled={draft.forbiddenClaims.length >= 3}
+                    onClick={() => patch({ forbiddenClaims: [...draft.forbiddenClaims, ""] })}
+                  >
+                    + 添加错误结论
+                  </button>
+                </div>
                 {draft.forbiddenClaims.map((claim, index) => (
                   <div className="dataset-forbidden-item" key={`forbidden-${index}`}>
-                    <Input value={claim} placeholder="输入错误结论" onChange={(event) => patch({
-                      forbiddenClaims: draft.forbiddenClaims.map((item, at) => at === index ? event.target.value : item),
-                    })} />
+                    <span className="dataset-forbidden-mark">×</span>
+                    <InlineEditableField
+                      label=""
+                      value={claim}
+                      placeholder="点击填写错误结论"
+                      onChange={(value) =>
+                        patch({
+                          forbiddenClaims: draft.forbiddenClaims.map((item, at) =>
+                            at === index ? value : item,
+                          ),
+                        })
+                      }
+                    />
                     <button type="button" className="dataset-icon-action" aria-label={`删除错误结论 ${index + 1}`}
                       onClick={() => patch({ forbiddenClaims: draft.forbiddenClaims.filter((_, at) => at !== index) })}>
                       <DeleteOutlined />
                     </button>
                   </div>
                 ))}
-                <Button className="dataset-add-row" block type="dashed" icon={<PlusOutlined />}
-                  disabled={draft.forbiddenClaims.length >= 3}
-                  onClick={() => patch({ forbiddenClaims: [...draft.forbiddenClaims, ""] })}>
-                  新增错误结论
-                </Button>
               </div>
             </section>
           )}
@@ -521,11 +521,41 @@ export function CaseDetailDrawer({
   );
 }
 
-function ReadonlyItem({ label, value }: { label: string; value: string }) {
+function InlineEditableField({
+  label,
+  value,
+  placeholder = "点击填写",
+  readOnly = false,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  placeholder?: string;
+  readOnly?: boolean;
+  onChange: (value: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const displayValue = value || placeholder;
+
   return (
-    <div className="dataset-readonly-item">
-      <small>{label}</small>
-      <p>{value || "—"}</p>
+    <div className={`dataset-inline-editable${editing ? " is-editing" : ""}`}>
+      {label ? <label>{label}</label> : null}
+      {readOnly ? (
+        <p>{value || "—"}</p>
+      ) : editing ? (
+        <Input.TextArea
+          autoFocus
+          rows={label ? 3 : 2}
+          value={value}
+          placeholder={placeholder}
+          onChange={(event) => onChange(event.target.value)}
+          onBlur={() => setEditing(false)}
+        />
+      ) : (
+        <button type="button" onClick={() => setEditing(true)}>
+          {displayValue}
+        </button>
+      )}
     </div>
   );
 }
@@ -570,22 +600,5 @@ function EvidencePicker({
         {!references.length ? <p className="dataset-note">当前用例还没有参考片段。</p> : null}
       </div>
     </Modal>
-  );
-}
-
-function FieldGroup({
-  label,
-  value,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <div className="dataset-form-group">
-      <label>{label}</label>
-      <Input.TextArea rows={3} value={value} onChange={(event) => onChange(event.target.value)} />
-    </div>
   );
 }

@@ -1,9 +1,11 @@
 import csv
 import hashlib
+from types import SimpleNamespace
 
 import pytest
 
 from evo.operations.dataset.import_cases import import_cases
+from evo.operations.dataset.kb_client import KnowledgeBaseClient
 
 
 HEADERS = ('question', 'question_type', 'ground_truth', 'grading_guidance')
@@ -140,3 +142,46 @@ def test_valid_rows_are_not_truncated_or_filled_to_configured_target(tmp_path):
     }
     assert result['stats']['case_allocation']['target_case_count'] == 2
     assert result['stats']['case_allocation']['auto_case_count'] == 0
+
+
+class LookupDocument:
+    def __init__(self, nodes_by_uid):
+        self.nodes_by_uid = nodes_by_uid
+        self.calls = []
+
+    def get_nodes(self, **kwargs):
+        self.calls.append(kwargs)
+        uids = kwargs.get('uids') or []
+        nodes = [self.nodes_by_uid[uid] for uid in uids if uid in self.nodes_by_uid]
+        return nodes, len(nodes)
+
+
+def test_import_resolves_referenced_chunks_by_uid_without_scanning_unrelated_documents(tmp_path):
+    document = LookupDocument({
+        'chunk-keep': SimpleNamespace(
+            uid='chunk-keep', text='keep', global_metadata={'docid': 'doc-1'},
+        ),
+        'chunk-other': SimpleNamespace(
+            uid='chunk-other', text='other', global_metadata={'docid': 'doc-2'},
+        ),
+    })
+
+    class Client(KnowledgeBaseClient):
+        def list_documents(self, kb_id):
+            return [{'doc_id': 'doc-1'}, {'doc_id': 'doc-2'}]
+
+    headers = (*HEADERS, 'reference_doc_ids', 'reference_chunk_ids')
+    path = _write(tmp_path, [_row(reference_doc_ids='doc-1', reference_chunk_ids='chunk-keep')], headers)
+    client = Client(document=document)
+
+    result = import_cases(None, {'source_config': {
+        'kb_ids': ['kb-a'],
+        'csv_sources': [{'kb_id': 'kb-a', 'path': str(path)}],
+        'target_case_count': 1,
+    }}, kb_client=client)['import_cases_manifest']
+
+    assert result['details'][0]['load_status'] == 'loaded'
+    assert result['details'][0]['case']['reference_chunk_ids'] == ['chunk-keep']
+    assert document.calls
+    assert all(call.get('uids') == ['chunk-keep'] for call in document.calls)
+    assert all(not call.get('doc_ids') for call in document.calls)

@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from evo.operations.dataset.kb_client import KnowledgeBaseClient
+from evo.operations.dataset.kb_client import CHUNK_PAGE_SIZE, DOCS_PAGE_SIZE, KnowledgeBaseClient
 
 
 class FakeDocument:
@@ -31,13 +31,14 @@ class FakeKnowledgeBaseClient(KnowledgeBaseClient):
         return self.documents
 
 
-def node(uid, *, text='chunk text', chunk_type='text', embedding=None, number=1):
+def node(uid, *, text='chunk text', chunk_type='text', embedding=None, number=1, doc_id=''):
     return SimpleNamespace(
         uid=uid,
         text=text,
         metadata={'type': chunk_type},
         embedding={'default': [1.0]} if embedding is None else embedding,
         number=number,
+        global_metadata={'docid': doc_id} if doc_id else {},
     )
 
 
@@ -110,7 +111,7 @@ class FakeDocServer:
         return {
             'code': 200,
             'msg': 'success',
-            'data': self.pages.get(page, {'items': [], 'total': 0, 'page': page, 'page_size': 100}),
+            'data': self.pages.get(page, {'items': [], 'total': 0, 'page': page, 'page_size': DOCS_PAGE_SIZE}),
         }
 
 
@@ -172,7 +173,7 @@ def test_list_documents_uses_doc_server_and_normalizes_rows_without_real_db():
             ],
             'total': 2,
             'page': 1,
-            'page_size': 100,
+            'page_size': DOCS_PAGE_SIZE,
         },
     })
     client = KnowledgeBaseClient(base_url='http://doc-server:8000', http_get_json=http, document=FakeDocument())
@@ -197,7 +198,7 @@ def test_list_documents_uses_doc_server_and_normalizes_rows_without_real_db():
         },
     }]
     assert http.urls == [
-        'http://doc-server:8000/v1/docs?kb_id=kb-1&include_deleted_or_canceled=false&page=1&page_size=100'
+        f'http://doc-server:8000/v1/docs?kb_id=kb-1&include_deleted_or_canceled=false&page=1&page_size={DOCS_PAGE_SIZE}'
     ]
 
 
@@ -212,7 +213,7 @@ def test_list_documents_does_not_precount_groups_per_document():
             ],
             'total': 2,
             'page': 1,
-            'page_size': 100,
+            'page_size': DOCS_PAGE_SIZE,
         },
     })
     document = FakeDocument()
@@ -229,6 +230,68 @@ def test_list_documents_does_not_precount_groups_per_document():
                  'relation': {}, 'snapshot': {}}},
     ]
     assert document.calls == []
+
+
+def test_scan_valid_chunks_returns_stats_and_effective_nodes_in_one_document_pass():
+    document = FakeDocument({
+        ('doc-1', 'block', 0): ([
+            node('valid-1', number=2),
+            node('filtered-1', chunk_type='heading', number=1),
+            node('valid-2', number=3),
+        ], 3),
+    })
+    client = KnowledgeBaseClient(document=document)
+
+    result = client.scan_valid_chunks(
+        'kb-1', ['doc-1'], ['block'], ['text', 'paragraph'], max_scan_chunks=10,
+    )
+
+    assert result['scanned_count'] == 3
+    assert result['effective_count'] == 2
+    assert result['capacities'] == {'block': {'doc-1': 2}}
+    assert result['filtered_count_by_type'] == {'heading': 1}
+    assert [item.uid for item in result['nodes']['doc-1', 'block']] == ['valid-1', 'valid-2']
+    assert document.calls == [{
+        'doc_ids': ['doc-1'],
+        'group': 'block',
+        'kb_id': 'kb-1',
+        'limit': CHUNK_PAGE_SIZE,
+        'offset': 0,
+        'return_total': True,
+        'sort_by_number': True,
+    }]
+
+
+class GroupDocument:
+    def __init__(self, nodes_by_doc):
+        self.nodes_by_doc = nodes_by_doc
+        self.calls = []
+
+    def get_nodes(self, **kwargs):
+        self.calls.append(kwargs)
+        grouped = []
+        for doc_id in kwargs['doc_ids']:
+            grouped.extend(self.nodes_by_doc.get((doc_id, kwargs['group']), []))
+        offset = kwargs['offset']
+        limit = kwargs['limit']
+        return grouped[offset:offset + limit], len(grouped)
+
+
+def test_scan_valid_chunks_reads_all_documents_in_a_group_together():
+    document = GroupDocument({
+        ('doc-1', 'block'): [node('a', number=1, doc_id='doc-1')],
+        ('doc-2', 'block'): [node('b', number=2, doc_id='doc-2')],
+    })
+    client = KnowledgeBaseClient(document=document)
+
+    result = client.scan_valid_chunks(
+        'kb-1', ['doc-1', 'doc-2'], ['block'], ['text'], max_scan_chunks=10,
+    )
+
+    assert result['effective_count'] == 2
+    assert [item.uid for item in result['nodes']['doc-1', 'block']] == ['a']
+    assert [item.uid for item in result['nodes']['doc-2', 'block']] == ['b']
+    assert [call['doc_ids'] for call in document.calls] == [['doc-1', 'doc-2']]
 
 
 def test_count_valid_chunks_returns_group_doc_capacity_and_aggregate_filter_stats():
@@ -441,6 +504,26 @@ def test_iter_chunks_initializes_vector_store_and_attaches_stored_embeddings():
         'filter': "uid in ['n1']",
         'output_fields': ['uid', 'embedding_embed_main'],
     })
+
+
+def test_stored_embedding_collection_metadata_is_reused_across_pages():
+    milvus = FakeMilvusClient(rows=[
+        {'uid': 'n1', 'embedding_embed_main': [0.1, 0.2]},
+        {'uid': 'n2', 'embedding_embed_main': [0.3, 0.4]},
+    ])
+    store = FakeStore(FakeVectorStore(milvus))
+    document = FakeDocument({
+        ('doc-1', 'block', 0): ([node_without_embedding('n1')], 2),
+        ('doc-1', 'block', 1): ([node_without_embedding('n2')], 2),
+    })
+    document._impl = SimpleNamespace(store=store)
+
+    list(KnowledgeBaseClient(document=document).iter_chunks(
+        'kb', doc_ids=['doc-1'], groups=['block'], page_size=1,
+    ))
+
+    assert [call[0] for call in milvus.calls].count('load_collection') == 1
+    assert [call[0] for call in milvus.calls].count('describe_collection') == 1
 
 
 def test_iter_chunks_raises_embedding_query_error_with_context():

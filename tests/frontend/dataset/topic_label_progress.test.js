@@ -116,15 +116,51 @@ describe('topic discovery 3-phase progress', () => {
     expect(steps[2]).toMatchObject({ completed: 8, total: 8, status: 'done' });
   });
 
-  it('does not flash the previous completed overview while /steps says this stage is running', () => {
-    const steps = topicDiscoverySteps(
-      undefined,
-      { status: 'completed', total_topics: 8 },
-      'running',
-    );
+  it('shows completed overview stages when there is no live SSE', () => {
+    const steps = topicDiscoverySteps(undefined, {
+      status: 'completed',
+      total_topics: 8,
+      stages: {
+        entities: { status: 'completed', completed: 2, total: 2 },
+        semantic: { status: 'completed', completed: 4, total: 4 },
+        topics: { status: 'completed', completed: 8, total: 8 },
+      },
+    });
 
-    expect(steps.every((step) => step.status === 'pending')).toBe(true);
-    expect(steps.every((step) => step.completed === 0)).toBe(true);
+    expect(steps[0]).toMatchObject({ completed: 2, total: 2, status: 'done' });
+    expect(steps[1]).toMatchObject({ completed: 4, total: 4, status: 'done' });
+    expect(steps[2]).toMatchObject({ completed: 8, total: 8, status: 'done' });
+  });
+
+  it('calibrates rings when overview is awaiting_approval with pending stage counts', () => {
+    const steps = topicDiscoverySteps(undefined, {
+      status: 'awaiting_approval',
+      total_topics: 184,
+      stages: {
+        entities: { status: 'pending', completed: 0, total: 30 },
+        semantic: { status: 'pending', completed: 0, total: 2 },
+        topics: { status: 'pending', completed: 0, total: 184 },
+      },
+    });
+
+    expect(steps[0]).toMatchObject({ completed: 30, total: 30, status: 'done' });
+    expect(steps[2]).toMatchObject({ completed: 184, total: 184, status: 'done' });
+  });
+
+  it('calibrates rings when the topic manifest is published but stages are still pending at the gate', () => {
+    const steps = topicDiscoverySteps(undefined, {
+      status: 'paused',
+      total_topics: 184,
+      stages: {
+        entities: { status: 'pending', completed: 0, total: 30 },
+        semantic: { status: 'pending', completed: 0, total: 2 },
+        topics: { status: 'pending', completed: 0, total: 184 },
+      },
+    });
+
+    expect(steps[0]).toMatchObject({ completed: 30, total: 30, status: 'done', summary: '全部完成' });
+    expect(steps[1]).toMatchObject({ completed: 2, total: 2, status: 'done', summary: '全部完成' });
+    expect(steps[2]).toMatchObject({ completed: 184, total: 184, status: 'done', summary: '全部完成' });
   });
 
   it('does not let an earlier attempt overwrite a retried partition', () => {
@@ -157,9 +193,46 @@ describe('topic discovery 3-phase progress', () => {
     expect(steps[0].summary).not.toBe('全部完成');
   });
 
-  it('does not blank later phases after step.finish before overview refresh returns', () => {
+  it('keeps SSE failures after overview calibrates completed stages', () => {
     let progress = applyTopicLabelPartitionEvent(undefined, event({
       partition: { id: 'chunk-1', total: 2 },
+      status: 'completed',
+    }));
+    progress = applyTopicLabelPartitionEvent(progress, event({
+      partition: { id: 'chunk-2', total: 2 },
+      attemptId: 'attempt-2',
+      status: 'failed',
+    }));
+    progress = applyTopicLabelPartitionEvent(progress, {
+      event: 'step.finish',
+      stage: 'dataset.topic_discovery',
+      stepId: 'thread-1:dataset.topic_discovery:1',
+    });
+
+    const steps = topicDiscoverySteps(progress, {
+      status: 'completed',
+      total_topics: 8,
+      stages: {
+        entities: { status: 'completed', completed: 2, total: 2 },
+        semantic: { status: 'completed', completed: 4, total: 4 },
+        topics: { status: 'completed', completed: 8, total: 8 },
+      },
+    });
+
+    expect(steps[0].status).toBe('partial');
+    expect(steps[0].summary).toContain('失败');
+    expect(steps[0].summary).not.toBe('全部完成');
+    expect(steps[1]).toMatchObject({ completed: 4, total: 4, status: 'done' });
+    expect(steps[2]).toMatchObject({ completed: 8, total: 8, status: 'done' });
+  });
+
+  it('keeps the last SSE frame after step.finish until overview calibrates', () => {
+    let progress = applyTopicLabelPartitionEvent(undefined, event({
+      partition: { id: 'chunk-1', total: 2 },
+      status: 'completed',
+    }));
+    progress = applyTopicLabelPartitionEvent(progress, event({
+      partition: { id: 'chunk-2', total: 2 },
       status: 'completed',
     }));
     progress = applyTopicLabelPartitionEvent(progress, {
@@ -169,8 +242,41 @@ describe('topic discovery 3-phase progress', () => {
     });
 
     const steps = topicDiscoverySteps(progress);
-    expect(steps[0].status).toBe('done');
-    expect(steps[1].status).toBe('done');
-    expect(steps[2].status).toBe('done');
+    expect(steps[0]).toMatchObject({ completed: 2, total: 2, status: 'done' });
+    expect(steps[1]).toMatchObject({ completed: 0, total: null, status: 'pending' });
+    expect(steps[2]).toMatchObject({ completed: 0, total: null, status: 'pending' });
+    expect(steps[1].summary).not.toBe('全部完成');
+    expect(steps[2].summary).not.toBe('全部完成');
+  });
+
+  it('calibrates finished rings from overview stages instead of zeroing totals', () => {
+    let progress = applyTopicLabelPartitionEvent(undefined, event({
+      partition: { id: 'chunk-1', total: 2 },
+      status: 'completed',
+    }));
+    progress = applyTopicLabelPartitionEvent(progress, event({
+      partition: { id: 'chunk-2', total: 2 },
+      status: 'completed',
+    }));
+    progress = applyTopicLabelPartitionEvent(progress, {
+      event: 'step.finish',
+      stage: 'dataset.topic_discovery',
+      stepId: 'thread-1:dataset.topic_discovery:1',
+    });
+
+    const steps = topicDiscoverySteps(progress, {
+      status: 'completed',
+      total_topics: 30,
+      stages: {
+        entities: { status: 'completed', completed: 2, total: 2 },
+        semantic: { status: 'completed', completed: 4, total: 4 },
+        topics: { status: 'completed', completed: 30, total: 30 },
+      },
+    });
+
+    expect(steps[0]).toMatchObject({ completed: 2, total: 2, status: 'done' });
+    expect(steps[1]).toMatchObject({ completed: 4, total: 4, status: 'done' });
+    expect(steps[2]).toMatchObject({ completed: 30, total: 30, status: 'done' });
+    expect(steps.every((step) => step.summary === '全部完成')).toBe(true);
   });
 });

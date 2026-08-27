@@ -2437,7 +2437,10 @@ def _partition_count(value: object | None) -> int | None:
 def _topic_execution_stages(status: str, entity_total: int | None, semantic_total: int | None,
                             topic_total: int | None) -> dict[str, dict[str, object]]:
     totals = {'entities': entity_total, 'semantic': semantic_total, 'topics': topic_total}
-    if status in {'completed', 'succeeded'}:
+    # Published topic_manifest is the settle signal. Stage may still be paused
+    # at the continue gate; rings must not stay at 0/N pending.
+    settled = topic_total is not None or status in {'completed', 'succeeded'}
+    if settled:
         return {
             name: {'status': 'completed', 'completed': total or 0, 'total': total}
             for name, total in totals.items()

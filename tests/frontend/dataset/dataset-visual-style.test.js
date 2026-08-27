@@ -11,6 +11,12 @@ const primitives = readFrontendFile(
 const materials = readFrontendFile(
   'src/modules/selfEvolution/components/workbench/dataset/MaterialsStage.tsx',
 );
+const topics = readFrontendFile(
+  'src/modules/selfEvolution/components/workbench/dataset/TopicsStage.tsx',
+);
+const caseDetail = readFrontendFile(
+  'src/modules/selfEvolution/components/workbench/dataset/CaseDetailDrawer.tsx',
+);
 
 describe('dataset overview visual hierarchy', () => {
   it('gives running sub-navigation steps the same breathing cue as live case status', () => {
@@ -38,5 +44,23 @@ describe('dataset overview visual hierarchy', () => {
   it('allows the material document detail to omit its redundant parent document name', () => {
     expect(primitives).toContain('documentName?: string;');
     expect(materials).not.toMatch(/<ChunkCard\s+[\s\S]*?documentName=\{detail\.document\.name\}/);
+  });
+
+  it('uses one restrained drawer language for material, topic, and Case details', () => {
+    expect(styles).toMatch(/\.dataset-drawer-attributes\s*\{[^}]*gap:\s*0;/s);
+    expect(styles).toMatch(/\.dataset-drawer-attribute\s*\{[^}]*border-radius:\s*0;/s);
+    expect(styles).toMatch(/\.dataset-case-roadmap\s*\{[^}]*border-bottom:/s);
+    expect(materials).toContain('保存为待应用修改');
+    expect(topics).toContain('保存为待应用修改');
+  });
+
+  it('centers the case-generation pause notice between the stepper and overview', () => {
+    expect(styles).toMatch(/\.dataset-pause-notice\s*\{[^}]*margin:\s*0 0 12px;/s);
+  });
+
+  it('uses click-to-edit content instead of a separate Case question editor action', () => {
+    expect(caseDetail).not.toContain('编辑问答');
+    expect(caseDetail).not.toContain('EditOutlined');
+    expect(caseDetail).toContain('dataset-inline-editable');
   });
 });

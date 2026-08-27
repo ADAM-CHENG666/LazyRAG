@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Button, Drawer, Input } from "antd";
+import { Alert, Button, Drawer, Input } from "antd";
 import { datasetRoot, describeRequestError, getJson } from "./api";
 import { chunkTags } from "./capabilities";
 import { CHUNK_PAGE_SIZE, PAGE_SIZE, useDatasetList, useDatasetResource } from "./hooks";
@@ -28,7 +28,6 @@ import type {
   TopicDetail,
   TopicRow,
   TopicsOverview,
-  VisualStatus,
 } from "./types";
 
 type Props = {
@@ -36,7 +35,6 @@ type Props = {
   refreshToken: number;
   overviewToken: number;
   labelProgress?: TopicDiscoveryProgress;
-  executionStatus: VisualStatus;
   onOverviewRevision: (tab: "topics", revision: string | null) => void;
   draft?: DatasetDraft;
   onSaveDraft: (draft: DatasetDraft) => boolean;
@@ -55,7 +53,6 @@ export function TopicsStage({
   refreshToken,
   overviewToken,
   labelProgress,
-  executionStatus,
   onOverviewRevision,
   draft,
   onSaveDraft,
@@ -100,8 +97,8 @@ export function TopicsStage({
   const distribution = overview.data?.question_types;
   const hasFilters = Boolean(questionType || chunkBucket);
   const discoverySteps = useMemo(
-    () => topicDiscoverySteps(labelProgress, overview.data, executionStatus),
-    [executionStatus, labelProgress, overview.data],
+    () => topicDiscoverySteps(labelProgress, overview.data),
+    [labelProgress, overview.data],
   );
   const clearFilters = () => {
     setQuestionType(undefined);
@@ -289,6 +286,7 @@ function TopicDrawer({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>();
   const [name, setName] = useState("");
+  const [editingName, setEditingName] = useState(false);
 
   // Chunk tags name their split rule and layout type from the same capability
   // catalog the material stage uses, so a type never reads differently here.
@@ -340,6 +338,7 @@ function TopicDrawer({
   useEffect(() => {
     if (!row) return;
     setName(nameDrafts?.[row.topic_id] || row.name);
+    setEditingName(false);
   }, [nameDrafts, row]);
 
   // Renames apply against the topic collection version, which the list owns.
@@ -395,14 +394,22 @@ function TopicDrawer({
         </div>
       ) : (
         <>
-          <div className="dataset-form-group">
-            <label htmlFor="dataset-topic-name">主题名称</label>
-            <Input
-              id="dataset-topic-name"
-              value={name}
-              maxLength={120}
-              onChange={(event) => setName(event.target.value)}
-            />
+          <div className="dataset-topic-name-editor">
+            <label>主题名称</label>
+            {editingName ? (
+              <Input
+                autoFocus
+                id="dataset-topic-name"
+                value={name}
+                maxLength={120}
+                onBlur={() => setEditingName(false)}
+                onChange={(event) => setName(event.target.value)}
+              />
+            ) : (
+              <button type="button" className="dataset-inline-title" onClick={() => setEditingName(true)}>
+                {name || "未命名主题"}
+              </button>
+            )}
           </div>
           <DrawerAttributes
             items={[

@@ -467,6 +467,17 @@ class _FakeKnowledgeBaseClient:
             for index in range(1, limit + 1)
         ]
 
+    def scan_valid_chunks(self, kb_id, doc_ids, groups, allowed_types, max_scan_chunks, **kwargs):
+        stats = self.count_valid_chunks(kb_id, doc_ids, groups, allowed_types, max_scan_chunks)
+        nodes = {}
+        for doc_id in doc_ids:
+            for group in groups:
+                capacity = stats['capacities'][group][doc_id]
+                nodes[doc_id, group] = self.fetch_valid_chunks(
+                    kb_id, doc_id, group, allowed_types, capacity, order_by='stable_chunk_id_hash',
+                )
+        return {**stats, 'nodes': nodes}
+
 
 class _FakeImportKnowledgeBaseClient:
     def list_documents(self, kb_id):
