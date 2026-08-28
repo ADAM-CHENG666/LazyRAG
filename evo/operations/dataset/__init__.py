@@ -16,6 +16,8 @@ from .select_docs import SelectDocsParams, select_docs
 from .topic_discovery import (
     topic_discovery_embedding_cluster,
     topic_discovery_embedding_label,
+    topic_discovery_embedding_label_cluster,
+    topic_discovery_embedding_label_manifest,
     topic_discovery_entity_build_graph,
     topic_discovery_entity_cluster,
     topic_discovery_manifest,
@@ -54,6 +56,8 @@ __all__ = [
     'select_docs',
     'topic_discovery_embedding_cluster',
     'topic_discovery_embedding_label',
+    'topic_discovery_embedding_label_cluster',
+    'topic_discovery_embedding_label_manifest',
     'topic_discovery_entity_build_graph',
     'topic_discovery_entity_cluster',
     'topic_discovery_manifest',

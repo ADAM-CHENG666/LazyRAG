@@ -18,7 +18,10 @@ class StrictModel(BaseModel):
 
 class ThreadInputs(StrictModel):
     kb_id: list[str] = Field(default_factory=list)
+    knowledge_base_names: dict[str, str] = Field(default_factory=dict)
     csv_data: list[dict[str, str]] = Field(default_factory=list)
+    imported_cases: list[dict[str, Any]] = Field(default_factory=list)
+    supplement_existing_eval_set: bool = False
     router_chat_url: str = Field(min_length=1)
     router_admin_url: str = Field(min_length=1)
     algorithm_id: str = Field(min_length=1)
@@ -28,6 +31,11 @@ class ThreadInputs(StrictModel):
     @model_validator(mode='after')
     def validate_sources(self) -> Self:
         self.kb_id = [item.strip() for item in self.kb_id if item.strip()]
+        self.knowledge_base_names = {
+            key.strip(): value.strip()
+            for key, value in self.knowledge_base_names.items()
+            if isinstance(key, str) and isinstance(value, str) and key.strip() and value.strip()
+        }
         rows: list[dict[str, str]] = []
         for row in self.csv_data:
             if len(row) != 1:
@@ -116,6 +124,49 @@ class ArtifactUpdateBody(StrictModel):
         targets = [(item.artifact_id, item.partition_key) for item in self.updates]
         if len(set(targets)) != len(targets):
             raise ValueError('updates cannot contain the same artifact twice')
+        return self
+
+
+class DatasetApplyBody(StrictModel):
+    request_id: str = Field(min_length=1, max_length=160)
+    expected_revision: str = Field(min_length=1)
+    changes: dict[str, Any]
+
+
+class TopicApplyBody(StrictModel):
+    request_id: str = Field(min_length=1, max_length=160)
+    expected_revision: str = Field(min_length=1)
+    changes: list[dict[str, Any]] = Field(min_length=1)
+
+
+class GenerationPlanApplyBody(StrictModel):
+    request_id: str = Field(min_length=1, max_length=160)
+    expected_revision: str = Field(min_length=1)
+    distribution: dict[str, dict[str, int]]
+
+    @model_validator(mode='after')
+    def validate_distribution(self) -> Self:
+        expected_types = {'precision', 'reasoning'}
+        expected_difficulties = {'easy', 'medium', 'hard'}
+        if set(self.distribution) != expected_types:
+            raise ValueError('distribution must contain precision and reasoning')
+        for question_type, counts in self.distribution.items():
+            if set(counts) != expected_difficulties:
+                raise ValueError(f'distribution.{question_type} must contain easy, medium and hard')
+            if any(isinstance(count, bool) or count < 0 for count in counts.values()):
+                raise ValueError('distribution values must be non-negative integers')
+        return self
+
+
+class CasePatchBody(StrictModel):
+    request_id: str = Field(min_length=1, max_length=160)
+    expected_revision: str = Field(min_length=1)
+    changes: dict[str, Any]
+
+    @model_validator(mode='after')
+    def validate_changes(self) -> Self:
+        if not self.changes or set(self.changes) - {'plan', 'generate', 'grading'}:
+            raise ValueError('changes must contain plan, generate or grading')
         return self
 
 
@@ -222,8 +273,8 @@ class AbStrategyBody(StrictModel):
 
 __all__ = [
     'AbStrategyBody', 'AlgorithmActionBody', 'AlgorithmOwner', 'ArtifactUpdateBody', 'ArtifactValue',
-    'AutomaticUpdateBody', 'CaseRerunBody', 'CaseSeed', 'CaseStructureBody', 'CommandRequest',
-    'ConfigurationUpdateBody', 'ControlRequest', 'ExternalResultBody', 'MessageBody', 'RegisterAlgorithmBody',
+    'AutomaticUpdateBody', 'CasePatchBody', 'CaseRerunBody', 'CaseSeed', 'CaseStructureBody', 'CommandRequest',
+    'ConfigurationUpdateBody', 'ControlRequest', 'DatasetApplyBody', 'ExternalResultBody', 'GenerationPlanApplyBody', 'MessageBody', 'RegisterAlgorithmBody',
     'RetryRequest',
-    'ServiceError', 'StrictModel', 'ThreadCreate', 'ThreadInputs',
+    'ServiceError', 'StrictModel', 'ThreadCreate', 'ThreadInputs', 'TopicApplyBody',
 ]

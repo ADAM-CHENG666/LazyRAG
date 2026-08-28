@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping
 from types import SimpleNamespace
 from typing import Any
@@ -37,6 +38,8 @@ from .source_config import normalize_source_config
 from .topic_discovery import (
     topic_discovery_embedding_cluster,
     topic_discovery_embedding_label,
+    topic_discovery_embedding_label_cluster,
+    topic_discovery_embedding_label_manifest,
     topic_discovery_entity_build_graph,
     topic_discovery_entity_cluster,
     topic_discovery_manifest,
@@ -59,6 +62,7 @@ async def import_cases_operation(ctx: OperationContext, source_config: object) -
     inputs={
         'source_config': one(A.CORPUS_SOURCE_CONFIG),
         'import_manifest': one(A.DATASET_IMPORT_CASES_MANIFEST),
+        'select_docs_params': one(A.DATASET_SELECT_DOCS_PARAMS),
     },
     outputs={'selected_docs': scalar(A.DATASET_SELECTED_DOCS)},
 )
@@ -66,14 +70,13 @@ async def select_docs_operation(
     ctx: OperationContext,
     source_config: object,
     import_manifest: object,
+    select_docs_params: object,
 ) -> OperationResult:
     config = normalize_source_config(source_config)
     selected = select_docs(ctx, {
         'source_config': config,
         'import_cases_manifest': _mapping(import_manifest, 'import_manifest'),
-        'select_docs_params': {
-            'knowledge_bases': [{'kb_id': kb_id, 'included': True} for kb_id in config['kb_ids']],
-        },
+        'select_docs_params': _mapping(select_docs_params, 'select_docs_params'),
     })['selected_docs']
     return await _result(ctx, 'dataset.documents_selected', {'selected_docs': selected})
 
@@ -83,6 +86,7 @@ async def select_docs_operation(
     inputs={
         'selected_docs': one(A.DATASET_SELECTED_DOCS),
         'import_manifest': one(A.DATASET_IMPORT_CASES_MANIFEST),
+        'build_chunks_params': one(A.DATASET_BUILD_CHUNKS_PARAMS),
     },
     outputs={
         'candidates': scalar(A.DATASET_BUILD_CHUNK_CANDIDATES),
@@ -94,19 +98,23 @@ async def build_chunk_candidates_operation(
     ctx: OperationContext,
     selected_docs: object,
     import_manifest: object,
+    build_chunks_params: object,
 ) -> OperationResult:
     candidates = build_chunk_candidates(ctx, {
         'selected_docs': _mapping(selected_docs, 'selected_docs'),
         'import_cases_manifest': _mapping(import_manifest, 'import_manifest'),
-        'build_chunks_params': {},
+        'build_chunks_params': _mapping(build_chunks_params, 'build_chunks_params'),
     })['build_chunk_candidates']
-    target = _candidate_limit(candidates)
-    partition_keys = tuple(f'chunk_{index:04d}' for index in range(1, target + 1))
+    partition_keys = tuple(
+        str(chunk['chunk_id'])
+        for chunk in candidates.get('chunks', ())
+        if isinstance(chunk, Mapping) and chunk.get('selected') is True
+    )
     return await _result(ctx, 'dataset.chunk_candidates_built', {
         'candidates': candidates,
         'partitions': PartitionSet(partition_keys),
         'requests': {key: {'partition_key': key} for key in partition_keys},
-    }, total=target)
+    }, total=len(partition_keys))
 
 
 @operation(
@@ -116,7 +124,7 @@ async def build_chunk_candidates_operation(
         'candidates': one(A.DATASET_BUILD_CHUNK_CANDIDATES),
     },
     outputs={'chunk': partitioned(A.DATASET_CHUNK)},
-    max_concurrency=4,
+    max_concurrency=10,
 )
 async def build_chunk_operation(
     ctx: OperationContext,
@@ -163,16 +171,19 @@ async def build_chunks_manifest_operation(
         'chunk': each(A.DATASET_CHUNK, over=A.DATASET_CHUNK_REQUESTS),
         'chunks_manifest': one(A.DATASET_BUILD_CHUNKS_MANIFEST),
         'run_config': one(A.RUN_CONFIG),
+        'material_approval': one(A.APPROVAL_DATASET_MATERIAL_PREPARATION),
     },
     outputs={'entity': partitioned(A.DATASET_CHUNK_ENTITY)},
-    max_concurrency=4,
+    max_concurrency=10,
 )
 async def extract_chunk_entities_operation(
     ctx: OperationContext,
     chunk: object,
     chunks_manifest: object,
     run_config: object,
+    material_approval: object,
 ) -> OperationResult:
+    del material_approval
     _mapping(chunks_manifest, 'chunks_manifest')
     entity = chunk_entities_extract(ctx, {
         'chunk': _mapping(chunk, 'chunk'),
@@ -267,48 +278,83 @@ async def cluster_entities_operation(ctx: OperationContext, graph: object) -> Op
     inputs={
         'chunks': all_items(A.DATASET_CHUNK, over=A.DATASET_CHUNK_REQUESTS),
         'chunks_manifest': one(A.DATASET_BUILD_CHUNKS_MANIFEST),
+        'material_approval': one(A.APPROVAL_DATASET_MATERIAL_PREPARATION),
     },
-    outputs={'candidates': scalar(A.DATASET_EMBEDDING_CLUSTER_CANDIDATES)},
+    outputs={
+        'candidates': scalar(A.DATASET_EMBEDDING_CLUSTER_CANDIDATES),
+        'partitions': scalar(A.DATASET_EMBEDDING_LABEL_REQUESTS),
+        'requests': partitioned(A.DATASET_EMBEDDING_LABEL_REQUEST, over=A.DATASET_EMBEDDING_LABEL_REQUESTS),
+    },
 )
 async def cluster_embeddings_operation(
     ctx: OperationContext,
     chunks: object,
     chunks_manifest: object,
+    material_approval: object,
 ) -> OperationResult:
+    del material_approval
     values = _chunk_values_for_manifest(chunks, _mapping(chunks_manifest, 'chunks_manifest'))
-    candidates = topic_discovery_embedding_cluster(ctx, {
+    output = topic_discovery_embedding_cluster(ctx, {
         'chunk': values,
         'topic_discovery_embedding_cluster_params': {},
-    })['embedding_cluster_candidates']
-    return await _result(ctx, 'dataset.embedding_candidates_built', {'candidates': candidates})
+    })
+    partition_ids = tuple(output['embedding_label_requests'])
+    return await _result(ctx, 'dataset.embedding_candidates_built', {
+        'candidates': output['embedding_cluster_candidates'],
+        'partitions': PartitionSet(partition_ids),
+        'requests': output['embedding_label_request'],
+    }, total=len(partition_ids))
 
 
 @operation(
-    op_id='dataset.label_embedding_clusters',
+    op_id='dataset.label_embedding_cluster',
+    inputs={
+        'request': each(A.DATASET_EMBEDDING_LABEL_REQUEST, over=A.DATASET_EMBEDDING_LABEL_REQUESTS),
+        'run_config': one(A.RUN_CONFIG),
+    },
+    outputs={'cluster': partitioned(A.DATASET_EMBEDDING_CLUSTER)},
+    max_concurrency=10,
+)
+async def label_embedding_cluster_operation(
+    ctx: OperationContext,
+    request: object,
+    run_config: object,
+) -> OperationResult:
+    cluster = topic_discovery_embedding_label_cluster(ctx, {
+        'request': _mapping(request, 'request'),
+        'topic_discovery_embedding_label_params': {},
+    }, llm_complete=_llm_complete(run_config))['embedding_cluster']
+    return await _result(
+        ctx,
+        'dataset.embedding_cluster_labeled',
+        {'cluster': cluster},
+        case_id=ctx.partition_key,
+    )
+
+
+@operation(
+    op_id='dataset.embedding_label_manifest',
     inputs={
         'candidates': one(A.DATASET_EMBEDDING_CLUSTER_CANDIDATES),
-        'chunks': all_items(A.DATASET_CHUNK, over=A.DATASET_CHUNK_REQUESTS),
-        'chunks_manifest': one(A.DATASET_BUILD_CHUNKS_MANIFEST),
-        'run_config': one(A.RUN_CONFIG),
+        'requests': one(A.DATASET_EMBEDDING_LABEL_REQUESTS),
+        'clusters': all_items(A.DATASET_EMBEDDING_CLUSTER, over=A.DATASET_EMBEDDING_LABEL_REQUESTS),
     },
     outputs={'clusters': scalar(A.DATASET_EMBEDDING_CLUSTERS)},
 )
-async def label_embedding_clusters_operation(
+async def embedding_label_manifest_operation(
     ctx: OperationContext,
     candidates: object,
-    chunks: object,
-    chunks_manifest: object,
-    run_config: object,
+    requests: object,
+    clusters: object,
 ) -> OperationResult:
-    values = _chunk_values_for_manifest(chunks, _mapping(chunks_manifest, 'chunks_manifest'))
-    candidate_value = _mapping(candidates, 'candidates')
-    complete = _llm_complete(run_config) if candidate_value.get('clusters') else None
-    clusters = topic_discovery_embedding_label(ctx, {
-        'embedding_cluster_candidates': candidate_value,
-        'chunk': values,
+    values = _successful_values(clusters)
+    manifest = topic_discovery_embedding_label_manifest(ctx, {
+        'embedding_cluster_candidates': _mapping(candidates, 'candidates'),
+        'embedding_label_requests': _partition_set_ids(requests),
+        'embedding_cluster': values,
         'topic_discovery_embedding_label_params': {},
-    }, llm_complete=complete)['embedding_clusters']
-    return await _result(ctx, 'dataset.embedding_clusters_labeled', {'clusters': clusters})
+    })['embedding_clusters']
+    return await _result(ctx, 'dataset.embedding_clusters_labeled', {'clusters': manifest}, total=len(values))
 
 
 @operation(
@@ -340,6 +386,7 @@ async def topic_manifest_operation(
         'chunks': all_items(A.DATASET_CHUNK, over=A.DATASET_CHUNK_REQUESTS),
         'chunks_manifest': one(A.DATASET_BUILD_CHUNKS_MANIFEST),
         'plan_params': one(A.DATASET_QAPLAN_PLAN_PARAMS),
+        'topic_approval': one(A.APPROVAL_DATASET_TOPIC_DISCOVERY),
     },
     outputs={
         'plan': scalar(A.DATASET_QAPLAN_PLAN),
@@ -355,7 +402,9 @@ async def qaplan_plan_operation(
     chunks: object,
     chunks_manifest: object,
     plan_params: object,
+    topic_approval: object,
 ) -> OperationResult:
+    del topic_approval
     imported = _mapping(import_manifest, 'import_manifest')
     case_ids = _case_ids(imported)
     values = _chunk_values_for_manifest(chunks, _mapping(chunks_manifest, 'chunks_manifest'))
@@ -384,7 +433,7 @@ async def qaplan_plan_operation(
         'chunks_manifest': one(A.DATASET_BUILD_CHUNKS_MANIFEST),
     },
     outputs={'specification': partitioned(A.DATASET_QAPLAN_SPEC)},
-    max_concurrency=4,
+    max_concurrency=10,
 )
 async def qaplan_spec_operation(
     ctx: OperationContext,
@@ -437,7 +486,7 @@ async def qaplan_manifest_operation(
         'run_config': one(A.RUN_CONFIG),
     },
     outputs={'draft': partitioned(A.DATASET_CASE_DRAFT)},
-    max_concurrency=4,
+    max_concurrency=10,
 )
 async def generate_case_operation(
     ctx: OperationContext,
@@ -483,7 +532,7 @@ async def generate_manifest_operation(
         'run_config': one(A.RUN_CONFIG),
     },
     outputs={'enhancement': partitioned(A.DATASET_CASE_ENHANCEMENT)},
-    max_concurrency=4,
+    max_concurrency=10,
 )
 async def enhance_case_operation(
     ctx: OperationContext,
@@ -499,10 +548,21 @@ async def enhance_case_operation(
 
 @operation(
     op_id='dataset.enhance_manifest',
-    inputs={'enhancements': all_items(A.DATASET_CASE_ENHANCEMENT, over=A.EVAL_CASE_REQUESTS)},
+    inputs={
+        'enhancements': all_items(A.DATASET_CASE_ENHANCEMENT, over=A.EVAL_CASE_REQUESTS),
+        'qaplan_manifest': one(A.DATASET_QAPLAN_MANIFEST),
+        'generate_manifest': one(A.DATASET_GENERATE_MANIFEST),
+    },
     outputs={'manifest': scalar(A.DATASET_ENHANCE_MANIFEST)},
 )
-async def enhance_manifest_operation(ctx: OperationContext, enhancements: object) -> OperationResult:
+async def enhance_manifest_operation(
+    ctx: OperationContext,
+    enhancements: object,
+    qaplan_manifest: object,
+    generate_manifest: object,
+) -> OperationResult:
+    _mapping(qaplan_manifest, 'qaplan_manifest')
+    _mapping(generate_manifest, 'generate_manifest')
     values = _successful_values(enhancements)
     failures = _failures(enhancements)
     if failures:
@@ -519,7 +579,7 @@ async def enhance_manifest_operation(ctx: OperationContext, enhancements: object
         'enhancement': keyed(A.DATASET_CASE_ENHANCEMENT),
     },
     outputs={'case': partitioned(A.EVAL_CASE)},
-    max_concurrency=4,
+    max_concurrency=10,
 )
 async def finalize_case_operation(
     ctx: OperationContext,
@@ -579,7 +639,8 @@ _DATASET_OPERATIONS: tuple[Operation, ...] = (
     build_entity_graph_operation,
     cluster_entities_operation,
     cluster_embeddings_operation,
-    label_embedding_clusters_operation,
+    label_embedding_cluster_operation,
+    embedding_label_manifest_operation,
     topic_manifest_operation,
     qaplan_plan_operation,
     qaplan_spec_operation,
@@ -648,15 +709,6 @@ def _unavailable_chunk_payload(partition: str, group: str) -> dict[str, object]:
     }
 
 
-def _candidate_limit(value: object) -> int:
-    candidates = _mapping(value, 'candidates')
-    summary = _mapping(candidates.get('summary'), 'candidates.summary')
-    limit = summary.get('selected_count', 0)
-    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
-        raise ValueError('candidate_limit must be non-negative')
-    return limit
-
-
 def _successful_entries(value: object) -> tuple[tuple[str, object], ...]:
     if isinstance(value, AggregateValue):
         return tuple(sorted(value.entries))
@@ -667,6 +719,12 @@ def _successful_entries(value: object) -> tuple[tuple[str, object], ...]:
 
 def _successful_values(value: object) -> tuple[Mapping[str, Any], ...]:
     return tuple(_mapping(item, 'partition value') for _, item in _successful_entries(value))
+
+
+def _partition_set_ids(value: object) -> tuple[str, ...]:
+    if not isinstance(value, PartitionSet):
+        raise ValueError('partition set input must be a PartitionSet')
+    return value.keys
 
 
 def _failures(value: object) -> list[dict[str, object]]:
@@ -748,11 +806,26 @@ def _entities_with_failures(value: object, manifest: Mapping[str, Any]) -> tuple
     return tuple(output)
 
 
+def _natural_case_id_key(case_id: str) -> tuple[object, ...]:
+    return tuple(int(part) if part.isdigit() else part.casefold() for part in re.split(r'(\d+)', case_id) if part)
+
+
 def _case_ids(import_manifest: Mapping[str, Any]) -> tuple[str, ...]:
     stats = _mapping(import_manifest.get('stats'), 'import_manifest.stats')
     allocation = _mapping(stats.get('case_allocation'), 'import_manifest.stats.case_allocation')
     assignments = _mapping(allocation.get('assignments'), 'case_allocation.assignments')
-    case_ids = tuple(assignments)
+    imported: list[str] = []
+    generated: list[str] = []
+    for case_id, raw in assignments.items():
+        assignment = _mapping(raw, f'case_allocation.assignments.{case_id}')
+        mode = assignment.get('mode')
+        if mode == 'imported':
+            imported.append(str(case_id))
+        elif mode == 'generated':
+            generated.append(str(case_id))
+        else:
+            raise ValueError(f'case assignment mode is invalid: {case_id}')
+    case_ids = tuple(sorted(imported, key=_natural_case_id_key) + sorted(generated, key=_natural_case_id_key))
     if not case_ids or len(set(case_ids)) != len(case_ids):
         raise ValueError('case assignments must contain unique case ids')
     return case_ids
@@ -795,25 +868,30 @@ def _finalize_case(
 ) -> dict[str, Any]:
     if str(draft.get('id') or '') != case_id:
         raise ValueError('draft id must match case partition')
+    source_preparation = dict(_mapping(draft.get('source_preparation'), 'draft.source_preparation'))
+    mode = str(source_preparation.get('dataset_mode') or 'generated')
     raw_context = draft.get('reference_context')
-    if not isinstance(raw_context, list) or not raw_context:
+    if mode == 'imported' and raw_context in (None, ''):
+        raw_context = []
+    if not isinstance(raw_context, list) or (not raw_context and mode != 'imported'):
         raise ValueError('draft.reference_context must be a non-empty list')
-    context = [_mapping(item, 'draft.reference_context[]') for item in raw_context]
-    context_texts = [str(item.get('text') or '').strip() for item in context]
-    if any(not text for text in context_texts):
+    context = [dict(item) if isinstance(item, Mapping) else str(item).strip() for item in raw_context]
+    context_texts = [str(item.get('text') or '').strip() if isinstance(item, Mapping) else item for item in context]
+    if mode != 'imported' and any(not text for text in context_texts):
         raise ValueError('draft.reference_context text must be non-empty')
 
     key_points = enhancement.get('key_points')
-    if not isinstance(key_points, list) or not key_points:
+    if not isinstance(key_points, list) or (not key_points and mode != 'imported'):
         raise ValueError('enhancement.key_points must be a non-empty list')
-    reasoning_steps = [str(_mapping(item, 'key_points[]').get('statement') or '').strip() for item in key_points]
-    if any(not statement for statement in reasoning_steps):
+    reasoning_steps = [
+        str(item.get('statement') or '').strip() if isinstance(item, Mapping) else str(item).strip()
+        for item in key_points
+    ]
+    if mode != 'imported' and any(not statement for statement in reasoning_steps):
         raise ValueError('enhancement key point statements must be non-empty')
 
-    source_preparation = dict(_mapping(draft.get('source_preparation'), 'draft.source_preparation'))
-    source_preparation['context_reference'] = [dict(item) for item in context]
+    source_preparation['context_reference'] = [dict(item) if isinstance(item, Mapping) else item for item in context]
     source_preparation['dataset_enhancement'] = dict(enhancement)
-    mode = str(source_preparation.get('dataset_mode') or 'generated')
     case_source = dict(_mapping(source_preparation.get('case_source', {}), 'case_source'))
     case_source.update({
         'final_id': case_id,
@@ -823,35 +901,32 @@ def _finalize_case(
     source_preparation['case_source'] = case_source
 
     reference_doc_ids = [str(value).strip() for value in draft.get('reference_doc_ids') or []]
-    if not reference_doc_ids or any(not value for value in reference_doc_ids):
+    if (not reference_doc_ids and mode != 'imported') or any(not value for value in reference_doc_ids):
         raise ValueError('draft.reference_doc_ids must contain non-empty values')
-    question_type = _current_question_type(str(draft.get('question_type') or ''), reference_doc_ids)
+    question_type = str(draft.get('question_type') or '').strip()
+    if question_type not in {'precision', 'reasoning'}:
+        raise ValueError(f'unsupported dataset question type: {question_type}')
     difficulty = str(draft.get('difficulty') or '').strip()
     return normalize_eval_case({
         'id': case_id,
         'question': draft.get('question'),
         'answer': draft.get('answer'),
+        'ground_truth': draft.get('answer'),
         'question_type': question_type,
         'difficulty': difficulty,
         'grading_guidance': draft.get('grading_guidance'),
+        'key_points': [dict(item) if isinstance(item, Mapping) else item for item in key_points],
+        'forbidden_claims': list(enhancement.get('forbidden_claims') or []),
+        'generate_reason': draft.get('generate_reason'),
+        'is_deleted': bool(draft.get('is_deleted', False)),
         'reasoning_steps': reasoning_steps,
         'difficulty_rationale': f'{difficulty} case using {len(context)} reference chunks',
         'type_rationale': f'adapted from dataset question type {draft.get("question_type")}',
         'reference_chunk_ids': list(draft.get('reference_chunk_ids') or []),
-        'reference_context': context_texts,
-        'reference_doc': context_texts,
+        'reference_context': context if mode == 'imported' else context_texts,
+        'reference_doc': list(draft.get('reference_doc') or []) if mode == 'imported' else context_texts,
         'reference_doc_ids': reference_doc_ids,
         'source_message_id': '',
         'source_preparation': source_preparation,
     }, default_id=case_id)
-
-
-def _current_question_type(question_type: str, reference_doc_ids: list[str]) -> str:
-    if question_type == 'precision':
-        return 'single_hop'
-    if question_type == 'reasoning':
-        return 'multi_doc_multi_hop' if len(set(reference_doc_ids)) > 1 else 'single_doc_multi_hop'
-    raise ValueError(f'unsupported dataset question type: {question_type}')
-
-
 __all__ = ['dataset_operations']

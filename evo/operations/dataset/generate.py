@@ -41,11 +41,11 @@ def generate(
         if _text(case.get('id'), 'imported_case.id') != case_id:
             raise ValueError('imported_case.id must match case output partition')
         _choice(case.get('question_type'), ('precision', 'reasoning'), 'imported_case.question_type')
-        _choice(case.get('difficulty'), ('easy', 'medium', 'hard'), 'imported_case.difficulty')
+        _optional_choice(case.get('difficulty'), ('easy', 'medium', 'hard'), 'imported_case.difficulty')
         _text(case.get('question'), 'imported_case.question')
         _text(case.get('answer'), 'imported_case.answer')
         _text(case.get('grading_guidance'), 'imported_case.grading_guidance')
-        _string_list(case.get('reference_chunk_ids'), 'imported_case.reference_chunk_ids')
+        _optional_string_list(case.get('reference_chunk_ids'), 'imported_case.reference_chunk_ids')
         return {'case': dict(case)}
 
     question_type = _choice(preparation.get('question_type'), ('precision', 'reasoning'), 'question_type')
@@ -187,6 +187,12 @@ def _string_list(value: object, name: str) -> list[str]:
     return [_text(item, name) for item in value]
 
 
+def _optional_string_list(value: object, name: str) -> list[str]:
+    if not isinstance(value, list):
+        raise ValueError(f'{name} must be a list')
+    return [_text(item, name) for item in value]
+
+
 def _text(value: object, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f'{name} must be a non-empty string')
@@ -198,6 +204,12 @@ def _choice(value: object, choices: tuple[str, ...], name: str) -> str:
     if item not in choices:
         raise ValueError(f'{name} is invalid')
     return item
+
+
+def _optional_choice(value: object, choices: tuple[str, ...], name: str) -> str:
+    if value in (None, ''):
+        return ''
+    return _choice(value, choices, name)
 
 
 def _non_negative_int(value: object, name: str) -> int:
