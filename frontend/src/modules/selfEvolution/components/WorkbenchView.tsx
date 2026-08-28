@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { Typography } from "antd";
 import { useTranslation } from "react-i18next";
 import { CloseOutlined, DownOutlined, EyeOutlined, FileTextOutlined } from "@ant-design/icons";
@@ -11,7 +11,6 @@ import {
 import { FinalResultCard } from "./workbench/FinalResultCard";
 import { CutoverDecisionCard } from "./workbench/CutoverDecisionCard";
 import { ProcessActivitySection } from "./workbench/ProcessActivitySection";
-import { DatasetWorkspace } from "./workbench/dataset/DatasetWorkspace";
 import { DatasetStageActionButton, DatasetStageActionProvider } from "./workbench/dataset/stageAction";
 import { EvalStreamingTable } from "./workbench/EvalStreamingTable";
 import { AbtestStreamingTable } from "./workbench/AbtestStreamingTable";
@@ -28,6 +27,11 @@ export type {
 } from "./workbench/types";
 
 const { Paragraph, Text, Title } = Typography;
+const DatasetWorkspace = lazy(() =>
+  import("./workbench/dataset/DatasetWorkspace").then(({ DatasetWorkspace: component }) => ({
+    default: component,
+  })),
+);
 
 export function SelfEvolutionWorkbenchView({
   processDashboard,
@@ -407,14 +411,16 @@ export function SelfEvolutionWorkbenchView({
                 )}
 
                 {shouldShowStageDetail && displayStage === "dataset" ? (
-                  <DatasetWorkspace
-                    threadId={routeThreadId}
-                    stageStatuses={datasetStageStatuses}
-                    suggestedTab={datasetSuggestedTab}
-                    onStepsSnapshot={onDatasetStepsSnapshot}
-                    onWriteApplied={onDatasetWriteApplied}
-                    executionResumeToken={datasetExecutionResumeToken}
-                  />
+                  <Suspense fallback={<div className="dataset-skeleton-lines"><span /><span /><span /></div>}>
+                    <DatasetWorkspace
+                      threadId={routeThreadId}
+                      stageStatuses={datasetStageStatuses}
+                      suggestedTab={datasetSuggestedTab}
+                      onStepsSnapshot={onDatasetStepsSnapshot}
+                      onWriteApplied={onDatasetWriteApplied}
+                      executionResumeToken={datasetExecutionResumeToken}
+                    />
+                  </Suspense>
                 ) : shouldShowStageDetail && displayStage === "eval" ? (
                   <EvalStreamingTable
                     rows={streamingEvalRows}

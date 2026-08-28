@@ -4,7 +4,7 @@ import { DeleteOutlined, ReloadOutlined } from "@ant-design/icons";
 import { datasetRoot, describeRequestError, getJson, newRequestId, patchJson, postJson, threadRoot } from "./api";
 import { caseRetryRequest, getCaseRetryAction } from "./caseRetry";
 import type { CaseGenerationProgress } from "./caseGenerationProgress";
-import { PAGE_SIZE } from "./hooks";
+import { PAGE_SIZE, useDatasetResource } from "./hooks";
 import {
   Chip,
   ChunkText,
@@ -68,71 +68,56 @@ export function CaseDetailDrawer({
   onClose: () => void;
   onSaved: () => void;
 }) {
-  const [detail, setDetail] = useState<CaseDetail>();
-  const [topicOptions, setTopicOptions] = useState<CaseTopicOption[]>([]);
-  const [topicOptionsLoading, setTopicOptionsLoading] = useState(false);
-  const [topicOptionsError, setTopicOptionsError] = useState<string>();
   const [stage, setStage] = useState<CaseStageKey>("generate");
   const [draft, setDraft] = useState<Draft>();
   const [saving, setSaving] = useState(false);
   const [retrying, setRetrying] = useState(false);
-  const [error, setError] = useState<string>();
   const [evidenceEditorIndex, setEvidenceEditorIndex] = useState<number>();
 
   const caseId = row?.case_id;
   const root = datasetRoot(threadId);
 
-  const load = useCallback(async () => {
-    if (!caseId) return;
-    setError(undefined);
-    try {
-      const detailUrl = `${root}/cases/${encodeURIComponent(caseId)}`;
-      const value = await getJson<CaseDetail>(detailUrl);
-      setDetail(value);
-      setDraft(toDraft(value));
-      setStage(focusStage(value));
-      setEvidenceEditorIndex(undefined);
-      setTopicOptions([]);
-      setTopicOptionsError(undefined);
-    } catch (caught) {
-      setError(describeRequestError(caught, "读取用例详情失败"));
-    }
-  }, [caseId, root]);
+  const fetchDetail = useCallback(
+    () => getJson<CaseDetail>(`${root}/cases/${encodeURIComponent(caseId || "")}`),
+    [caseId, root],
+  );
+  const detailResource = useDatasetResource(
+    caseId ? fetchDetail : undefined,
+    0,
+    "读取用例详情失败",
+    true,
+  );
+  const detail = detailResource.data?.case_id === caseId ? detailResource.data : undefined;
 
   useEffect(() => {
     if (!caseId) {
-      setDetail(undefined);
       setDraft(undefined);
-      setTopicOptions([]);
-      setTopicOptionsLoading(false);
-      setTopicOptionsError(undefined);
       return;
     }
-    void load();
-  }, [caseId, load]);
+    if (!detail) return;
+    setDraft(toDraft(detail));
+    setStage(focusStage(detail));
+    setEvidenceEditorIndex(undefined);
+  }, [caseId, detail]);
 
-  const loadTopicOptions = useCallback(async () => {
-    if (!caseId) return;
-    setTopicOptionsLoading(true);
-    setTopicOptionsError(undefined);
-    try {
-      const value = await getJson<PagedResponse<CaseTopicOption>>(
-        `${root}/cases/${encodeURIComponent(caseId)}/topic-options`,
-        { page_size: PAGE_SIZE },
-      );
-      setTopicOptions(value.items);
-    } catch (caught) {
-      setTopicOptions([]);
-      setTopicOptionsError(describeRequestError(caught, "读取可替换主题失败"));
-    } finally {
-      setTopicOptionsLoading(false);
-    }
-  }, [caseId, root]);
-
-  useEffect(() => {
+  const loadTopicOptions = useCallback(
+    () => getJson<PagedResponse<CaseTopicOption>>(
+      `${root}/cases/${encodeURIComponent(caseId || "")}/topic-options`,
+      { page_size: PAGE_SIZE },
+    ),
+    [caseId, root],
+  );
+  const canLoadTopicOptions = (() => {
     if (stage !== "plan" || !detail || detail.source === "imported") return;
-    void loadTopicOptions();
-  }, [detail, loadTopicOptions, stage]);
+    return true;
+  })();
+  const topicOptionsResource = useDatasetResource(
+    canLoadTopicOptions ? loadTopicOptions : undefined,
+    0,
+    "读取可替换主题失败",
+    true,
+  );
+  const topicOptions = topicOptionsResource.data?.items || [];
 
   const imported = detail?.source === "imported";
   const initial = useMemo(() => (detail ? toDraft(detail) : undefined), [detail]);
@@ -243,7 +228,7 @@ export function CaseDetailDrawer({
           });
           message.success("用例修改已保存");
           onSaved();
-          await load();
+          detailResource.reload();
         } catch (caught) {
           message.error(describeRequestError(caught, "保存用例失败"));
           throw caught;
@@ -265,7 +250,7 @@ export function CaseDetailDrawer({
       });
       message.success("已提交当前用例的重试生成");
       onSaved();
-      await load();
+      detailResource.reload();
     } catch (caught) {
       message.error(describeRequestError(caught, "重试生成失败"));
     } finally {
@@ -305,14 +290,14 @@ export function CaseDetailDrawer({
         </div>
       }
     >
-      {error ? (
+      {detailResource.error ? (
         <Alert
           type="error"
           showIcon
           message="用例详情不可用"
-          description={error}
+          description={detailResource.error}
           action={
-            <Button size="small" onClick={() => void load()}>
+            <Button size="small" onClick={detailResource.reload}>
               重试
             </Button>
           }
@@ -422,10 +407,10 @@ export function CaseDetailDrawer({
                           </div>
                         </button>
                       ))}
-                      {topicOptionsLoading ? (
+                      {topicOptionsResource.loading ? (
                         <p className="dataset-note">正在读取可替换主题…</p>
-                      ) : topicOptionsError ? (
-                        <p className="dataset-note">{topicOptionsError}</p>
+                      ) : topicOptionsResource.error ? (
+                        <p className="dataset-note">{topicOptionsResource.error}</p>
                       ) : !topicOptions.length ? (
                         <p className="dataset-note">当前没有可替换的主题。</p>
                       ) : null}

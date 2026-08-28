@@ -539,6 +539,9 @@ class ProjectionService:
         filters = _case_filters(
             plan_status, generate_status, grading_status, source, question_type, difficulty,
         )
+        has_status_filters = any(filters.get(name) for name in (
+            'plan_status', 'generate_status', 'grading_status',
+        ))
         normalized_filters = self._normalize_filters(filters)
         complete_keys = (
             ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST),
@@ -595,29 +598,44 @@ class ProjectionService:
                 artifacts[planned_keys[0]]['value'], artifacts[planned_keys[1]]['value'],
             )
             statuses = _pending_case_statuses(tuple(row['case_id'] for row in rows))
+            rows = _ordered_case_rows(
+                rows, artifacts[ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST)]['value'],
+            )
+            execution_revision = self._build_execution_revision(statuses)
+            rows = [row for row in rows if _case_matches(row, filters)]
+            page = _page(rows, size, str(offset))
         else:
             case_ids = _case_ids_from_partition_set(artifacts[ArtifactKey.scalar(A.EVAL_CASE_REQUESTS)]['value'])
-            statuses = _with_imported_completed_placeholders(
-                await self._case_operation_statuses(thread_id, case_ids),
-                artifacts[ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST)]['value'],
-            )
-            rows = _case_rows(
-                case_ids,
-                artifacts[ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST)]['value'],
-                artifacts[ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN)]['value'],
-                artifacts[ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST)]['value'],
-                statuses,
-                {},
-            )
-        rows = _ordered_case_rows(
-            rows, artifacts[ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST)]['value'],
-        )
-        current_execution_revision = self._build_execution_revision(statuses)
-        # Page tokens bind the published case roster, not live operation
-        # statuses. Status changes must not 409 a continuation page.
-        execution_revision = current_execution_revision
-        rows = [row for row in rows if _case_matches(row, filters)]
-        page = _page(rows, size, str(offset))
+            imported = artifacts[ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST)]['value']
+            plan = artifacts[ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN)]['value']
+            topics = artifacts[ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST)]['value']
+            if page_token and execution_revision and not has_status_filters:
+                placeholders = _with_imported_completed_placeholders(
+                    _pending_case_statuses(case_ids), imported,
+                )
+                rows = _ordered_case_rows(
+                    _case_rows(case_ids, imported, plan, topics, placeholders, {}), imported,
+                )
+                rows = [row for row in rows if _case_matches(row, filters)]
+                page = _page(rows, size, str(offset))
+                page_case_ids = tuple(item['case_id'] for item in page['items'])
+                statuses = _with_imported_completed_placeholders(
+                    await self._case_operation_statuses(thread_id, page_case_ids), imported,
+                )
+                page['items'] = _case_rows(page_case_ids, imported, plan, topics, statuses, {})
+            else:
+                statuses = _with_imported_completed_placeholders(
+                    await self._case_operation_statuses(thread_id, case_ids), imported,
+                )
+                current_execution_revision = self._build_execution_revision(statuses)
+                if page_token and has_status_filters and execution_revision != current_execution_revision:
+                    raise ServiceError(409, 'case execution snapshot changed; reload the first page')
+                execution_revision = current_execution_revision
+                rows = _ordered_case_rows(
+                    _case_rows(case_ids, imported, plan, topics, statuses, {}), imported,
+                )
+                rows = [row for row in rows if _case_matches(row, filters)]
+                page = _page(rows, size, str(offset))
         if set(keys) == set(complete_keys) and page['items']:
             page_case_ids = tuple(item['case_id'] for item in page['items'])
             specifications = await self._case_spec_values(thread_id, page_case_ids)
@@ -638,6 +656,7 @@ class ProjectionService:
             'next_page_token': '' if not next_offset else self._build_page_token(
                 thread_id=thread_id, list_name='dataset.cases', revision=revision,
                 filters=normalized_filters, page_size=size, next_offset=int(next_offset),
+                execution_revision=execution_revision,
             ),
         }
 

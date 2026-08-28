@@ -697,6 +697,19 @@ def test_cases_reads_runtime_once_and_only_reads_specs_for_the_visible_page() ->
     assert spec_heads == ['case-1']
 
 
+def test_cases_continuation_reads_statuses_only_for_the_visible_page() -> None:
+    service = _case_list_service()
+    first = _cases(service, page_size=1)
+
+    second = _cases(service, page_size=1, page_token=first['next_page_token'])
+
+    assert [item['case_id'] for item in second['items']] == ['case-2']
+    assert service.flow.case_operation_statuses_calls == [
+        ('case-1', 'case-2', 'case-3'),
+        ('case-2',),
+    ]
+
+
 def test_cases_returns_all_rows_before_qaplan_outputs_exist() -> None:
     values = {
         ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST): {1: {
@@ -778,7 +791,25 @@ def test_cases_pagination_keeps_going_when_runtime_execution_changes() -> None:
     assert [item['case_id'] for item in second['items']] == ['case-2']
     assert second['items'][0]['stages']['generate'] == 'completed'
     assert second['revision'] == first['revision']
-    assert second['execution_revision'] != first['execution_revision']
+    assert second['execution_revision'] == first['execution_revision']
+
+
+def test_cases_status_filtered_continuation_rejects_changed_execution_snapshot() -> None:
+    service = _case_list_service()
+    first = _cases(service, page_size=1, grading_status='pending')
+
+    service.flow._cases['case-2']['runtime']['operations'][1]['status'] = 'succeeded'
+
+    with pytest.raises(ServiceError) as error:
+        _cases(
+            service,
+            page_size=1,
+            page_token=first['next_page_token'],
+            grading_status='pending',
+        )
+
+    assert error.value.status_code == 409
+    assert 'execution snapshot' in str(error.value)
 
 
 @pytest.mark.parametrize(('kwargs', 'message'), [

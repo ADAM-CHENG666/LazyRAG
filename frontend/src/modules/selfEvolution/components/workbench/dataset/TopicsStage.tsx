@@ -1,8 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Drawer, Input } from "antd";
-import { datasetRoot, describeRequestError, getJson } from "./api";
+import { datasetRoot, getJson } from "./api";
 import { chunkTags } from "./capabilities";
-import { CHUNK_PAGE_SIZE, PAGE_SIZE, useDatasetList, useDatasetResource } from "./hooks";
+import {
+  CHUNK_PAGE_SIZE,
+  PAGE_SIZE,
+  useDatasetList,
+  useDatasetPagedDetail,
+  useDatasetResource,
+} from "./hooks";
 import {
   Chip,
   ChunkCard,
@@ -24,7 +30,6 @@ import type {
   DatasetDraft,
   PagedResponse,
   QuestionType,
-  TopicChunk,
   TopicDetail,
   TopicRow,
   TopicsOverview,
@@ -289,11 +294,6 @@ function TopicDrawer({
   onClose: () => void;
   onSaveDraft: (draft: DatasetDraft) => boolean;
 }) {
-  const [detail, setDetail] = useState<TopicDetail>();
-  const [chunks, setChunks] = useState<TopicChunk[]>([]);
-  const [nextPageToken, setNextPageToken] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string>();
   const [name, setName] = useState("");
   const [editingName, setEditingName] = useState(false);
 
@@ -309,40 +309,20 @@ function TopicDrawer({
   const topicId = row?.topic_id;
   const detailUrl = topicId ? `${root}/topics/${encodeURIComponent(topicId)}` : undefined;
 
-  const load = useCallback(
-    async (pageToken?: string) => {
-      if (!detailUrl) return;
-      setLoading(true);
-      setError(undefined);
-      try {
-        const value = await getJson<TopicDetail>(detailUrl, {
-          page_size: CHUNK_PAGE_SIZE,
-          page_token: pageToken,
-        });
-        setDetail(value);
-        setNextPageToken(value.chunks?.next_page_token || "");
-        setChunks((prev) =>
-          pageToken ? [...prev, ...(value.chunks?.items || [])] : value.chunks?.items || [],
-        );
-      } catch (caught) {
-        setError(describeRequestError(caught, "读取主题详情失败"));
-      } finally {
-        setLoading(false);
-      }
-    },
+  const fetchDetailPage = useCallback(
+    (pageToken?: string) => getJson<TopicDetail>(detailUrl || "", {
+      page_size: CHUNK_PAGE_SIZE,
+      page_token: pageToken,
+    }),
     [detailUrl],
   );
-
-  useEffect(() => {
-    if (!detailUrl) {
-      setDetail(undefined);
-      setChunks([]);
-      setNextPageToken("");
-      return;
-    }
-    setChunks([]);
-    void load();
-  }, [detailUrl, load]);
+  const detailPage = useDatasetPagedDetail(
+    detailUrl ? fetchDetailPage : undefined,
+    (value) => value.chunks?.items || [],
+    (value) => value.chunks?.next_page_token || "",
+    "读取主题详情失败",
+  );
+  const { data: detail, items: chunks } = detailPage;
 
   useEffect(() => {
     if (!row) return;
@@ -383,14 +363,14 @@ function TopicDrawer({
         </div>
       }
     >
-      {error ? (
+      {detailPage.error ? (
         <Alert
           type="error"
           showIcon
           message="主题详情不可用"
-          description={error}
+          description={detailPage.error}
           action={
-            <Button size="small" onClick={() => void load()}>
+            <Button size="small" onClick={detailPage.reload}>
               重试
             </Button>
           }
@@ -439,9 +419,13 @@ function TopicDrawer({
                   text={chunk.text}
                 />
               ))}
-              {!chunks.length && !loading && <p className="dataset-note">该主题没有支撑片段。</p>}
+              {!chunks.length && !detailPage.loading && <p className="dataset-note">该主题没有支撑片段。</p>}
             </div>
-            <ScrollSentinel hasMore={!!nextPageToken} loading={loading} onLoadMore={() => void load(nextPageToken)} />
+            <ScrollSentinel
+              hasMore={!!detailPage.nextPageToken}
+              loading={detailPage.loading}
+              onLoadMore={detailPage.loadMore}
+            />
           </div>
         </>
       )}

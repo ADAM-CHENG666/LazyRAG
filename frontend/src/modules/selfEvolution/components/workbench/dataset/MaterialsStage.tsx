@@ -1,13 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Checkbox, Drawer, Select } from "antd";
-import { datasetRoot, describeRequestError, getJson } from "./api";
+import { datasetRoot, getJson } from "./api";
 import {
   capabilityFilterOptions,
   capabilityNote,
   chunkTags,
   describeCapability,
 } from "./capabilities";
-import { CHUNK_PAGE_SIZE, PAGE_SIZE, useDatasetList, useDatasetResource } from "./hooks";
+import {
+  CHUNK_PAGE_SIZE,
+  PAGE_SIZE,
+  useDatasetList,
+  useDatasetPagedDetail,
+  useDatasetResource,
+} from "./hooks";
 import { MaterialAdjustmentDrawer } from "./MaterialAdjustmentDrawer";
 import {
   Chip,
@@ -59,7 +65,6 @@ export function MaterialsStage({
   const [knowledgeBaseId, setKnowledgeBaseId] = useState<string>();
   const [openDocument, setOpenDocument] = useState<DocumentRow>();
   const [adjustmentOpen, setAdjustmentOpen] = useState(false);
-  const [knownKnowledgeBases, setKnownKnowledgeBases] = useState<Record<string, string>>({});
   const listRef = useRef<HTMLDivElement>(null);
 
   const root = datasetRoot(threadId);
@@ -103,23 +108,6 @@ export function MaterialsStage({
     [includedFilter, knowledgeBaseId, root],
   );
   const documents = useDatasetList(fetchDocuments, refreshToken, "文档列表加载失败");
-
-  // Filter options are built from every document seen so far, so that choosing
-  // a knowledge base does not collapse the option list to that one entry.
-  useEffect(() => {
-    if (!documents.items.length) return;
-    setKnownKnowledgeBases((prev) => {
-      const next = { ...prev };
-      let changed = false;
-      for (const item of documents.items) {
-        if (next[item.knowledge_base.id] !== item.knowledge_base.name) {
-          next[item.knowledge_base.id] = item.knowledge_base.name;
-          changed = true;
-        }
-      }
-      return changed ? next : prev;
-    });
-  }, [documents.items]);
 
   usePublishDatasetStageAction(
     useMemo(
@@ -211,7 +199,7 @@ export function MaterialsStage({
                     label="知识库"
                     value={knowledgeBaseId}
                     onChange={setKnowledgeBaseId}
-                    options={Object.entries(knownKnowledgeBases).map(([id, name]) => ({
+                    options={(capabilities.data?.knowledge_bases || []).map(({ id, name }) => ({
                       value: id,
                       label: name,
                     }))}
@@ -359,11 +347,6 @@ function DocumentDrawer({
   onClose: () => void;
   onSaveDraft: (draft: DatasetDraft) => boolean;
 }) {
-  const [detail, setDetail] = useState<DocumentDetail>();
-  const [chunks, setChunks] = useState<DocumentChunk[]>([]);
-  const [nextPageToken, setNextPageToken] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string>();
   const [changes, setChanges] = useState<ChunkDraft>({});
   const [selectionFilter, setSelectionFilter] = useState<string>();
   const [ruleFilter, setRuleFilter] = useState<string>();
@@ -374,42 +357,25 @@ function DocumentDrawer({
       )}/documents/${encodeURIComponent(row.document_id)}`
     : undefined;
 
-  const load = useCallback(
-    async (pageToken?: string) => {
-      if (!detailUrl) return;
-      setLoading(true);
-      setError(undefined);
-      try {
-        const value = await getJson<DocumentDetail>(detailUrl, {
-          page_size: CHUNK_PAGE_SIZE,
-          page_token: pageToken,
-        });
-        setDetail(value);
-        setNextPageToken(value.chunks?.next_page_token || "");
-        setChunks((prev) =>
-          pageToken ? [...prev, ...(value.chunks?.items || [])] : value.chunks?.items || [],
-        );
-      } catch (caught) {
-        setError(describeRequestError(caught, "读取文档详情失败"));
-      } finally {
-        setLoading(false);
-      }
-    },
+  const fetchDetailPage = useCallback(
+    (pageToken?: string) => getJson<DocumentDetail>(detailUrl || "", {
+      page_size: CHUNK_PAGE_SIZE,
+      page_token: pageToken,
+    }),
     [detailUrl],
   );
+  const detailPage = useDatasetPagedDetail(
+    detailUrl ? fetchDetailPage : undefined,
+    (value) => value.chunks?.items || [],
+    (value) => value.chunks?.next_page_token || "",
+    "读取文档详情失败",
+  );
+  const { data: detail, items: chunks } = detailPage;
 
   useEffect(() => {
-    if (!detailUrl) {
-      setDetail(undefined);
-      setChunks([]);
-      setNextPageToken("");
-      return;
-    }
-    setChunks([]);
     setSelectionFilter(undefined);
     setRuleFilter(undefined);
-    void load();
-  }, [detailUrl, load]);
+  }, [detailUrl]);
 
   // Reopening a document restores its unapplied selection so the draft stays visible.
   useEffect(() => {
@@ -489,14 +455,14 @@ function DocumentDrawer({
         </div>
       }
     >
-      {error ? (
+      {detailPage.error ? (
         <Alert
           type="error"
           showIcon
           message="文档详情不可用"
-          description={error}
+          description={detailPage.error}
           action={
-            <Button size="small" onClick={() => void load()}>
+            <Button size="small" onClick={detailPage.reload}>
               重试
             </Button>
           }
@@ -618,12 +584,16 @@ function DocumentDrawer({
                     }
                   />
                 ))}
-                {!visibleChunks.length && !loading && (
+                {!visibleChunks.length && !detailPage.loading && (
                   <p className="dataset-note">没有符合当前筛选条件的片段。</p>
                 )}
               </div>
-              <ScrollSentinel hasMore={!!nextPageToken} loading={loading} onLoadMore={() => void load(nextPageToken)} />
-              {!nextPageToken && !loading ? (
+              <ScrollSentinel
+                hasMore={!!detailPage.nextPageToken}
+                loading={detailPage.loading}
+                onLoadMore={detailPage.loadMore}
+              />
+              {!detailPage.nextPageToken && !detailPage.loading ? (
                 <div className="dataset-note is-centered">已按原文顺序加载全部有效片段</div>
               ) : null}
             </div>
