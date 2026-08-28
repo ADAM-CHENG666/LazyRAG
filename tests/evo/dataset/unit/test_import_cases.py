@@ -185,3 +185,52 @@ def test_import_resolves_referenced_chunks_by_uid_without_scanning_unrelated_doc
     assert document.calls
     assert all(call.get('uids') == ['chunk-keep'] for call in document.calls)
     assert all(not call.get('doc_ids') for call in document.calls)
+
+
+def test_import_does_not_fail_when_the_same_chunk_uid_is_found_in_every_selected_kb(tmp_path):
+    document = LookupDocument({
+        'chunk-keep': SimpleNamespace(
+            uid='chunk-keep', text='keep', global_metadata={'docid': 'doc-1'},
+        ),
+    })
+
+    class Client(KnowledgeBaseClient):
+        def list_documents(self, kb_id):
+            return [{'doc_id': 'doc-1'}]
+
+    headers = (*HEADERS, 'reference_doc_ids', 'reference_chunk_ids')
+    path = _write(tmp_path, [_row(reference_doc_ids='doc-1', reference_chunk_ids='chunk-keep')], headers)
+    client = Client(document=document)
+
+    result = import_cases(None, {'source_config': {
+        'kb_ids': ['kb-a', 'kb-b'],
+        'csv_sources': [{'kb_id': 'kb-a', 'path': str(path)}],
+        'target_case_count': 1,
+    }}, kb_client=client)['import_cases_manifest']
+
+    assert result['details'][0]['load_status'] == 'loaded'
+    assert result['details'][0]['case']['references'][0]['chunk_id'] == 'chunk-keep'
+    assert result['details'][0]['case']['references'][0]['doc_id'] == 'doc-1'
+
+
+def test_import_still_rejects_the_same_uid_mapped_to_different_documents():
+    class Client:
+        def list_documents(self, kb_id):
+            return [{'doc_id': f'doc-{kb_id}'}]
+
+        def lookup_chunks(self, kb_id, chunk_ids, groups=None):
+            del groups
+            return {
+                chunk_id: {'kb_id': kb_id, 'doc_id': f'doc-{kb_id}', 'text': chunk_id}
+                for chunk_id in chunk_ids
+            }
+
+    with pytest.raises(ValueError, match='ambiguous_chunk_id: chunk-keep'):
+        import_cases(None, {'source_config': {
+            'kb_ids': ['kb-a', 'kb-b'],
+            'imported_cases': [_row(
+                reference_doc_ids=['doc-kb-a'],
+                reference_chunk_ids=['chunk-keep'],
+            )],
+            'target_case_count': 1,
+        }}, kb_client=Client())

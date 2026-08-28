@@ -126,20 +126,21 @@ export function caseGenerationSteps(progress: CaseGenerationProgress | undefined
 /**
  * Overview rings: overview counts are the baseline (imports already completed);
  * SSE only covers cases that emitted events. Unobserved cases keep the baseline.
+ * `importedCompleted` is a floor so imported placeholders survive a new run.
  */
 export function caseGenerationDisplayStep(
   live: CaseGenerationStep | undefined,
   baseline: StableCaseGenerationStep | undefined,
+  importedCompleted = 0,
 ): CaseGenerationDisplayStep {
   const total = Math.max(baseline?.total ?? 0, live?.total ?? 0);
+  const importedFloor = Math.min(Math.max(0, importedCompleted), total);
   const base = {
-    completed: baseline?.completed ?? 0,
+    completed: Math.max(baseline?.completed ?? 0, importedFloor),
     running: baseline?.status_counts?.running ?? 0,
     failed: baseline?.status_counts?.failed ?? 0,
     canceled: baseline?.status_counts?.canceled ?? 0,
   };
-  const basePending = baseline?.status_counts?.pending
-    ?? Math.max(0, total - base.completed - base.running - base.failed - base.canceled);
 
   const liveSeen = live
     ? live.completed + live.running + live.failed + live.canceled
@@ -151,21 +152,21 @@ export function caseGenerationDisplayStep(
       running: base.running,
       failed: base.failed,
       canceled: base.canceled,
-      pending: basePending,
+      pending: Math.max(0, total - base.completed - base.running - base.failed - base.canceled),
       status: toVisualStatus(baseline?.status),
     };
   }
 
   // Previous-run "all completed" snapshot while a new step is already live.
-  // Trust live only until overview refresh brings the real baseline.
+  // Drop generated leftovers, but keep the imported completed floor.
   if (base.completed >= total && total > 0 && liveSeen < total) {
     return finalizeCounts({
-      completed: live.completed,
+      completed: Math.min(total, live.completed + importedFloor),
       total,
       running: live.running,
       failed: live.failed,
       canceled: live.canceled,
-      pending: Math.max(0, total - liveSeen),
+      pending: Math.max(0, total - liveSeen - importedFloor),
     });
   }
 
@@ -179,7 +180,7 @@ export function caseGenerationDisplayStep(
   remaining -= unobservedCanceled;
 
   return finalizeCounts({
-    completed: live.completed + unobservedCompleted,
+    completed: Math.min(total, live.completed + Math.max(unobservedCompleted, importedFloor)),
     total,
     running: live.running,
     failed: live.failed + unobservedFailed,

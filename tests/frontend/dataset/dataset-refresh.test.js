@@ -151,4 +151,18 @@ describe('dataset refresh policy', () => {
     expect(onSend.match(/subscribePendingNextStepRun\(/g)?.length).toBe(2);
     expect(onSend.match(/setDatasetExecutionResumeToken/g)?.length).toBe(2);
   });
+
+  it('loads more cases inside the scrolling table, not from a footer outside it', () => {
+    const source = readFrontendFile(
+      'src/modules/selfEvolution/components/workbench/dataset/CasesStage.tsx',
+    );
+    const wrap = source.indexOf('className="dataset-table-wrap"');
+    const sentinel = source.indexOf('<ScrollSentinel');
+    const wrapClose = source.indexOf('</div>\n      </section>', wrap);
+
+    expect(wrap).toBeGreaterThan(-1);
+    expect(sentinel).toBeGreaterThan(wrap);
+    expect(sentinel).toBeLessThan(wrapClose);
+    expect(source).toContain('rootRef={listRef}');
+  });
 });

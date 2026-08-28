@@ -89,6 +89,7 @@ export function CasesStage({
   const [openCase, setOpenCase] = useState<CaseRow>();
   const [planOpen, setPlanOpen] = useState(false);
   const lastReconciledToken = useRef(0);
+  const listRef = useRef<HTMLDivElement>(null);
 
   const root = datasetRoot(threadId);
 
@@ -153,6 +154,10 @@ export function CasesStage({
   );
 
   const plan = overview.data?.automatic_plan;
+  const importedCompleted = Math.max(
+    0,
+    (overview.data?.stages.plan.total ?? 0) - (plan?.total ?? 0),
+  );
   const generationPaused = shouldShowGenerationPlanPause(overview.data?.status);
   const transientSteps = useMemo(() => caseGenerationSteps(progress), [progress]);
   const displayedCases = useMemo(() => overlayCaseProgress(cases.items, progress), [cases.items, progress]);
@@ -195,7 +200,7 @@ export function CasesStage({
               steps={STAGE_ORDER.map((key) => {
                 const stable = overview.data?.stages[key];
                 const transient = transientSteps.find((item) => item.key === key);
-                const displayed = caseGenerationDisplayStep(transient, stable);
+                const displayed = caseGenerationDisplayStep(transient, stable, importedCompleted);
                 return {
                   key,
                   label: STAGE_LABEL[key],
@@ -250,7 +255,7 @@ export function CasesStage({
       </div>
 
       <section className="dataset-list-card" aria-label="用例列表">
-        <div className="dataset-table-wrap">
+        <div className="dataset-table-wrap" ref={listRef}>
           <table className="dataset-object-table dataset-case-table">
             <thead>
               <tr>
@@ -360,8 +365,16 @@ export function CasesStage({
               )}
             </tbody>
           </table>
+          {cases.error && cases.items.length ? (
+            <p className="dataset-pane-error">{cases.error}</p>
+          ) : null}
+          <ScrollSentinel
+            rootRef={listRef}
+            hasMore={!!cases.nextPageToken}
+            loading={cases.loading}
+            onLoadMore={() => void cases.loadMore()}
+          />
         </div>
-        <ScrollSentinel hasMore={!!cases.nextPageToken} loading={cases.loading} onLoadMore={() => void cases.loadMore()} />
       </section>
 
       <CaseDetailDrawer

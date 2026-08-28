@@ -249,6 +249,62 @@ describe('topic discovery 3-phase progress', () => {
     expect(steps[2].summary).not.toBe('全部完成');
   });
 
+  it('does not let the entities manifest completion wipe partition failures', () => {
+    let progress = applyTopicLabelPartitionEvent(undefined, event({
+      partition: { id: 'chunk-1', total: 3 },
+      status: 'completed',
+    }));
+    progress = applyTopicLabelPartitionEvent(progress, event({
+      partition: { id: 'chunk-2', total: 3 },
+      attemptId: 'attempt-2',
+      status: 'failed',
+    }));
+    progress = applyTopicLabelPartitionEvent(progress, event({
+      event: 'dataset.chunk_entities_manifest',
+      operationId: 'dataset.chunk_entities_manifest',
+      partition: undefined,
+      status: 'completed',
+      progress: { total: 3 },
+    }));
+
+    const steps = topicDiscoverySteps(progress);
+    expect(steps[0]).toMatchObject({ completed: 2, total: 3, status: 'partial' });
+    expect(steps[0].summary).toBe('1 失败');
+    expect(steps[0].summary).not.toBe('全部完成');
+  });
+
+  it('keeps overview partition failures visible after the flow settles', () => {
+    const steps = topicDiscoverySteps(undefined, {
+      status: 'completed',
+      total_topics: 8,
+      stages: {
+        entities: { status: 'completed', completed: 26, total: 30, failed: 4 },
+        semantic: { status: 'completed', completed: 2, total: 2, failed: 0 },
+        topics: { status: 'completed', completed: 8, total: 8 },
+      },
+    });
+
+    expect(steps[0]).toMatchObject({ completed: 26, total: 30, status: 'partial', summary: '4 失败' });
+    expect(steps[1]).toMatchObject({ completed: 2, total: 2, status: 'done', summary: '全部完成' });
+    expect(steps[2]).toMatchObject({ completed: 8, total: 8, status: 'done', summary: '全部完成' });
+  });
+
+  it('does not fill pending rings to all-done when overview reports failures', () => {
+    const steps = topicDiscoverySteps(undefined, {
+      status: 'awaiting_approval',
+      total_topics: 8,
+      stages: {
+        entities: { status: 'pending', completed: 0, total: 30, failed: 4 },
+        semantic: { status: 'pending', completed: 0, total: 2, failed: 0 },
+        topics: { status: 'pending', completed: 0, total: 8 },
+      },
+    });
+
+    expect(steps[0]).toMatchObject({ completed: 26, total: 30, status: 'partial', summary: '4 失败' });
+    expect(steps[1]).toMatchObject({ completed: 2, total: 2, status: 'done', summary: '全部完成' });
+    expect(steps[2]).toMatchObject({ completed: 8, total: 8, status: 'done', summary: '全部完成' });
+  });
+
   it('calibrates finished rings from overview stages instead of zeroing totals', () => {
     let progress = applyTopicLabelPartitionEvent(undefined, event({
       partition: { id: 'chunk-1', total: 2 },

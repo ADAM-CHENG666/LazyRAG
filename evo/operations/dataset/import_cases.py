@@ -280,6 +280,7 @@ def _knowledge_index(
     chunks: dict[str, dict[str, str]] = {}
     documents: dict[str, set[str]] = {}
     lookup = getattr(client, 'lookup_chunks', None)
+    wanted = list(dict.fromkeys(chunk_ids or ()))
     for kb_id in kb_ids:
         kb_docs = []
         for doc in client.list_documents(kb_id):
@@ -287,23 +288,34 @@ def _knowledge_index(
             documents.setdefault(doc_id, set()).add(kb_id)
             kb_docs.append(doc_id)
         if lookup is not None:
-            for chunk_id, payload in lookup(kb_id, list(chunk_ids or ())).items():
-                if chunk_id in chunks:
-                    raise ValueError(f'ambiguous_chunk_id: {chunk_id}')
-                chunks[chunk_id] = payload
+            for chunk_id, payload in lookup(kb_id, wanted).items():
+                _index_chunk(chunks, chunk_id, payload)
             continue
         for doc_id in kb_docs:
             for batch in client.iter_chunks(kb_id, [doc_id], ['block', 'line'], 200, require_embeddings=False):
                 for node in batch:
                     chunk_id = str(getattr(node, 'uid', '') or getattr(node, '_uid', '') or '')
-                    if chunk_id in chunks:
-                        raise ValueError(f'ambiguous_chunk_id: {chunk_id}')
-                    chunks[chunk_id] = {
+                    _index_chunk(chunks, chunk_id, {
                         'kb_id': kb_id,
                         'doc_id': doc_id,
                         'text': str(getattr(node, 'text', '') or ''),
-                    }
+                    })
     return chunks, documents
+
+
+def _index_chunk(
+    chunks: dict[str, dict[str, str]],
+    chunk_id: str,
+    payload: Mapping[str, str],
+) -> None:
+    if not chunk_id:
+        return
+    existing = chunks.get(chunk_id)
+    if existing is None:
+        chunks[chunk_id] = dict(payload)
+        return
+    if existing.get('doc_id') != payload.get('doc_id'):
+        raise ValueError(f'ambiguous_chunk_id: {chunk_id}')
 
 
 def _peek_chunk_ids(row: Mapping[str, object]) -> list[str]:

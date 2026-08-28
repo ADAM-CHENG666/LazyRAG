@@ -34,6 +34,29 @@ const COMPLETE_OPS = new Set([
 
 type PartitionStatus = 'running' | 'completed' | 'failed' | 'canceled';
 
+type TopicStageSnapshot = {
+  status: string;
+  completed: number;
+  total: number | null;
+  failed?: number;
+};
+
+function settledPhaseStatus(completed: number, failed: number): VisualStatus {
+  if (failed > 0) return completed > 0 ? 'partial' : 'failed';
+  return 'done';
+}
+
+function fillSettledPhase(total: number, failed: number): Pick<TopicPhaseState, 'completed' | 'failed' | 'running' | 'status'> {
+  const safeFailed = Math.max(0, Math.min(failed, total));
+  const completed = Math.max(0, total - safeFailed);
+  return {
+    completed,
+    failed: safeFailed,
+    running: 0,
+    status: settledPhaseStatus(completed, safeFailed),
+  };
+}
+
 export type TopicLabelPartitionEvent = {
   event: string;
   stage: string;
@@ -119,11 +142,8 @@ export function applyTopicLabelPartitionEvent(
       const total = Math.max(phase.total, hintedTotal);
       base.phases[phaseId] = {
         ...phase,
-        completed: total,
+        ...fillSettledPhase(total, phase.failed),
         total,
-        running: 0,
-        failed: 0,
-        status: 'done',
       };
     } else if (event.status === 'failed') {
       base.phases[phaseId] = { ...phase, total: Math.max(phase.total, hintedTotal), failed: 1, status: 'failed' };
@@ -144,7 +164,7 @@ export function topicDiscoverySteps(
   overview?: {
     status?: string;
     total_topics?: number | null;
-    stages?: Partial<Record<TopicPhaseId, { status: string; completed: number; total: number | null }>>;
+    stages?: Partial<Record<TopicPhaseId, TopicStageSnapshot>>;
   },
 ): TopicDiscoveryStepView[] {
   const phases = progress?.phases ?? emptyProgress('').phases;
@@ -210,7 +230,7 @@ function hasLiveExecution(progress: TopicDiscoveryProgress | undefined): boolean
 function settlePhase(
   id: TopicPhaseId,
   sse: TopicPhaseState,
-  snapshot: { status: string; completed: number; total: number | null },
+  snapshot: TopicStageSnapshot,
   publishedTopicCount: number | null,
 ): TopicPhaseState {
   const settled = snapshotPhase(id, snapshot);
@@ -222,13 +242,16 @@ function settlePhase(
     && next.completed === 0
     && (next.status === 'pending' || next.status === 'running')
   ) {
-    next = { ...next, completed: next.total, running: 0, status: 'done' };
+    next = { ...next, ...fillSettledPhase(next.total, next.failed) };
   }
-  if (sse.failed > 0) {
+  const failed = Math.max(sse.failed, next.failed);
+  if (failed > 0) {
+    const completed = next.total > 0 ? Math.min(next.completed, Math.max(0, next.total - failed)) : next.completed;
     return {
       ...next,
-      failed: sse.failed,
-      status: sse.status === 'partial' || sse.status === 'failed' ? sse.status : next.status,
+      completed,
+      failed,
+      status: settledPhaseStatus(completed, failed),
     };
   }
   return next;
@@ -249,23 +272,27 @@ function hasPhaseExecution(progress: TopicDiscoveryProgress | undefined, id: Top
 
 function snapshotPhase(
   id: TopicPhaseId,
-  snapshot: { status: string; completed: number; total: number | null } | undefined,
+  snapshot: TopicStageSnapshot | undefined,
 ): TopicPhaseState | undefined {
   if (!snapshot) return undefined;
+  const failed = snapshot.failed ?? (snapshot.status === 'failed' ? 1 : 0);
+  const completed = snapshot.completed;
+  let status: VisualStatus = 'pending';
+  if (snapshot.status === 'completed' || snapshot.status === 'succeeded') {
+    status = settledPhaseStatus(completed, failed);
+  } else if (snapshot.status === 'failed') {
+    status = 'failed';
+  } else if (snapshot.status === 'running') {
+    status = 'running';
+  }
   return {
     id,
     label: PHASE_LABEL[id],
-    completed: snapshot.completed,
+    completed,
     total: snapshot.total ?? 0,
     running: 0,
-    failed: snapshot.status === 'failed' ? 1 : 0,
-    status: snapshot.status === 'completed' || snapshot.status === 'succeeded'
-      ? 'done'
-      : snapshot.status === 'failed'
-        ? 'failed'
-        : snapshot.status === 'running'
-          ? 'running'
-          : 'pending',
+    failed,
+    status,
   };
 }
 

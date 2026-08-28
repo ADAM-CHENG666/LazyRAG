@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Checkbox, Drawer, Select } from "antd";
 import { datasetRoot, describeRequestError, getJson } from "./api";
 import {
@@ -60,6 +60,7 @@ export function MaterialsStage({
   const [openDocument, setOpenDocument] = useState<DocumentRow>();
   const [adjustmentOpen, setAdjustmentOpen] = useState(false);
   const [knownKnowledgeBases, setKnownKnowledgeBases] = useState<Record<string, string>>({});
+  const listRef = useRef<HTMLDivElement>(null);
 
   const root = datasetRoot(threadId);
 
@@ -189,7 +190,7 @@ export function MaterialsStage({
       ))}
 
       <section className="dataset-list-card" aria-label="文档列表">
-        <div className="dataset-table-wrap">
+        <div className="dataset-table-wrap" ref={listRef}>
           <table className="dataset-object-table dataset-document-table">
             <thead>
               <tr>
@@ -283,8 +284,16 @@ export function MaterialsStage({
               )}
             </tbody>
           </table>
+          {documents.error && documents.items.length ? (
+            <p className="dataset-pane-error">{documents.error}</p>
+          ) : null}
+          <ScrollSentinel
+            rootRef={listRef}
+            hasMore={!!documents.nextPageToken}
+            loading={documents.loading}
+            onLoadMore={() => void documents.loadMore()}
+          />
         </div>
-        <ScrollSentinel hasMore={!!documents.nextPageToken} loading={documents.loading} onLoadMore={() => void documents.loadMore()} />
       </section>
 
       <DocumentDrawer

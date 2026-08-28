@@ -161,9 +161,9 @@ def test_topics_overview_projects_current_manifest_and_calculates_rates(monkeypa
             'reasoning': {'count': 12, 'rate': 0.4},
         },
         'stages': {
-            'entities': {'status': 'completed', 'completed': 2, 'total': 2},
-            'semantic': {'status': 'completed', 'completed': 1, 'total': 1},
-            'topics': {'status': 'completed', 'completed': 30, 'total': 30},
+            'entities': {'status': 'completed', 'completed': 2, 'total': 2, 'failed': 0},
+            'semantic': {'status': 'completed', 'completed': 1, 'total': 1, 'failed': 0},
+            'topics': {'status': 'completed', 'completed': 30, 'total': 30, 'failed': 0},
         },
     }
 
@@ -191,9 +191,51 @@ def test_topics_overview_calibrates_stage_counts_when_manifest_exists_at_gate(
     assert result['status'] == 'paused'
     assert result['total_topics'] == 184
     assert result['stages'] == {
-        'entities': {'status': 'completed', 'completed': 30, 'total': 30},
-        'semantic': {'status': 'completed', 'completed': 2, 'total': 2},
-        'topics': {'status': 'completed', 'completed': 184, 'total': 184},
+        'entities': {'status': 'completed', 'completed': 30, 'total': 30, 'failed': 0},
+        'semantic': {'status': 'completed', 'completed': 2, 'total': 2, 'failed': 0},
+        'topics': {'status': 'completed', 'completed': 184, 'total': 184, 'failed': 0},
+    }
+
+
+def test_topics_overview_keeps_partition_failures_when_the_flow_has_settled(
+        monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_dataset_stages(monkeypatch)
+    service = _service(
+        values={
+            ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST): {3: {
+                'stats': {
+                    'total_topic_count': 8,
+                    'question_types': {'precision': {'count': 5}, 'reasoning': {'count': 3}},
+                },
+            }},
+            ArtifactKey.scalar(A.DATASET_CHUNK_REQUESTS): {1: PartitionSet(tuple(f'chunk-{i}' for i in range(30)))},
+            ArtifactKey.scalar(A.DATASET_EMBEDDING_LABEL_REQUESTS): {1: PartitionSet(('cluster-1', 'cluster-2'))},
+            ArtifactKey.scalar(A.DATASET_CHUNK_ENTITIES_MANIFEST): {1: {
+                'stats': {
+                    'slot_count': 30,
+                    'available_count': 26,
+                    'placeholder_count': 4,
+                },
+            }},
+            ArtifactKey.scalar(A.DATASET_EMBEDDING_CLUSTERS): {1: {
+                'stats': {
+                    'candidate_count': 2,
+                    'cluster_count': 1,
+                    'labeled_cluster_count': 1,
+                },
+            }},
+        },
+        statuses={_TOPIC_STAGE: 'paused'},
+    )
+
+    result = asyncio.run(service.topics_overview('thr-1'))
+
+    assert result['status'] == 'paused'
+    assert result['stages'] == {
+        'entities': {'status': 'completed', 'completed': 26, 'total': 30, 'failed': 4},
+        'semantic': {'status': 'completed', 'completed': 1, 'total': 2, 'failed': 1},
+        'topics': {'status': 'completed', 'completed': 8, 'total': 8, 'failed': 0},
     }
 
 
@@ -215,9 +257,9 @@ def test_topics_overview_keeps_a_valid_empty_manifest_distinct_from_no_manifest(
         'thread_id': 'thr-1', 'revision': None, 'status': 'running',
         'total_topics': None, 'question_types': None,
         'stages': {
-            'entities': {'status': 'pending', 'completed': 0, 'total': None},
-            'semantic': {'status': 'pending', 'completed': 0, 'total': None},
-            'topics': {'status': 'pending', 'completed': 0, 'total': None},
+            'entities': {'status': 'pending', 'completed': 0, 'total': None, 'failed': 0},
+            'semantic': {'status': 'pending', 'completed': 0, 'total': None, 'failed': 0},
+            'topics': {'status': 'pending', 'completed': 0, 'total': None, 'failed': 0},
         },
     }
 
@@ -402,6 +444,58 @@ def test_cases_overview_projects_capacities_before_qaplan_manifest(
                     'capacities': {'easy': 1, 'medium': 1, 'hard': 1},
                 },
             },
+        },
+    }
+
+
+def test_cases_overview_keeps_imported_cases_complete_after_runtime_requests(
+        monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_case_stage(monkeypatch)
+    params_ref = ArtifactRef(ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN_PARAMS), 1)
+    service = _service(
+        values={
+            params_ref.key: {1: {'lane_case_counts': {}}},
+            ArtifactKey.scalar(A.EVAL_CASE_REQUESTS): {2: PartitionSet(('imported-1', 'generated-1'))},
+            ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST): {3: {
+                'stats': {'case_allocation': {
+                    'assignments': {
+                        'imported-1': {'mode': 'imported', 'source_row_number': 1},
+                        'generated-1': {'mode': 'generated'},
+                    },
+                }},
+                'details': [],
+            }},
+        },
+        statuses={_CASE_STAGE: 'running'},
+        cases={
+            'imported-1': {'runtime': {'operations': [
+                {'operation_id': 'dataset.qaplan_spec', 'status': 'pending'},
+                {'operation_id': 'dataset.generate_case', 'status': 'pending'},
+                {'operation_id': 'dataset.enhance_case', 'status': 'pending'},
+            ]}},
+            'generated-1': {'runtime': {'operations': [
+                {'operation_id': 'dataset.qaplan_spec', 'status': 'running'},
+                {'operation_id': 'dataset.generate_case', 'status': 'pending'},
+                {'operation_id': 'dataset.enhance_case', 'status': 'pending'},
+            ]}},
+        },
+    )
+
+    result = asyncio.run(service.cases_overview('thr-1'))
+
+    assert result['stages'] == {
+        'plan': {
+            'status': 'running', 'completed': 1, 'total': 2,
+            'status_counts': {'pending': 0, 'running': 1, 'completed': 1, 'failed': 0, 'canceled': 0},
+        },
+        'generate': {
+            'status': 'pending', 'completed': 1, 'total': 2,
+            'status_counts': {'pending': 1, 'running': 0, 'completed': 1, 'failed': 0, 'canceled': 0},
+        },
+        'grading': {
+            'status': 'pending', 'completed': 1, 'total': 2,
+            'status_counts': {'pending': 1, 'running': 0, 'completed': 1, 'failed': 0, 'canceled': 0},
         },
     }
 

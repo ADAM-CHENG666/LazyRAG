@@ -337,12 +337,18 @@ class ProjectionService:
             raise ServiceError(404, f'thread not found: {thread_id}')
         stage_snapshot = await self.stage_snapshot(thread_id, 'dataset.topic_discovery')
         status = _overview_stage_status(stage_snapshot)
-        chunk_requests, label_requests = await asyncio.gather(
+        chunk_requests, label_requests, entities_manifest, embedding_clusters = await asyncio.gather(
             _optional_overview_artifact(self, thread_id, A.DATASET_CHUNK_REQUESTS),
             _optional_overview_artifact(self, thread_id, A.DATASET_EMBEDDING_LABEL_REQUESTS),
+            _optional_overview_artifact(self, thread_id, A.DATASET_CHUNK_ENTITIES_MANIFEST),
+            _optional_overview_artifact(self, thread_id, A.DATASET_EMBEDDING_CLUSTERS),
         )
         entity_total = _partition_count(None if chunk_requests is None else chunk_requests['value'])
         semantic_total = _partition_count(None if label_requests is None else label_requests['value'])
+        entity_failed = _topic_entity_failed(None if entities_manifest is None else entities_manifest['value'])
+        semantic_failed = _topic_semantic_failed(
+            None if embedding_clusters is None else embedding_clusters['value'],
+        )
         try:
             artifact = await self.artifact(thread_id, A.DATASET_TOPIC_MANIFEST)
         except ServiceError as error:
@@ -354,7 +360,10 @@ class ProjectionService:
                 'status': status,
                 'total_topics': None,
                 'question_types': None,
-                'stages': _topic_execution_stages(status, entity_total, semantic_total, None),
+                'stages': _topic_execution_stages(
+                    status, entity_total, semantic_total, None,
+                    entity_failed=entity_failed, semantic_failed=semantic_failed,
+                ),
             }
 
         stats = _overview_mapping(_overview_mapping(artifact['value'], 'topics overview').get('stats'),
@@ -378,7 +387,10 @@ class ProjectionService:
                 'precision': {'count': precision, 'rate': None if not total else precision / total},
                 'reasoning': {'count': reasoning, 'rate': None if not total else reasoning / total},
             },
-            'stages': _topic_execution_stages(status, entity_total, semantic_total, total),
+            'stages': _topic_execution_stages(
+                status, entity_total, semantic_total, total,
+                entity_failed=entity_failed, semantic_failed=semantic_failed,
+            ),
         }
 
     async def cases_overview(self, thread_id: str) -> dict[str, Any]:
@@ -430,7 +442,10 @@ class ProjectionService:
             }
 
         case_ids = _case_ids_from_partition_set(requests['value'])
-        statuses = await self._case_operation_statuses(thread_id, case_ids)
+        statuses = _with_imported_completed_placeholders(
+            await self._case_operation_statuses(thread_id, case_ids),
+            None if import_manifest is None else import_manifest['value'],
+        )
         stages = self._summarize_case_statuses(statuses)
         return {
             'thread_id': thread_id,
@@ -582,7 +597,10 @@ class ProjectionService:
             statuses = _pending_case_statuses(tuple(row['case_id'] for row in rows))
         else:
             case_ids = _case_ids_from_partition_set(artifacts[ArtifactKey.scalar(A.EVAL_CASE_REQUESTS)]['value'])
-            statuses = await self._case_operation_statuses(thread_id, case_ids)
+            statuses = _with_imported_completed_placeholders(
+                await self._case_operation_statuses(thread_id, case_ids),
+                artifacts[ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST)]['value'],
+            )
             rows = _case_rows(
                 case_ids,
                 artifacts[ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST)]['value'],
@@ -595,8 +613,8 @@ class ProjectionService:
             rows, artifacts[ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST)]['value'],
         )
         current_execution_revision = self._build_execution_revision(statuses)
-        if page_token and execution_revision != current_execution_revision:
-            raise ServiceError(409, 'page_token execution snapshot is unavailable')
+        # Page tokens bind the published case roster, not live operation
+        # statuses. Status changes must not 409 a continuation page.
         execution_revision = current_execution_revision
         rows = [row for row in rows if _case_matches(row, filters)]
         page = _page(rows, size, str(offset))
@@ -620,7 +638,6 @@ class ProjectionService:
             'next_page_token': '' if not next_offset else self._build_page_token(
                 thread_id=thread_id, list_name='dataset.cases', revision=revision,
                 filters=normalized_filters, page_size=size, next_offset=int(next_offset),
-                execution_revision=execution_revision,
             ),
         }
 
@@ -644,7 +661,10 @@ class ProjectionService:
         case_ids = _case_ids_from_partition_set(artifacts[base_keys[0]]['value'])
         if case_id not in case_ids:
             raise ServiceError(404, f'case not found: {case_id}')
-        statuses = await self._case_operation_statuses(thread_id, (case_id,))
+        statuses = _with_imported_completed_placeholders(
+            await self._case_operation_statuses(thread_id, (case_id,)),
+            artifacts[base_keys[1]]['value'],
+        )
         optional = await self._case_detail_artifacts(thread_id, case_id)
         row = _case_rows(
             (case_id,),
@@ -2434,20 +2454,54 @@ def _partition_count(value: object | None) -> int | None:
     return len(_case_ids_from_partition_set(value))
 
 
-def _topic_execution_stages(status: str, entity_total: int | None, semantic_total: int | None,
-                            topic_total: int | None) -> dict[str, dict[str, object]]:
-    totals = {'entities': entity_total, 'semantic': semantic_total, 'topics': topic_total}
-    # Published topic_manifest is the settle signal. Stage may still be paused
-    # at the continue gate; rings must not stay at 0/N pending.
-    settled = topic_total is not None or status in {'completed', 'succeeded'}
-    if settled:
-        return {
-            name: {'status': 'completed', 'completed': total or 0, 'total': total}
-            for name, total in totals.items()
-        }
+def _topic_artifact_stats(value: object | None) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    stats = value.get('stats')
+    return stats if isinstance(stats, Mapping) else {}
+
+
+def _topic_stats_count(stats: Mapping[str, Any], key: str) -> int:
+    value = stats.get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _topic_entity_failed(value: object | None) -> int:
+    return _topic_stats_count(_topic_artifact_stats(value), 'placeholder_count')
+
+
+def _topic_semantic_failed(value: object | None) -> int:
+    stats = _topic_artifact_stats(value)
+    candidate = _topic_stats_count(stats, 'candidate_count')
+    labeled = _topic_stats_count(stats, 'labeled_cluster_count')
+    return max(0, candidate - labeled)
+
+
+def _topic_stage_entry(total: int | None, failed: int, *, settled: bool) -> dict[str, object]:
+    failed_count = max(0, failed)
+    if total is not None:
+        failed_count = min(failed_count, total)
+    if not settled:
+        return {'status': 'pending', 'completed': 0, 'total': total, 'failed': 0}
     return {
-        name: {'status': 'pending', 'completed': 0, 'total': total}
-        for name, total in totals.items()
+        'status': 'completed',
+        'completed': max(0, (total or 0) - failed_count),
+        'total': total,
+        'failed': failed_count,
+    }
+
+
+def _topic_execution_stages(status: str, entity_total: int | None, semantic_total: int | None,
+                            topic_total: int | None, *, entity_failed: int = 0,
+                            semantic_failed: int = 0, topic_failed: int = 0) -> dict[str, dict[str, object]]:
+    # Published topic_manifest is the settle signal. Stage may still be paused
+    # at the continue gate; rings must not stay at 0/N pending. completed is
+    # successes only so partition failures remain visible after the flow finishes.
+    settled = topic_total is not None or status in {'completed', 'succeeded'}
+    return {
+        'entities': _topic_stage_entry(entity_total, entity_failed, settled=settled),
+        'semantic': _topic_stage_entry(semantic_total, semantic_failed, settled=settled),
+        'topics': _topic_stage_entry(topic_total, topic_failed, settled=settled),
     }
 
 
@@ -2498,6 +2552,31 @@ def _initial_case_statuses(import_manifest_value: object) -> dict[str, dict[str,
                 'dataset.enhance_case': 'completed',
             }
     return statuses
+
+
+def _with_imported_completed_placeholders(
+    statuses_by_case: Mapping[str, Mapping[str, str]],
+    import_manifest_value: object | None,
+) -> dict[str, dict[str, str]]:
+    """Keep imported cases completed until runtime actually starts that operation."""
+    if import_manifest_value is None:
+        return {case_id: dict(statuses) for case_id, statuses in statuses_by_case.items()}
+    initial = _initial_case_statuses(import_manifest_value)
+    merged: dict[str, dict[str, str]] = {}
+    for case_id, statuses in statuses_by_case.items():
+        imported = initial.get(case_id)
+        if imported is None:
+            merged[case_id] = dict(statuses)
+            continue
+        merged[case_id] = {
+            operation_id: (
+                imported[operation_id]
+                if status == 'pending' and imported.get(operation_id) == 'completed'
+                else status
+            )
+            for operation_id, status in statuses.items()
+        }
+    return merged
 
 
 def _planned_case_rows(import_manifest_value: object, params_value: object) -> list[dict[str, Any]]:

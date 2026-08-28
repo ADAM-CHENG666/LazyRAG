@@ -118,6 +118,7 @@ export type TopicsOverview = {
     status: FlowStatus;
     completed: number;
     total: number | null;
+    failed?: number;
   }>;
 };
 

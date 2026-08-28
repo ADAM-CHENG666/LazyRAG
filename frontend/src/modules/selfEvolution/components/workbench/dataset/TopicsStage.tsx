@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Drawer, Input } from "antd";
 import { datasetRoot, describeRequestError, getJson } from "./api";
 import { chunkTags } from "./capabilities";
@@ -60,6 +60,7 @@ export function TopicsStage({
   const [questionType, setQuestionType] = useState<QuestionType>();
   const [chunkBucket, setChunkBucket] = useState<ChunkBucket>();
   const [openTopic, setOpenTopic] = useState<TopicRow>();
+  const listRef = useRef<HTMLDivElement>(null);
 
   const root = datasetRoot(threadId);
   const nameDrafts = draft?.kind === "topic-names" ? draft.names : undefined;
@@ -164,7 +165,7 @@ export function TopicsStage({
       </div>
 
       <section className="dataset-list-card" aria-label="主题列表">
-        <div className="dataset-table-wrap">
+        <div className="dataset-table-wrap" ref={listRef}>
           <table className="dataset-object-table dataset-topic-table">
             <thead>
               <tr>
@@ -246,8 +247,16 @@ export function TopicsStage({
               )}
             </tbody>
           </table>
+          {topics.error && topics.items.length ? (
+            <p className="dataset-pane-error">{topics.error}</p>
+          ) : null}
+          <ScrollSentinel
+            rootRef={listRef}
+            hasMore={!!topics.nextPageToken}
+            loading={topics.loading}
+            onLoadMore={() => void topics.loadMore()}
+          />
         </div>
-        <ScrollSentinel hasMore={!!topics.nextPageToken} loading={topics.loading} onLoadMore={() => void topics.loadMore()} />
       </section>
 
       <TopicDrawer

@@ -570,6 +570,30 @@ def test_topics_returns_409_when_the_token_snapshot_cannot_be_read() -> None:
     assert error.value.status_code == 409
 
 
+def test_cases_keeps_imported_rows_complete_when_runtime_is_still_pending() -> None:
+    snapshots = _case_snapshots()
+    snapshots['case-1'] = {'runtime': {'operations': [
+        {'operation_id': 'dataset.qaplan_spec', 'status': 'pending'},
+        {'operation_id': 'dataset.generate_case', 'status': 'pending'},
+        {'operation_id': 'dataset.enhance_case', 'status': 'pending'},
+    ]}}
+    service = ProjectionService(
+        _CaseListFakeFlow(_case_list_values(), snapshots),
+        definition=None,
+    )
+
+    result = _cases(service)
+
+    assert result['items'][0] == {
+        'case_id': 'case-1',
+        'stages': {'plan': 'completed', 'generate': 'completed', 'grading': 'completed'},
+        'source': 'imported', 'question_type': 'reasoning', 'difficulty': 'hard', 'topic': None,
+    }
+    assert result['items'][1]['stages'] == {
+        'plan': 'completed', 'generate': 'running', 'grading': 'pending',
+    }
+
+
 def test_cases_projects_plan_metadata_and_runtime_operation_statuses() -> None:
     result = _cases(_case_list_service())
 
@@ -744,16 +768,17 @@ def test_cases_pagination_keeps_its_artifact_snapshot_and_binds_query_behavior()
     assert error.value.status_code == 400
 
 
-def test_cases_pagination_rejects_a_changed_runtime_execution_snapshot() -> None:
+def test_cases_pagination_keeps_going_when_runtime_execution_changes() -> None:
     service = _case_list_service()
     first = _cases(service, page_size=1)
 
     service.flow._cases['case-2']['runtime']['operations'][1]['status'] = 'succeeded'
+    second = _cases(service, page_size=1, page_token=first['next_page_token'])
 
-    with pytest.raises(ServiceError) as error:
-        _cases(service, page_size=1, page_token=first['next_page_token'])
-
-    assert error.value.status_code == 409
+    assert [item['case_id'] for item in second['items']] == ['case-2']
+    assert second['items'][0]['stages']['generate'] == 'completed'
+    assert second['revision'] == first['revision']
+    assert second['execution_revision'] != first['execution_revision']
 
 
 @pytest.mark.parametrize(('kwargs', 'message'), [

@@ -386,10 +386,12 @@ export function ScrollSentinel({
   hasMore,
   loading,
   onLoadMore,
+  rootRef,
 }: {
   hasMore: boolean;
   loading: boolean;
   onLoadMore: () => void;
+  rootRef?: { current: HTMLElement | null };
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const loadMoreRef = useRef(onLoadMore);
@@ -404,10 +406,13 @@ export function ScrollSentinel({
   useEffect(() => {
     const el = ref.current;
     if (!el || !hasMore || loading) return undefined;
-    const observer = new IntersectionObserver(handleIntersect, { rootMargin: '200px' });
+    const observer = new IntersectionObserver(handleIntersect, {
+      root: rootRef?.current ?? null,
+      rootMargin: '200px',
+    });
     observer.observe(el);
     return () => observer.disconnect();
-  }, [hasMore, loading, handleIntersect]);
+  }, [hasMore, loading, handleIntersect, rootRef]);
 
   if (!hasMore) return null;
   return (

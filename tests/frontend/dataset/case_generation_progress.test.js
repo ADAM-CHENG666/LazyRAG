@@ -142,6 +142,62 @@ describe('case generation SSE progress', () => {
     });
   });
 
+  it('keeps imported completed when a previous-run all-completed baseline is discarded', () => {
+    let progress;
+    progress = apply(progress, {
+      partition: { id: 'case-0011', total: 20 },
+      status: 'running',
+    });
+
+    const displayed = caseGenerationDisplayStep(
+      caseGenerationSteps(progress)[0],
+      {
+        status: 'completed',
+        completed: 20,
+        total: 20,
+        status_counts: { completed: 20, pending: 0, running: 0, failed: 0, canceled: 0 },
+      },
+      8,
+    );
+
+    expect(displayed).toMatchObject({
+      completed: 8,
+      running: 1,
+      pending: 11,
+      total: 20,
+      status: 'running',
+    });
+  });
+
+  it('keeps imported completed when live execution starts and overview baseline was cleared', () => {
+    let progress;
+    progress = apply(progress, {
+      event: 'dataset.generate_case',
+      operationId: 'dataset.generate_case',
+      partition: { id: 'case-0011', total: 20 },
+      status: 'running',
+    });
+
+    const displayed = caseGenerationDisplayStep(
+      caseGenerationSteps(progress)[1],
+      {
+        status: 'pending',
+        completed: 0,
+        total: 20,
+        status_counts: { completed: 0, pending: 20, running: 0, failed: 0, canceled: 0 },
+      },
+      8,
+    );
+
+    expect(displayed).toMatchObject({
+      completed: 8,
+      running: 1,
+      pending: 11,
+      total: 20,
+      status: 'running',
+    });
+  });
+
   it('uses overview baseline alone when there is no live SSE yet', () => {
     const displayed = caseGenerationDisplayStep(
       undefined,
@@ -156,6 +212,26 @@ describe('case generation SSE progress', () => {
     expect(displayed).toMatchObject({
       completed: 10,
       pending: 10,
+      total: 20,
+      status: 'pending',
+    });
+  });
+
+  it('keeps imported completed on a cleared overview before that stage has live SSE', () => {
+    const displayed = caseGenerationDisplayStep(
+      undefined,
+      {
+        status: 'pending',
+        completed: 0,
+        total: 20,
+        status_counts: { completed: 0, pending: 20, running: 0, failed: 0, canceled: 0 },
+      },
+      8,
+    );
+
+    expect(displayed).toMatchObject({
+      completed: 8,
+      pending: 12,
       total: 20,
       status: 'pending',
     });
