@@ -362,6 +362,61 @@ def test_case_detail_uses_plan_references_before_generation_and_nulls_future_sta
     }
 
 
+def test_case_detail_keeps_imported_references_when_selected_docs_are_empty() -> None:
+    values = _case_base_values()
+    values[ArtifactKey.scalar(A.DATASET_SELECTED_DOCS)] = {1: {'documents': []}}
+    values[ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST)] = {1: {
+        'stats': {'case_allocation': {'assignments': {
+            'case-1': {'mode': 'imported', 'source_row_number': 1},
+        }}},
+        'details': [{'source_row_number': 1, 'case': {
+            'id': 'case-1', 'question_type': 'precision', 'difficulty': 'easy',
+            'references': [{
+                'kb_id': 'ds_37dd4124f1d89f6138e003f509602da9',
+                'doc_id': 'doc_713834a997d94031990e9b1ceacc867c',
+                'chunk_id': 'chunk-import',
+                'text': '导入引用',
+            }],
+        }}],
+    }}
+    values[ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN)] = {1: {'items': []}}
+    values[ArtifactKey(A.DATASET_QAPLAN_SPEC, 'case-1')] = {1: {
+        'id': 'case-1', 'mode': 'imported', 'imported_case': {
+            'id': 'case-1', 'question_type': 'precision', 'difficulty': 'easy',
+            'references': [{
+                'kb_id': 'ds_37dd4124f1d89f6138e003f509602da9',
+                'doc_id': 'doc_713834a997d94031990e9b1ceacc867c',
+                'chunk_id': 'chunk-import',
+                'text': '导入引用',
+            }],
+        },
+    }}
+
+    result = _case_detail(_service(values, {'case-1': _case_statuses()}))
+
+    assert result['source'] == 'imported'
+    assert result['references'] == [{
+        'chunk_id': 'chunk-import',
+        'knowledge_base': {
+            'id': 'ds_37dd4124f1d89f6138e003f509602da9',
+            'name': 'ds_37dd4124f1d89f6138e003f509602da9',
+        },
+        'document': {
+            'id': 'doc_713834a997d94031990e9b1ceacc867c',
+            'name': 'doc_713834a997d94031990e9b1ceacc867c',
+        },
+        'text': '导入引用',
+    }]
+
+
+def test_case_detail_still_requires_selected_docs_for_generated_references() -> None:
+    values = _case_base_values()
+    values[ArtifactKey.scalar(A.DATASET_SELECTED_DOCS)] = {1: {'documents': []}}
+
+    with pytest.raises(ServiceError, match='reference document is unavailable'):
+        _case_detail(_service(values, {'case-1': _case_statuses()}))
+
+
 def test_case_detail_projects_imported_case_without_topic() -> None:
     values = _case_base_values()
     values[ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST)] = {1: {

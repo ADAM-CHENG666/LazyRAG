@@ -695,7 +695,7 @@ class ProjectionService:
             'question_type': row['question_type'],
             'difficulty': row['difficulty'],
             'topic': _case_detail_topic(row['topic'], artifacts[base_keys[3]]['value']),
-            'references': _detail_reference_rows(references, documents),
+            'references': _detail_reference_rows(references, documents, row['source']),
             'stages': {
                 'plan': {'status': row['stages']['plan']},
                 'generate': _detail_generate_stage(row['stages']['generate'], draft),
@@ -2855,14 +2855,17 @@ def _selected_document_names(value: object) -> dict[tuple[str, str], tuple[str, 
 
 
 def _detail_reference_rows(references: list[Mapping[str, object]],
-                           documents: Mapping[tuple[str, str], tuple[str, str]]) -> list[dict[str, Any]]:
+                           documents: Mapping[tuple[str, str], tuple[str, str]],
+                           source: object) -> list[dict[str, Any]]:
     rows = []
     for reference in references:
         kb_id = _required_id(reference.get('kb_id'), 'reference.kb_id')
         doc_id = _required_id(reference.get('doc_id'), 'reference.doc_id')
         names = documents.get((kb_id, doc_id))
         if names is None:
-            raise ServiceError(503, f'reference document is unavailable: {kb_id}/{doc_id}')
+            if source != 'imported':
+                raise ServiceError(503, f'reference document is unavailable: {kb_id}/{doc_id}')
+            names = (kb_id, doc_id)
         rows.append({
             'chunk_id': _required_id(reference.get('chunk_id'), 'reference.chunk_id'),
             'knowledge_base': {'id': kb_id, 'name': names[0]},
