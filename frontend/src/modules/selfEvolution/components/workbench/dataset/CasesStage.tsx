@@ -158,7 +158,11 @@ export function CasesStage({
     0,
     (overview.data?.stages.plan.total ?? 0) - (plan?.total ?? 0),
   );
-  const generationPaused = shouldShowGenerationPlanPause(overview.data?.status);
+  const generationPaused = shouldShowGenerationPlanPause(
+    overview.data?.status,
+    overview.data?.stages.generate.completed,
+    importedCompleted,
+  );
   const transientSteps = useMemo(() => caseGenerationSteps(progress), [progress]);
   const displayedCases = useMemo(() => overlayCaseProgress(cases.items, progress), [cases.items, progress]);
   const hasFilters = Boolean(
@@ -380,6 +384,7 @@ export function CasesStage({
       <CaseDetailDrawer
         threadId={threadId}
         row={openCase}
+        progress={progress}
         onClose={() => setOpenCase(undefined)}
         onSaved={onCaseSaved}
       />

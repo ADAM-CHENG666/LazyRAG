@@ -265,7 +265,7 @@ class EvoService:
                 from_stage=request.stage,
                 from_artifact=(ArtifactKey.partition(request.artifact_id, case_id) if request.artifact_id else None),
             )
-            await self._continue_automatic(thread_id)
+            await self._resume_if_paused(thread_id)
             return _accepted(thread_id, command_id, 'rerun-case')
 
     async def retry_case(self, thread_id: str, case_id: str, request: ControlRequest | Mapping[str, Any]
@@ -274,7 +274,7 @@ class EvoService:
         command_id = request.command_id.strip() or f'retry-case:{thread_id}:{case_id}:{time.time_ns()}'
         async with self._control_locks.setdefault(thread_id, asyncio.Lock()):
             await self.flow.retry_failed_case(thread_id, case_id, request_id=command_id)
-            await self._continue_automatic(thread_id)
+            await self._resume_if_paused(thread_id)
             return _accepted(thread_id, command_id, 'retry-case')
 
     async def pause(self, thread_id: str, request: ControlRequest | Mapping[str, Any]) -> dict[str, str]:
@@ -479,7 +479,7 @@ class EvoService:
             )
         except DefinitionError as error:
             raise ServiceError(409, str(error)) from error
-        await self._resume_after_dataset_write(thread_id)
+        await self._resume_if_paused(thread_id)
         heads = await asyncio.gather(*(self.flow.head(thread_id, ref.key) for ref in refs))
         if any(record is None for record in heads):
             raise ServiceError(503, 'committed material selection is unavailable')
@@ -749,7 +749,7 @@ class EvoService:
             )
         except DefinitionError as error:
             raise ServiceError(409, str(error)) from error
-        await self._resume_after_dataset_write(thread_id)
+        await self._resume_if_paused(thread_id)
         heads = await asyncio.gather(*(self.flow.head(thread_id, ref.key) for ref in refs))
         if any(record is None for record in heads):
             raise ServiceError(503, 'committed configuration is unavailable')
@@ -894,7 +894,7 @@ class EvoService:
         if await self._auto_enabled(thread_id):
             self._ensure_auto_task(thread_id)
 
-    async def _resume_after_dataset_write(self, thread_id: str) -> None:
+    async def _resume_if_paused(self, thread_id: str) -> None:
         snapshot = await self.flow.snapshot(thread_id)
         if snapshot.status == 'paused':
             await self.flow.resume(thread_id)

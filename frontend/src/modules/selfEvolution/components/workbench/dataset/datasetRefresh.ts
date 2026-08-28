@@ -29,8 +29,13 @@ export function executionImpactTabs(kind: DatasetDraft['kind']): DatasetTab[] {
   return DATASET_TAB_ORDER.slice(DATASET_TAB_ORDER.indexOf(first));
 }
 
-export function shouldShowGenerationPlanPause(status: string | undefined): boolean {
-  return status === 'paused';
+export function shouldShowGenerationPlanPause(
+  status: string | undefined,
+  generateCompleted: number | null | undefined,
+  importedCompleted: number,
+): boolean {
+  if (status !== 'paused') return false;
+  return (generateCompleted ?? 0) <= importedCompleted;
 }
 
 export function shouldResumeDatasetStream(lastHandledToken: number, nextToken: number): boolean {

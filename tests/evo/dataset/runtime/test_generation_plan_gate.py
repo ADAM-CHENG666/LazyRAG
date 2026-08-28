@@ -51,39 +51,74 @@ class _Store:
         return {ref: self.values[ref] for ref in refs}
 
 
+def _over_capacity_session(*extra_records: ArtifactRecord) -> tuple[RunSession, list[bool]]:
+    session = object.__new__(RunSession)
+    session.run_id = 'thr-a7f9a9d6'
+    session._status = 'running'
+
+    import_ref = ArtifactRef(ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST), 2)
+    topic_ref = ArtifactRef(ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST), 1)
+    params_ref = ArtifactRef(ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN_PARAMS), 1)
+    records = {
+        import_ref.key: ArtifactRecord(import_ref, 'operation:dataset.import_cases'),
+        topic_ref.key: ArtifactRecord(topic_ref, 'operation:dataset.topic_manifest'),
+        params_ref.key: ArtifactRecord(params_ref, 'user:create'),
+    }
+    for record in extra_records:
+        records[record.ref.key] = record
+    session._decision = PlanReady(ArtifactSnapshot(records=records), ())
+    session._store = _Store({
+        import_ref: _import_manifest(auto=20),
+        topic_ref: {'topics': _thr_a7f9a9d6_topics()},
+        params_ref: {},
+    })
+
+    paused = []
+
+    async def _pause() -> None:
+        paused.append(True)
+
+    session._pause = _pause
+    return session, paused
+
+
+async def _gate(session: RunSession) -> bool:
+    return await session._pause_for_generation_plan_gate((
+        SimpleNamespace(operation=SimpleNamespace(spec=SimpleNamespace(op_id='dataset.qaplan_plan'))),
+    ))
+
+
 def test_generation_plan_gate_reads_manifest_values_from_mapping() -> None:
     async def run() -> None:
-        session = object.__new__(RunSession)
-        session.run_id = 'thr-a7f9a9d6'
-        session._status = 'running'
-
-        import_ref = ArtifactRef(ArtifactKey.scalar(A.DATASET_IMPORT_CASES_MANIFEST), 2)
-        topic_ref = ArtifactRef(ArtifactKey.scalar(A.DATASET_TOPIC_MANIFEST), 1)
-        params_ref = ArtifactRef(ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN_PARAMS), 1)
-        session._decision = PlanReady(ArtifactSnapshot(records={
-            import_ref.key: ArtifactRecord(import_ref, 'operation:dataset.import_cases'),
-            topic_ref.key: ArtifactRecord(topic_ref, 'operation:dataset.topic_manifest'),
-            params_ref.key: ArtifactRecord(params_ref, 'user:create'),
-        }), ())
-        session._store = _Store({
-            import_ref: _import_manifest(auto=20),
-            topic_ref: {'topics': _thr_a7f9a9d6_topics()},
-            params_ref: {},
-        })
-
-        paused = False
-
-        async def _pause() -> None:
-            nonlocal paused
-            paused = True
-
-        session._pause = _pause
-
-        blocked = await session._pause_for_generation_plan_gate((
-            SimpleNamespace(operation=SimpleNamespace(spec=SimpleNamespace(op_id='dataset.qaplan_plan'))),
-        ))
-
+        session, paused = _over_capacity_session()
+        blocked = await _gate(session)
         assert blocked is True
-        assert paused is True
+        assert paused == [True]
+
+    asyncio.run(run())
+
+
+def test_generation_plan_gate_does_not_pause_when_plan_already_exists() -> None:
+    async def run() -> None:
+        plan_ref = ArtifactRef(ArtifactKey.scalar(A.DATASET_QAPLAN_PLAN), 1)
+        session, paused = _over_capacity_session(
+            ArtifactRecord(plan_ref, 'operation:dataset.qaplan_plan'),
+        )
+        blocked = await _gate(session)
+        assert blocked is False
+        assert paused == []
+
+    asyncio.run(run())
+
+
+def test_generation_plan_gate_does_not_pause_when_case_requests_already_exist() -> None:
+    async def run() -> None:
+        requests_ref = ArtifactRef(ArtifactKey.scalar(A.EVAL_CASE_REQUESTS), 1)
+        session, paused = _over_capacity_session(
+            ArtifactRecord(requests_ref, 'operation:dataset.qaplan_plan'),
+        )
+        blocked = await _gate(session)
+        assert blocked is False
+        assert paused == []
 
     asyncio.run(run())

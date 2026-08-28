@@ -670,6 +670,15 @@ class RunSession:
         from evo import artifacts as runtime_artifacts
         from evo.operations.dataset.qaplan_capacity import default_lane_distribution_exceeds_capacity
 
+        if any(
+            self._decision.view.records.get(key) is not None
+            for key in (
+                ArtifactKey.scalar(runtime_artifacts.DATASET_QAPLAN_PLAN),
+                ArtifactKey.scalar(runtime_artifacts.EVAL_CASE_REQUESTS),
+            )
+        ):
+            return False
+
         keys = (
             ArtifactKey.scalar(runtime_artifacts.DATASET_IMPORT_CASES_MANIFEST),
             ArtifactKey.scalar(runtime_artifacts.DATASET_TOPIC_MANIFEST),

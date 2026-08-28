@@ -46,10 +46,20 @@ describe('dataset refresh policy', () => {
     expect(executionImpactTabs('generation-plan')).toEqual(['cases']);
   });
 
-  it('shows the generation-plan pause notice only while case generation is paused', () => {
-    expect(shouldShowGenerationPlanPause('paused')).toBe(true);
-    expect(shouldShowGenerationPlanPause('running')).toBe(false);
-    expect(shouldShowGenerationPlanPause(undefined)).toBe(false);
+  it('shows the generation-plan pause notice only on the first-entry quota gate', () => {
+    expect(shouldShowGenerationPlanPause('paused', 0, 0)).toBe(true);
+    expect(shouldShowGenerationPlanPause('paused', 5, 5)).toBe(true);
+    expect(shouldShowGenerationPlanPause('paused', null, 0)).toBe(true);
+    expect(shouldShowGenerationPlanPause('paused', 59, 0)).toBe(false);
+    expect(shouldShowGenerationPlanPause('paused', 6, 5)).toBe(false);
+    expect(shouldShowGenerationPlanPause('running', 0, 0)).toBe(false);
+    expect(shouldShowGenerationPlanPause(undefined, 0, 0)).toBe(false);
+
+    const source = readFrontendFile(
+      'src/modules/selfEvolution/components/workbench/dataset/CasesStage.tsx',
+    );
+    expect(source).toContain('overview.data?.stages.generate.completed');
+    expect(source).toContain('importedCompleted');
   });
 
   it('reopens the Dataset stream once when an external action starts a new execution round', () => {

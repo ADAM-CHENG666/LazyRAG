@@ -1589,6 +1589,29 @@ $ds-line: #dbe8f9;
   font-size: 10px;
 }
 
+.dataset-case-retry-control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border: 1px solid #cfe0f4;
+  border-radius: 8px;
+  background: #f6faff;
+  color: #5f7893;
+  font-size: 10px;
+  line-height: 1.45;
+
+  > span {
+    min-width: 0;
+  }
+
+  .ant-btn {
+    flex: 0 0 auto;
+  }
+}
+
 .dataset-case-unsaved {
   margin-bottom: 10px;
   padding: 7px 9px;

@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Alert, Button, Checkbox, Drawer, Input, Modal, message } from "antd";
-import { DeleteOutlined } from "@ant-design/icons";
-import { datasetRoot, describeRequestError, getJson, newRequestId, patchJson } from "./api";
+import { DeleteOutlined, ReloadOutlined } from "@ant-design/icons";
+import { datasetRoot, describeRequestError, getJson, newRequestId, patchJson, postJson, threadRoot } from "./api";
+import { caseRetryRequest, getCaseRetryAction } from "./caseRetry";
+import type { CaseGenerationProgress } from "./caseGenerationProgress";
 import { PAGE_SIZE } from "./hooks";
 import {
   Chip,
@@ -56,11 +58,13 @@ const focusStage = (detail: CaseDetail): CaseStageKey => {
 export function CaseDetailDrawer({
   threadId,
   row,
+  progress,
   onClose,
   onSaved,
 }: {
   threadId: string;
   row?: CaseRow;
+  progress?: CaseGenerationProgress;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -71,6 +75,7 @@ export function CaseDetailDrawer({
   const [stage, setStage] = useState<CaseStageKey>("generate");
   const [draft, setDraft] = useState<Draft>();
   const [saving, setSaving] = useState(false);
+  const [retrying, setRetrying] = useState(false);
   const [error, setError] = useState<string>();
   const [evidenceEditorIndex, setEvidenceEditorIndex] = useState<number>();
 
@@ -156,6 +161,15 @@ export function CaseDetailDrawer({
   const patch = (partial: Partial<Draft>) =>
     setDraft((prev) => (prev ? { ...prev, ...partial } : prev));
 
+  const effectiveStageStatus = (key: CaseStageKey) =>
+    detail && progress?.partitions[key]?.[detail.case_id]
+      ? progress.partitions[key][detail.case_id]
+      : detail?.stages[key].status;
+
+  const retryAction = detail
+    ? getCaseRetryAction(stage, effectiveStageStatus(stage) || detail.stages[stage].status, detail.source)
+    : undefined;
+
   const submit = async () => {
     if (!detail || !draft || !dirty) return;
     if (planChanged && gradingChanged) {
@@ -240,6 +254,39 @@ export function CaseDetailDrawer({
     });
   };
 
+  const retryGeneration = async () => {
+    if (!detail || !retryAction || retrying) return;
+    setRetrying(true);
+    try {
+      const request = caseRetryRequest(threadRoot(threadId), detail.case_id, retryAction);
+      await postJson(request.path, {
+        command_id: newRequestId(),
+        ...request.body,
+      });
+      message.success("已提交当前用例的重试生成");
+      onSaved();
+      await load();
+    } catch (caught) {
+      message.error(describeRequestError(caught, "重试生成失败"));
+    } finally {
+      setRetrying(false);
+    }
+  };
+
+  const retryControl = retryAction ? (
+    <div className="dataset-case-retry-control">
+      <span>{retryAction.description}</span>
+      <Button
+        size="small"
+        icon={<ReloadOutlined />}
+        loading={retrying}
+        onClick={() => void retryGeneration()}
+      >
+        {retryAction.label}
+      </Button>
+    </div>
+  ) : null;
+
   return (
     <Drawer
       className="dataset-drawer"
@@ -307,22 +354,25 @@ export function CaseDetailDrawer({
           ) : null}
 
           <nav className="dataset-case-roadmap" aria-label="用例阶段">
-            {(Object.keys(STAGE_LABEL) as CaseStageKey[]).map((key, index) => (
-              <button
-                type="button"
-                key={key}
-                className={`dataset-roadmap-step${stage === key ? " is-selected" : ""}`}
-                onClick={() => setStage(key)}
-              >
-                <span
-                  className={`dataset-roadmap-mark is-${toVisualStatus(detail.stages[key].status)}`}
-                  aria-hidden="true"
+            {(Object.keys(STAGE_LABEL) as CaseStageKey[]).map((key, index) => {
+              const stageStatus = effectiveStageStatus(key) || detail.stages[key].status;
+              return (
+                <button
+                  type="button"
+                  key={key}
+                  className={`dataset-roadmap-step${stage === key ? " is-selected" : ""}`}
+                  onClick={() => setStage(key)}
                 >
-                  {toVisualStatus(detail.stages[key].status) === "done" ? "✓" : index + 1}
-                </span>
-                <strong>{STAGE_LABEL[key]}</strong>
-              </button>
-            ))}
+                  <span
+                    className={`dataset-roadmap-mark is-${toVisualStatus(stageStatus)}`}
+                    aria-hidden="true"
+                  >
+                    {toVisualStatus(stageStatus) === "done" ? "✓" : index + 1}
+                  </span>
+                  <strong>{STAGE_LABEL[key]}</strong>
+                </button>
+              );
+            })}
           </nav>
 
           {stage === "plan" && (
@@ -396,6 +446,7 @@ export function CaseDetailDrawer({
                   ? "问答内容随外部导入，在本阶段只读。"
                   : "问题、标准答案与评分说明共同属于当前 Case 修改。"}
               </div>
+              {retryControl}
               <div className="dataset-inline-editable-stack">
                 <InlineEditableField
                   label="问题"
@@ -421,6 +472,7 @@ export function CaseDetailDrawer({
 
           {stage === "grading" && (
             <section>
+              {retryControl}
               <div className="dataset-section-heading">
                 <h4>关键得分点</h4>
                 <button

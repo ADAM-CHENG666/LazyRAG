@@ -132,6 +132,28 @@ def test_generate_enhance_repairs_invalid_key_points_once():
     assert result['forbidden_claims'] == []
 
 
+def test_generate_enhance_resubmits_invalid_reference_aliases_for_repair():
+    prompts = []
+    invalid = _key_points_response(key_points=[
+        {'statement': 'The warranty covers battery defects.', 'evidence_reference_ids': ['ref_45']},
+    ])
+    result = _enhance(
+        responses=(
+            json.dumps(invalid),
+            json.dumps(_key_points_response()),
+            json.dumps(_forbidden_claims_response(forbidden_claims=[])),
+        ),
+        captured=prompts,
+    )
+
+    repair_prompt = prompts[1]
+    assert "got=['ref_45']" in repair_prompt
+    assert "allowed=['ref_1', 'ref_2']" in repair_prompt
+    assert 'evidence_reference_ids 只能使用这些短别名：ref_1, ref_2' in repair_prompt
+    assert '"ref_45"' in repair_prompt
+    assert result['key_points'][0]['evidence_chunk_ids'] == ['chunk-1']
+
+
 def test_generate_enhance_fails_without_partial_output_when_forbidden_claims_fail():
     with pytest.raises(ValueError, match='LLM JSON call failed after 2 attempts'):
         _enhance(responses=(

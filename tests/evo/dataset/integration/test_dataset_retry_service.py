@@ -39,6 +39,73 @@ def test_retry_does_not_claim_to_restart_case_generation_while_plan_adjustment_i
     assert flow.retry_calls == []
 
 
+class _PausedCaseControlFlow:
+    def __init__(self) -> None:
+        self.status = 'paused'
+        self.retry_calls: list[tuple[str, str]] = []
+        self.rerun_calls: list[tuple[str, str]] = []
+        self.resume_calls: list[str] = []
+
+    async def snapshot(self, _: str) -> SimpleNamespace:
+        return SimpleNamespace(status=self.status)
+
+    async def retry_failed_case(self, thread_id: str, case_id: str, *, request_id: str) -> SimpleNamespace:
+        del request_id
+        self.retry_calls.append((thread_id, case_id))
+        return SimpleNamespace()
+
+    async def rerun_case(
+        self,
+        thread_id: str,
+        case_id: str,
+        *,
+        request_id: str,
+        from_stage: str = '',
+        from_artifact: ArtifactKey | None = None,
+    ) -> SimpleNamespace:
+        del request_id, from_stage, from_artifact
+        self.rerun_calls.append((thread_id, case_id))
+        return SimpleNamespace()
+
+    async def resume(self, thread_id: str) -> SimpleNamespace:
+        self.status = 'running'
+        self.resume_calls.append(thread_id)
+        return SimpleNamespace()
+
+    async def configuration(self, _: str) -> SimpleNamespace:
+        return SimpleNamespace(values={'automatic': False})
+
+
+def test_retry_case_resumes_a_paused_thread_so_the_failure_can_run() -> None:
+    flow = _PausedCaseControlFlow()
+    service = object.__new__(EvoService)
+    service.flow = flow
+    service._control_locks = {}
+
+    asyncio.run(service.retry_case('thr-1', 'case_0026', {'command_id': 'retry-case-1'}))
+
+    assert flow.retry_calls == [('thr-1', 'case_0026')]
+    assert flow.resume_calls == ['thr-1']
+    assert flow.status == 'running'
+
+
+def test_rerun_case_resumes_a_paused_thread_so_the_published_artifact_can_recompute() -> None:
+    flow = _PausedCaseControlFlow()
+    service = object.__new__(EvoService)
+    service.flow = flow
+    service._control_locks = {}
+
+    asyncio.run(service.rerun_case(
+        'thr-1',
+        'case_0026',
+        {'command_id': 'rerun-case-1', 'artifact_id': 'dataset.case_draft'},
+    ))
+
+    assert flow.rerun_calls == [('thr-1', 'case_0026')]
+    assert flow.resume_calls == ['thr-1']
+    assert flow.status == 'running'
+
+
 class _PausedApprovalFlow:
     def __init__(self) -> None:
         self.resumed = False
