@@ -17,6 +17,7 @@ const {
   writeStartupMetrics,
 } = require("./startup-metrics");
 const {
+  installerWarmupWebPreferences,
   macWarmupCompleted,
   macWarmupMarkerPath,
   markMacWarmupCompleted,
@@ -718,11 +719,7 @@ async function runInstallerWarmup() {
     readStatus,
     createRenderer: () => new BrowserWindow({
       show: false,
-      webPreferences: {
-        contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: true,
-      },
+      webPreferences: installerWarmupWebPreferences(),
     }),
     loadRenderer: async (warmupWindow, status) => {
       warmupWindow.webContents.session.webRequest.onBeforeRequest((details, callback) => {
@@ -744,6 +741,7 @@ async function runInstallerWarmup() {
     }),
     disposeRenderer: (warmupWindow) => {
       if (!warmupWindow.isDestroyed()) {
+        warmupWindow.webContents.session.webRequest.onBeforeRequest(null);
         warmupWindow.destroy();
       }
     },
