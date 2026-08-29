@@ -180,6 +180,9 @@ func readBuiltinPackageFiles(root string) (map[string][]byte, error) {
 		if err != nil {
 			return err
 		}
+		if entry.Type()&fs.ModeSymlink != 0 {
+			return nil
+		}
 		if path != root && ignoredBuiltinPackageDir(entry.Name()) {
 			if entry.IsDir() {
 				return filepath.SkipDir

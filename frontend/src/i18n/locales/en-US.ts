@@ -2784,6 +2784,8 @@ const enUS = {
     updateAllSubmitted: "The batch update check was submitted",
     updateAllChecked: "The batch update check is complete",
     marketTaskFailed: "{{name}} failed. Open Background Tasks for details",
+    marketTaskPartiallyFailed:
+      "Some files in {{name}} failed. Open Background Tasks for details",
     taskProgressPercent: "Processing {{progress}}%",
     taskName: "Task",
     taskType: "Type",
@@ -2841,6 +2843,7 @@ const enUS = {
     processing: "Processing",
     processed: "Processed",
     failed: "Failed",
+    partialFailed: "Partially failed",
     pending: "Pending",
     tags: "Tags",
     addTag: "Add Tag",

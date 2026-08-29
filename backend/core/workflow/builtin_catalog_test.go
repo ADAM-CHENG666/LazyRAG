@@ -102,6 +102,32 @@ func TestBuiltinPackageIgnoresPythonRuntimeCacheFiles(t *testing.T) {
 	}
 }
 
+func TestReadBuiltinPackageFilesIgnoresDirectorySymlink(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "workflow.yaml"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	exporterDir := filepath.Join(root, "runtime", "scripts", "export_pptx")
+	if err := os.MkdirAll(exporterDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dependencyDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dependencyDir, "package.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(dependencyDir, filepath.Join(exporterDir, "runtime_dependencies")); err != nil {
+		t.Skipf("directory symlinks are unavailable: %v", err)
+	}
+
+	files, err := readBuiltinPackageFiles(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || string(files["workflow.yaml"]) != "keep" {
+		t.Fatalf("directory symlink leaked into built-in package: %#v", files)
+	}
+}
+
 func TestReadBuiltinPackageFilesIgnoresNodeModulesEntries(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "workflow.yaml"), []byte("keep"), 0o600); err != nil {
