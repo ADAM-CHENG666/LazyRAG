@@ -15,7 +15,6 @@ import {
 import { FilePreviewDrawer } from "./FilePreviewDrawer";
 import {
   WriterArtifactContent,
-  WRITER_ARTIFACT_SLOT_IDS,
   unwrapArtifactPayload,
 } from './writerArtifactViews';
 import { WriterIRControl, type WriterIRSaveMode, type WriterIRSaveResult } from './WriterIRControl';
@@ -1912,15 +1911,18 @@ export function SlotText({ slot, widget, sessionId, slotId, revisionCount, onRef
     const savedText = saved?.text !== undefined ? String(saved.text) : undefined;
     const nextDraft = savedText !== undefined && savedText !== text ? savedText : text;
     if (source) {
-      const rect = source.getBoundingClientRect();
-      const pointerRatio = pointer && rect.height > 0
-        ? Math.max(0, Math.min(1, (pointer.clientY - rect.top) / rect.height))
+      const contentRect = source.getBoundingClientRect();
+      const slotElement = source.closest<HTMLElement>('.workflow-slot--text');
+      const slotRect = slotElement?.getBoundingClientRect();
+      const layoutRect = slotRect && slotRect.height > 0 ? slotRect : contentRect;
+      const pointerRatio = pointer && contentRect.height > 0
+        ? Math.max(0, Math.min(1, (pointer.clientY - contentRect.top) / contentRect.height))
         : 0;
       const scrollContainer = source.closest<HTMLElement>(
         '.workflow-panel__tab-content, .workflow-panel__auto-grid, .composite-grid',
       );
       editViewportRef.current = {
-        height: rect.height,
+        height: layoutRect.height,
         selectionStart: pointer
           ? rawTextOffsetAtPoint(
             source,
@@ -1943,6 +1945,9 @@ export function SlotText({ slot, widget, sessionId, slotId, revisionCount, onRef
 
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const val = e.target.value;
+    const minimumHeight = editViewportRef.current?.height ?? 0;
+    e.target.style.height = 'auto';
+    e.target.style.height = `${Math.max(minimumHeight, e.target.scrollHeight)}px`;
     setDraft(val);
     if (sessionId && slotId) {
       const draftPayload: Record<string, unknown> = { text: val };
@@ -2044,6 +2049,10 @@ export function SlotText({ slot, widget, sessionId, slotId, revisionCount, onRef
     if (!editor) return;
 
     const viewport = editViewportRef.current;
+    if (viewport) {
+      editor.style.height = 'auto';
+      editor.style.height = `${Math.max(viewport.height, editor.scrollHeight)}px`;
+    }
     const selectionStart = Math.min(viewport?.selectionStart ?? 0, editor.value.length);
     editor.focus({ preventScroll: true });
     editor.setSelectionRange(selectionStart, selectionStart);
@@ -2091,7 +2100,7 @@ export function SlotText({ slot, widget, sessionId, slotId, revisionCount, onRef
           onBlur={handleSave}
           rows={6}
           style={editViewportRef.current?.height
-            ? { height: editViewportRef.current.height }
+            ? { minHeight: editViewportRef.current.height, height: editViewportRef.current.height }
             : undefined}
           aria-label={tr('chat.slots.editText')}
         />
@@ -2364,17 +2373,13 @@ function writerLmdFilename(name: string, title = ''): string {
 function shouldRenderInlineStructuredContent(
   slot: SlotRevision,
   expectedType?: 'image' | 'file' | 'text',
-  slotId?: string,
 ): boolean {
   const payload = getInlineStructuredArtifactPayload(slot);
   if (payload === null) return false;
   if (isWriterDocument(payload)) {
     return expectedType !== 'image';
   }
-  if (expectedType !== 'text') return false;
-  if (slot.content_type === 'json') return true;
-  const resolvedSlotId = slotId ?? slot.slot;
-  return WRITER_ARTIFACT_SLOT_IDS.has(resolvedSlotId);
+  return expectedType === 'text';
 }
 
 function shouldRenderJsonFileAsContent(
@@ -2774,7 +2779,7 @@ function SlotWriterDocument({
   const displayRevisionCount = localRevisionCount ?? revisionCount;
   const showVersionBadge = Boolean(displayRevisionCount && displayRevisionCount > 0);
   const canEdit = !readOnly;
-  const canEditWriterIR = canEdit && writerDocument?.ui_editable === true;
+  const canEditWriterIR = canEdit && writerDocument !== null;
   const canRewrite = canEdit
     && displayRevision > 0
     && rewriteSelection === null
@@ -3275,7 +3280,7 @@ function SlotJsonFile({
   );
   const canEditWriterIR = Boolean(sessionId && slotId)
     && !readOnly
-    && writerDocument?.ui_editable === true
+    && writerDocument !== null
     && (loadedSourceKey === sourceKey || writerEditing);
   const editingKey = `${sessionId}:${slotId}:${apiListIndex}:writer-ir`;
   const showVersionBadge =
@@ -3655,7 +3660,7 @@ function SlotInlineStructured({
   );
   const canEditWriterIR = Boolean(sessionId && slotId)
     && !readOnly
-    && writerDocument?.ui_editable === true;
+    && writerDocument !== null;
   const editingKey = `${sessionId}:${slotId}:${apiListIndex}:writer-ir`;
   const showVersionBadge =
     displayRevisionCount !== undefined && displayRevisionCount > 0 && Boolean(sessionId && slotId);
@@ -4078,8 +4083,7 @@ function SlotMarkdownFile({
     && rewriteSelection === null
     && rewritePreview === null;
   const canEditMarkdown = Boolean(sessionId && slotId)
-    && !readOnly
-    && WRITER_ARTIFACT_SLOT_IDS.has(resolvedSlotId);
+    && !readOnly;
 
   useEffect(() => {
     if (!canEditMarkdown) setDownloadMarkdownContent(content);
@@ -4256,7 +4260,13 @@ function SlotMarkdownFile({
 
   return (
     <div className='workflow-slot workflow-slot--artifact'>
-      <div className='writer-artifact__output-toolbar' hidden={!allowDownload}>
+      <div className='writer-artifact__output-toolbar' hidden={!allowDownload && !readOnly}>
+        {readOnly && (
+          <span className='writer-artifact__readonly-badge' role='status'>
+            <span aria-hidden='true'>🔒</span>
+            {tr('chat.writerMarkdown.readOnly')}
+          </span>
+        )}
         {!canEditMarkdown && (
           <WriterDownloadFormatButton
             markdown={{
@@ -4774,7 +4784,7 @@ export function SlotRenderer({
       />
     );
   }
-  if (shouldRenderInlineStructuredContent(slot, expectedType, slotId)) {
+  if (shouldRenderInlineStructuredContent(slot, expectedType)) {
     return (
       <SlotInlineStructured
         slot={slot}

@@ -1070,10 +1070,13 @@
   overflow: hidden;
 
   &--text {
+    width: 100%;
+    min-width: 0;
     padding: 8px 12px;
     background: #f9fafb;
     border: 1px solid #e5e7eb;
     border-radius: 6px;
+    box-sizing: border-box;
   }
 
   &__text {
@@ -3728,6 +3731,19 @@
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.writer-artifact__readonly-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border: 1px solid #d1d5db;
+  border-radius: 999px;
+  color: #6b7280;
+  background: #f9fafb;
+  font-size: 12px;
+  line-height: 1;
 }
 
 .writer-artifact__download-btn {
