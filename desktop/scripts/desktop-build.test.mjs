@@ -619,6 +619,11 @@ test("Desktop renderer keeps Node disabled behind an isolated preload bridge", (
   assert.match(source, /contextIsolation:\s*true/);
   assert.match(source, /nodeIntegration:\s*false/);
   assert.match(source, /preload:\s*path\.join\(__dirname, "preload\.js"\)/);
+  assert.match(
+    source,
+    /backgroundThrottling:\s*false/,
+    "hidden Chat windows must keep running until they report renderer readiness",
+  );
 });
 
 test("Desktop clears stale frontend caches before opening a renderer", () => {
