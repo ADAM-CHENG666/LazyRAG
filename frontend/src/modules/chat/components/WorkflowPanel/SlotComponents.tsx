@@ -174,14 +174,23 @@ const MEDIA_LIBRARY_LOAD_RETRY_MS = 800;
 /**
  * Resolve a slot image URL and preload it before display.
  * Avoids flashing a broken <img> when the API returns a signed URL before the file exists.
+ * Public http(s)/data URLs from an external Agent are already displayable.
  */
 function useSlotImageUrl(raw: Record<string, unknown> | undefined) {
   const pathForSign = String(raw?.path ?? raw?.url ?? '').trim();
   const apiUrlRaw = raw?.url ? String(raw.url).trim() : '';
-  const [displayUrl, setDisplayUrl] = useState('');
-  const [pending, setPending] = useState(Boolean(pathForSign));
+  const publicUrl = (/^https?:\/\//i.test(apiUrlRaw) || apiUrlRaw.startsWith('data:image/'))
+    ? apiUrlRaw
+    : '';
+  const [displayUrl, setDisplayUrl] = useState(publicUrl);
+  const [pending, setPending] = useState(Boolean(pathForSign) && !publicUrl);
 
   useEffect(() => {
+    if (publicUrl) {
+      setDisplayUrl(publicUrl);
+      setPending(false);
+      return;
+    }
     if (!pathForSign) {
       setDisplayUrl('');
       setPending(false);
@@ -208,6 +217,14 @@ function useSlotImageUrl(raw: Record<string, unknown> | undefined) {
         return;
       }
 
+      if (!candidate.includes('/static-files/')) {
+        if (!cancelled) {
+          setDisplayUrl(candidate);
+          setPending(false);
+        }
+        return;
+      }
+
       for (let attempt = 0; attempt < SLOT_IMAGE_PRELOAD_RETRIES && !cancelled; attempt++) {
         if (await preloadImageUrl(candidate)) {
           if (!cancelled) {
@@ -223,7 +240,7 @@ function useSlotImageUrl(raw: Record<string, unknown> | undefined) {
       }
 
       if (!cancelled) {
-        setDisplayUrl('');
+        setDisplayUrl(candidate);
         setPending(false);
       }
     }
@@ -232,7 +249,7 @@ function useSlotImageUrl(raw: Record<string, unknown> | undefined) {
     return () => {
       cancelled = true;
     };
-  }, [pathForSign, apiUrlRaw]);
+  }, [pathForSign, apiUrlRaw, publicUrl]);
 
   return { displayUrl, pending, hasSource: Boolean(pathForSign) };
 }
@@ -4795,7 +4812,7 @@ export function SlotFile({ slot, sessionId, slotId, revisionCount, onRefresh, re
       <FilePreviewDrawer
         open={previewOpen}
         filename={name}
-        url={rawPath}
+        url={url}
         onClose={() => setPreviewOpen(false)}
       />
     </div>

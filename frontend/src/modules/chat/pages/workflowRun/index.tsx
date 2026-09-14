@@ -6,7 +6,7 @@ import { AgentAppsAuth } from '@/components/auth';
 import { WorkflowPanel } from '@/modules/chat/components/WorkflowPanel';
 import { useWorkflowStore } from '@/modules/chat/store/workflowPanel';
 import { WorkflowSessionApi } from '@/modules/chat/utils/request';
-import { controlActions, ReviewRefreshRequired, type WorkflowActionIntent } from '@/modules/chat/utils/workflowControl';
+import { controlActions, controlNoticeKey, ReviewRefreshRequired, type WorkflowActionIntent } from '@/modules/chat/utils/workflowControl';
 import { loadWorkflowRunSnapshot, watchWorkflowRun, controlStatusKey, type WorkflowRunSnapshot } from './loadRun';
 import './index.scss';
 
@@ -77,7 +77,7 @@ export default function WorkflowRunPage({ embedded = false }: { embedded?: boole
     setError(''); setNotice('');
     try {
       await actions.execute(intent);
-      if (lifetime.current?.key === key && !lifetime.current.controller.signal.aborted) setNotice(t(intent.kind === 'save' ? 'chat.workflowControlSaved' : 'chat.workflowControlAccepted'));
+      if (lifetime.current?.key === key && !lifetime.current.controller.signal.aborted) setNotice(t(controlNoticeKey(intent.kind)));
     } catch (reason) {
       if (lifetime.current?.key !== key || lifetime.current.controller.signal.aborted) return;
       if (reason instanceof ReviewRefreshRequired) setNotice(t('chat.workflowControlReviewChanged'));

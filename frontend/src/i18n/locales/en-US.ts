@@ -2400,6 +2400,8 @@ workflowControlCancellationAccepted: 'The original agent has acknowledged cancel
     workflowControlResume: "Resume workflow",
     workflowControlOtherReview: "Step {{step}} needs review. Open its tab to confirm.",
     workflowControlSaved: "Changes saved.",
+    workflowControlConfirmed: "This step is confirmed.",
+    workflowControlRecovered: "This step ran again. Deterministic steps may produce the same content.",
     workflowControlAccepted: "Operation recorded. Check delivery status for host acceptance.",
     workflowControlReviewChanged: "Content was saved or changed. Review the updated content before confirming this step.",
     workflowControlDeliveryPending: "Operation committed; waiting for the original Agent session.",

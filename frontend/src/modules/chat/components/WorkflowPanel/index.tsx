@@ -200,6 +200,7 @@ export interface WorkflowPanelControlContext {
   stepId: string;
   stepIds: string[];
   pending: boolean;
+  dirty?: boolean;
   runAction(action: () => Promise<void>, flush?: boolean): Promise<void>;
 }
 
@@ -2285,6 +2286,7 @@ export function WorkflowPanel({
             stepId: controlStepId,
             stepIds: controlStepIds,
             pending: actionPending,
+            dirty: anySlotEditing,
             runAction: runControlledAction,
           }} /> : <span role='status'>{t('chat.workflowControlLegacy')}</span>) : <>
           {displayStatus === 'active' && onStop && (

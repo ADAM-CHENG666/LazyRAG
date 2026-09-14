@@ -26,6 +26,14 @@ export interface WorkflowControlRequest extends Pick<WorkflowControlCommand, 'co
 
 export class ReviewRefreshRequired extends Error {}
 
+/** Banner copy after a typed panel command. Recovery is local; continue/stop still depend on the host. */
+export function controlNoticeKey(kind: WorkflowActionKind): string {
+  if (kind === 'save') return 'chat.workflowControlSaved';
+  if (kind === 'confirm') return 'chat.workflowControlConfirmed';
+  if (kind === 'retry' || kind === 'rewind') return 'chat.workflowControlRecovered';
+  return 'chat.workflowControlAccepted';
+}
+
 export function deliveryPending(control: WorkflowControlView): boolean {
   const delivery = control.delivery;
   if (!delivery || delivery.consumed_at) return false;
