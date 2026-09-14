@@ -103,6 +103,56 @@ func setupBatchTransitionSession(t *testing.T) (*orm.DB, string) {
 	return db, graph.GraphHash
 }
 
+func putRevisionWorkflowYAML(t *testing.T, db *orm.DB, revisionID, body string) {
+	t.Helper()
+	content := []byte(body)
+	hash := "yaml-" + revisionID
+	if err := db.Create(&orm.WorkflowBlob{Hash: hash, Size: int64(len(content)), Content: content, CreatedAt: time.Now().UTC()}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&orm.WorkflowRevisionEntry{RevisionID: revisionID, Path: "workflow.yaml",
+		EntryType: "file", BlobHash: &hash, Size: int64(len(content))}).Error; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func beginControlledExternalStep(t *testing.T, db *orm.DB, tools []string, yamlBody string) WorkflowControlResult {
+	t.Helper()
+	if err := db.AutoMigrate(&orm.WorkflowReviewCheckpoint{}, &orm.WorkflowHostAction{}, &orm.WorkflowCommand{}, &orm.WorkflowRevisionEntry{}, &orm.WorkflowBlob{}); err != nil {
+		t.Fatal(err)
+	}
+	putRevisionWorkflowYAML(t, db, "batch-revision", yamlBody)
+	var revision orm.WorkflowRevision
+	db.First(&revision, "id = ?", "batch-revision")
+	var graph graphengine.CompiledStateGraph
+	if err := json.Unmarshal(revision.CompiledGraph, &graph); err != nil {
+		t.Fatal(err)
+	}
+	node := graph.Nodes["branch_b"]
+	node.LegacyTools = tools
+	graph.Nodes["branch_b"] = node
+	if err := db.Model(&revision).Update("compiled_graph", graph.JSON()).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&orm.WorkflowSession{}).Where("id = ?", "batch-session").Updates(map[string]any{"control_protocol": "workflow.control.v1", "controller_host": "external-agent"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&orm.WorkflowSessionStep{ID: "prior-native", SessionID: "batch-session", StepID: "branch_c", TaskID: "prior-task", Status: "succeeded", ExecutorHost: "lazymind"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&orm.WorkflowHostAction{ID: "prior-notification", SessionID: "batch-session", Kind: "continue", ExecutionID: "prior-native", Status: "accepted"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	oldDB, oldState := store.DB(), store.State()
+	store.Init(db.DB, db.DB, nil)
+	t.Cleanup(func() { store.Init(oldDB, oldDB, oldState) })
+	result, err := (WorkflowControlService{DB: db.DB}).Execute(context.Background(), "batch-user", "batch-session", WorkflowControlCommand{CommandID: "host-begin", Kind: "begin", StepID: "branch_b", StateVersion: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
 func runBatchTransition(t *testing.T, db *orm.DB, graphHash, operation string, targets []map[string]any) (*httptest.ResponseRecorder, map[string]any) {
 	t.Helper()
 	oldDB, oldState := store.DB(), store.State()
@@ -313,12 +363,14 @@ func TestResolveAdvanceOperationFromEffectiveAttempt(t *testing.T) {
 }
 
 func TestControlledDeclaredToolsStayOnExternalAgent(t *testing.T) {
+	packageYAML := "tool_scripts:\n  - path: scripts/tools.py\n    functions: [package_tool]\n"
 	for _, requirement := range []string{"declared_tools", "tools_only", "post_step_check"} {
 		t.Run(requirement, func(t *testing.T) {
 			db, _ := setupBatchTransitionSession(t)
 			if err := db.AutoMigrate(&orm.WorkflowReviewCheckpoint{}, &orm.WorkflowHostAction{}, &orm.WorkflowCommand{}, &orm.WorkflowRevisionEntry{}, &orm.WorkflowBlob{}); err != nil {
 				t.Fatal(err)
 			}
+			putRevisionWorkflowYAML(t, db, "batch-revision", packageYAML)
 			var revision orm.WorkflowRevision
 			db.First(&revision, "id = ?", "batch-revision")
 			var graph graphengine.CompiledStateGraph
@@ -367,5 +419,22 @@ func TestControlledDeclaredToolsStayOnExternalAgent(t *testing.T) {
 				t.Fatalf("wrong dispatch: %+v %+v tasks=%d", execution, result.Control, taskCount)
 			}
 		})
+	}
+}
+
+func TestControlledInternalToolsRunOnLazyMind(t *testing.T) {
+	db, _ := setupBatchTransitionSession(t)
+	result := beginControlledExternalStep(t, db, []string{"image_generator", "select_image_route"},
+		"tool_scripts:\n  - path: scripts/tools.py\n    functions: [select_image_route]\n")
+	var execution orm.WorkflowSessionStep
+	if err := db.First(&execution, "id = ?", result.Receipt.ExecutionID).Error; err != nil {
+		t.Fatal(err)
+	}
+	var taskCount int64
+	if err := db.Model(&orm.SubAgentTask{}).Where("id = ?", execution.TaskID).Count(&taskCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if execution.ExecutorHost != "lazymind" || taskCount != 1 {
+		t.Fatalf("internal-tool step must run inside LazyMind: %+v tasks=%d", execution, taskCount)
 	}
 }
