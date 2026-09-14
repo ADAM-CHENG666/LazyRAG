@@ -7,7 +7,8 @@ import type { ChatNode } from '@deepseek-ai/dsh-client-ui-chat/client'
 import { useEffect, useRef, useSyncExternalStore, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
 import { eventRun, type RunLink } from '../protocol'
 import {
-  type ResizeEdge, type WindowRect, RESIZE_EDGES, clampRect, defaultWindowRect, moveRect, resizeHandleStyle, resizeRect,
+  type ResizeEdge, type WindowRect, RESIZE_EDGES, clampRect, defaultWindowRect,
+  moveRect, resizeHandleStyle, resizeRect,
 } from './window-geometry'
 import { runKey, windowStore } from './window-store'
 
@@ -100,10 +101,8 @@ export function apply(ctx: ClientContext, config: { serverName?: string } = {}):
     }
     const endResize = () => { resize.current = undefined }
     const url = new URL(`/workflow-runs/${encodeURIComponent(current.run.runId)}/embed`, new URL(current.run.url).origin).href
-    const layoutStyle = current.layout
-      ? { left: current.layout.left, top: current.layout.top, width: current.layout.width, height: current.layout.height }
-      : { right: 20, top: '50%', transform: 'translateY(-50%)' as const,
-        width: 'min(960px, calc(100vw - 40px))', height: 'min(720px, calc(100vh - 40px))' }
+    const layout = current.layout ?? defaultWindowRect(viewport())
+    const layoutStyle = { left: layout.left, top: layout.top, width: layout.width, height: layout.height }
     return <section ref={panel} role="dialog" aria-label="LazyMind Workflow" style={{ position: 'absolute',
       ...layoutStyle, boxSizing: 'border-box', background: '#fff', color: '#111', border: '1px solid #d9d9d9',
       borderRadius: 10, boxShadow: '0 12px 48px rgba(0, 0, 0, .24)', overflow: 'hidden', display: 'flex',

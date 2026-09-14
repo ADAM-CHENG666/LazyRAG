@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { controlActions, controlNoticeKey, deliveryPending, ReviewRefreshRequired, type WorkflowControlView } from './workflowControl';
+import { controlActions, controlNoticeKey, deliveryBanner, deliveryPending, overlayInfoBanner, REVIEW_CHANGED_NOTICE, ReviewRefreshRequired, type WorkflowControlView } from './workflowControl';
 
 const state = (): WorkflowControlView => ({
   protocol: 'workflow.control.v1', session_id: 'run-1', state_version: 3, continuation: 'awaiting_user',
@@ -69,4 +69,22 @@ it('keeps panel controls available after a settled execution notification is del
   control.delivery.status = 'unknown';
   control.active_execution_ids = [];
   expect(deliveryPending(control)).toBe(true);
+});
+
+it('never stacks the click acknowledgement on top of a live delivery strip', () => {
+  const pending = { id: 'act-1', kind: 'continue' as const, status: 'pending' as const };
+  expect(overlayInfoBanner('chat.workflowControlAccepted', pending)).toEqual({
+    key: 'chat.workflowControlDeliveryPending', tone: 'info',
+  });
+  expect(deliveryBanner({ ...pending, status: 'accepted' })).toBeUndefined();
+  expect(overlayInfoBanner('chat.workflowControlAccepted', { ...pending, status: 'accepted' })).toEqual({
+    key: 'chat.workflowControlAccepted', tone: 'info',
+  });
+  expect(overlayInfoBanner(REVIEW_CHANGED_NOTICE, pending)).toEqual({
+    key: REVIEW_CHANGED_NOTICE, tone: 'info',
+  });
+  expect(overlayInfoBanner('', { ...pending, status: 'failed', last_error: 'timeout' })).toEqual({
+    key: 'chat.workflowControlDeliveryFailed', tone: 'warning',
+  });
+  expect(overlayInfoBanner('', { ...pending, consumed_at: '2026-09-14T00:00:00Z' })).toBeUndefined();
 });

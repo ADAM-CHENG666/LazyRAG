@@ -3,9 +3,13 @@ export interface Viewport { width: number; height: number }
 export type ResizeEdge = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw'
 
 export const RESIZE_EDGES: readonly ResizeEdge[] = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']
-export const DEFAULT_WINDOW_SIZE = { width: 960, height: 720 }
-export const MIN_WINDOW_SIZE = { width: 480, height: 360 }
-const MARGIN = 20
+/** Wide enough for the stepper and footer; short enough that the workspace does not sit empty. */
+export const DEFAULT_WINDOW_SIZE = { width: 560, height: 360 }
+export const MIN_WINDOW_SIZE = { width: 360, height: 280 }
+export const WINDOW_MARGIN = 20
+export const WINDOW_TOP_RESERVE = 64
+export const WINDOW_BOTTOM_RESERVE = 168
+const MARGIN = WINDOW_MARGIN
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), Math.max(min, max))
@@ -32,10 +36,13 @@ export function clampRect(rect: WindowRect, viewport: Viewport): WindowRect {
 
 export function defaultWindowRect(viewport: Viewport): WindowRect {
   const width = Math.min(DEFAULT_WINDOW_SIZE.width, Math.max(0, viewport.width - MARGIN * 2))
-  const height = Math.min(DEFAULT_WINDOW_SIZE.height, Math.max(0, viewport.height - MARGIN * 2))
+  const height = Math.min(
+    DEFAULT_WINDOW_SIZE.height,
+    Math.max(0, viewport.height - WINDOW_TOP_RESERVE - WINDOW_BOTTOM_RESERVE),
+  )
   return clampRect({
     left: viewport.width - width - MARGIN,
-    top: Math.round((viewport.height - height) / 2),
+    top: WINDOW_TOP_RESERVE,
     width,
     height,
   }, viewport)

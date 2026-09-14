@@ -1,22 +1,24 @@
 import { describe, expect, it } from 'vitest'
 import {
-  DEFAULT_WINDOW_SIZE, MIN_WINDOW_SIZE, clampRect, defaultWindowRect, moveRect, resizeHandleStyle, resizeRect,
+  DEFAULT_WINDOW_SIZE, MIN_WINDOW_SIZE, WINDOW_BOTTOM_RESERVE, WINDOW_MARGIN, WINDOW_TOP_RESERVE,
+  clampRect, defaultWindowRect, moveRect, resizeHandleStyle, resizeRect,
 } from '../src/client/window-geometry'
 
 const desktop = { width: 1440, height: 900 }
 const start = { left: 200, top: 100, width: 800, height: 500 }
 
 describe('workflow overlay geometry', () => {
-  it('defaults to a right-aligned panel larger than the old fixed 760x560 window', () => {
+  it('defaults to a slim right-aligned panel that leaves the host composer visible', () => {
     const rect = defaultWindowRect(desktop)
     expect(rect).toEqual({
-      left: desktop.width - DEFAULT_WINDOW_SIZE.width - 20,
-      top: Math.round((desktop.height - DEFAULT_WINDOW_SIZE.height) / 2),
+      left: desktop.width - DEFAULT_WINDOW_SIZE.width - WINDOW_MARGIN,
+      top: WINDOW_TOP_RESERVE,
       width: DEFAULT_WINDOW_SIZE.width,
       height: DEFAULT_WINDOW_SIZE.height,
     })
-    expect(rect.width).toBeGreaterThan(760)
-    expect(rect.height).toBeGreaterThan(560)
+    expect(rect.top + rect.height).toBeLessThanOrEqual(desktop.height - WINDOW_BOTTOM_RESERVE)
+    expect(rect.width).toBe(560)
+    expect(rect.height).toBe(360)
   })
   it('shrinks the default panel to the viewport instead of overflowing a small screen', () => {
     const rect = defaultWindowRect({ width: 700, height: 500 })
@@ -24,6 +26,11 @@ describe('workflow overlay geometry', () => {
     expect(rect.top).toBeGreaterThanOrEqual(0)
     expect(rect.left + rect.width).toBeLessThanOrEqual(700)
     expect(rect.top + rect.height).toBeLessThanOrEqual(500)
+  })
+  it('keeps the default panel above the host composer on a laptop viewport', () => {
+    const laptop = { width: 1280, height: 720 }
+    const rect = defaultWindowRect(laptop)
+    expect(rect.top + rect.height).toBeLessThanOrEqual(laptop.height - WINDOW_BOTTOM_RESERVE)
   })
   it('keeps a dragged panel inside the viewport', () => {
     expect(moveRect(start, -80, -40, desktop)).toEqual({ ...start, left: 0, top: 0 })

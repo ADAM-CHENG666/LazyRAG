@@ -6,7 +6,7 @@ import { AgentAppsAuth } from '@/components/auth';
 import { WorkflowPanel } from '@/modules/chat/components/WorkflowPanel';
 import { useWorkflowStore } from '@/modules/chat/store/workflowPanel';
 import { WorkflowSessionApi } from '@/modules/chat/utils/request';
-import { controlActions, controlNoticeKey, ReviewRefreshRequired, type WorkflowActionIntent } from '@/modules/chat/utils/workflowControl';
+import { CONTROL_NOTICE_TTL_MS, controlActions, controlNoticeKey, deliveryBanner, overlayInfoBanner, REVIEW_CHANGED_NOTICE, ReviewRefreshRequired, type WorkflowActionIntent } from '@/modules/chat/utils/workflowControl';
 import { loadWorkflowRunSnapshot, watchWorkflowRun, controlStatusKey, type WorkflowRunSnapshot } from './loadRun';
 import './index.scss';
 
@@ -17,7 +17,7 @@ export default function WorkflowRunPage({ embedded = false }: { embedded?: boole
   const user = AgentAppsAuth.getUserInfo();
   const key = `workflow-run:${window.location.origin}:${user?.tenantId ?? user?.tenant_id ?? ''}:${user?.userId ?? user?.username ?? ''}:${sessionId}`;
   const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
+  const [noticeKey, setNoticeKey] = useState('');
   const [snapshot, setSnapshot] = useState<WorkflowRunSnapshot>();
   const latest = useRef<WorkflowRunSnapshot>();
   const request = useRef(0);
@@ -63,7 +63,7 @@ export default function WorkflowRunPage({ embedded = false }: { embedded?: boole
     latest.current = undefined;
     setSnapshot(undefined);
     setError('');
-    setNotice('');
+    setNoticeKey('');
     // Subscribe before the baseline read. Both paths refresh the same versioned snapshot.
     const reload = () => {
       void refresh().catch(reason => { if (!current.controller.signal.aborted) setError(reason instanceof Error ? reason.message : translate.current('chat.workflowRunLoadFailed')); });
@@ -74,32 +74,37 @@ export default function WorkflowRunPage({ embedded = false }: { embedded?: boole
   }, [sessionId, refresh, key, setSession]);
 
   const act = async (intent: WorkflowActionIntent) => {
-    setError(''); setNotice('');
+    setError(''); setNoticeKey('');
     try {
       await actions.execute(intent);
-      if (lifetime.current?.key === key && !lifetime.current.controller.signal.aborted) setNotice(t(controlNoticeKey(intent.kind)));
+      if (lifetime.current?.key === key && !lifetime.current.controller.signal.aborted) setNoticeKey(controlNoticeKey(intent.kind));
     } catch (reason) {
       if (lifetime.current?.key !== key || lifetime.current.controller.signal.aborted) return;
-      if (reason instanceof ReviewRefreshRequired) setNotice(t('chat.workflowControlReviewChanged'));
+      if (reason instanceof ReviewRefreshRequired) setNoticeKey(REVIEW_CHANGED_NOTICE);
       else {
         const payload = (reason as { response?: { data?: { error?: { code?: string; message?: string }; message?: string } } })?.response?.data;
-        if (payload?.error?.code === 'REVIEW_VERSION_CONFLICT') setNotice(t('chat.workflowControlReviewChanged'));
+        if (payload?.error?.code === 'REVIEW_VERSION_CONFLICT') setNoticeKey(REVIEW_CHANGED_NOTICE);
         else setError(payload?.error?.message ?? payload?.message ?? (reason instanceof Error ? reason.message : t('chat.workflowRunControlFailed')));
       }
       void refresh().catch(() => {});
     }
   };
+  useEffect(() => {
+    if (!noticeKey || noticeKey === REVIEW_CHANGED_NOTICE) return;
+    const timer = window.setTimeout(() => setNoticeKey(''), CONTROL_NOTICE_TTL_MS);
+    return () => window.clearTimeout(timer);
+  }, [noticeKey]);
   const control = snapshot?.control;
-  const delivery = control?.delivery;
-  const deliveryLabel = delivery && !delivery.consumed_at ? ({ pending: 'chat.workflowControlDeliveryPending', dispatching: 'chat.workflowControlDeliveryPending',
-    accepted: delivery.kind === 'cancel' ? 'chat.workflowControlCancellationAccepted' : 'chat.workflowControlDeliveryAccepted', unknown: 'chat.workflowControlDeliveryUnknown', failed: 'chat.workflowControlDeliveryFailed' } as Record<string, string>)[delivery.status] : undefined;
+  const liveDelivery = deliveryBanner(control?.delivery);
+  const infoBanner = overlayInfoBanner(noticeKey, control?.delivery);
+  const bannerFromNotice = Boolean(infoBanner && (!liveDelivery || noticeKey === REVIEW_CHANGED_NOTICE));
 
   return <main className={embedded ? 'workflow-run workflow-run--embedded' : 'workflow-run'}
     style={embedded ? undefined : { maxWidth: 1200, margin: '24px auto', padding: 24 }}>
     {!embedded && <h1>{t('chat.workflowPanelTitle')}</h1>}
-    {error && <Alert type='error' showIcon message={error} />}
-    {notice && <Alert type='info' showIcon message={notice} />}
-    {deliveryLabel && <Alert type={delivery?.status === 'unknown' || delivery?.status === 'failed' ? 'warning' : 'info'} showIcon message={t(deliveryLabel)} />}
+    {error && <Alert type='error' showIcon closable onClose={() => setError('')} message={error} />}
+    {!error && infoBanner && <Alert type={infoBanner.tone} showIcon
+      closable={bannerFromNotice} onClose={() => setNoticeKey('')} message={t(infoBanner.key)} />}
     {!snapshot && !error && <Spin />}
     {snapshot && <>
       {!embedded && <Button onClick={() => { void refresh().catch(reason => setError(String(reason))); }}>{t('chat.workflowRunRefresh')}</Button>}

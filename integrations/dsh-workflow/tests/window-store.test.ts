@@ -57,7 +57,7 @@ describe('standard-event workflow presentation', () => {
     store.dispose()
     expect(store.snapshot().entries).toEqual({})
   })
-  it('keeps the panel layout after minimize, reopen and a later start in the same session', () => {
+  it('keeps the panel layout after minimize and reopen of the same run', () => {
     const store = windowStore()
     const run = { runId: 'r', url: 'http://localhost:8090/workflow-runs/r', hostSessionId: 'a', operation: 'start' }
     const layout = { left: 40, top: 80, width: 900, height: 640 }
@@ -66,8 +66,16 @@ describe('standard-event workflow presentation', () => {
     store.minimize('a')
     store.open(run, 20)
     expect(store.snapshot().entries.a).toMatchObject({ minimized: false, layout })
+    store.dispose()
+  })
+  it('does not carry a dragged oversized frame onto a later start in the same chat', () => {
+    const store = windowStore()
+    const run = { runId: 'r', url: 'http://localhost:8090/workflow-runs/r', hostSessionId: 'a', operation: 'start' }
+    const layout = { left: 40, top: 80, width: 900, height: 640 }
+    store.observe(run, 20)
+    store.place('a', layout)
     store.observe({ ...run, runId: 'second', url: 'http://localhost:8090/workflow-runs/second', operation: 'start' }, 80)
-    expect(store.snapshot().entries.a.layout).toEqual(layout)
+    expect(store.snapshot().entries.a.layout).toBeUndefined()
     expect(store.snapshot().entries.a.run.runId).toBe('second')
     store.dispose()
   })

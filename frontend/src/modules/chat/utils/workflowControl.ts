@@ -34,6 +34,28 @@ export function controlNoticeKey(kind: WorkflowActionKind): string {
   return 'chat.workflowControlAccepted';
 }
 
+export const CONTROL_NOTICE_TTL_MS = 4000;
+export const REVIEW_CHANGED_NOTICE = 'chat.workflowControlReviewChanged';
+
+export type OverlayInfoBanner = { key: string; tone: 'info' | 'warning' };
+
+/** Live host-delivery strip. Accepted receipts do not get a second info banner. */
+export function deliveryBanner(delivery: WorkflowControlView['delivery'] | null | undefined): OverlayInfoBanner | undefined {
+  if (!delivery || delivery.consumed_at) return undefined;
+  if (delivery.status === 'pending' || delivery.status === 'dispatching') {
+    return { key: 'chat.workflowControlDeliveryPending', tone: 'info' };
+  }
+  if (delivery.status === 'unknown') return { key: 'chat.workflowControlDeliveryUnknown', tone: 'warning' };
+  if (delivery.status === 'failed') return { key: 'chat.workflowControlDeliveryFailed', tone: 'warning' };
+  return undefined;
+}
+
+/** At most one info/warning strip so the panel workspace is not squeezed by stacked Alerts. */
+export function overlayInfoBanner(noticeKey: string, delivery: WorkflowControlView['delivery'] | null | undefined): OverlayInfoBanner | undefined {
+  if (noticeKey === REVIEW_CHANGED_NOTICE) return { key: noticeKey, tone: 'info' };
+  return deliveryBanner(delivery) ?? (noticeKey ? { key: noticeKey, tone: 'info' } : undefined);
+}
+
 export function deliveryPending(control: WorkflowControlView): boolean {
   const delivery = control.delivery;
   if (!delivery || delivery.consumed_at) return false;

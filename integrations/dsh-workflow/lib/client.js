@@ -121,15 +121,19 @@ const RESIZE_EDGES = [
 	"se",
 	"sw"
 ];
+/** Wide enough for the stepper and footer; short enough that the workspace does not sit empty. */
 const DEFAULT_WINDOW_SIZE = {
-	width: 960,
-	height: 720
-};
-const MIN_WINDOW_SIZE = {
-	width: 480,
+	width: 560,
 	height: 360
 };
-const MARGIN = 20;
+const MIN_WINDOW_SIZE = {
+	width: 360,
+	height: 280
+};
+const WINDOW_MARGIN = 20;
+const WINDOW_TOP_RESERVE = 64;
+const WINDOW_BOTTOM_RESERVE = 168;
+const MARGIN = WINDOW_MARGIN;
 function clamp(value, min, max) {
 	return Math.min(Math.max(value, min), Math.max(min, max));
 }
@@ -152,10 +156,10 @@ function clampRect(rect, viewport) {
 }
 function defaultWindowRect(viewport) {
 	const width = Math.min(DEFAULT_WINDOW_SIZE.width, Math.max(0, viewport.width - MARGIN * 2));
-	const height = Math.min(DEFAULT_WINDOW_SIZE.height, Math.max(0, viewport.height - MARGIN * 2));
+	const height = Math.min(DEFAULT_WINDOW_SIZE.height, Math.max(0, viewport.height - WINDOW_TOP_RESERVE - WINDOW_BOTTOM_RESERVE));
 	return clampRect({
 		left: viewport.width - width - MARGIN,
-		top: Math.round((viewport.height - height) / 2),
+		top: WINDOW_TOP_RESERVE,
 		width,
 		height
 	}, viewport);
@@ -306,7 +310,7 @@ function windowStore() {
 						run,
 						minimized: false,
 						anchor,
-						layout: current?.layout
+						layout: current && current.run.runId === run.runId ? current.layout : void 0
 					}
 				} : state.entries
 			});
@@ -318,7 +322,7 @@ function windowStore() {
 				run,
 				minimized: false,
 				anchor,
-				layout: prev?.layout
+				layout: prev && prev.run.runId === run.runId ? prev.layout : void 0
 			});
 		},
 		minimize(id) {
@@ -486,17 +490,12 @@ function apply(ctx, config = {}) {
 			resize.current = void 0;
 		};
 		const url = new URL(`/workflow-runs/${encodeURIComponent(current.run.runId)}/embed`, new URL(current.run.url).origin).href;
-		const layoutStyle = current.layout ? {
-			left: current.layout.left,
-			top: current.layout.top,
-			width: current.layout.width,
-			height: current.layout.height
-		} : {
-			right: 20,
-			top: "50%",
-			transform: "translateY(-50%)",
-			width: "min(960px, calc(100vw - 40px))",
-			height: "min(720px, calc(100vh - 40px))"
+		const layout = current.layout ?? defaultWindowRect(viewport());
+		const layoutStyle = {
+			left: layout.left,
+			top: layout.top,
+			width: layout.width,
+			height: layout.height
 		};
 		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("section", {
 			ref: panel,
