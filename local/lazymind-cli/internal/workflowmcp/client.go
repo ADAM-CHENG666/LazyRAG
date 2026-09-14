@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -253,7 +254,35 @@ func (c *Client) Get(ctx context.Context, workflowID, revisionID string) (map[st
 	}
 	var result map[string]any
 	err := c.api.DoJSON(ctx, http.MethodGet, path, nil, &result)
-	return result, err
+	if err != nil {
+		return nil, err
+	}
+	keepHostGetFiles(result)
+	return result, nil
+}
+
+func keepHostGetFiles(pkg map[string]any) {
+	delete(pkg, "compiled_graph")
+	raw, _ := pkg["files"].(map[string]any)
+	if raw == nil {
+		return
+	}
+	out := map[string]string{}
+	for p, v := range raw {
+		if !strings.HasPrefix(p, "scripts/") || !strings.HasSuffix(p, ".py") || strings.Contains(p, "/tests/") {
+			continue
+		}
+		s, ok := v.(string)
+		if !ok {
+			continue
+		}
+		body, err := base64.StdEncoding.DecodeString(s)
+		if err != nil {
+			body = []byte(s)
+		}
+		out[p] = string(body)
+	}
+	pkg["files"] = out
 }
 
 func (c *Client) State(ctx context.Context, sessionID string) (Projection, error) {

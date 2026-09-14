@@ -2,6 +2,7 @@ package workflowmcp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -75,7 +76,7 @@ func TestWorkflowToolCopyPinsGetOnce(t *testing.T) {
 	if !containsAll(got["workflow.start"], "workflow.get once", "workflow_id", "revision_id") {
 		t.Fatalf("workflow.start description=%q", got["workflow.start"])
 	}
-	if !containsAll(got["workflow.get"], "Call once after workflow.start", "step_contract.legacy_tools", "scripts/tools.py") {
+	if !containsAll(got["workflow.get"], "Call once after workflow.start", "tool_scripts", "compiled_graph") {
 		t.Fatalf("workflow.get description=%q", got["workflow.get"])
 	}
 	if !containsAll(got["workflow.step.begin"], "step_contract.legacy_tools", "package files from workflow.get") {
@@ -218,5 +219,26 @@ func TestEncodeOutputsAssignsSequenceWithinEachSlot(t *testing.T) {
 		if value["seq"] != want[index] {
 			t.Fatalf("output %d seq=%v, want %d", index, value["seq"], want[index])
 		}
+	}
+}
+
+func TestKeepHostGetFilesDropsGraphAndKeepsScripts(t *testing.T) {
+	pkg := map[string]any{
+		"workflow_id":    "image-workflow",
+		"compiled_graph": map[string]any{"steps": []any{}},
+		"files": map[string]any{
+			"workflow.yaml":                    base64.StdEncoding.EncodeToString([]byte("name: image")),
+			"scripts/tools.py":                 base64.StdEncoding.EncodeToString([]byte("def f():\n    pass\n")),
+			"scripts/tests/test_tools.py":      base64.StdEncoding.EncodeToString([]byte("assert True")),
+			"scenario/driver.md":               base64.StdEncoding.EncodeToString([]byte("# driver")),
+		},
+	}
+	keepHostGetFiles(pkg)
+	if _, ok := pkg["compiled_graph"]; ok {
+		t.Fatal("compiled_graph should be omitted")
+	}
+	files, _ := pkg["files"].(map[string]string)
+	if len(files) != 1 || files["scripts/tools.py"] != "def f():\n    pass\n" {
+		t.Fatalf("files=%#v", files)
 	}
 }

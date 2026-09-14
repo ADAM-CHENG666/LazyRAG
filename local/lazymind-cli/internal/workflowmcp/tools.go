@@ -107,7 +107,7 @@ func Register(server *mcp.Server, client *Client) {
 			return nil, value, err
 		})
 	mcp.AddTool(server, &mcp.Tool{Name: "workflow.get", Title: "Get a LazyMind Workflow",
-		Description: "Read the published Workflow package for one revision: scripts, scenario, and yaml in files. Call once after workflow.start with that run's workflow_id and revision_id. Functions named in later step_contract.legacy_tools live in these files, typically scripts/tools.py.", Annotations: readOnly},
+		Description: "Read one published Workflow revision: identifiers plus declared tool_scripts as UTF-8 files. Omits compiled_graph, scenario, and yaml. Call once after workflow.start with that run's workflow_id and revision_id.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input GetInput) (*mcp.CallToolResult, map[string]any, error) {
 			value, err := client.Get(ctx, input.WorkflowID, input.RevisionID)
 			return nil, value, err
