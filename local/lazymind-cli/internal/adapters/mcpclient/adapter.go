@@ -291,9 +291,10 @@ func dshProfilePatch(self string, environment map[string]string) string {
 			lines = append(lines, "          "+key+": "+strconv.Quote(environment[key]))
 		}
 	}
-	// Surface proxy auth/start failures in the DSH plugin panel instead of
-	// silently omitting mcp__lazymind__* tools.
-	return strings.Join(append(lines, "        failOnStartupError: true"), "\n") + "\n"
+	// Keep the DSH harness up when LazyMind is offline. DSH's default is also
+	// false: a failed first MCP connect logs, omits mcp__lazymind__* tools, and
+	// reconnects later. true would abort the whole plugin tree at boot.
+	return strings.Join(append(lines, "        failOnStartupError: false"), "\n") + "\n"
 }
 
 func dshHome() string {

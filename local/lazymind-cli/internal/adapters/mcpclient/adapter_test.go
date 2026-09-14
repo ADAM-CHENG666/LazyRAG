@@ -213,6 +213,30 @@ func TestForeignLazyMindEntryBecomesConflict(t *testing.T) {
 	}
 }
 
+func TestManagedDSHConfigDoesNotAbortHarnessWhenMCPIsOffline(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "cordis.patch.yml")
+	self := filepath.Join(root, "bin", "lazymind")
+	home := filepath.Join(root, "home")
+	writeTestFile(t, self, "test connector")
+	writeTestFile(t, path, "- insert:\n    - id: mcp-lazymind\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: lazymind\n        failOnStartupError: true\n")
+
+	if err := writeManagedConfig(DeepSeekHarness, path, self, home, "host-1", false); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	if !strings.Contains(text, "failOnStartupError: false") {
+		t.Fatalf("expected failOnStartupError false so DSH can start without LazyMind:\n%s", text)
+	}
+	if strings.Contains(text, "failOnStartupError: true") {
+		t.Fatalf("stale failOnStartupError true would abort DSH boot:\n%s", text)
+	}
+}
+
 func TestManagedDSHConfigPreservesOtherPatchEntries(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "cordis.patch.yml")
