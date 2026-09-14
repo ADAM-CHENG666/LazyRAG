@@ -312,7 +312,7 @@ func TestResolveAdvanceOperationFromEffectiveAttempt(t *testing.T) {
 	}
 }
 
-func TestControlledDeclaredToolsUseNativeExecutorAndReturnAttemptID(t *testing.T) {
+func TestControlledDeclaredToolsStayOnExternalAgent(t *testing.T) {
 	for _, requirement := range []string{"declared_tools", "tools_only", "post_step_check"} {
 		t.Run(requirement, func(t *testing.T) {
 			db, _ := setupBatchTransitionSession(t)
@@ -347,29 +347,24 @@ func TestControlledDeclaredToolsUseNativeExecutorAndReturnAttemptID(t *testing.T
 			if err := db.Create(&orm.WorkflowHostAction{ID: "prior-notification", SessionID: "batch-session", Kind: "continue", ExecutionID: "prior-native", Status: "accepted"}).Error; err != nil {
 				t.Fatal(err)
 			}
-			result, err := (WorkflowControlService{DB: db.DB}).Execute(context.Background(), "batch-user", "batch-session", WorkflowControlCommand{CommandID: "native-begin", Kind: "begin", StepID: "branch_b", StateVersion: 4})
+			result, err := (WorkflowControlService{DB: db.DB}).Execute(context.Background(), "batch-user", "batch-session", WorkflowControlCommand{CommandID: "host-begin", Kind: "begin", StepID: "branch_b", StateVersion: 4})
 			if err != nil {
 				t.Fatal(err)
 			}
 			var notification orm.WorkflowHostAction
 			if err := db.First(&notification, "id = ?", "prior-notification").Error; err != nil || notification.ConsumedAt == nil {
-				t.Fatalf("advancing did not consume native completion: %+v %v", notification, err)
+				t.Fatalf("advancing did not consume prior completion: %+v %v", notification, err)
 			}
 			var execution orm.WorkflowSessionStep
 			if err := db.First(&execution, "id = ?", result.Receipt.ExecutionID).Error; err != nil {
-				t.Fatal("receipt must identify the execution, not its SubAgent task", err)
+				t.Fatal("receipt must identify the execution, not a SubAgent task", err)
 			}
-			var task orm.SubAgentTask
-			if err := db.First(&task, "id = ?", execution.TaskID).Error; err != nil {
+			var taskCount int64
+			if err := db.Model(&orm.SubAgentTask{}).Where("id = ?", execution.TaskID).Count(&taskCount).Error; err != nil {
 				t.Fatal(err)
 			}
-			if execution.ExecutorHost != "lazymind" || result.Control.Continuation != "awaiting_executor" {
-				t.Fatalf("wrong dispatch: %+v %+v", execution, result.Control)
-			}
-			var params map[string]any
-			json.Unmarshal(task.Params, &params)
-			if params["session_id"] != "batch-session" || params["step_id"] != "branch_b" {
-				t.Fatalf("native runtime context missing: %+v", params)
+			if execution.ExecutorHost != "external-agent" || execution.Status != "queued" || result.Control.Continuation == "awaiting_executor" || taskCount != 0 {
+				t.Fatalf("wrong dispatch: %+v %+v tasks=%d", execution, result.Control, taskCount)
 			}
 		})
 	}

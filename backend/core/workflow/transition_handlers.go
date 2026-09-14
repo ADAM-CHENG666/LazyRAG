@@ -732,17 +732,10 @@ func applyWorkflowTransition(ctx context.Context, tx *gorm.DB, sessionID string,
 			handOff := req.HandOff
 			nodeDef := graph.Nodes[target.TargetStepID]
 			taskID := target.TaskID
+			// External-agent sessions publish every step as a host contract, including
+			// declared tools and post_step_checks. LazyMind only launches a native
+			// attempt when the session itself is controlled by lazymind.
 			executorHost := session.ControllerHost
-			if controlstore.Controlled(session) {
-				if nodeDef.ToolsOnly || nodeDef.TerminalToolsOnly || len(nodeDef.LegacyTools) > 0 {
-					executorHost = "lazymind"
-				}
-				for _, check := range graph.Runtime.PostStepChecks {
-					if check.StepID == target.TargetStepID {
-						executorHost = "lazymind"
-					}
-				}
-			}
 			if executorHost == "external-agent" {
 				if err := queueHostAttempt(ctx, tx, session, target, nodeDef, now); err != nil {
 					return err
