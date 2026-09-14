@@ -843,11 +843,15 @@ func (h Handler) Consume(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		writeJSON(w, http.StatusOK, envelope{Data: map[string]any{
-			"workflow_session_id": session.ID, "session_id": session.ID, "status": session.Status,
-			"workflow_mode":    session.WorkflowMode,
-			"state_version":    session.StateVersion,
-			"event_stream_url": "/workflow-sessions/" + session.ID + "/events",
-			"status_url":       "/workflow-sessions/" + session.ID + "/projection",
+			"workflow_session_id":  session.ID,
+			"session_id":           session.ID,
+			"status":               session.Status,
+			"workflow_id":          session.WorkflowID,
+			"workflow_revision_id": session.WorkflowRevisionID,
+			"workflow_mode":        session.WorkflowMode,
+			"state_version":        session.StateVersion,
+			"event_stream_url":     "/workflow-sessions/" + session.ID + "/events",
+			"status_url":           "/workflow-sessions/" + session.ID + "/projection",
 		}})
 		return
 	}

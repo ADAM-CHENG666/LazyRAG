@@ -84,6 +84,8 @@ type StartResult struct {
 	InteractionURL string     `json:"interaction_url"`
 	PreparationID  string     `json:"preparation_id"`
 	SessionID      string     `json:"session_id"`
+	WorkflowID     string     `json:"workflow_id"`
+	RevisionID     string     `json:"revision_id"`
 	State          Projection `json:"state"`
 }
 
@@ -171,9 +173,9 @@ type ResumeInput struct {
 
 type Output struct {
 	Slot        string `json:"slot" jsonschema:"required,Declared Workflow output slot"`
-	ContentType string `json:"content_type,omitempty" jsonschema:"MIME type or application/json"`
-	Value       any    `json:"value,omitempty" jsonschema:"Inline JSON or text value"`
-	LocalPath   string `json:"local_path,omitempty" jsonschema:"Local artifact file inside the current workspace; mutually exclusive with value"`
+	ContentType string `json:"content_type,omitempty" jsonschema:"Slot type: text, json, image, file, or file_list"`
+	Value       any    `json:"value,omitempty" jsonschema:"Inline result: text, JSON, image URL, or file payload"`
+	LocalPath   string `json:"local_path,omitempty" jsonschema:"Local file path for a file slot; mutually exclusive with value"`
 	Caption     string `json:"caption,omitempty"`
 	Seq         int    `json:"seq,omitempty" jsonschema:"One-based idempotency sequence for list items or repeated revisions of one slot"`
 }
@@ -428,7 +430,9 @@ func (c *Client) Start(ctx context.Context, input StartInput) (StartResult, erro
 		return StartResult{}, err
 	}
 	var consumed struct {
-		SessionID string `json:"session_id"`
+		SessionID  string `json:"session_id"`
+		WorkflowID string `json:"workflow_id"`
+		RevisionID string `json:"workflow_revision_id"`
 	}
 	if err := c.api.DoJSON(ctx, http.MethodPost, "/workflow-preparations/"+url.PathEscape(prepared.PreparationID)+":consume",
 		map[string]any{"session_id": input.SessionID}, &consumed); err != nil {
@@ -438,7 +442,14 @@ func (c *Client) Start(ctx context.Context, input StartInput) (StartResult, erro
 	if err != nil {
 		return StartResult{}, err
 	}
-	return StartResult{PreparationID: prepared.PreparationID, SessionID: consumed.SessionID, InteractionURL: state.InteractionURL, State: state}, nil
+	workflowID := strings.TrimSpace(consumed.WorkflowID)
+	if workflowID == "" {
+		workflowID = input.WorkflowID
+	}
+	return StartResult{
+		PreparationID: prepared.PreparationID, SessionID: consumed.SessionID, WorkflowID: workflowID,
+		RevisionID: strings.TrimSpace(consumed.RevisionID), InteractionURL: state.InteractionURL, State: state,
+	}, nil
 }
 
 func (c *Client) Begin(ctx context.Context, input BeginInput) (BeginResult, error) {

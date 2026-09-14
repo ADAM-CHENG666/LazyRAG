@@ -163,3 +163,18 @@ func (r *recordingInvocationRecorder) values() ([]coreapi.InvocationStart, []cor
 	defer r.mu.Unlock()
 	return append([]coreapi.InvocationStart(nil), r.starts...), append([]coreapi.InvocationFinish(nil), r.finishes...)
 }
+
+func TestWorkflowInstructionsGetOnceThenBegin(t *testing.T) {
+	if !strings.Contains(workflowInstructions, "workflow.get once with the returned workflow_id and revision_id") {
+		t.Fatalf("instructions missing get-once sequence: %s", workflowInstructions)
+	}
+	if !strings.Contains(workflowInstructions, "from the package files already returned by workflow.get") {
+		t.Fatalf("instructions missing package location: %s", workflowInstructions)
+	}
+	if !strings.Contains(workflowInstructions, "using the slot content_type") {
+		t.Fatalf("instructions missing slot content_type: %s", workflowInstructions)
+	}
+	if strings.Contains(workflowInstructions, "If the contract lists legacy_tools, call workflow.get") {
+		t.Fatal("instructions still fetch the package after begin")
+	}
+}
