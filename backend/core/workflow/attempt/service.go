@@ -176,7 +176,7 @@ func (s *Service) ClaimForHost(ctx context.Context, executorID, host string) (Cl
 	)
 	if host != "" {
 		query = query.Joins("JOIN plugin_sessions ps ON ps.id = plugin_session_steps.session_id").
-			Where("COALESCE(NULLIF(plugin_session_steps.executor_host, ''), ps.controller_host, 'lazymind') = ?", host)
+			Where("COALESCE(NULLIF(plugin_session_steps.executor_host, ''), ps.controller_host, 'lazymind') = ?", host) // workflow-naming: persistence
 	}
 	err := query.Order("plugin_session_steps.created_at ASC").First(&candidate).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -201,7 +201,7 @@ func (s *Service) ClaimAttemptForHost(ctx context.Context, attemptID, executorID
 		Where("plugin_session_steps.id = ? AND plugin_session_steps.validity = 'effective'", attemptID) // workflow-naming: persistence
 	if host != "" {
 		query = query.Joins("JOIN plugin_sessions ps ON ps.id = plugin_session_steps.session_id").
-			Where("COALESCE(NULLIF(plugin_session_steps.executor_host, ''), ps.controller_host, 'lazymind') = ?", host)
+			Where("COALESCE(NULLIF(plugin_session_steps.executor_host, ''), ps.controller_host, 'lazymind') = ?", host) // workflow-naming: persistence
 	}
 	if err := query.First(&candidate).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
