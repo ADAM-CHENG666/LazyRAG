@@ -77,7 +77,7 @@ async function fixture(seedPTC = false, native = false, laterManualInput = false
   child.ctx.tools.register(definition('structured_output', async (_args, exec) => { exec.concludeTurn(); return { recorded: true } }))
   if (seedPTC) {
     control = { ...control, continuation: 'awaiting_user', state_version: 3, admission: { can_begin: false } }
-    root.session.append('tool/code-dispatch', {
+    root.session.append('tool/ptc-dispatch', {
       rootCallId: 'code' as ToolExecutionInput['callId'], parentCallId: 'code' as ToolExecutionInput['callId'],
       subCallId: 'code:1' as ToolExecutionInput['callId'], name: publicName('mcp__lazymind__workflow_step_submit'),
       arguments: {}, isError: false, content: [{type: 'text', text: JSON.stringify({lazymind_workflow: {

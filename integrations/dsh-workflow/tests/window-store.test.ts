@@ -35,7 +35,7 @@ describe('standard-event workflow presentation', () => {
       .toBe('mcp-0064515ead492c9266272cfeb69fa80f')
   })
   it('decodes PTC only from successful LazyMind workflow dispatches', () => {
-    const event = { type: 'tool/code-dispatch', data: { isError: false, name: 'mcp__lazymind__workflow_start', content: [
+    const event = { type: 'tool/ptc-dispatch', data: { isError: false, name: 'mcp__lazymind__workflow_start', content: [
       { type: 'text', text: JSON.stringify({ lazymind_workflow: { runId: 'r', url: 'http://localhost:8090/workflow-runs/r', hostSessionId: 's' } }) },
     ] } }
     expect(eventRun(event, 'lazymind')?.runId).toBe('r')

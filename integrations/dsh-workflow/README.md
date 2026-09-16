@@ -2,7 +2,7 @@
 
 LazyMind distributes this precompiled bundle with its connector. Connect DeepSeek Harness from LazyMind to install it into the selected DSH profile, configure MCP and create a private pairing file. Users do not build the bundle or modify DSH source.
 
-The supported SDK baseline is DSH 0.1.2-rc.1. The Node Host adapter uses public scoped tools, lifecycle gates and SessionController; the browser adapter projects standard tool events into a session-scoped Workbench window. It never appends a custom `lazymind-workflow/open` event and never reads DSH's signing credentials.
+The supported SDK baseline is DSH 0.1.6-alpha.1. The Node Host adapter uses public scoped tools, lifecycle gates and SessionController; the browser adapter projects standard tool events into a session-scoped Workbench window. It never appends a custom `lazymind-workflow/open` event and never reads DSH's signing credentials.
 
 Workflow approval, execution fencing and delivery intent live in Core. The local Bridge authenticates the plugin with a scoped pairing file and relays protocol messages. `concludeTurn` is used only on successful results; already granted workers can drain, including their required structured output. Delivery uncertainty is reconciled against standard host input records and is not blindly retried.
 

@@ -107,7 +107,7 @@ func Register(server *mcp.Server, client *Client) {
 			return nil, value, err
 		})
 	mcp.AddTool(server, &mcp.Tool{Name: "workflow.get", Title: "Get a LazyMind Workflow",
-		Description: "Read one published Workflow revision: identifiers plus declared tool_scripts as UTF-8 files. Omits compiled_graph, scenario, and yaml. Call once after workflow.start with that run's workflow_id and revision_id.", Annotations: readOnly},
+		Description: "Read one published Workflow revision: identifiers plus declared tool_scripts as UTF-8 files. Omits compiled_graph, scenario, and yaml. Use when inspecting package scripts; step execution uses the contract returned by workflow.step.begin.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input GetInput) (*mcp.CallToolResult, map[string]any, error) {
 			value, err := client.Get(ctx, input.WorkflowID, input.RevisionID)
 			return nil, value, err
@@ -123,7 +123,7 @@ func Register(server *mcp.Server, client *Client) {
 			return nil, value, err
 		})
 	mcp.AddTool(server, &mcp.Tool{Name: "workflow.input.get", Title: "Get a Workflow input",
-		Description: "Read one immutable LazyMind Workflow input resource. Images are also returned as native MCP image content.", Annotations: readOnly},
+		Description: "Read one immutable LazyMind Workflow input resource by resource_id from the input binding. Images are also returned as native MCP image content.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input InputGetInput) (*mcp.CallToolResult, InputGetResult, error) {
 			resource, err := client.GetInput(ctx, input.ResourceID)
 			if err != nil {
@@ -137,7 +137,7 @@ func Register(server *mcp.Server, client *Client) {
 			return nil, InputGetResult{Resource: resource}, nil
 		})
 	mcp.AddTool(server, &mcp.Tool{Name: "workflow.start", Title: "Start a LazyMind Workflow",
-		Description: "Create a durable Workflow session and pin its revision. Returns session_id, workflow_id, and revision_id. Next call workflow.get once with those identifiers, then workflow.step.begin for a ready step, including auto steps. This creates NO step execution. Do not wait for steps to launch themselves. A prior terminal session in this same conversation is archived atomically; a conflicting active session must be handled explicitly. Other conversations are independent.", Annotations: write},
+		Description: "Create a durable Workflow session and pin its revision. Returns session_id, workflow_id, and revision_id. Next call workflow.step.begin for a ready step, including auto steps; start creates the session without launching steps. A prior terminal session in this same conversation is archived atomically; a conflicting active session must be handled explicitly. Other conversations are independent.", Annotations: write},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input StartInput) (*mcp.CallToolResult, StartResult, error) {
 			value, err := client.Start(ctx, input)
 			return nil, value, err
@@ -167,7 +167,7 @@ func Register(server *mcp.Server, client *Client) {
 			return nil, value, err
 		})
 	mcp.AddTool(server, &mcp.Tool{Name: "workflow.step.begin", Title: "Begin a LazyMind Workflow step",
-		Description: "Start one ready step, including auto steps, and return its contract and execution_handle. Functions in step_contract.legacy_tools live in the package files from workflow.get. Human review occurs after a successful submit. If executor_host is lazymind, no handle is issued: only observe.", Annotations: write},
+		Description: "Start one ready step, including auto steps, and return its contract and execution_handle. Human review occurs after a successful submit. If executor_host is lazymind, no handle is issued: only observe.", Annotations: write},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input BeginInput) (*mcp.CallToolResult, BeginResult, error) {
 			value, err := client.Begin(ctx, input)
 			return nil, value, err
@@ -185,7 +185,7 @@ func Register(server *mcp.Server, client *Client) {
 			return nil, value, err
 		})
 	mcp.AddTool(server, &mcp.Tool{Name: "workflow.step.submit", Title: "Submit a LazyMind Workflow step",
-		Description: "Return the external Agent outcome and declared artifacts to LazyMind with the unchanged execution_handle from begin, claim or resume. content_type is the slot type: text, json, image, file, or file_list. Files use local_path; image URLs and other inline results use value. LazyMind validates required outputs, versions artifacts and advances authoritative state. If the submitted step is human, stop this turn and wait for the user to continue from the run page.", Annotations: write},
+		Description: "Finish an external step by returning its outcome and declared artifacts with the unchanged execution_handle from begin, claim or resume. Collect save_artifact/save_artifacts writes into outputs (key becomes slot) and submit together when the step finishes. content_type is the slot type: text, json, image, file, or file_list. Files use local_path; image URLs and other inline results use value. LazyMind validates required outputs, versions artifacts and advances authoritative state. If the submitted step is human, stop this turn and wait for the user to continue from the run page.", Annotations: write},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input SubmitInput) (*mcp.CallToolResult, SubmitResult, error) {
 			artifacts, err := encodeOutputs(input.Outputs)
 			if err != nil {
@@ -212,7 +212,7 @@ func Register(server *mcp.Server, client *Client) {
 			return nil, ArtifactListResult{Artifacts: value}, err
 		})
 	mcp.AddTool(server, &mcp.Tool{Name: "workflow.artifact.get", Title: "Get a LazyMind Workflow artifact",
-		Description: "Read one immutable artifact revision. Inline images are also returned as native MCP image content.", Annotations: readOnly},
+		Description: "Read one immutable artifact revision by artifact_id from the step inputs or workflow.artifact.list; a slot key is not an artifact_id. Corresponds to get_artifact/read_artifact in step instructions. Inline images are also returned as native MCP image content.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input ArtifactGetInput) (*mcp.CallToolResult, any, error) {
 			artifact, err := client.GetArtifact(ctx, input.ArtifactID)
 			if err != nil {

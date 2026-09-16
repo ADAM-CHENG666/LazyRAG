@@ -49,7 +49,7 @@ func TestWorkflowListPublishesObjectInputSchema(t *testing.T) {
 	t.Fatal("workflow.list tool is missing")
 }
 
-func TestWorkflowToolCopyPinsGetOnce(t *testing.T) {
+func TestWorkflowToolDescriptionsMatchExecutionFlow(t *testing.T) {
 	ctx := context.Background()
 	clientTransport, serverTransport := mcp.NewInMemoryTransports()
 	server := mcp.NewServer(&mcp.Implementation{Name: "schema-test", Version: "1"}, nil)
@@ -73,19 +73,24 @@ func TestWorkflowToolCopyPinsGetOnce(t *testing.T) {
 	for _, tool := range listed.Tools {
 		got[tool.Name] = tool.Description
 	}
-	if !containsAll(got["workflow.start"], "workflow.get once", "workflow_id", "revision_id") {
+	if !containsAll(got["workflow.start"], "Next call workflow.step.begin", "workflow_id", "revision_id") {
 		t.Fatalf("workflow.start description=%q", got["workflow.start"])
 	}
-	if !containsAll(got["workflow.get"], "Call once after workflow.start", "tool_scripts", "compiled_graph") {
+	if !containsAll(got["workflow.get"], "inspecting package scripts", "tool_scripts", "compiled_graph") {
 		t.Fatalf("workflow.get description=%q", got["workflow.get"])
 	}
-	if !containsAll(got["workflow.step.begin"], "step_contract.legacy_tools", "package files from workflow.get") {
+	if !containsAll(got["workflow.step.begin"], "execution_handle", "executor_host is lazymind", "no handle is issued") {
 		t.Fatalf("workflow.step.begin description=%q", got["workflow.step.begin"])
 	}
-	if containsAny(got["workflow.step.begin"], "not MCP", "not a new", "not new") {
-		t.Fatalf("workflow.step.begin used a negation: %q", got["workflow.step.begin"])
+	for _, name := range []string{"workflow.start", "workflow.step.begin"} {
+		if containsAny(got[name], "workflow.get", "legacy_tools") {
+			t.Errorf("%s retains obsolete script guidance: %q", name, got[name])
+		}
 	}
-	if !containsAll(got["workflow.step.submit"], "text, json, image, file, or file_list", "local_path", "value") {
+	if !containsAll(got["workflow.artifact.get"], "artifact_id", "slot key", "get_artifact/read_artifact") {
+		t.Fatalf("workflow.artifact.get description=%q", got["workflow.artifact.get"])
+	}
+	if !containsAll(got["workflow.step.submit"], "text, json, image, file, or file_list", "local_path", "value", "save_artifact/save_artifacts", "key becomes slot", "when the step finishes") {
 		t.Fatalf("workflow.step.submit description=%q", got["workflow.step.submit"])
 	}
 }
@@ -227,10 +232,10 @@ func TestKeepHostGetFilesDropsGraphAndKeepsScripts(t *testing.T) {
 		"workflow_id":    "image-workflow",
 		"compiled_graph": map[string]any{"steps": []any{}},
 		"files": map[string]any{
-			"workflow.yaml":                    base64.StdEncoding.EncodeToString([]byte("name: image")),
-			"scripts/tools.py":                 base64.StdEncoding.EncodeToString([]byte("def f():\n    pass\n")),
-			"scripts/tests/test_tools.py":      base64.StdEncoding.EncodeToString([]byte("assert True")),
-			"scenario/driver.md":               base64.StdEncoding.EncodeToString([]byte("# driver")),
+			"workflow.yaml":               base64.StdEncoding.EncodeToString([]byte("name: image")),
+			"scripts/tools.py":            base64.StdEncoding.EncodeToString([]byte("def f():\n    pass\n")),
+			"scripts/tests/test_tools.py": base64.StdEncoding.EncodeToString([]byte("assert True")),
+			"scenario/driver.md":          base64.StdEncoding.EncodeToString([]byte("# driver")),
 		},
 	}
 	keepHostGetFiles(pkg)

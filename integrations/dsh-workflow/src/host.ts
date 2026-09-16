@@ -13,7 +13,7 @@ import { workflowTool } from './tool'
 const READS = new Set(['list', 'get', 'input_get', 'state', 'session_list', 'artifact_list', 'artifact_get'])
 const ACQUIRE = new Set(['step_begin', 'step_claim', 'step_resume'])
 const PAUSED = new Set(['awaiting_user', 'awaiting_executor', 'draining', 'stopped', 'binding_required'])
-const STRUCTURED_OUTPUT = 'structured_output' // Published DSH 0.1.2 subagent completion contract.
+const STRUCTURED_OUTPUT = 'structured_output' // Published DSH subagent completion contract.
 
 interface Scope {
   agent: Agent

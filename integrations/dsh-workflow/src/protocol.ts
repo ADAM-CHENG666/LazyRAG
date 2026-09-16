@@ -24,7 +24,7 @@ const OPERATIONS = new Set(['list', 'get', 'input_import', 'input_get', 'start',
 export function workflowOperation(name: string, serverName: string): string | null {
   const prefix = `mcp__${serverName}__workflow_`
   if (!name.startsWith(prefix)) return null
-  // DSH 0.1.2 appends a 12-hex identity hash whenever dots are normalized.
+  // DSH appends a 12-hex identity hash whenever dots are normalized.
   const operation = name.slice(prefix.length).replace(/_[0-9a-f]{12}$/, '')
   return OPERATIONS.has(operation) ? operation : null
 }
@@ -100,7 +100,7 @@ export function eventRun(event: unknown, serverName: string): RunLink | null {
     }
     return null
   }
-  if (value?.type !== 'tool/code-dispatch' || data?.isError !== false || typeof data.name !== 'string'
+  if (value?.type !== 'tool/ptc-dispatch' || data?.isError !== false || typeof data.name !== 'string'
     || !['start', 'state', 'step_begin', 'step_claim', 'step_resume', 'step_submit'].includes(workflowOperation(data.name, serverName) ?? '')
     || !Array.isArray(data.content)) return null
   for (const raw of [...data.content].reverse()) {

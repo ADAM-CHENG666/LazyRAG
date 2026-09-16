@@ -98,7 +98,7 @@ function eventRun(event, serverName) {
 		}
 		return null;
 	}
-	if (value?.type !== "tool/code-dispatch" || data?.isError !== false || typeof data.name !== "string" || ![
+	if (value?.type !== "tool/ptc-dispatch" || data?.isError !== false || typeof data.name !== "string" || ![
 		"start",
 		"state",
 		"step_begin",

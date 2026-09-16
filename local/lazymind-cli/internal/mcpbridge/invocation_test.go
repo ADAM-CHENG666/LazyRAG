@@ -164,17 +164,15 @@ func (r *recordingInvocationRecorder) values() ([]coreapi.InvocationStart, []cor
 	return append([]coreapi.InvocationStart(nil), r.starts...), append([]coreapi.InvocationFinish(nil), r.finishes...)
 }
 
-func TestWorkflowInstructionsGetOnceThenBegin(t *testing.T) {
-	if !strings.Contains(workflowInstructions, "workflow.get once with the returned workflow_id and revision_id") {
-		t.Fatalf("instructions missing get-once sequence: %s", workflowInstructions)
+func TestWorkflowInstructionsDescribeExecutionAndArtifactMapping(t *testing.T) {
+	for _, part := range []string{"workflow.start", "workflow.step.begin", "execution_handle", "executor_host is lazymind", "save_artifact/save_artifacts", "submit.outputs", "key becomes slot", "when the step finishes", "control.continuation", "workflow.state confirms completed"} {
+		if !strings.Contains(workflowInstructions, part) {
+			t.Errorf("instructions missing %q", part)
+		}
 	}
-	if !strings.Contains(workflowInstructions, "from the package files already returned by workflow.get") {
-		t.Fatalf("instructions missing package location: %s", workflowInstructions)
-	}
-	if !strings.Contains(workflowInstructions, "using the slot content_type") {
-		t.Fatalf("instructions missing slot content_type: %s", workflowInstructions)
-	}
-	if strings.Contains(workflowInstructions, "If the contract lists legacy_tools, call workflow.get") {
-		t.Fatal("instructions still fetch the package after begin")
+	for _, obsolete := range []string{"workflow.get", "legacy_tools", "if a function cannot run"} {
+		if strings.Contains(workflowInstructions, obsolete) {
+			t.Errorf("instructions retain obsolete guidance %q", obsolete)
+		}
 	}
 }

@@ -54,6 +54,7 @@ import { resolveCompletedContinueStep } from './workflowContinue';
 import { WorkflowControlActions } from './WorkflowControlActions';
 import type { WorkflowActionIntent, WorkflowControlView } from '@/modules/chat/utils/workflowControl';
 import { resolvePendingApprovalStep } from './workflowApproval';
+import { workflowEmptyStateKey } from './workflowEmptyState';
 import { moveSelectedCompositePages, sameCompositePageOrder } from './compositePageReorder';
 import {
   filterPresentCompositeItems,
@@ -242,9 +243,11 @@ function AutoSlotGrid({
 }) {
   const { t } = useTranslation();
   if (!session.slots || session.slots.length === 0) {
+    const current = session.projection?.current ?? [];
+    const stepId = current.length === 1 ? current[0] : session.current_step_id;
     return (
       <div className='workflow-panel__empty' role='status' aria-live='polite'>
-        <span>{t('chat.workflowWaitingForResults')}</span>
+        <span>{t(workflowEmptyStateKey(session, stepId))}</span>
       </div>
     );
   }
@@ -962,7 +965,7 @@ function CompositeSlotGrid({
   if (rows.length === 0) {
     return (
       <div className='workflow-panel__empty' role='status' aria-live='polite'>
-        <span>{t('chat.workflowWaitingForResults')}</span>
+        <span>{t(workflowEmptyStateKey(session, resolveWorkflowTabStepId(tab, session.steps)))}</span>
       </div>
     );
   }
