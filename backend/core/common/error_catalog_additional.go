@@ -793,6 +793,11 @@ func init() {
 	registerAdditionalError("invalid built-in tool catalog", http.StatusBadGateway, 2002916)
 	registerAdditionalError("cannot check tool configuration", http.StatusInternalServerError, 2002917)
 	registerAdditionalError("cannot load tool configuration", http.StatusInternalServerError, 2002918)
+	registerAdditionalError("workflow unavailable", http.StatusServiceUnavailable, 2002919)
+	registerAdditionalError("use the authenticated workflow page to change approval preferences", http.StatusForbidden, 2002920)
+	registerAdditionalError("artifact file is outside LazyMind storage", http.StatusBadRequest, 2002921)
+	registerAdditionalError("artifact must be a regular file of at most 20 MiB", http.StatusBadRequest, 2002922)
+	registerAdditionalError("artifact exceeds 20 MiB", http.StatusRequestEntityTooLarge, 2002923)
 }
 
 func registerAdditionalError(message string, status, code int) {
