@@ -7,7 +7,6 @@ import os
 import re
 import time
 from collections.abc import AsyncIterator
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import lazyllm
