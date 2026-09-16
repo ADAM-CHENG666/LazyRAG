@@ -6,10 +6,22 @@ ALTER TABLE plugin_session_steps DROP COLUMN review_required;
 ALTER TABLE plugin_sessions DROP COLUMN control_binding_json;
 ALTER TABLE plugin_sessions DROP COLUMN control_protocol;
 
+DROP TABLE IF EXISTS external_capability_invocations;
+DROP TABLE IF EXISTS external_capability_grants;
 DROP TABLE IF EXISTS conversation_fork_requests;
 DROP TABLE IF EXISTS conversation_fork_origins;
+DROP INDEX IF EXISTS idx_vocabulary_review_session_word;
+DROP INDEX IF EXISTS idx_vocabulary_review_sessions_active;
 
 -- +migrate Dialect postgres
+ALTER TABLE plugin_sessions DROP COLUMN last_stopped_at;
+DROP TABLE IF EXISTS conversation_organizer_changes;
+DROP TABLE IF EXISTS conversation_organizer_candidates;
+DROP TABLE IF EXISTS conversation_organizer_snapshot_items;
+DROP TABLE IF EXISTS conversation_organizer_runs;
+DROP TABLE IF EXISTS conversation_group_states;
+DROP TABLE IF EXISTS conversation_group_members;
+DROP TABLE IF EXISTS conversation_groups;
 DROP TABLE IF EXISTS public.workflow_approval_preferences;
 ALTER TABLE public.task_center_tasks DROP CONSTRAINT IF EXISTS chk_tct_task_type;
 UPDATE public.task_center_tasks SET task_type = 'plugin_run' WHERE task_type = 'workflow_run';
@@ -118,6 +130,8 @@ ALTER TABLE conversations DROP COLUMN IF EXISTS chat_model_version;
 ALTER TABLE conversations DROP COLUMN IF EXISTS chat_model_snapshot;
 ALTER TABLE conversations DROP COLUMN IF EXISTS chat_model_id;
 ALTER TABLE conversations DROP COLUMN IF EXISTS chat_model_mode;
+ALTER TABLE conversations DROP COLUMN IF EXISTS unpinned_history_order;
+ALTER TABLE conversations DROP COLUMN IF EXISTS history_order;
 ALTER TABLE conversations DROP COLUMN IF EXISTS pinned_at;
 ALTER TABLE conversations DROP COLUMN IF EXISTS source_display_name;
 ALTER TABLE conversations DROP COLUMN IF EXISTS source_document_id;
@@ -150,6 +164,14 @@ ALTER TABLE plugin_session_steps
 DROP TABLE IF EXISTS workflow_events;
 DROP TABLE IF EXISTS workflow_commands;
 DROP TABLE IF EXISTS workflow_preparations;
+DROP INDEX IF EXISTS idx_plugins_source_skill;
+ALTER TABLE plugins
+    DROP COLUMN IF EXISTS source_draft_id,
+    DROP COLUMN IF EXISTS source_skill_tree_hash,
+    DROP COLUMN IF EXISTS source_skill_revision_no,
+    DROP COLUMN IF EXISTS source_skill_revision_id,
+    DROP COLUMN IF EXISTS source_skill_name,
+    DROP COLUMN IF EXISTS source_skill_id;
 DROP INDEX IF EXISTS idx_plugin_sessions_origin;
 ALTER TABLE plugin_sessions
     DROP COLUMN IF EXISTS workflow_mode,
@@ -188,6 +210,7 @@ BEGIN
 END $$;
 
 -- +migrate Dialect sqlite
+ALTER TABLE plugin_sessions DROP COLUMN last_stopped_at;
 DROP TABLE IF EXISTS workflow_approval_preferences;
 UPDATE task_center_tasks SET task_type = 'plugin_run' WHERE task_type = 'workflow_run';
 
@@ -282,6 +305,8 @@ ALTER TABLE conversations DROP COLUMN chat_model_version;
 ALTER TABLE conversations DROP COLUMN chat_model_snapshot;
 ALTER TABLE conversations DROP COLUMN chat_model_id;
 ALTER TABLE conversations DROP COLUMN chat_model_mode;
+ALTER TABLE conversations DROP COLUMN unpinned_history_order;
+ALTER TABLE conversations DROP COLUMN history_order;
 ALTER TABLE conversations DROP COLUMN pinned_at;
 ALTER TABLE conversations DROP COLUMN source_display_name;
 ALTER TABLE conversations DROP COLUMN source_document_id;
@@ -312,6 +337,13 @@ ALTER TABLE plugin_session_steps DROP COLUMN lease_owner;
 DROP TABLE IF EXISTS workflow_events;
 DROP TABLE IF EXISTS workflow_commands;
 DROP TABLE IF EXISTS workflow_preparations;
+DROP INDEX IF EXISTS idx_plugins_source_skill;
+ALTER TABLE plugins DROP COLUMN source_draft_id;
+ALTER TABLE plugins DROP COLUMN source_skill_tree_hash;
+ALTER TABLE plugins DROP COLUMN source_skill_revision_no;
+ALTER TABLE plugins DROP COLUMN source_skill_revision_id;
+ALTER TABLE plugins DROP COLUMN source_skill_name;
+ALTER TABLE plugins DROP COLUMN source_skill_id;
 DROP INDEX IF EXISTS idx_plugin_sessions_origin;
 ALTER TABLE plugin_sessions DROP COLUMN workflow_mode;
 ALTER TABLE plugin_sessions DROP COLUMN controller_host;
@@ -442,8 +474,88 @@ ALTER TABLE resource_update_tasks DROP COLUMN run_id;
 ALTER TABLE resource_update_tasks DROP COLUMN lane_key;
 ALTER TABLE resource_update_tasks DROP COLUMN result_json;
 
+-- Conversation opening metadata
 -- +migrate Dialect postgres
-DROP TABLE IF EXISTS chat_run_performance;
+DELETE FROM async_jobs WHERE job_type IN ('conversation.opening', 'conversation.opening.backfill');
+DROP TABLE IF EXISTS conversation_opening_metadata;
+DROP TABLE IF EXISTS conversation_opening_backfills;
+ALTER TABLE conversations DROP COLUMN title_revision;
+ALTER TABLE conversations DROP COLUMN title_source;
+DELETE FROM user_selected_models WHERE model_type = 'conversation_metadata';
 
 -- +migrate Dialect sqlite
+DELETE FROM async_jobs WHERE job_type IN ('conversation.opening', 'conversation.opening.backfill');
+DROP TABLE IF EXISTS conversation_organizer_changes;
+DROP TABLE IF EXISTS conversation_organizer_candidates;
+DROP TABLE IF EXISTS conversation_organizer_snapshot_items;
+DROP TABLE IF EXISTS conversation_organizer_runs;
+DROP TABLE IF EXISTS conversation_group_states;
+DROP TABLE IF EXISTS conversation_group_members;
+DROP TABLE IF EXISTS conversation_groups;
+DROP TABLE IF EXISTS conversation_opening_metadata;
+DROP TABLE IF EXISTS conversation_opening_backfills;
+ALTER TABLE conversations DROP COLUMN title_revision;
+ALTER TABLE conversations DROP COLUMN title_source;
+DELETE FROM user_selected_models WHERE model_type = 'conversation_metadata';
+
+-- +migrate Dialect postgres
+DROP TABLE IF EXISTS document_processing_states;
+DROP INDEX IF EXISTS idx_datasets_processing_level;
+ALTER TABLE datasets DROP COLUMN IF EXISTS processing_config;
+ALTER TABLE datasets DROP COLUMN IF EXISTS reader_fallback_accepted;
+ALTER TABLE datasets DROP COLUMN IF EXISTS transition_status;
+ALTER TABLE datasets DROP COLUMN IF EXISTS processing_revision;
+ALTER TABLE datasets DROP COLUMN IF EXISTS processing_level;
+
 DROP TABLE IF EXISTS chat_run_performance;
+DROP TABLE IF EXISTS vocabulary_review_session_answers;
+DROP TABLE IF EXISTS vocabulary_review_session_items;
+DROP TABLE IF EXISTS vocabulary_review_sessions;
+DROP TABLE IF EXISTS vocabulary_provider_operations;
+DROP TABLE IF EXISTS vocabulary_fsrs_profiles;
+DROP TABLE IF EXISTS vocabulary_dictionary_examples;
+DROP TABLE IF EXISTS vocabulary_dictionary_senses;
+DROP TABLE IF EXISTS vocabulary_dictionary_entries;
+DROP TABLE IF EXISTS vocabulary_dictionary_imports;
+DROP TABLE IF EXISTS vocabulary_example_tags;
+DROP TABLE IF EXISTS vocabulary_word_tags;
+DROP TABLE IF EXISTS vocabulary_tags;
+DROP TABLE IF EXISTS vocabulary_wordbook_entries;
+DROP TABLE IF EXISTS vocabulary_wordbooks;
+DROP TABLE IF EXISTS vocabulary_review_logs;
+DROP TABLE IF EXISTS vocabulary_review_cards;
+DROP TABLE IF EXISTS vocabulary_source_refs;
+DROP TABLE IF EXISTS vocabulary_examples;
+DROP TABLE IF EXISTS vocabulary_words;
+DROP TABLE IF EXISTS vocabulary_provider_settings;
+
+-- +migrate Dialect sqlite
+DROP TABLE IF EXISTS document_processing_states;
+DROP INDEX IF EXISTS idx_datasets_processing_level;
+ALTER TABLE datasets DROP COLUMN processing_config;
+ALTER TABLE datasets DROP COLUMN reader_fallback_accepted;
+ALTER TABLE datasets DROP COLUMN transition_status;
+ALTER TABLE datasets DROP COLUMN processing_revision;
+ALTER TABLE datasets DROP COLUMN processing_level;
+
+DROP TABLE IF EXISTS chat_run_performance;
+DROP TABLE IF EXISTS vocabulary_provider_operations;
+DROP TABLE IF EXISTS vocabulary_fsrs_profiles;
+DROP TABLE IF EXISTS vocabulary_dictionary_examples;
+DROP TABLE IF EXISTS vocabulary_dictionary_senses;
+DROP TABLE IF EXISTS vocabulary_dictionary_entries;
+DROP TABLE IF EXISTS vocabulary_dictionary_imports;
+DROP TABLE IF EXISTS vocabulary_example_tags;
+DROP TABLE IF EXISTS vocabulary_word_tags;
+DROP TABLE IF EXISTS vocabulary_tags;
+DROP TABLE IF EXISTS vocabulary_wordbook_entries;
+DROP TABLE IF EXISTS vocabulary_wordbooks;
+DROP TABLE IF EXISTS vocabulary_review_logs;
+DROP TABLE IF EXISTS vocabulary_review_cards;
+DROP TABLE IF EXISTS vocabulary_source_refs;
+DROP TABLE IF EXISTS vocabulary_examples;
+DROP TABLE IF EXISTS vocabulary_words;
+DROP TABLE IF EXISTS vocabulary_provider_settings;
+DROP TABLE IF EXISTS vocabulary_review_session_answers;
+DROP TABLE IF EXISTS vocabulary_review_session_items;
+DROP TABLE IF EXISTS vocabulary_review_sessions;

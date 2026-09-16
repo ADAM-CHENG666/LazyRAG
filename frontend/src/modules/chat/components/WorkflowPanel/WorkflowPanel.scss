@@ -612,9 +612,11 @@
     background: #fff;
     border-bottom: 1px solid #f0f1f3;
     overflow-x: auto;
-    scrollbar-width: none;
     flex-shrink: 0;
-    &::-webkit-scrollbar { display: none; }
+    scrollbar-width: thin;
+    scrollbar-color: #d1d5db transparent;
+    &::-webkit-scrollbar { height: 6px; }
+    &::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 4px; }
   }
 
   // Connector line between steps
@@ -1260,11 +1262,29 @@
 
   &__text {
     margin: 0;
+    max-height: 520px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding-right: 6px;
+    scrollbar-gutter: stable;
     font-size: 13px;
     line-height: 1.6;
     color: #374151;
     white-space: pre-wrap;
     word-break: break-word;
+
+    &::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    &::-webkit-scrollbar-thumb {
+      background: #dbe2ea;
+      border-radius: 999px;
+    }
+
+    &::-webkit-scrollbar-track {
+      background: transparent;
+    }
 
     &--editable {
       cursor: text;
@@ -1934,12 +1954,15 @@
 
   &__version-label {
     display: flex;
+    flex-wrap: wrap;
+    white-space: nowrap;
     align-items: center;
     gap: 4px;
     color: #374151;
   }
 
   &__version-source-badge {
+    flex-shrink: 0;
     font-size: 10px;
     padding: 0 4px;
     border-radius: 4px;
@@ -1950,6 +1973,7 @@
   }
 
   &__version-current-tag {
+    flex-shrink: 0;
     font-size: 10px;
     background: #dcfce7;
     color: #166534;
@@ -2473,6 +2497,16 @@
     &:hover { background: #e5e7eb; }
   }
 
+  &__image-preview {
+    display: block;
+    width: 100%;
+
+    img:focus-visible {
+      outline: 2px solid #2563eb;
+      outline-offset: -2px;
+    }
+  }
+
   &__image {
     display: block;
     max-width: 100%;
@@ -2499,6 +2533,7 @@
 
   &__image-card-caption {
     position: absolute;
+    pointer-events: none;
     bottom: 0;
     left: 0;
     right: 0;

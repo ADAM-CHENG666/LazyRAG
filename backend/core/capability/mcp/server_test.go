@@ -2,6 +2,7 @@ package mcpadapter
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,77 @@ import (
 )
 
 type mcpFakePorts struct{ call capability.InvocationContext }
+
+type schemaOnlyExternal struct {
+	capability.ExternalCapabilityExecutor
+}
+
+func TestExternalToolResultPublishesObjectSchemaForStrictClients(t *testing.T) {
+	ports := &mcpFakePorts{}
+	service, err := capability.NewService(capability.Dependencies{
+		Skills: ports, Knowledge: ports, Documents: ports, Search: ports,
+		Cloud: ports, Vocabulary: ports, External: schemaOnlyExternal{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	serverSession, err := newServer(service).Connect(context.Background(), serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serverSession.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "schema-test", Version: "1"}, nil)
+	session, err := client.Connect(context.Background(), clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	listed, err := session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range listed.Tools {
+		if tool.Name != "tool.call" {
+			continue
+		}
+		raw, err := json.Marshal(tool.OutputSchema)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var schema struct {
+			Properties map[string]json.RawMessage `json:"properties"`
+			Required   []string                   `json:"required"`
+		}
+		if err := json.Unmarshal(raw, &schema); err != nil {
+			t.Fatal(err)
+		}
+		if string(schema.Properties["result"]) != "{}" || len(schema.Required) != 1 || schema.Required[0] != "result" {
+			t.Fatalf("result must remain required and unconstrained with an object schema: %s", raw)
+		}
+		return
+	}
+	t.Fatal("tool.call was not published")
+}
+
+func (f *mcpFakePorts) ListVocabularyWordbooks(context.Context, capability.InvocationContext) (capability.ListVocabularyWordbooksResult, error) {
+	return capability.ListVocabularyWordbooksResult{}, nil
+}
+func (f *mcpFakePorts) ListVocabularyWords(context.Context, capability.InvocationContext, capability.ListVocabularyWordsInput) (capability.ListVocabularyWordsResult, error) {
+	return capability.ListVocabularyWordsResult{}, nil
+}
+func (f *mcpFakePorts) NextVocabularyReview(context.Context, capability.InvocationContext, capability.NextVocabularyReviewInput) (capability.NextVocabularyReviewResult, error) {
+	return capability.NextVocabularyReviewResult{}, nil
+}
+func (f *mcpFakePorts) StartVocabularyReview(context.Context, capability.InvocationContext, capability.StartVocabularyReviewInput) (capability.StartVocabularyReviewResult, error) {
+	return capability.StartVocabularyReviewResult{}, nil
+}
+func (f *mcpFakePorts) AnswerVocabularyReview(context.Context, capability.InvocationContext, capability.AnswerVocabularyReviewInput) (capability.AnswerVocabularyReviewResult, error) {
+	return capability.AnswerVocabularyReviewResult{}, nil
+}
+func (f *mcpFakePorts) VocabularyReviewReport(context.Context, capability.InvocationContext, capability.VocabularyReviewReportInput) (capability.VocabularyReviewReportResult, error) {
+	return capability.VocabularyReviewReportResult{}, nil
+}
 
 func (f *mcpFakePorts) ListCloudDocuments(_ context.Context, call capability.InvocationContext, _ capability.CloudDocumentListQuery) (capability.CloudDocumentListPage, error) {
 	f.call = call
@@ -55,7 +127,7 @@ func (f *mcpFakePorts) SearchKnowledge(_ context.Context, call capability.Invoca
 
 func TestStreamableHTTPPublishesAuthenticatedReadOnlyTools(t *testing.T) {
 	ports := &mcpFakePorts{}
-	service, err := capability.NewService(capability.Dependencies{Skills: ports, Knowledge: ports, Documents: ports, Search: ports, Cloud: ports})
+	service, err := capability.NewService(capability.Dependencies{Skills: ports, Knowledge: ports, Documents: ports, Search: ports, Cloud: ports, Vocabulary: ports})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,12 +167,16 @@ func TestStreamableHTTPPublishesAuthenticatedReadOnlyTools(t *testing.T) {
 		if tool.Annotations == nil || tool.Annotations.DestructiveHint == nil || *tool.Annotations.DestructiveHint {
 			t.Fatalf("tool %q is not marked non-destructive", tool.Name)
 		}
-		if !tool.Annotations.ReadOnlyHint || !tool.Annotations.IdempotentHint {
+		stateChanging := false
+		if !stateChanging && (!tool.Annotations.ReadOnlyHint || !tool.Annotations.IdempotentHint) {
 			t.Fatalf("tool %q annotations = %#v, want read-only and idempotent", tool.Name, tool.Annotations)
+		}
+		if stateChanging && (tool.Annotations.ReadOnlyHint || tool.Annotations.IdempotentHint) {
+			t.Fatalf("tool %q annotations = %#v, want state-changing and non-idempotent", tool.Name, tool.Annotations)
 		}
 	}
 	sort.Strings(names)
-	if got, want := strings.Join(names, ","), "cloud_document.get,cloud_document.list,cloud_document.search,knowledge.document.get,knowledge.document.list,knowledge.list,knowledge.search,skill.get,skill.list"; got != want {
+	if got, want := strings.Join(names, ","), "cloud_document.get,cloud_document.list,cloud_document.search,knowledge.document.get,knowledge.document.list,knowledge.list,knowledge.search,skill.get,skill.list,vocabulary.word.list,vocabulary.wordbook.list"; got != want {
 		t.Fatalf("tool names = %q, want %q", got, want)
 	}
 

@@ -27,6 +27,8 @@ import { AgentAppsAuth } from "@/components/auth";
 import {
   isAskPendingReadOnly,
   shouldRenderAskPending,
+  mailDraftCardsReadOnly,
+  unansweredMailDrafts,
 } from "@/modules/chat/utils/message";
 import type { ExternalExecutionProjection } from "@/modules/chat/utils/message";
 import { ChatServiceApi, decideToolLimit } from "@/modules/chat/utils/request";
@@ -36,13 +38,14 @@ import MultiAnswerDisplay, { type PreferenceType } from "../MultiAnswerDisplay";
 import FeedbackModal from "../FeedbackModal";
 import AskCard from "@/modules/chat/components/AskCard";
 import MailDraftCard from "@/modules/chat/components/MailDraftCard";
+import MailMailboxCard from "@/modules/chat/components/MailDraftCard/MailMailboxCard";
 import ToolLimitCard from "@/modules/chat/components/ToolLimitCard";
 import ArtifactDownloadButton from "@/modules/chat/components/ArtifactCollectorCard/ArtifactDownloadButton";
 import RunStatusCard from "@/modules/chat/components/RunStatusCard";
 import {
   type ChatSource,
   type ChatSourceCollection,
-  getSearchSources,
+  getReferenceSources,
   getSourceDedupKey,
   getSourceEvidenceText,
   getSourceFaviconUrl,
@@ -54,7 +57,9 @@ import {
 import { IdentityAvatar } from "@/modules/identityAvatar";
 import {
   getTranslationStatus,
-  translateText,
+  isSingleEnglishWord,
+  translateSelectionText,
+  TranslationUnavailableError,
 } from "@/modules/knowledge/api/translation";
 
 let translationStatusRequest: Promise<boolean> | undefined;
@@ -118,15 +123,19 @@ function SourceFavicon({
 export function ChatSourcePanel({
   sources,
   onClose,
+  embedded = false,
 }: {
   sources: ChatSource[];
   onClose: () => void;
+  embedded?: boolean;
 }) {
   const { t } = useTranslation();
+  const [selected, setSelected] = useState<ChatSource | null>(null);
+  useEffect(() => { setSelected(null); }, [sources]);
 
   return (
     <aside className="chat-source-panel" aria-label={t("chat.references")}>
-      <div className="chat-source-panel-header">
+      {!embedded && <div className="chat-source-panel-header">
         <h2 className="chat-source-panel-title">
           <span>{t("chat.references")}</span>
           <span className="chat-source-panel-count">{sources.length}</span>
@@ -138,15 +147,21 @@ export function ChatSourcePanel({
           onClick={onClose}
           aria-label={t("common.close")}
         />
-      </div>
+      </div>}
       <div className="chat-source-panel-body">
-        <div className="chat-source-list">
+        {selected ? <div className="chat-source-detail">
+          <Button type="text" onClick={() => setSelected(null)}>{t("chat.contextPanel.backToSources")}</Button>
+          <h3>{getSourceLabel(selected)}</h3>
+          <small>{getSourceSubtitle(selected)}</small>
+          <p>{getSourceEvidenceText(selected) || t("chat.contextPanel.noExcerpt")}</p>
+          <Button onClick={() => openSource(selected)}>{t("chat.contextPanel.openOriginal")}</Button>
+        </div> : <div className="chat-source-list">
           {sources.map((source, sourceIndex) => (
             <button
               type="button"
               className="chat-source-item"
               key={getSourceDedupKey(source, sourceIndex)}
-              onClick={() => openSource(source)}
+              onClick={() => embedded ? setSelected(source) : openSource(source)}
               title={getSourceLabel(source)}
             >
               <SourceFavicon source={source} />
@@ -169,7 +184,7 @@ export function ChatSourcePanel({
               />
             </button>
           ))}
-        </div>
+        </div>}
       </div>
     </aside>
   );
@@ -441,6 +456,7 @@ const AssistantMessage = (props: any) => {
     renderText,
     updateMessage,
     sessionId,
+    conversationFiles,
     onPreferenceSelect,
     isLatestDualAnswer,
     onCiteMessage,
@@ -536,10 +552,6 @@ const AssistantMessage = (props: any) => {
 
   const handleTranslateSelectedText = useCallback(async () => {
     const selectedText = citeSelectionTextRef.current.trim();
-    if (!translationConfiguredRef.current) {
-      window.location.href = "/settings?section=knowledge&tool=translation";
-      return;
-    }
     if (!selectedText) return;
     setTranslationSource(selectedText);
     setTranslationResult("");
@@ -547,10 +559,11 @@ const AssistantMessage = (props: any) => {
     window.getSelection()?.removeAllRanges();
     hideCiteButton();
     try {
-      const result = await translateText(selectedText);
+      const result = await translateSelectionText(selectedText);
       setTranslationResult(result.translated_text);
-    } catch {
-      message.error(t("knowledge.translationFailed"));
+    } catch (error) {
+      if(error instanceof TranslationUnavailableError&&error.reason==="service_not_configured")window.location.href="/settings?section=knowledge&tool=translation";
+      else message.error(error instanceof TranslationUnavailableError?t("knowledge.dictionaryNotFound"):t("knowledge.translationFailed"));
     } finally {
       setTranslationLoading(false);
     }
@@ -630,12 +643,16 @@ const AssistantMessage = (props: any) => {
       );
       if (translateButton) {
         translateButton.textContent = t("knowledge.translateSelection");
-        translateButton.title = t("knowledge.translationConfigureTip");
+        const wordSelection=isSingleEnglishWord(text);
+        translateButton.classList.toggle("is-translation-disabled", !wordSelection);
+        translateButton.setAttribute("aria-disabled", String(!wordSelection));
+        translateButton.title = wordSelection?t("knowledge.translateSelection"):t("knowledge.translationConfigureTip");
         void loadTranslationStatus().then((configured) => {
           translationConfiguredRef.current = configured;
-          translateButton.classList.toggle("is-translation-disabled", !configured);
-          translateButton.setAttribute("aria-disabled", String(!configured));
-          translateButton.title = configured
+          const disabled=!configured&&!isSingleEnglishWord(text);
+          translateButton.classList.toggle("is-translation-disabled", disabled);
+          translateButton.setAttribute("aria-disabled", String(disabled));
+          translateButton.title = !disabled
             ? t("knowledge.translateSelection")
             : `${t("knowledge.translationConfigureTip")} · ${t("knowledge.translationConfigureAction")}`;
         });
@@ -791,13 +808,13 @@ const AssistantMessage = (props: any) => {
   }
 
   function renderSourceButton(sources?: ChatSourceCollection) {
-    const displaySources = getSearchSources(sources);
+    const displaySources = getReferenceSources(sources);
     if (!displaySources.length) return null;
     return (
       <Tooltip title={`${t("chat.references")} (${displaySources.length})`}>
         <Button
           className="tool-btn source-btn"
-          onClick={() => onOpenSources?.(displaySources)}
+          onClick={() => onOpenSources?.(displaySources, String(item?.content || item?.delta || "").slice(0, 180))}
           aria-label={`${t("chat.references")} (${displaySources.length})`}
         >
           <span className="chat-source-button-icons" aria-hidden="true">
@@ -824,8 +841,7 @@ const AssistantMessage = (props: any) => {
     const resolvedHistoryId = historyId || item?.history_id;
     if (
       resolvedHistoryId &&
-      feedbackState.localFeedbackHistoryId === resolvedHistoryId &&
-      feedbackState.localFeedbackType
+      feedbackState.localFeedbackHistoryId === resolvedHistoryId
     ) {
       return feedbackState.localFeedbackType;
     }
@@ -971,7 +987,11 @@ const AssistantMessage = (props: any) => {
       return;
     }
 
-    if (AgentAppsAuth.getUserInfo()?.chatUnlikeSwitch === true) {
+    if (
+      getCurrentFeedback(historyId) !==
+        FeedBackChatHistoryRequestTypeEnum.FeedBackTypeUnlike &&
+      AgentAppsAuth.getUserInfo()?.chatUnlikeSwitch === true
+    ) {
       dispatch({ type: "OPEN_MODAL", historyId: targetHistoryId });
       return;
     }
@@ -1290,26 +1310,90 @@ const AssistantMessage = (props: any) => {
         index === length - 1,
         !!hasLaterUserMessage,
       );
-      if (!showAskCard) return null;
-      if (askPending.mail_draft) {
+      if (askPending.mail_draft || (askPending.mail_drafts && askPending.mail_drafts.length)) {
+        const drafts =
+          askPending.mail_drafts && askPending.mail_drafts.length
+            ? askPending.mail_drafts
+            : askPending.mail_draft
+              ? [askPending.mail_draft]
+              : [];
+        const remainingDrafts = unansweredMailDrafts(
+          { mail_drafts: drafts },
+          item.answered_mail_draft_ids,
+        );
+        if (!remainingDrafts.length) return null;
+        const mailReadOnly = mailDraftCardsReadOnly(
+          disabled,
+          item.ask_answered,
+        );
+        const markDraftAnswered = (confirmedId: string) => {
+          const nextAnswered = Array.from(
+            new Set([
+              ...(item.answered_mail_draft_ids || []),
+              String(confirmedId || "").trim(),
+            ]),
+          ).filter(Boolean);
+          updateMessage({
+            ...item,
+            answered_mail_draft_ids: nextAnswered,
+            ask_answered:
+              unansweredMailDrafts({ mail_drafts: drafts }, nextAnswered)
+                .length === 0,
+          });
+        };
         return (
-          <MailDraftCard
-            key={askPending.ask_id}
-            draft={askPending.mail_draft}
-            disabled={isReadOnly}
-            onConfirm={(draftId, revision) => {
-              updateMessage({
-                ...item,
-                ask_answered: true,
-              });
-              props.sendMessage?.(t("chat.mailDraft.confirmQuery"), undefined, {
-                mail_draft_confirm_id: draftId,
-                mail_draft_confirm_revision: revision,
-              });
-            }}
-          />
+          <div className="mail-draft-card-list" key={askPending.ask_id}>
+            {remainingDrafts.map((draft) => {
+              const draftId = String(draft.draft_id || "").trim();
+              if (String(draft.status || "") === "needs_mailbox") {
+                return (
+                  <MailMailboxCard
+                    key={draftId || askPending.ask_id}
+                    draft={draft}
+                    disabled={mailReadOnly}
+                    onConfirm={async (mailbox, confirmedId) => {
+                      const started = await props.sendMessage?.(
+                        t("chat.mailMailbox.confirmQuery", { mailbox }),
+                        undefined,
+                        {
+                          mail_mailbox_confirm: mailbox,
+                          mail_mailbox_confirm_draft_id: confirmedId,
+                        },
+                      );
+                      if (started) {
+                        markDraftAnswered(confirmedId);
+                      }
+                    }}
+                  />
+                );
+              }
+              return (
+                <MailDraftCard
+                  key={draftId || askPending.ask_id}
+                  draft={draft}
+                  disabled={mailReadOnly}
+                  conversationFiles={conversationFiles}
+                  onConfirm={async (confirmedId, revision, patch) => {
+                    const started = await props.sendMessage?.(
+                      t("chat.mailDraft.confirmQuery"),
+                      undefined,
+                      {
+                        mail_draft_confirm_id: confirmedId,
+                        mail_draft_confirm_revision: revision,
+                        ...(patch ? { mail_draft_patch: patch } : {}),
+                      },
+                    );
+                    if (started) {
+                      markDraftAnswered(confirmedId);
+                    }
+                  }}
+                />
+              );
+            })}
+          </div>
         );
       }
+      if (!showAskCard) return null;
       return (
         <AskCard
           key={askPending.ask_id}
@@ -1437,6 +1521,9 @@ const AssistantMessage = (props: any) => {
             <RunStatusCard
               terminal={item.run_terminal}
               conversationId={sessionId}
+              providerId={item.model_route?.provider_id}
+              providerName={item.model_route?.provider_name}
+              modelName={item.model_route?.model_name}
               onRetry={runRetryable ? regenerate : undefined}
               retryDisabled={regenerateDisabled}
             />
@@ -1521,6 +1608,9 @@ const AssistantMessage = (props: any) => {
           <RunStatusCard
             terminal={item.run_terminal}
             conversationId={sessionId}
+            providerId={item.model_route?.provider_id}
+            providerName={item.model_route?.provider_name}
+            modelName={item.model_route?.model_name}
             onRetry={runRetryable ? regenerate : undefined}
             retryDisabled={regenerateDisabled}
           />

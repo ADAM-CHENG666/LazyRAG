@@ -18,11 +18,13 @@ import (
 
 	"lazymind/core/acl"
 	"lazymind/core/asyncjob"
+	"lazymind/core/browser"
 	capabilitybootstrap "lazymind/core/capability/bootstrap"
 	"lazymind/core/chat"
 	"lazymind/core/common"
 	"lazymind/core/common/orm"
 	"lazymind/core/common/readonlyorm"
+	"lazymind/core/conversationgroup"
 	"lazymind/core/currentmemory"
 	"lazymind/core/episode"
 	"lazymind/core/evalset"
@@ -255,6 +257,10 @@ func registerCapabilityMCPRoute(r *mux.Router, handler http.Handler) {
 	r.Handle("/mcp/capabilities/v1", handler).Methods(http.MethodGet, http.MethodDelete)
 }
 
+func registerBrowserMCPRoute(r *mux.Router, handler http.Handler) {
+	r.Handle("/mcp/browser/v1", handler).Methods(http.MethodPost, http.MethodGet, http.MethodDelete)
+}
+
 func coreListenAddr() string {
 	host := strings.TrimSpace(os.Getenv("LAZYMIND_CORE_HOST"))
 	port := strings.TrimSpace(os.Getenv("LAZYMIND_CORE_PORT"))
@@ -453,6 +459,7 @@ func run(ctx context.Context) error {
 	if err := modelprovider.MigrateLegacyAPIKeys(db.DB); err != nil {
 		return &startupError{msg: "migrate model provider credentials", err: err}
 	}
+	modelprovider.MustLoadContextWindows(filepath.Join(".", "config", "model_context_windows.yaml"))
 	catalogPath := filepath.Join(".", "config", "model_catalog.yaml")
 	modelprovider.MustSeedModelCatalog(ctx, db.DB, catalogPath)
 	datasourceCatalogPath := filepath.Join(".", "config", "datasource_catalog.yaml")
@@ -508,6 +515,9 @@ func run(ctx context.Context) error {
 		return &startupError{msg: "inject bundled history", err: err}
 	}
 	evalset.RegisterAsyncJobs()
+	chat.RegisterConversationTitleJobs(store.DB())
+	conversationgroup.RegisterTitlePreparer(chat.OrganizerTitlePreparer{})
+	conversationgroup.RegisterAsyncJobs()
 	knowledge_market.RegisterAsyncJobs()
 	workflow.RegisterWorkflowDraftGenerateJob()
 	workflowHosts := workflowexecutor.DefaultHostRegistry
@@ -539,11 +549,14 @@ func run(ctx context.Context) error {
 	} else {
 		asyncConfig := evalset.LoadAsyncJobRuntimeConfigFromEnv()
 		runner = asyncjob.Start(runtimeCtx, store.DB(), asyncjob.Options{
-			Concurrency:  asyncConfig.Concurrency,
-			PollInterval: asyncConfig.PollInterval,
-			LockTTL:      asyncConfig.LockTTL,
+			Concurrency:     asyncConfig.Concurrency,
+			ExcludeJobTypes: chat.ConversationTitleJobTypes,
+			PollInterval:    asyncConfig.PollInterval,
+			LockTTL:         asyncConfig.LockTTL,
 		})
 		backgroundDone = append(backgroundDone, runner.Done())
+		backgroundDone = append(backgroundDone, conversationgroup.StartTerminalJobReconciler(runtimeCtx, store.DB(), 2*time.Second))
+		backgroundDone = append(backgroundDone, chat.StartConversationTitle(runtimeCtx, store.DB())...)
 
 		importConfig := evalset.LoadImportRuntimeConfigFromEnv()
 		backgroundDone = append(backgroundDone,
@@ -635,6 +648,8 @@ func run(ctx context.Context) error {
 	}
 	registerCapabilityMCPRoute(r, capabilityRuntime.MCP)
 	log.Logger.Info().Str("path", "/mcp/capabilities/v1").Msg("capability MCP enabled")
+	registerBrowserMCPRoute(r, browser.NewMCPHandler(browser.DefaultHub))
+	log.Logger.Info().Str("path", "/mcp/browser/v1").Msg("browser MCP enabled")
 
 	listenAddr := coreListenAddr()
 	listener, err := net.Listen("tcp", listenAddr)

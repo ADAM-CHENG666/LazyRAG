@@ -18,6 +18,7 @@ import (
 	"lazymind/core/externalcontext"
 	"lazymind/core/state"
 	"lazymind/core/store"
+	"lazymind/core/vocabulary"
 )
 
 func TestResolveMailDraftConfirmIDFromDraftCard(t *testing.T) {
@@ -39,6 +40,45 @@ func TestResolveMailDraftConfirmIDFromDraftCard(t *testing.T) {
 	}, nil, "", 1)
 	if withRevision["mail_draft_confirm_revision"] != 2 {
 		t.Fatalf("expected draft-card confirm revision, got %#v", withRevision["mail_draft_confirm_revision"])
+	}
+
+	withPatch := buildChatRequestBody(context.TODO(), nil, "conv-1", "", "确认发送", nil, map[string]any{
+		"mail_draft_confirm_id": "draft_ac38c2afeac34780",
+		"mail_draft_patch": map[string]any{
+			"subject":          "edited",
+			"ignored":          "nope",
+			"attachment_paths": []any{"report.pdf"},
+			"attachments": []any{
+				map[string]any{"filename": "card.txt", "content_base64": "aGVsbG8="},
+				map[string]any{"filename": "skip.txt"},
+			},
+		},
+	}, nil, "", 1)
+	patch, ok := withPatch["mail_draft_patch"].(map[string]any)
+	if !ok || patch["subject"] != "edited" {
+		t.Fatalf("expected draft patch subject, got %#v", withPatch["mail_draft_patch"])
+	}
+	if _, exists := patch["ignored"]; exists {
+		t.Fatalf("did not expect unknown patch fields: %#v", patch)
+	}
+	paths, _ := patch["attachment_paths"].([]string)
+	if len(paths) != 1 || paths[0] != "report.pdf" {
+		t.Fatalf("expected conversation attachment paths, got %#v", patch["attachment_paths"])
+	}
+	uploads, _ := patch["attachments"].([]map[string]any)
+	if len(uploads) != 1 || uploads[0]["filename"] != "card.txt" || uploads[0]["content_base64"] != "aGVsbG8=" {
+		t.Fatalf("expected card upload attachments, got %#v", patch["attachments"])
+	}
+
+	withMailbox := buildChatRequestBody(context.TODO(), nil, "conv-1", "", "确认发件邮箱", nil, map[string]any{
+		"mail_mailbox_confirm":          "a@qq.com",
+		"mail_mailbox_confirm_draft_id": "draft_ac38c2afeac34780",
+	}, nil, "", 1)
+	if withMailbox["mail_mailbox_confirm"] != "a@qq.com" {
+		t.Fatalf("expected mailbox confirm, got %#v", withMailbox["mail_mailbox_confirm"])
+	}
+	if withMailbox["mail_mailbox_confirm_draft_id"] != "draft_ac38c2afeac34780" {
+		t.Fatalf("expected mailbox confirm draft id, got %#v", withMailbox["mail_mailbox_confirm_draft_id"])
 	}
 }
 
@@ -778,6 +818,26 @@ func TestBuildChatRequestBodyScopesDocumentPreviewRetrieval(t *testing.T) {
 	}
 }
 
+func TestBuildLazyChatRequestPreservesDocumentSelectionContext(t *testing.T) {
+	documentContext := map[string]any{
+		"dataset_id": "kb-1", "document_id": "doc-1",
+		"selected_text": "batch size tokens", "paragraph_text": "surrounding paragraph",
+	}
+	body := buildChatRequestBody(context.TODO(), nil, "conv-1", "", "translate", nil, map[string]any{
+		"document_context": documentContext,
+	}, nil, "", 1)
+	body["surface"] = "knowledge_document_preview"
+
+	req := buildLazyChatRequest(body)
+	if req.DocumentContext["selected_text"] != "batch size tokens" ||
+		req.DocumentContext["paragraph_text"] != "surrounding paragraph" {
+		t.Fatalf("document selection context was not forwarded: %#v", req.DocumentContext)
+	}
+	if req.Conversation.Surface != "knowledge_document_preview" {
+		t.Fatalf("conversation surface was not forwarded: %q", req.Conversation.Surface)
+	}
+}
+
 func TestBuildChatRequestBodyLoadsFiltersFromConversationDB(t *testing.T) {
 	db := orm.MigrateTestDB(t, &orm.Conversation{})
 	now := time.Now()
@@ -891,6 +951,61 @@ func TestReplaceAskUserToolResultSupportsJSONCarrier(t *testing.T) {
 	}
 	if !strings.Contains(replaced, `"result":"Q1: Purpose\n  Answer: Personal use"`) {
 		t.Fatalf("expected structured answer context, got %s", replaced)
+	}
+}
+
+func TestBuildAskUserToolResultIncludesMandatoryLLMReviewProtocol(t *testing.T) {
+	pending := map[string]any{
+		"review_hook": map[string]any{
+			"kind":       "vocabulary_review_llm",
+			"session_id": "session-1",
+			"items": []any{map[string]any{
+				"question_index": 0, "review_item_id": "item-1",
+				"weight": 3.0, "grading_criteria": "answer conveys the core meaning",
+			}},
+		},
+	}
+	structured := &askAnswersStructuredPayload{Questions: []askAnsweredQuestionItem{{
+		Text: "meaning?", Type: "text", Answer: json.RawMessage(`{"value":"多样的"}`),
+	}}}
+
+	got := buildAskUserToolResultContent(pending, structured, nil)
+	for _, required := range []string{"MANDATORY_REVIEW_GRADING", "register_review_words", "item-1", `"weight":3`} {
+		if !strings.Contains(got, required) {
+			t.Fatalf("result missing %q: %s", required, got)
+		}
+	}
+}
+
+func TestBuildAskUserToolResultHidesObjectiveReviewAnswer(t *testing.T) {
+	pending := map[string]any{
+		"review_hook": map[string]any{"kind": "vocabulary_review_objective"},
+	}
+	structured := &askAnswersStructuredPayload{Questions: []askAnsweredQuestionItem{{
+		Text: "diverse 的中文含义？", Type: "single", Answer: json.RawMessage(`{"value":"各；不一样"}`),
+	}}}
+
+	got := buildAskUserToolResultContent(pending, structured, nil)
+	for _, hidden := range []string{"diverse", "各；不一样", "Answer:"} {
+		if strings.Contains(got, hidden) {
+			t.Fatalf("objective result leaked %q: %s", hidden, got)
+		}
+	}
+	if !strings.Contains(got, "backend graded and registered") {
+		t.Fatalf("objective result did not explain backend registration: %s", got)
+	}
+}
+
+func TestFormatVocabularyReviewReportUsesBackendValues(t *testing.T) {
+	got := formatVocabularyReviewReport(vocabulary.ReviewSessionReport{
+		Total: 4, Correct: 3, Incorrect: 1, Accuracy: 0.75,
+		AverageIntervalBefore: 2, AverageIntervalAfter: 6.5,
+		DifficultWords: []string{"diverse"},
+	})
+	for _, required := range []string{"Reviewed 4 words", "75.0% accuracy", "2.0 days", "6.5 days", "diverse"} {
+		if !strings.Contains(got, required) {
+			t.Fatalf("report missing %q: %s", required, got)
+		}
 	}
 }
 
@@ -1054,7 +1169,7 @@ func TestCollectedInputsForConversationReturnsSnapshotAndSummary(t *testing.T) {
 }
 
 func TestGetConversationDetailReturnsStoredMultimodalInput(t *testing.T) {
-	db := orm.MigrateTestDB(t, &orm.Conversation{}, &orm.ChatHistory{}, &orm.ExternalAgentBinding{}, &orm.ConversationForkOrigin{})
+	db := orm.MigrateTestDB(t, &orm.Conversation{}, &orm.ConversationOpening{}, &orm.ChatHistory{}, &orm.ExternalAgentBinding{}, &orm.ConversationForkOrigin{})
 	store.Init(db.DB, nil, nil)
 	t.Cleanup(func() { store.Init(nil, nil, nil) })
 
@@ -1139,7 +1254,7 @@ func TestChatHistoryResponseIncludesMentions(t *testing.T) {
 	}
 }
 
-func TestChatHistoryResponseOmitsAnsweredAskPending(t *testing.T) {
+func TestChatHistoryResponseKeepsAnsweredAskPendingReadOnly(t *testing.T) {
 	item := chatHistoryToResponseItem(orm.ChatHistory{
 		Ext: json.RawMessage(`{
 			"ask_pending":{"ask_id":"ask-1","questions":[]},
@@ -1147,11 +1262,25 @@ func TestChatHistoryResponseOmitsAnsweredAskPending(t *testing.T) {
 			"ask_saved_answers":{"0":{"type":"text","value":"done"}}
 		}`),
 	})
-	if _, exists := item["ask_pending"]; exists {
-		t.Fatalf("answered ask_pending leaked into history response: %#v", item)
+	if _, exists := item["ask_pending"]; !exists {
+		t.Fatalf("answered ask_pending missing from history response: %#v", item)
 	}
-	if _, exists := item["ask_saved_answers"]; exists {
-		t.Fatalf("answered ask_saved_answers leaked into history response: %#v", item)
+	if answered, _ := item["ask_answered"].(bool); !answered {
+		t.Fatalf("answered marker missing from history response: %#v", item)
+	}
+	if _, exists := item["ask_saved_answers"]; !exists {
+		t.Fatalf("answered ask_saved_answers missing from history response: %#v", item)
+	}
+}
+
+func TestSubmittedAskAnswersPreservesQuestionIndexes(t *testing.T) {
+	answers := submittedAskAnswers(map[string]any{"questions": []any{
+		map[string]any{"answer": map[string]any{"type": "single", "value": "A"}},
+		map[string]any{"answer": nil},
+		map[string]any{"answer": map[string]any{"type": "text", "value": "word"}},
+	}})
+	if len(answers) != 2 || answers["0"] == nil || answers["2"] == nil {
+		t.Fatalf("submitted answers were not preserved by index: %#v", answers)
 	}
 }
 
@@ -1324,7 +1453,7 @@ func TestElapsedThinkingSecondsRoundsUp(t *testing.T) {
 }
 
 func TestGetConversationDetailFiltersMissingDatasets(t *testing.T) {
-	db := orm.MigrateTestDB(t, &orm.Conversation{}, &orm.ChatHistory{}, &orm.Dataset{}, &orm.ExternalAgentBinding{}, &orm.ConversationForkOrigin{})
+	db := orm.MigrateTestDB(t, &orm.Conversation{}, &orm.ConversationOpening{}, &orm.ChatHistory{}, &orm.Dataset{}, &orm.ExternalAgentBinding{}, &orm.ConversationForkOrigin{})
 	store.Init(db.DB, nil, nil)
 	t.Cleanup(func() { store.Init(nil, nil, nil) })
 
@@ -1408,7 +1537,7 @@ func TestGetConversationDetailFiltersMissingDatasets(t *testing.T) {
 }
 
 func TestGetConversationHistoryReturnsStoredMultimodalInput(t *testing.T) {
-	db := orm.MigrateTestDB(t, &orm.Conversation{}, &orm.ChatHistory{}, &orm.ChatRunPerformance{})
+	db := orm.MigrateTestDB(t, &orm.Conversation{}, &orm.ConversationOpening{}, &orm.ChatHistory{}, &orm.ChatRunPerformance{})
 	store.Init(db.DB, nil, nil)
 	t.Cleanup(func() { store.Init(nil, nil, nil) })
 
@@ -1804,6 +1933,9 @@ func TestBuildLLMConfigFromSelectedModels(t *testing.T) {
 
 	if chatCfg["source"] != "openai" || chatCfg["model"] != "gpt-4o" || chatCfg["api_key"] != "sk-from-db" {
 		t.Fatalf("unexpected llm config: %#v", chatCfg)
+	}
+	if chatCfg["max_input_tokens"] != "128K" {
+		t.Fatalf("llm max_input_tokens = %#v, want 128K fallback", chatCfg["max_input_tokens"])
 	}
 	if evoCfg["model"] != "gpt-4o-mini" {
 		t.Fatalf("unexpected evo_llm config: %#v", evoCfg)

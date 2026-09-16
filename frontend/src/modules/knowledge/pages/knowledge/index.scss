@@ -94,6 +94,13 @@
   width: 220px;
 }
 
+.knowledge-preview-options-popover {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 220px;
+}
+
 .knowledge-preview-sequence {
   flex: none;
   gap: 8px;
@@ -110,6 +117,18 @@
 
 .knowledge-translation-block + .knowledge-translation-block {
   margin-top: 18px;
+}
+
+.knowledge-translation-model-action {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 20px;
+
+  span {
+    color: var(--color-text-description);
+    font-size: 12px;
+  }
 }
 
 .knowledge-translation-label {

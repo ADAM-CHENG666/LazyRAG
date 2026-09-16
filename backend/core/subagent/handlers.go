@@ -30,6 +30,17 @@ func authorizeWorkflowExecutor(w http.ResponseWriter, r *http.Request) bool {
 	return false
 }
 
+func authorizeInternalService(w http.ResponseWriter, r *http.Request) bool {
+	expected := strings.TrimSpace(os.Getenv("LAZYMIND_AUTH_SERVICE_INTERNAL_TOKEN"))
+	provided := strings.TrimSpace(r.Header.Get("X-LazyMind-Internal-Token"))
+	if expected == "" || provided == "" || len(provided) != len(expected) ||
+		subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
+		common.ReplyErr(w, "internal token required", http.StatusUnauthorized)
+		return false
+	}
+	return true
+}
+
 // InternalGetExecutionSpec returns LazyMind Host-private configuration to the
 // authenticated remote LazyMind Executor. Workflow Runtime never stores this
 // data in Attempt Context or sends it to another Host.
@@ -49,7 +60,8 @@ func InternalGetExecutionSpec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var runtimeParams struct {
-		LegacyTools []string `json:"legacy_tools"`
+		Capabilities []string `json:"capabilities"`
+		LegacyTools  []string `json:"legacy_tools"`
 	}
 	if len(task.Params) > 0 {
 		if err := json.Unmarshal(task.Params, &runtimeParams); err != nil {
@@ -58,7 +70,7 @@ func InternalGetExecutionSpec(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	toolConfig, err := modelconfig.LoadToolConfigForCapabilities(
-		r.Context(), store.DB(), task.CreateUserID, runtimeParams.LegacyTools,
+		r.Context(), store.DB(), task.CreateUserID, workflowToolConfigCapabilities(runtimeParams.Capabilities, runtimeParams.LegacyTools),
 	)
 	if err != nil {
 		common.ReplyErr(w, "tool config unavailable", http.StatusServiceUnavailable)
@@ -75,6 +87,20 @@ func InternalGetExecutionSpec(w http.ResponseWriter, r *http.Request) {
 	common.ReplyOK(w, map[string]any{"task": toTaskDTO(task), "params": task.Params,
 		"steps": stepDTOs, "create_user_id": task.CreateUserID, "llm_config": config,
 		"tool_config": toolConfig, "workspace_path": task.WorkspacePath})
+}
+
+func workflowToolConfigCapabilities(capabilities, legacyTools []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(capabilities)+len(legacyTools))
+	for _, value := range append(capabilities, legacyTools...) {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
 }
 
 // InternalIngestTaskEvent preserves the ordinary LazyMind SubAgent task stream
@@ -112,6 +138,7 @@ func InternalIngestTaskEvent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	event.DurableToolResults = nil
 	var session orm.WorkflowSession
 	if err := store.DB().WithContext(r.Context()).Joins("JOIN plugin_session_steps step ON step.session_id = plugin_sessions.id").Where("step.task_id = ?", taskID).Select("plugin_sessions.*").First(&session).Error; err != nil {
 		common.ReplyErr(w, "workflow unavailable", http.StatusServiceUnavailable)
@@ -155,9 +182,37 @@ func remoteStepContent(event TaskEvent) (string, json.RawMessage) {
 	case "think":
 		role, value = "think", map[string]any{"content": event.Think}
 	case "tool_calls":
-		role, value = "assistant", map[string]any{"tool_calls": event.ToolCalls}
+		var calls []map[string]any
+		if json.Unmarshal(event.ToolCalls, &calls) != nil {
+			calls = []map[string]any{}
+		}
+		role, value = "assistant", map[string]any{"text": "", "tool_calls": calls}
 	case "tool_results":
-		role, value = "tool", map[string]any{"tool_results": event.ToolResults}
+		var incoming []map[string]any
+		persistedResults := event.DurableToolResults
+		if len(persistedResults) == 0 {
+			persistedResults = event.ToolResults
+		}
+		if json.Unmarshal(persistedResults, &incoming) != nil {
+			incoming = []map[string]any{}
+		}
+		results := make([]map[string]any, 0, len(incoming))
+		for _, result := range incoming {
+			toolCallID := result["tool_call_id"]
+			if toolCallID == nil {
+				toolCallID = result["id"]
+			}
+			resultValue := result["result"]
+			if resultValue == nil {
+				resultValue = result["content"]
+			}
+			results = append(results, map[string]any{
+				"tool_call_id": toolCallID,
+				"name":         result["name"],
+				"result":       resultValue,
+			})
+		}
+		role, value = "tool", map[string]any{"tool_results": results}
 	}
 	if role == "" {
 		return "", nil
@@ -236,6 +291,11 @@ type artifactDTO struct {
 	Seq         int             `json:"seq"`
 	Value       json.RawMessage `json:"value"`
 	CreatedAt   time.Time       `json:"created_at"`
+}
+
+type internalArtifactDTO struct {
+	TaskID string `json:"task_id"`
+	artifactDTO
 }
 
 func toTaskDTO(t *orm.SubAgentTask) taskDTO {
@@ -408,6 +468,123 @@ func GetTaskArtifacts(w http.ResponseWriter, r *http.Request) {
 		if !arts[i].Hidden {
 			out = append(out, toArtifactDTO(&arts[i], task.WorkspacePath))
 		}
+	}
+	common.ReplyOK(w, map[string]any{"artifacts": out})
+}
+
+// InternalListConversationTasks is the service boundary used by Algorithm
+// processes. It deliberately returns task DTOs instead of exposing SQL or the
+// core.db path.
+func InternalListConversationTasks(w http.ResponseWriter, r *http.Request) {
+	if !authorizeInternalService(w, r) {
+		return
+	}
+	conversationID := strings.TrimSpace(common.PathVar(r, "conversation_id"))
+	if conversationID == "" {
+		common.ReplyErr(w, "conversation_id required", http.StatusBadRequest)
+		return
+	}
+	tasks, err := ListTasksByConversation(r.Context(), store.DB(), conversationID)
+	if err != nil {
+		common.ReplyErr(w, "query tasks failed", http.StatusInternalServerError)
+		return
+	}
+	out := make([]taskDTO, 0, len(tasks))
+	for i := range tasks {
+		out = append(out, toTaskDTO(&tasks[i]))
+	}
+	common.ReplyOK(w, map[string]any{"tasks": out})
+}
+
+// InternalGetTaskArtifacts returns visible task artifacts to trusted Algorithm
+// callers without granting them direct access to Core persistence.
+func InternalGetTaskArtifacts(w http.ResponseWriter, r *http.Request) {
+	if !authorizeInternalService(w, r) {
+		return
+	}
+	taskID := strings.TrimSpace(common.PathVar(r, "task_id"))
+	if taskID == "" {
+		common.ReplyErr(w, "task_id required", http.StatusBadRequest)
+		return
+	}
+	task, err := GetTask(r.Context(), store.DB(), taskID)
+	if err != nil {
+		if IsNotFound(err) {
+			common.ReplyErr(w, "task not found", http.StatusNotFound)
+		} else {
+			common.ReplyErr(w, "query task failed", http.StatusInternalServerError)
+		}
+		return
+	}
+	artifacts, err := LoadArtifacts(r.Context(), store.DB(), taskID)
+	if err != nil {
+		common.ReplyErr(w, "query artifacts failed", http.StatusInternalServerError)
+		return
+	}
+	out := make([]artifactDTO, 0, len(artifacts))
+	for i := range artifacts {
+		if !artifacts[i].Hidden {
+			out = append(out, toArtifactDTO(&artifacts[i], task.WorkspacePath))
+		}
+	}
+	common.ReplyOK(w, map[string]any{"artifacts": out})
+}
+
+// InternalGetTaskArtifactsBatch performs one bounded read for chat context
+// construction, avoiding one HTTP request and one SQL query per task.
+func InternalGetTaskArtifactsBatch(w http.ResponseWriter, r *http.Request) {
+	if !authorizeInternalService(w, r) {
+		return
+	}
+	taskIDs := r.URL.Query()["task_id"]
+	if len(taskIDs) == 0 {
+		common.ReplyOK(w, map[string]any{"artifacts": []internalArtifactDTO{}})
+		return
+	}
+	if len(taskIDs) > 100 {
+		common.ReplyErr(w, "at most 100 task_id values are allowed", http.StatusBadRequest)
+		return
+	}
+	normalized := make([]string, 0, len(taskIDs))
+	seen := make(map[string]struct{}, len(taskIDs))
+	for _, taskID := range taskIDs {
+		taskID = strings.TrimSpace(taskID)
+		if taskID == "" {
+			continue
+		}
+		if _, exists := seen[taskID]; exists {
+			continue
+		}
+		seen[taskID] = struct{}{}
+		normalized = append(normalized, taskID)
+	}
+	if len(normalized) == 0 {
+		common.ReplyOK(w, map[string]any{"artifacts": []internalArtifactDTO{}})
+		return
+	}
+
+	var tasks []orm.SubAgentTask
+	if err := store.DB().WithContext(r.Context()).Select("id", "workspace_path").
+		Where("id IN ?", normalized).Find(&tasks).Error; err != nil {
+		common.ReplyErr(w, "query tasks failed", http.StatusInternalServerError)
+		return
+	}
+	workspaceByTask := make(map[string]string, len(tasks))
+	for i := range tasks {
+		workspaceByTask[tasks[i].ID] = tasks[i].WorkspacePath
+	}
+	var artifacts []orm.SubAgentArtifact
+	if err := store.DB().WithContext(r.Context()).Where("task_id IN ? AND hidden = ?", normalized, false).
+		Order("task_id ASC, slot ASC, seq ASC").Find(&artifacts).Error; err != nil {
+		common.ReplyErr(w, "query artifacts failed", http.StatusInternalServerError)
+		return
+	}
+	out := make([]internalArtifactDTO, 0, len(artifacts))
+	for i := range artifacts {
+		out = append(out, internalArtifactDTO{
+			TaskID:      artifacts[i].TaskID,
+			artifactDTO: toArtifactDTO(&artifacts[i], workspaceByTask[artifacts[i].TaskID]),
+		})
 	}
 	common.ReplyOK(w, map[string]any{"artifacts": out})
 }

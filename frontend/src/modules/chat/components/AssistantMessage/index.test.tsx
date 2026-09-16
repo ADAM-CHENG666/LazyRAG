@@ -6,7 +6,7 @@ import {
 } from "@/api/generated/chatbot-client";
 import enUS from "@/i18n/locales/en-US";
 import zhCN from "@/i18n/locales/zh-CN";
-import AssistantMessage, { externalProviderDisplayName } from "./index";
+import AssistantMessage, { ChatSourcePanel, externalProviderDisplayName } from "./index";
 
 vi.mock("react-i18next", () => ({
   initReactI18next: {
@@ -30,7 +30,8 @@ vi.mock("@/modules/identityAvatar", () => ({
 
 vi.mock("@/modules/knowledge/api/translation", () => ({
   getTranslationStatus: vi.fn().mockResolvedValue(true),
-  translateText: vi.fn().mockResolvedValue({
+  isSingleEnglishWord: (text:string) => /^[A-Za-z]+$/.test(text),
+  translateSelectionText: vi.fn().mockResolvedValue({
     translated_text: "已翻译内容",
     source: "en",
     target: "zh",
@@ -195,7 +196,7 @@ describe("AssistantMessage cancellation", () => {
     expect(screen.getByText("chat.runStatus.providerError")).toBeInTheDocument();
   });
 
-  it("opens a side chat with the selected text and source position", () => {
+  it.each(["completed", "running"])("opens a side chat from a %s answer with the selected text and source position", (runStatus) => {
     const onOpenSideChat = vi.fn();
     render(
       <AssistantMessage
@@ -205,8 +206,10 @@ describe("AssistantMessage cancellation", () => {
           seq: 7,
           role: "assistant",
           delta: "selected answer",
-          finish_reason:
-            ChatConversationsResponseFinishReasonEnum.FinishReasonStop,
+          run_status: runStatus,
+          finish_reason: runStatus === "completed"
+            ? ChatConversationsResponseFinishReasonEnum.FinishReasonStop
+            : ChatConversationsResponseFinishReasonEnum.FinishReasonUnspecified,
         }}
         index={0}
         length={1}
@@ -500,5 +503,21 @@ describe("Fork message action", () => {
   it("hides Fork when the conversation does not support it", () => {
     render(<AssistantMessage {...messageProps} item={persistedReply} />);
     expect(screen.queryByRole("button", { name: "chat.fork.title" })).toBeNull();
+  });
+});
+
+
+describe("embedded reference details", () => {
+  it("shows details inside the panel and returns to the list without opening another surface", () => {
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+    const sources = [{ source_type: "external" as const, title: "Example source", url: "https://example.com/article", content: "Evidence excerpt" }];
+    render(<ChatSourcePanel sources={sources} embedded onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: /Example source/ }));
+    expect(screen.getByRole("heading", { name: "Example source" })).toBeVisible();
+    expect(screen.getByText("Evidence excerpt")).toBeVisible();
+    expect(open).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "chat.contextPanel.backToSources" }));
+    expect(screen.getByRole("button", { name: /Example source/ })).toBeVisible();
+    open.mockRestore();
   });
 });

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -185,6 +186,28 @@ func TestRemoteExecutionSpecReturnsTaskParamsAndDurableSteps(t *testing.T) {
 	}
 }
 
+func TestRemoteExecutionSpecLoadsCapabilityToolConfig(t *testing.T) {
+	db := remoteSubagentFixture(t)
+	seedRemoteSearchProvider(t, db)
+	if err := db.Model(&orm.SubAgentTask{}).Where("id = ?", "task-remote").Update("params",
+		json.RawMessage(`{"operation":"execute","capabilities":["web_search"]}`)).Error; err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/internal/subagent/tasks/task-remote/execution-spec", nil)
+	req = mux.SetURLVars(req, map[string]string{"task_id": "task-remote"})
+	req.Header.Set("Authorization", "Bearer executor-secret")
+	req.Header.Set("X-Workflow-Lease-Token", "lease-live")
+	rec := httptest.NewRecorder()
+	InternalGetExecutionSpec(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	toolConfig := getData(rec.Body.Bytes())["tool_config"].(map[string]any)
+	if toolConfig["tavily"] != "workflow-search-token" {
+		t.Fatalf("tool_config=%#v", toolConfig)
+	}
+}
+
 func TestRemoteExecutionSpecLoadsOnlyDeclaredAcademicSearchConfig(t *testing.T) {
 	db := remoteSubagentFixture(t)
 	seedRemoteSearchProvider(t, db)
@@ -234,7 +257,9 @@ func TestRemoteTaskEventsPersistStreamStateAndInvalidatePanel(t *testing.T) {
 		{"type": "text", "text": "hello"},
 		{"type": "think", "think": "reason"},
 		{"type": "tool_calls", "tool_calls": []map[string]any{{"id": "1", "name": "read"}}},
-		{"type": "tool_results", "tool_results": []map[string]any{{"id": "1", "result": "ok"}}},
+		{"type": "tool_results",
+			"tool_results":         []map[string]any{{"id": "1", "result": "compact"}},
+			"durable_tool_results": []map[string]any{{"id": "1", "result": "complete resume result"}}},
 		{"type": "progress", "progress": 42, "current_phase": "working",
 			"writing_subtasks": []map[string]any{{
 				"subtask_id": "research-1", "node_id": "section-1",
@@ -265,6 +290,16 @@ func TestRemoteTaskEventsPersistStreamStateAndInvalidatePanel(t *testing.T) {
 		if steps[i].Seq != i || steps[i].Role != role {
 			t.Fatalf("step[%d]=%#v", i, steps[i])
 		}
+	}
+	var toolContent map[string][]map[string]any
+	if err := json.Unmarshal(steps[3].Content, &toolContent); err != nil {
+		t.Fatal(err)
+	}
+	if toolContent["tool_results"][0]["tool_call_id"] != "1" {
+		t.Fatalf("tool result was not normalized for resume: %s", steps[3].Content)
+	}
+	if toolContent["tool_results"][0]["result"] != "complete resume result" {
+		t.Fatalf("compact UI result was persisted instead of durable result: %s", steps[3].Content)
 	}
 	task, _ := GetTask(context.Background(), db.DB, "task-remote")
 	if task.Status != StatusRunning || task.ProgressPct != 42 || task.CurrentPhase != "working" {
@@ -338,5 +373,47 @@ func TestControlledNativeTerminalMirrorsTaskWithoutLegacyContinuation(t *testing
 	task, err := GetTask(context.Background(), db.DB, "task-remote")
 	if err != nil || task.Status != StatusSucceeded {
 		t.Fatalf("task projection missing: %+v %v", task, err)
+	}
+}
+
+func TestAppendRemoteStepSerializesConcurrentSQLiteWriters(t *testing.T) {
+	db := remoteSubagentFixture(t)
+	if db.Dialector.Name() != "sqlite" {
+		t.Skip("SQLite-specific writer contention test")
+	}
+
+	const writers = 32
+	start := make(chan struct{})
+	errs := make(chan error, writers)
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs <- AppendRemoteStep(context.Background(), db.DB, "task-remote", "text",
+				json.RawMessage(`{"content":"concurrent"}`))
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("append concurrent step: %v", err)
+		}
+	}
+	steps, err := LoadSteps(context.Background(), db.DB, "task-remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(steps) != writers {
+		t.Fatalf("got %d steps, want %d", len(steps), writers)
+	}
+	for i, step := range steps {
+		if step.Seq != i {
+			t.Fatalf("step[%d].seq=%d, want %d", i, step.Seq, i)
+		}
 	}
 }

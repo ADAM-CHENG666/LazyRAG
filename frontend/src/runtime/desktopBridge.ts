@@ -155,17 +155,21 @@ export type DesktopAgentExecutableBindingResult =
 type DesktopBridgeCommand =
   | "openLogsDir"
   | "openDataDir"
+  | "openBrowserExtensionDir"
   | "restartRuntime";
 
 interface LazyMindDesktopBridge {
   platform?: string;
   openLogsDir?: () => Promise<void> | void;
   openDataDir?: () => Promise<void> | void;
+  openBrowserExtensionDir?: () => Promise<void> | void;
   runtimeStatus?: () => Promise<unknown> | unknown;
   agentIntegrationStatuses?: () => Promise<unknown> | unknown;
   agentIntegrationAction?: (agent: DesktopAgent, action: DesktopAgentIntegrationAction) => Promise<unknown> | unknown;
   executorIntegrationPolicies?: () => Promise<unknown> | unknown;
   executorIntegrationAction?: (provider: DesktopExecutorProvider, action: DesktopExecutorPolicyAction) => Promise<unknown> | unknown;
+  ankiIntegrationStatus?: () => Promise<unknown> | unknown;
+  openAnki?: () => Promise<unknown> | unknown;
   agentExecutableBindings?: () => Promise<unknown> | unknown;
   agentExecutableBind?: (target: DesktopAgentBindingTarget, path: string) => Promise<unknown> | unknown;
   agentExecutableClear?: (target: DesktopAgentBindingTarget) => Promise<unknown> | unknown;
@@ -237,6 +241,10 @@ export function openLogsDir(): Promise<DesktopBridgeResult> {
 
 export function openDataDir(): Promise<DesktopBridgeResult> {
   return callDesktopBridge("openDataDir");
+}
+
+export function openBrowserExtensionDir(): Promise<DesktopBridgeResult> {
+  return callDesktopBridge("openBrowserExtensionDir");
 }
 
 export function runtimeStatus(): Promise<DesktopRuntimeStatusResult> {
@@ -357,6 +365,25 @@ export async function executorIntegrationAction(
   } catch (error) {
     return localBridgeFailure(error);
   }
+}
+
+export interface DesktopAnkiStatus {
+  installed: boolean;
+  executable_path: string;
+  connect_installed: boolean;
+  addon_code: string;
+}
+
+export async function ankiIntegrationStatus(): Promise<DesktopAnkiStatus | null> {
+  const bridge = getDesktopBridge();
+  if (bridge?.ankiIntegrationStatus) return bridge.ankiIntegrationStatus() as Promise<DesktopAnkiStatus>;
+  return assistantBridgeJSON<DesktopAnkiStatus>("/anki/status", undefined, STATUS_TIMEOUT_MS);
+}
+
+export async function openAnki(): Promise<void> {
+  const bridge = getDesktopBridge();
+  if (bridge?.openAnki) { await bridge.openAnki(); return; }
+  await assistantBridgeJSON("/anki/open", { method: "POST" }, ACTION_TIMEOUT_MS);
 }
 
 export async function agentExecutableBindings(): Promise<DesktopAgentExecutableBindingsResult> {

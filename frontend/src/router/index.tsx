@@ -12,6 +12,7 @@ import Home from "@/modules/chat/pages/home";
 import { getAntdLocale } from "@/i18n/antdLocale";
 import { runtimeFeatures } from "@/runtime/features";
 import { isLocalSessionEnabled } from "@/runtime/localSession";
+import { isVocabularyEnabled } from "@/runtime/mode";
 import UserAgreementPage from "@/pages/UserAgreementPage";
 import SettingsPage from "@/modules/settings";
 
@@ -23,6 +24,7 @@ const KnowledgeList = lazy(() => import("@/modules/knowledge/pages/list"));
 const KnowledgeAuth = lazy(() => import("@/modules/knowledge/pages/auth"));
 const KnowledgeDetail = lazy(() => import("@/modules/knowledge/pages/detail"));
 const Knowledge = lazy(() => import("@/modules/knowledge/pages/knowledge"));
+const VocabularyPage = lazy(() => import("@/modules/vocabulary/VocabularyPage"));
 const AdminLayout = lazy(() => import("@/modules/admin/AdminLayout"));
 const TaskCenterPage = lazy(() => import("@/modules/taskCenter"));
 const UserManagement = lazy(() => import("@/modules/admin/pages/user"));
@@ -69,6 +71,7 @@ const SelfEvolutionObservationPage = lazy(() => import("@/modules/selfEvolution"
 })));
 const WorkflowDetailPage = lazy(() => import("@/modules/workflow/pages/detail"));
 const BuiltinWorkflowDetailPage = lazy(() => import("@/modules/workflow/pages/builtin-detail"));
+const ConversationGroupPage = lazy(() => import("@/modules/chat/conversationOrganizer/GroupPage"));
 
 export default function AppRouter() {
   const { i18n } = useTranslation();
@@ -141,6 +144,7 @@ export default function AppRouter() {
             <Route path="home" element={<Home />} />
             {/* Conversation detail URLs survive a full browser reload. */}
             <Route path="home/:conversationId" element={<Home />} />
+            <Route path="groups/:groupId" element={<ConversationGroupPage />} />
             <Route path="cases" element={<ShowcaseGalleryPage />} />
             <Route path="cases/:caseId" element={<ShowcaseDetailPage />} />
           </Route>
@@ -162,6 +166,7 @@ export default function AppRouter() {
             />
           </Route>
           <Route path="dataset-management" element={<DatasetListPage />} />
+          {isVocabularyEnabled() ? <Route path="lib/vocabulary" element={<VocabularyPage />} /> : null}
           <Route
             path="dataset-management/:datasetId"
             element={<DatasetDetailPage />}
@@ -178,10 +183,10 @@ export default function AppRouter() {
           />
           <Route path="cloud-documents" element={<CloudDocumentsLayout />}>
             <Route index element={<CloudDocumentsPage />} />
+            <Route path="mail" element={<EmailConnectionPage />} />
             <Route path="local" element={<LocalDataSourcePage />} />
             <Route path="feishu" element={<FeishuAccountPage />} />
             <Route path="google-drive" element={<GoogleDriveConnectionPage />} />
-            <Route path="mail" element={<EmailConnectionPage />} />
             <Route path="docs/feishu-setup" element={<FeishuSetupGuide />} />
             <Route path="docs/notion-setup" element={<NotionSetupGuide />} />
             <Route path="docs/google-drive-setup" element={<GoogleDriveSetupGuide />} />
@@ -193,6 +198,7 @@ export default function AppRouter() {
           <Route path="model-providers/tools" element={<Navigate to="/settings?section=system_tools" replace />} />
           <Route path="model-providers/external-services" element={<Navigate to="/settings?section=system_tools" replace />} />
           <Route path="model-providers/cloud-documents" element={<Navigate to="/cloud-documents" replace />} />
+          <Route path="model-providers/cloud-documents/mail" element={<Navigate to="/cloud-documents/mail" replace />} />
           <Route path="model-providers/cloud-documents/local" element={<Navigate to="/cloud-documents/local" replace />} />
           <Route path="model-providers/cloud-documents/feishu" element={<Navigate to="/cloud-documents/feishu" replace />} />
           <Route path="model-providers/cloud-documents/google-drive" element={<Navigate to="/cloud-documents/google-drive" replace />} />

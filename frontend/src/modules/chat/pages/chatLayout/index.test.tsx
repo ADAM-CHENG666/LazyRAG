@@ -41,7 +41,7 @@ vi.mock("react-i18next", () => ({
         return `来源：${params?.parent}`;
       }
       if (key === "chat.conversationForkedFrom") {
-        return `Fork自：${params?.parent}`;
+        return `分支来源：${params?.parent}`;
       }
       return key;
     },
@@ -62,6 +62,7 @@ vi.mock("react-router-dom", () => ({
 }));
 
 vi.mock("antd", () => ({
+  Badge: ({ children }: any) => <span>{children}</span>,
   Button: ({ children, loading, ...props }: any) => <button {...props} disabled={loading || props.disabled}>{children}</button>,
   Space: ({ children, ...props }: any) => <div {...props}>{children}</div>,
   message: {
@@ -72,6 +73,7 @@ vi.mock("antd", () => ({
 
 vi.mock("@ant-design/icons", () => ({
   MessageOutlined: () => null,
+  CloseOutlined: () => null,
   UnorderedListOutlined: () => null,
 }));
 
@@ -102,7 +104,7 @@ vi.mock("@/modules/chat/components/newChatContainer", () => ({
 vi.mock("@/modules/chat/components/SideChatPanel", () => ({
   default: (props: any) => {
     mocks.latestSideChatPanelProps = props;
-    return props.open ? (
+    return props.open && props.visible !== false ? (
       <div
         data-testid="side-chat-panel"
         data-parent-id={props.parentConversationId}
@@ -111,6 +113,8 @@ vi.mock("@/modules/chat/components/SideChatPanel", () => ({
     ) : null;
   },
 }));
+
+vi.mock("@/modules/chat/components/AssistantMessage", () => ({ ChatSourcePanel: () => <div>sources</div> }));
 
 vi.mock("@/modules/chat/components/InitialCard", () => ({ default: () => null }));
 vi.mock("@/modules/chat/components/TaskCenter", () => ({ default: () => null }));
@@ -595,6 +599,22 @@ describe("ChatLayout conversation loading", () => {
     );
   });
 
+  it("restores the same sidechat after visiting another conversation", async () => {
+    mocks.getConversationDetail.mockImplementation(async ({ conversation }: { conversation: string }) => ({
+      data: { conversation: { conversation_id: conversation, thinking_depth: "medium", search_config: {}, settings: { chat_executor: "lazymind" } } },
+    }));
+    const props = { setIsChatContent: vi.fn(), initchatConfig: {}, setChatConfigFn: vi.fn(), canChat: true };
+    const view = render(<ChatLayout {...props} conversationId="parent" />);
+    await waitFor(() => expect(mocks.latestChatContainerProps.onOpenSideChat).toBeTypeOf("function"));
+    act(() => mocks.latestChatContainerProps.onOpenSideChat({ selectedText: "excerpt", historyId: "h1" }));
+    expect(screen.getByTestId("side-chat-panel")).toHaveAttribute("data-selected-text", "excerpt");
+    view.rerender(<ChatLayout {...props} conversationId="other" />);
+    await waitFor(() => expect(screen.queryByTestId("side-chat-panel")).not.toBeInTheDocument());
+    view.rerender(<ChatLayout {...props} conversationId="parent" />);
+    await waitFor(() => expect(screen.getByTestId("side-chat-panel")).toHaveAttribute("data-selected-text", "excerpt"));
+    expect(mocks.latestSideChatPanelProps.parentConversationId).toBe("parent");
+  });
+
   it("keeps fork thinking depth local and clears it when starting a new conversation", async () => {
     mocks.getConversationDetail.mockResolvedValue({ data: { conversation: { conversation_id: "fork", thinking_depth: "high", search_config: {}, settings: { chat_executor: "lazymind" }, fork_origin: { source_conversation_id: "source", source_history_id: "h1", source_status: "available", can_locate: true } } } });
     const props = { setIsChatContent: vi.fn(), initchatConfig: {}, setChatConfigFn: vi.fn(), canChat: true };
@@ -634,7 +654,7 @@ describe("ChatLayout conversation loading", () => {
       />,
     );
 
-    expect(await screen.findByText("Fork自：主会话标题")).toBeInTheDocument();
+    expect(await screen.findByText("分支来源：主会话标题")).toBeInTheDocument();
     expect(mocks.latestChatContainerProps.showConversationConfig).toBe(true);
     expect(mocks.latestChatContainerProps.showSkillDeposit).toBe(true);
     expect(mocks.latestChatContainerProps.allowKnowledgeBaseSelection).toBe(true);

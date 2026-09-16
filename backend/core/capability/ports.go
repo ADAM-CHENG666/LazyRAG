@@ -69,6 +69,15 @@ type CloudDocumentReader interface {
 	GetCloudDocument(context.Context, InvocationContext, GetCloudDocumentInput) (GetCloudDocumentResult, error)
 	SearchCloudDocuments(context.Context, InvocationContext, SearchCloudDocumentsInput) (SearchCloudDocumentsResult, error)
 }
+
+type VocabularyTrainer interface {
+	ListVocabularyWordbooks(context.Context, InvocationContext) (ListVocabularyWordbooksResult, error)
+	ListVocabularyWords(context.Context, InvocationContext, ListVocabularyWordsInput) (ListVocabularyWordsResult, error)
+	NextVocabularyReview(context.Context, InvocationContext, NextVocabularyReviewInput) (NextVocabularyReviewResult, error)
+	StartVocabularyReview(context.Context, InvocationContext, StartVocabularyReviewInput) (StartVocabularyReviewResult, error)
+	AnswerVocabularyReview(context.Context, InvocationContext, AnswerVocabularyReviewInput) (AnswerVocabularyReviewResult, error)
+	VocabularyReviewReport(context.Context, InvocationContext, VocabularyReviewReportInput) (VocabularyReviewReportResult, error)
+}
 type CloudDocumentListQuery struct {
 	Keyword, Status string
 	Offset, Limit   int
@@ -76,4 +85,11 @@ type CloudDocumentListQuery struct {
 type CloudDocumentListPage struct {
 	Items []CloudDocumentSource
 	Total int64
+}
+
+type ExternalCapabilityExecutor interface {
+	ListExternalModels(context.Context, InvocationContext) (ListExternalModelsResult, error)
+	InvokeExternalModel(context.Context, InvocationContext, InvokeExternalModelInput) (InvokeExternalModelResult, error)
+	ListExternalTools(context.Context, InvocationContext) (ListExternalToolsResult, error)
+	InvokeExternalTool(context.Context, InvocationContext, InvokeExternalToolInput) (InvokeExternalToolResult, error)
 }

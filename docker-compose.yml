@@ -35,8 +35,8 @@ x-proxy-env: &proxy-env
   https_proxy: ${https_proxy:-}
   HTTP_PROXY: ${HTTP_PROXY:-}
   HTTPS_PROXY: ${HTTPS_PROXY:-}
-  no_proxy: 127.0.0.1,localhost,::1,core,chat,evo-api,doc-server,lazyllm-algo,parsing,milvus,opensearch,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
-  NO_PROXY: 127.0.0.1,localhost,::1,core,chat,evo-api,doc-server,lazyllm-algo,parsing,milvus,opensearch,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+  no_proxy: 127.0.0.1,localhost,::1,core,chat,evo-api,doc-server,lazyllm-doc-server,lazyllm-algo,parsing,lazyllm-parse-server,processor-server,ppt-export,mineru,auth-service,office-convert-service,scan-control-plane,milvus,opensearch,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+  NO_PROXY: 127.0.0.1,localhost,::1,core,chat,evo-api,doc-server,lazyllm-doc-server,lazyllm-algo,parsing,lazyllm-parse-server,processor-server,ppt-export,mineru,auth-service,office-convert-service,scan-control-plane,milvus,opensearch,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
 
 x-core-env: &core-env
   ACL_DB_DRIVER: postgres
@@ -46,6 +46,8 @@ x-core-env: &core-env
   # production deployments should leave this unset/false.
   MIGRATION_RECONCILE_UNKNOWN_DEV_HISTORY: ${MIGRATION_RECONCILE_UNKNOWN_DEV_HISTORY:-true}
   LAZYMIND_PREFERENCE_CONTEXT_MAX_CHARS: ${LAZYMIND_PREFERENCE_CONTEXT_MAX_CHARS:-5000}
+  LAZYMIND_VOCABULARY_ENABLED: ${LAZYMIND_VOCABULARY_ENABLED:-false}
+  LAZYMIND_ANKI_CONNECT_URL: ${LAZYMIND_ANKI_CONNECT_URL:-http://host.docker.internal:8765}
   LAZYMIND_REDIS_URL: redis://test:123456@redis:6379/0
   LAZYMIND_UPLOAD_ROOT: /var/lib/lazymind/uploads
   LAZYMIND_UPLOAD_TEXT_UTF8_CONVERT_ENABLED: ${LAZYMIND_UPLOAD_TEXT_UTF8_CONVERT_ENABLED:-true}
@@ -411,11 +413,10 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
-      <<: *core-env
+      <<: [*core-env, *proxy-env]
       MIGRATIONS_DIR: /migrations
       LAZYMIND_ALGO_SERVICE_URL: http://lazyllm-doc-server:8000
       LAZYMIND_SUBAGENT_WORKSPACE: /data/subagent
-      LAZYMIND_SUBAGENT_DB_DSN: ${ACL_DB_DSN}
       LAZYMIND_READONLY_VALIDATE: "0"
       LAZYMIND_READONLY_DB_DRIVER: postgres
       LAZYMIND_READONLY_DB_DSN: "host=db user=app password=app dbname=app port=5432 sslmode=disable TimeZone=UTC"
@@ -425,6 +426,8 @@ services:
       LAZYMIND_PARSING_SERVICE_URL: http://lazyllm-parse-server:8000
       LAZYMIND_CHAT_SERVICE_URL: http://chat:8046
       LAZYMIND_EVO_SERVICE_URL: http://evo-api:8047
+      LAZYMIND_BROWSER_ENABLED: ${LAZYMIND_BROWSER_ENABLED:-true}
+      LAZYMIND_BROWSER_MCP_URL: http://core:8000/mcp/browser/v1
       LAZYMIND_RESOURCE_UPDATE_ENABLED: "true"
       LAZYMIND_AUTH_SERVICE_INTERNAL_TOKEN: ${LAZYMIND_AUTH_SERVICE_INTERNAL_TOKEN:-dev-internal-service-token}
       LAZYMIND_OFFICE_CONVERT_WORKERS: "4"
@@ -459,7 +462,7 @@ services:
       - ./data/core/uploads:/var/lib/lazymind/uploads
       - ./skills/.runtime:/skills/.runtime:ro
     environment:
-      <<: *core-env
+      <<: [*core-env, *proxy-env]
     depends_on:
       db:
         condition: service_healthy
@@ -478,6 +481,7 @@ services:
       dockerfile: Dockerfile
       args:
         <<: *mirror-args
+        VITE_VOCABULARY_ENABLED: ${LAZYMIND_VOCABULARY_ENABLED:-false}
     ports:
       - "${LAZYMIND_FRONTEND_PORT:-8090}:80"
     expose:

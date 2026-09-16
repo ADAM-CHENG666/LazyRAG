@@ -553,6 +553,9 @@ components:
             type: object
         ChatChunkResponse:
             properties:
+                capability_dependency:
+                    properties: {}
+                    type: object
                 conversation_id:
                     type: string
                 delta:
@@ -871,6 +874,42 @@ components:
                         type: string
                     type: array
             type: object
+        ConversationBatchStatusRequest:
+            properties:
+                conversation_ids:
+                    items:
+                        maxLength: 64
+                        minLength: 1
+                        type: string
+                    maxItems: 100
+                    minItems: 1
+                    type: array
+            required:
+                - conversation_ids
+            type: object
+        ConversationBatchStatusResponse:
+            properties:
+                statuses:
+                    items:
+                        $ref: '#/components/schemas/ConversationRunningStatusItem'
+                    type: array
+            required:
+                - statuses
+            type: object
+        ConversationChatGroupRequest:
+            additionalProperties: true
+            description: Existing chat payload with optional group_id for the initial message of a new conversation. Creation and membership are atomic. A stale group is rejected.
+            properties:
+                action:
+                    type: string
+                conversation_id:
+                    type: string
+                data:
+                    properties: {}
+                    type: object
+                group_id:
+                    type: string
+            type: object
         ConversationChatStatusResponse:
             properties:
                 is_generating:
@@ -909,7 +948,13 @@ components:
                     nullable: true
                 has_fork_descendants:
                     type: boolean
+                history_order:
+                    format: int64
+                    nullable: true
+                    type: integer
                 is_pinned:
+                    type: boolean
+                metadata_pending:
                     type: boolean
                 models:
                     items:
@@ -963,6 +1008,9 @@ components:
                         - high
                         - max
                     type: string
+                title_revision:
+                    format: int64
+                    type: integer
                 total_feedback_like:
                     format: int64
                     type: integer
@@ -1047,6 +1095,179 @@ components:
                 - source_history_id
                 - source_status
                 - can_locate
+            type: object
+        ConversationGroup:
+            properties:
+                created_at:
+                    format: date-time
+                    type: string
+                created_by:
+                    enum:
+                        - user
+                        - organizer
+                    type: string
+                created_run_id:
+                    type: string
+                id:
+                    type: string
+                member_count:
+                    format: int64
+                    type: integer
+                name:
+                    description: Trimmed Unicode group name; unique ignoring case within the current user.
+                    maxLength: 24
+                    minLength: 1
+                    type: string
+                pinned:
+                    type: boolean
+                scope:
+                    description: Optional user-editable collection scope. Empty string clears it. Changes affect subsequent organization only.
+                    maxLength: 500
+                    type: string
+                sort_order:
+                    format: int64
+                    type: integer
+                updated_at:
+                    format: date-time
+                    type: string
+                version:
+                    format: int64
+                    type: integer
+            required:
+                - id
+                - name
+                - scope
+                - version
+                - member_count
+                - created_by
+                - created_at
+                - updated_at
+            type: object
+        ConversationGroupAssignRequest:
+            properties:
+                conversation_id:
+                    type: string
+                position:
+                    enum:
+                        - before
+                        - after
+                    type: string
+                target_conversation_id:
+                    type: string
+            required:
+                - conversation_id
+            type: object
+        ConversationGroupCreateRequest:
+            properties:
+                name:
+                    description: Trimmed Unicode group name; unique ignoring case within the current user.
+                    maxLength: 24
+                    minLength: 1
+                    type: string
+                scope:
+                    description: Optional user-editable collection scope. Empty string clears it. Changes affect subsequent organization only.
+                    maxLength: 500
+                    type: string
+            required:
+                - name
+            type: object
+        ConversationGroupDetailResponse:
+            properties:
+                conversations:
+                    items:
+                        $ref: '#/components/schemas/ConversationGroupMember'
+                    type: array
+                group:
+                    $ref: '#/components/schemas/ConversationGroup'
+                next_page_token:
+                    type: string
+                total_size:
+                    format: int64
+                    type: integer
+            required:
+                - group
+                - conversations
+                - total_size
+                - next_page_token
+            type: object
+        ConversationGroupListResponse:
+            properties:
+                groups:
+                    items:
+                        $ref: '#/components/schemas/ConversationGroup'
+                    type: array
+                total_size:
+                    format: int64
+                    type: integer
+            required:
+                - groups
+                - total_size
+            type: object
+        ConversationGroupMember:
+            properties:
+                conversation_id:
+                    type: string
+                created_at:
+                    format: date-time
+                    type: string
+                display_name:
+                    type: string
+                membership_revision:
+                    format: int64
+                    type: integer
+                pinned_at:
+                    format: date-time
+                    nullable: true
+                    type: string
+                summary:
+                    type: string
+                updated_at:
+                    format: date-time
+                    type: string
+            required:
+                - conversation_id
+                - display_name
+                - membership_revision
+            type: object
+        ConversationGroupMembershipResponse:
+            properties:
+                conversation_id:
+                    type: string
+                group_id:
+                    nullable: true
+                    type: string
+            required:
+                - conversation_id
+                - group_id
+            type: object
+        ConversationGroupPlacementRequest:
+            properties:
+                before_group_id:
+                    type: string
+                pinned:
+                    type: boolean
+            type: object
+        ConversationGroupResponse:
+            properties:
+                group:
+                    $ref: '#/components/schemas/ConversationGroup'
+            required:
+                - group
+            type: object
+        ConversationGroupUpdateRequest:
+            properties:
+                name:
+                    description: Trimmed Unicode group name; unique ignoring case within the current user.
+                    maxLength: 24
+                    minLength: 1
+                    type: string
+                organizer_run_id:
+                    description: Optional successful organizer run context for editing a group created by that run from its result panel. Preserves version-fenced undo of panel corrections.
+                    type: string
+                scope:
+                    description: Optional user-editable collection scope. Empty string clears it. Changes affect subsequent organization only.
+                    maxLength: 500
+                    type: string
             type: object
         ConversationHistoryItem:
             properties:
@@ -1151,15 +1372,27 @@ components:
                     allOf:
                         - $ref: '#/components/schemas/ConversationForkOrigin'
                     nullable: true
+                group_id:
+                    nullable: true
+                    type: string
                 has_fork_descendants:
                     type: boolean
+                history_order:
+                    format: int64
+                    nullable: true
+                    type: integer
                 is_pinned:
+                    type: boolean
+                metadata_pending:
                     type: boolean
                 models:
                     items:
                         type: string
                     type: array
                 name:
+                    type: string
+                organizing_run_id:
+                    nullable: true
                     type: string
                 parent_conversation_id:
                     nullable: true
@@ -1190,6 +1423,9 @@ components:
                         - high
                         - max
                     type: string
+                title_revision:
+                    format: int64
+                    type: integer
                 total_feedback_like:
                     format: int64
                     type: integer
@@ -1213,12 +1449,315 @@ components:
                     format: int64
                     type: integer
             type: object
+        ConversationOpeningState:
+            properties:
+                batch:
+                    properties:
+                        id:
+                            type: string
+                        scan_complete:
+                            type: boolean
+                        scanned:
+                            format: int64
+                            type: integer
+                        status:
+                            enum:
+                                - idle
+                                - running
+                                - paused
+                                - done
+                                - failed
+                            type: string
+                    type: object
+                completed:
+                    format: int64
+                    type: integer
+                failed:
+                    format: int64
+                    type: integer
+                pending:
+                    format: int64
+                    type: integer
+                revision:
+                    format: int64
+                    type: integer
+                skipped:
+                    format: int64
+                    type: integer
+                unprocessed:
+                    format: int64
+                    type: integer
+            required:
+                - batch
+                - pending
+                - revision
+                - completed
+                - failed
+                - skipped
+                - unprocessed
+            type: object
+        ConversationOrganizerCorrectionRequest:
+            description: Provide group_id (null for free) or new_group, exclusively. Changes are saved immediately and included in this run's undo.
+            oneOf:
+                - required:
+                    - group_id
+                - required:
+                    - new_group
+            properties:
+                group_id:
+                    nullable: true
+                    type: string
+                new_group:
+                    $ref: '#/components/schemas/ConversationGroupCreateRequest'
+            type: object
+        ConversationOrganizerItem:
+            properties:
+                conversation_id:
+                    type: string
+                corrected:
+                    type: boolean
+                group_id:
+                    nullable: true
+                    type: string
+                skip_reason:
+                    type: string
+                state:
+                    enum:
+                        - grouped
+                        - free
+                        - missing
+                        - deleted
+                        - archived
+                    type: string
+                summary:
+                    type: string
+                summary_error_code:
+                    type: string
+                title:
+                    type: string
+                unassigned_reason:
+                    enum:
+                        - no_matching_group
+                        - below_min_group_size
+                        - no_messages
+                        - no_task_intent
+                        - summary_failed
+                        - unsupported_conversation
+                    type: string
+            required:
+                - conversation_id
+                - title
+                - summary
+                - state
+                - corrected
+            type: object
+        ConversationOrganizerLatestResponse:
+            properties:
+                free_conversation_count:
+                    format: int64
+                    type: integer
+                latest_successful_run_id:
+                    nullable: true
+                    type: string
+                run:
+                    allOf:
+                        - $ref: '#/components/schemas/ConversationOrganizerRun'
+                    nullable: true
+            required:
+                - run
+                - latest_successful_run_id
+            type: object
+        ConversationOrganizerRun:
+            properties:
+                can_cancel:
+                    type: boolean
+                can_restart:
+                    type: boolean
+                can_retry:
+                    type: boolean
+                can_undo:
+                    type: boolean
+                created_at:
+                    format: date-time
+                    type: string
+                error:
+                    properties:
+                        code:
+                            type: string
+                        message:
+                            type: string
+                    required:
+                        - code
+                        - message
+                    type: object
+                free_count:
+                    format: int64
+                    type: integer
+                id:
+                    type: string
+                items:
+                    items:
+                        $ref: '#/components/schemas/ConversationOrganizerItem'
+                    type: array
+                model_progress:
+                    properties:
+                        elapsed_seconds:
+                            format: int64
+                            type: integer
+                        first_response_at:
+                            type: string
+                        idle_seconds:
+                            format: int64
+                            type: integer
+                        last_activity_at:
+                            type: string
+                        received_chars:
+                            format: int64
+                            type: integer
+                        state:
+                            type: string
+                    required:
+                        - state
+                        - received_chars
+                        - elapsed_seconds
+                        - idle_seconds
+                    type: object
+                organized_count:
+                    format: int64
+                    type: integer
+                progress:
+                    properties:
+                        batch_current:
+                            format: int64
+                            type: integer
+                        batch_total:
+                            format: int64
+                            type: integer
+                        current:
+                            format: int64
+                            type: integer
+                        preparation_batch_completed:
+                            format: int64
+                            type: integer
+                        preparation_batch_current:
+                            format: int64
+                            type: integer
+                        preparation_batch_total:
+                            format: int64
+                            type: integer
+                        preparation_current:
+                            format: int64
+                            type: integer
+                        preparation_total:
+                            format: int64
+                            type: integer
+                        total:
+                            format: int64
+                            type: integer
+                    required:
+                        - current
+                        - total
+                    type: object
+                skipped_count:
+                    format: int64
+                    type: integer
+                stage:
+                    type: string
+                status:
+                    enum:
+                        - pending
+                        - running
+                        - applying
+                        - succeeded
+                        - failed
+                        - canceled
+                        - undone
+                        - confirmed
+                    type: string
+                steps:
+                    items:
+                        properties:
+                            completed:
+                                format: int64
+                                type: integer
+                            current:
+                                format: int64
+                                type: integer
+                            detail:
+                                type: string
+                            id:
+                                enum:
+                                    - preparation
+                                    - organization
+                                    - review
+                                    - application
+                                type: string
+                            status:
+                                enum:
+                                    - pending
+                                    - active
+                                    - completed
+                                    - failed
+                                    - canceled
+                                type: string
+                            total:
+                                format: int64
+                                type: integer
+                        required:
+                            - id
+                            - status
+                            - current
+                            - total
+                            - completed
+                        type: object
+                    type: array
+                updated_at:
+                    format: date-time
+                    type: string
+            required:
+                - id
+                - status
+                - stage
+                - progress
+                - organized_count
+                - free_count
+                - skipped_count
+                - can_cancel
+                - can_retry
+                - can_undo
+                - created_at
+                - updated_at
+            type: object
+        ConversationOrganizerRunResponse:
+            properties:
+                run:
+                    $ref: '#/components/schemas/ConversationOrganizerRun'
+            required:
+                - run
+            type: object
         ConversationPinResponse:
             properties:
                 conversation_id:
                     type: string
+                history_order:
+                    format: int64
+                    nullable: true
+                    type: integer
                 is_pinned:
                     type: boolean
+                order_updates:
+                    items:
+                        properties:
+                            conversation_id:
+                                type: string
+                            history_order:
+                                format: int64
+                                type: integer
+                        required:
+                            - conversation_id
+                            - history_order
+                        type: object
+                    type: array
                 pinned_at:
                     format: date-time
                     nullable: true
@@ -1284,6 +1823,19 @@ components:
                 - page
                 - page_size
             type: object
+        ConversationReorderRequest:
+            properties:
+                position:
+                    enum:
+                        - before
+                        - after
+                    type: string
+                target_conversation_id:
+                    type: string
+            required:
+                - target_conversation_id
+                - position
+            type: object
         ConversationResumeRequest:
             properties:
                 conversation_id:
@@ -1292,6 +1844,28 @@ components:
                     type: string
             required:
                 - conversation_id
+            type: object
+        ConversationRunningStatusItem:
+            properties:
+                conversation_id:
+                    type: string
+                status:
+                    enum:
+                        - running
+                        - idle
+                        - unknown
+                    type: string
+                terminal_status:
+                    enum:
+                        - completed
+                        - failed
+                        - canceled
+                    type: string
+                terminal_version:
+                    type: string
+            required:
+                - conversation_id
+                - status
             type: object
         ConversationSetHistoryRequest:
             properties:
@@ -5459,6 +6033,9 @@ components:
             type: object
         addModelProviderGroupModelOpenAPIRequest:
             properties:
+                max_input_tokens:
+                    description: Optional override. When omitted, LLM/VLM windows are resolved from config/model_context_windows.yaml by model name and unknown names fall back to 128K.
+                    type: string
                 model_type:
                     type: string
                 name:
@@ -5477,6 +6054,10 @@ components:
                     type: string
                 is_default:
                     type: boolean
+                max_input_tokens:
+                    description: Stored LLM input context window, for example 512, 128K, or 1M
+                    nullable: true
+                    type: string
                 model_type:
                     type: string
                 name:
@@ -6809,6 +7390,35 @@ components:
                         $ref: '#/components/schemas/listModelProviderGroupsOpenAPIItem'
                     type: array
             type: object
+        listRemoteGroupModelsOpenAPIItem:
+            properties:
+                added:
+                    type: boolean
+                id:
+                    type: string
+                max_input_tokens:
+                    type: string
+                model_type:
+                    type: string
+                name:
+                    type: string
+            required:
+                - added
+                - id
+                - model_type
+                - name
+            type: object
+        listRemoteGroupModelsOpenAPIResponse:
+            properties:
+                models:
+                    items:
+                        $ref: '#/components/schemas/listRemoteGroupModelsOpenAPIItem'
+                    type: array
+                url:
+                    type: string
+            required:
+                - url
+            type: object
         listSelectedModelsOpenAPIResponse:
             properties:
                 selections:
@@ -7229,6 +7839,9 @@ components:
                     type: string
                 group_name:
                     type: string
+                is_default:
+                    description: True when the selection was copied from catalog YAML
+                    type: boolean
                 is_editable:
                     description: Whether the selected model supports image editing
                     type: boolean
@@ -7251,6 +7864,7 @@ components:
             required:
                 - base_url
                 - group_name
+                - is_default
                 - is_editable
                 - model_id
                 - model_key
@@ -8600,6 +9214,14 @@ components:
                     type: boolean
             required:
                 - configured
+            type: object
+        updateModelProviderGroupModelOpenAPIRequest:
+            properties:
+                max_input_tokens:
+                    description: LLM input context window, for example 512, 128K, or 1M
+                    type: string
+            required:
+                - max_input_tokens
             type: object
         updateModelProviderGroupOpenAPIRequest:
             properties:
@@ -10156,6 +10778,632 @@ paths:
                                 $ref: '#/components/schemas/EmptyObject'
                     description: Archive folder renamed
             summary: Rename a conversation archive folder
+    /api/core/conversation-groups:
+        get:
+            operationId: listConversationGroups
+            parameters:
+                - in: query
+                  name: keyword
+                  required: false
+                  schema:
+                    type: string
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ConversationGroupListResponse'
+                    description: List active conversation groups
+                "400":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Invalid input
+                "404":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Conversation, group or run is unavailable
+                "409":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Name, membership, scope version or task conflict
+            summary: List active conversation groups
+            tags:
+                - ConversationGroups
+        post:
+            operationId: createConversationGroup
+            requestBody:
+                content:
+                    application/json:
+                        schema:
+                            $ref: '#/components/schemas/ConversationGroupCreateRequest'
+                required: true
+            responses:
+                "201":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ConversationGroupResponse'
+                    description: Create a group without a minimum member count
+                "400":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Invalid input
+                "404":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Conversation, group or run is unavailable
+                "409":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Name, membership, scope version or task conflict
+            summary: Create a group without a minimum member count
+            tags:
+                - ConversationGroups
+    /api/core/conversation-groups/{group_id}:
+        delete:
+            operationId: deleteConversationGroup
+            parameters:
+                - in: path
+                  name: group_id
+                  required: true
+                  schema:
+                    type: string
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/EmptyObject'
+                    description: Remove a group and preserve all conversations
+                "400":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Invalid input
+                "404":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Conversation, group or run is unavailable
+                "409":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Name, membership, scope version or task conflict
+            summary: Remove a group and preserve all conversations
+            tags:
+                - ConversationGroups
+        get:
+            operationId: getConversationGroup
+            parameters:
+                - in: path
+                  name: group_id
+                  required: true
+                  schema:
+                    type: string
+                - in: query
+                  name: page_size
+                  required: false
+                  schema:
+                    type: integer
+                - in: query
+                  name: page_token
+                  required: false
+                  schema:
+                    type: string
+                - in: query
+                  name: keyword
+                  required: false
+                  schema:
+                    type: string
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ConversationGroupDetailResponse'
+                    description: Get a group and its paginated conversations
+                "400":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Invalid input
+                "404":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Conversation, group or run is unavailable
+                "409":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Name, membership, scope version or task conflict
+            summary: Get a group and its paginated conversations
+            tags:
+                - ConversationGroups
+        patch:
+            operationId: updateConversationGroup
+            parameters:
+                - in: path
+                  name: group_id
+                  required: true
+                  schema:
+                    type: string
+            requestBody:
+                content:
+                    application/json:
+                        schema:
+                            $ref: '#/components/schemas/ConversationGroupUpdateRequest'
+                required: true
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ConversationGroupResponse'
+                    description: Edit name or scope and increment group version
+                "400":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Invalid input
+                "404":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Conversation, group or run is unavailable
+                "409":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Name, membership, scope version or task conflict
+            summary: Edit name or scope and increment group version
+            tags:
+                - ConversationGroups
+    /api/core/conversation-groups/{group_id}/conversations:
+        post:
+            operationId: assignConversationGroup
+            parameters:
+                - in: path
+                  name: group_id
+                  required: true
+                  schema:
+                    type: string
+            requestBody:
+                content:
+                    application/json:
+                        schema:
+                            $ref: '#/components/schemas/ConversationGroupAssignRequest'
+                required: true
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ConversationGroupMembershipResponse'
+                    description: Move a conversation into a group
+                "400":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Invalid input
+                "404":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Conversation, group or run is unavailable
+                "409":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Name, membership, scope version or task conflict
+            summary: Move a conversation into a group
+            tags:
+                - ConversationGroups
+    /api/core/conversation-groups/{group_id}/conversations/{conversation_id}:
+        delete:
+            operationId: removeConversationGroupMember
+            parameters:
+                - in: path
+                  name: group_id
+                  required: true
+                  schema:
+                    type: string
+                - in: path
+                  name: conversation_id
+                  required: true
+                  schema:
+                    type: string
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ConversationGroupMembershipResponse'
+                    description: Make a current member free
+                "400":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Invalid input
+                "404":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Conversation, group or run is unavailable
+                "409":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Name, membership, scope version or task conflict
+            summary: Make a current member free
+            tags:
+                - ConversationGroups
+    /api/core/conversation-groups/{group_id}/placement:
+        patch:
+            operationId: updateConversationGroupPlacement
+            parameters:
+                - in: path
+                  name: group_id
+                  required: true
+                  schema:
+                    type: string
+            requestBody:
+                content:
+                    application/json:
+                        schema:
+                            $ref: '#/components/schemas/ConversationGroupPlacementRequest'
+                required: true
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ConversationGroupListResponse'
+                    description: Persist pinning and order within the user navigation
+                "400":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Invalid input
+                "404":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Conversation, group or run is unavailable
+                "409":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Name, membership, scope version or task conflict
+            summary: Persist pinning and order within the user navigation
+            tags:
+                - ConversationGroups
+    /api/core/conversation-organizer-runs:
+        post:
+            operationId: startConversationOrganizer
+            responses:
+                "202":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ConversationOrganizerRunResponse'
+                    description: Freeze eligible free conversations and enqueue organization; return an existing active run on repeated start
+                "400":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Invalid input
+                "404":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Conversation, group or run is unavailable
+                "409":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Name, membership, scope version or task conflict
+            summary: Freeze eligible free conversations and enqueue organization; return an existing active run on repeated start
+            tags:
+                - ConversationGroups
+    /api/core/conversation-organizer-runs/{run_id}:
+        get:
+            operationId: getConversationOrganizer
+            parameters:
+                - in: path
+                  name: run_id
+                  required: true
+                  schema:
+                    type: string
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ConversationOrganizerRunResponse'
+                    description: Get progress and immediately persisted results
+                "400":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Invalid input
+                "404":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Conversation, group or run is unavailable
+                "409":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Name, membership, scope version or task conflict
+            summary: Get progress and immediately persisted results
+            tags:
+                - ConversationGroups
+    /api/core/conversation-organizer-runs/{run_id}/items/{conversation_id}:
+        patch:
+            operationId: correctConversationOrganizerItem
+            parameters:
+                - in: path
+                  name: run_id
+                  required: true
+                  schema:
+                    type: string
+                - in: path
+                  name: conversation_id
+                  required: true
+                  schema:
+                    type: string
+            requestBody:
+                content:
+                    application/json:
+                        schema:
+                            $ref: '#/components/schemas/ConversationOrganizerCorrectionRequest'
+                required: true
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ConversationOrganizerRunResponse'
+                    description: Correct a result immediately
+                "400":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Invalid input
+                "404":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Conversation, group or run is unavailable
+                "409":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Name, membership, scope version or task conflict
+            summary: Correct a result immediately
+            tags:
+                - ConversationGroups
+    /api/core/conversation-organizer-runs/{run_id}:cancel:
+        post:
+            operationId: cancelConversationOrganizer
+            parameters:
+                - in: path
+                  name: run_id
+                  required: true
+                  schema:
+                    type: string
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ConversationOrganizerRunResponse'
+                    description: cancel organization
+                "400":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Invalid input
+                "404":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Conversation, group or run is unavailable
+                "409":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Name, membership, scope version or task conflict
+            summary: cancel organization
+            tags:
+                - ConversationGroups
+    /api/core/conversation-organizer-runs/{run_id}:confirm:
+        post:
+            operationId: confirmConversationOrganizer
+            parameters:
+                - in: path
+                  name: run_id
+                  required: true
+                  schema:
+                    type: string
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ConversationOrganizerRunResponse'
+                    description: confirm organization
+                "400":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Invalid input
+                "404":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Conversation, group or run is unavailable
+                "409":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Name, membership, scope version or task conflict
+            summary: confirm organization
+            tags:
+                - ConversationGroups
+    /api/core/conversation-organizer-runs/{run_id}:retry:
+        post:
+            operationId: retryConversationOrganizer
+            parameters:
+                - in: path
+                  name: run_id
+                  required: true
+                  schema:
+                    type: string
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ConversationOrganizerRunResponse'
+                    description: retry organization
+                "400":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Invalid input
+                "404":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Conversation, group or run is unavailable
+                "409":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Name, membership, scope version or task conflict
+            summary: retry organization
+            tags:
+                - ConversationGroups
+    /api/core/conversation-organizer-runs/{run_id}:undo:
+        post:
+            operationId: undoConversationOrganizer
+            parameters:
+                - in: path
+                  name: run_id
+                  required: true
+                  schema:
+                    type: string
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ConversationOrganizerRunResponse'
+                    description: undo organization
+                "400":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Invalid input
+                "404":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Conversation, group or run is unavailable
+                "409":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Name, membership, scope version or task conflict
+            summary: undo organization
+            tags:
+                - ConversationGroups
+    /api/core/conversation-organizer-runs:latest:
+        get:
+            operationId: getLatestConversationOrganizer
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ConversationOrganizerLatestResponse'
+                    description: Get the active run or most recent result
+                "400":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Invalid input
+                "404":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Conversation, group or run is unavailable
+                "409":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
+                    description: Name, membership, scope version or task conflict
+            summary: Get the active run or most recent result
+            tags:
+                - ConversationGroups
     /api/core/conversation:export:
         post:
             requestBody:
@@ -10608,6 +11856,28 @@ paths:
                                 $ref: '#/components/schemas/EmptyObject'
                     description: Conversation permanently deleted
             summary: Permanently delete a trashed conversation
+    /api/core/conversations/{conversation_id}:reorder:
+        post:
+            parameters:
+                - in: path
+                  name: conversation_id
+                  required: true
+                  schema:
+                    type: string
+            requestBody:
+                content:
+                    application/json:
+                        schema:
+                            $ref: '#/components/schemas/ConversationReorderRequest'
+                required: true
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ConversationPinResponse'
+                    description: Conversation reordered
+            summary: Move a conversation within its pinned or ordinary history
     /api/core/conversations/{conversation_id}:restore:
         post:
             parameters:
@@ -10731,6 +12001,43 @@ paths:
                                 $ref: '#/components/schemas/ConversationDetailItem'
                     description: Conversationtext
             summary: Get conversation
+    /api/core/conversations/{name}/title:
+        patch:
+            parameters:
+                - in: path
+                  name: name
+                  required: true
+                  schema:
+                    type: string
+            requestBody:
+                content:
+                    application/json:
+                        schema:
+                            properties:
+                                display_name:
+                                    type: string
+                                title_revision:
+                                    format: int64
+                                    type: integer
+                            required:
+                                - display_name
+                                - title_revision
+                            type: object
+                required: true
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                properties:
+                                    display_name:
+                                        type: string
+                                    title_revision:
+                                        format: int64
+                                        type: integer
+                                type: object
+                    description: Updated title
+            summary: Rename conversation with title revision protection
     /api/core/conversations/{name}:ask-answers:
         patch:
             parameters:
@@ -10877,6 +12184,41 @@ paths:
             summary: Create an ephemeral side conversation
             tags:
                 - conversations
+    /api/core/conversations/metadata-backfill:
+        get:
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ConversationOpeningState'
+                    description: Metadata progress
+            summary: Conversation metadata progress
+        post:
+            requestBody:
+                content:
+                    application/json:
+                        schema:
+                            properties:
+                                action:
+                                    enum:
+                                        - start
+                                        - pause
+                                        - resume
+                                        - retry
+                                    type: string
+                            required:
+                                - action
+                            type: object
+                required: true
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ConversationOpeningState'
+                    description: Metadata progress
+            summary: Start, pause, resume or retry conversation metadata backfill
     /api/core/conversations:archived:
         get:
             parameters:
@@ -10932,12 +12274,38 @@ paths:
                                 $ref: '#/components/schemas/ConversationBatchDeleteResponse'
                     description: Batch deleted conversations
             summary: Batch delete conversations
-    /api/core/conversations:chat:
+    /api/core/conversations:batchStatus:
         post:
+            requestBody:
+                content:
+                    application/json:
+                        schema:
+                            $ref: '#/components/schemas/ConversationBatchStatusRequest'
+                required: true
             responses:
                 "200":
-                    description: OK
-            summary: POST /conversations:chat
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ConversationBatchStatusResponse'
+                    description: Running, idle, or unknown; inaccessible conversations are omitted
+            summary: Get a content-free status snapshot for up to 100 accessible conversations (32 KiB request limit)
+    /api/core/conversations:chat:
+        post:
+            requestBody:
+                content:
+                    application/json:
+                        schema:
+                            $ref: '#/components/schemas/ConversationChatGroupRequest'
+                required: true
+            responses:
+                "200":
+                    content:
+                        text/event-stream:
+                            schema:
+                                type: string
+                    description: Chat event stream
+            summary: Chat; optional group_id atomically assigns a newly created conversation
     /api/core/conversations:editable-block:
         patch:
             responses:
@@ -14593,7 +15961,7 @@ paths:
             tags:
                 - model_providers
         post:
-            description: Creates a user_model_provider_group_models row with is_default false (custom model name and model_type). Name must be unique within the group among active rows. provider_name and base_url are taken from the user provider and group. Response group_name is user_model_provider_groups.name (not stored on the model row).
+            description: Creates a user_model_provider_group_models row with is_default false (custom model name and model_type). Name must be unique within the group among active rows. For llm and vlm, max_input_tokens from the request is stored when provided; otherwise it is resolved from config/model_context_windows.yaml by model name and unknown names fall back to 128K. provider_name and base_url are taken from the user provider and group. Response group_name is user_model_provider_groups.name (not stored on the model row).
             parameters:
                 - in: path
                   name: model_provider_id
@@ -14648,6 +16016,64 @@ paths:
                                 $ref: '#/components/schemas/deleteModelProviderGroupModelOpenAPIResponse'
                     description: Deleted group model
             summary: Delete model under a connection group
+            tags:
+                - model_providers
+        patch:
+            description: Updates max_input_tokens for a custom (non-catalog) LLM. The field is required. Values use a positive integer or K/M suffix such as 512, 128K, or 1M and must be at most 16 characters. Catalog models keep the YAML value and cannot be patched.
+            parameters:
+                - in: path
+                  name: model_provider_id
+                  required: true
+                  schema:
+                    type: string
+                - in: path
+                  name: group_id
+                  required: true
+                  schema:
+                    type: string
+                - in: path
+                  name: model_id
+                  required: true
+                  schema:
+                    type: string
+            requestBody:
+                content:
+                    application/json:
+                        schema:
+                            $ref: '#/components/schemas/updateModelProviderGroupModelOpenAPIRequest'
+                required: true
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/listModelProviderGroupModelsOpenAPIItem'
+                    description: Updated group model
+            summary: Update a connection group model
+            tags:
+                - model_providers
+    /api/core/model_providers/{model_provider_id}/groups/{group_id}/remote_models:
+        get:
+            description: Calls the group's OpenAI-compatible /v1/models endpoint using the stored Base URL and API key. Each item includes an inferred model_type and whether it is already added to the group.
+            parameters:
+                - in: path
+                  name: model_provider_id
+                  required: true
+                  schema:
+                    type: string
+                - in: path
+                  name: group_id
+                  required: true
+                  schema:
+                    type: string
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/listRemoteGroupModelsOpenAPIResponse'
+                    description: Remote models list
+            summary: List models advertised by a connection group
             tags:
                 - model_providers
     /api/core/model_providers/{model_provider_id}/groups/{group_id}:check:
@@ -16326,6 +17752,18 @@ paths:
             summary: List skill directory entries
             tags:
                 - skill-fs
+    /api/core/skills/{skill_id}/linked-workflows:
+        get:
+            parameters:
+                - in: path
+                  name: skill_id
+                  required: true
+                  schema:
+                    type: string
+            responses:
+                "200":
+                    description: OK
+            summary: GET /skills/{skill_id}/linked-workflows
     /api/core/skills/{skill_id}/revisions:
         get:
             parameters:
@@ -17665,6 +19103,12 @@ paths:
             summary: Inspect installed workflow control protocol and schema readiness
             tags:
                 - workflow-control
+    /api/core/workflow-conversions:preflight:
+        post:
+            responses:
+                "200":
+                    description: OK
+            summary: POST /workflow-conversions:preflight
     /api/core/workflow-drafts:
         get:
             responses:
@@ -17752,6 +19196,18 @@ paths:
                 "200":
                     description: OK
             summary: POST /workflow-drafts/{draft_id}:ai-repair
+    /api/core/workflow-drafts/{draft_id}:cancel-generation:
+        post:
+            parameters:
+                - in: path
+                  name: draft_id
+                  required: true
+                  schema:
+                    type: string
+            responses:
+                "200":
+                    description: OK
+            summary: POST /workflow-drafts/{draft_id}:cancel-generation
     /api/core/workflow-drafts/{draft_id}:confirm-workflow:
         post:
             parameters:

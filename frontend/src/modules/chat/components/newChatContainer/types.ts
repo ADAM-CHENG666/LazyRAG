@@ -15,7 +15,7 @@ export interface ChatImperativeProps {
   replaceMessageList: (id: string, data: any[], preserveScroll?: boolean) => void;
   mergeHistoryPage: (id: string, history: ConversationHistoryItem[]) => void;
   createNewChat: () => void;
-  sendMessage: (params: SendMessageParams) => void;
+  sendMessage: (params: SendMessageParams) => Promise<boolean>;
   prepareMessage: (
     params: Pick<SendMessageParams, "text" | "citeMessage" | "citeMessages"> & {
       appendCitations?: boolean;
@@ -36,6 +36,10 @@ export interface ChatImperativeProps {
 }
 
 export interface ChatContainerProps {
+  sideChatAction?: ReactNode;
+  onOpenSources?: (sources: import("@/modules/chat/utils/sourceAdapter").ChatSource[], summary?: string) => void;
+  /** Keeps references accessible when another chat drawer occupies the right edge. */
+  sourcePanelOverlay?: boolean;
   onFork?: (historyId: string) => void;
   forkPending?: boolean;
   canChat?: boolean;
@@ -63,6 +67,7 @@ export interface ChatContainerProps {
   setChatConfigFn: (chatConfig: ChatConfig) => void;
   knowledgeRefreshKey?: number | string;
   allowKnowledgeBaseSelection?: boolean;
+  allowMentions?: boolean;
   embeddingReady?: boolean | null;
   multimodalEmbeddingReady?: boolean | null;
   rerankReady?: boolean | null;
@@ -194,7 +199,10 @@ export interface ChatMessage {
     }>;
     title?: string;
     description?: string;
+    mail_draft?: import("@/modules/chat/components/MailDraftCard").MailDraftPreview;
+    mail_drafts?: import("@/modules/chat/components/MailDraftCard").MailDraftPreview[];
   };
   ask_answered?: boolean;
+  answered_mail_draft_ids?: string[];
   ask_saved_answers?: Record<number, unknown>;
 }
