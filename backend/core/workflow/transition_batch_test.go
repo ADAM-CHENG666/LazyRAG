@@ -362,9 +362,9 @@ func TestResolveAdvanceOperationFromEffectiveAttempt(t *testing.T) {
 	}
 }
 
-func TestControlledDeclaredToolsStayOnExternalAgent(t *testing.T) {
+func TestControlledStepExecutorRouting(t *testing.T) {
 	packageYAML := "tool_scripts:\n  - path: scripts/tools.py\n    functions: [package_tool]\n"
-	for _, requirement := range []string{"declared_tools", "tools_only", "post_step_check"} {
+	for _, requirement := range []string{"prompt_only", "declared_tools", "terminal_tools", "tools_only", "post_step_check"} {
 		t.Run(requirement, func(t *testing.T) {
 			db, _ := setupBatchTransitionSession(t)
 			if err := db.AutoMigrate(&orm.WorkflowReviewCheckpoint{}, &orm.WorkflowHostAction{}, &orm.WorkflowCommand{}, &orm.WorkflowRevisionEntry{}, &orm.WorkflowBlob{}); err != nil {
@@ -381,6 +381,8 @@ func TestControlledDeclaredToolsStayOnExternalAgent(t *testing.T) {
 			switch requirement {
 			case "declared_tools":
 				node.LegacyTools = []string{"package_tool"}
+			case "terminal_tools":
+				node.TerminalTools = []string{"package_tool"}
 			case "tools_only":
 				node.ToolsOnly = true
 			case "post_step_check":
@@ -415,7 +417,12 @@ func TestControlledDeclaredToolsStayOnExternalAgent(t *testing.T) {
 			if err := db.Model(&orm.SubAgentTask{}).Where("id = ?", execution.TaskID).Count(&taskCount).Error; err != nil {
 				t.Fatal(err)
 			}
-			if execution.ExecutorHost != "external-agent" || execution.Status != "queued" || result.Control.Continuation == "awaiting_executor" || taskCount != 0 {
+			wantNative := requirement == "declared_tools" || requirement == "terminal_tools" || requirement == "post_step_check"
+			if wantNative {
+				if execution.ExecutorHost != "lazymind" || taskCount != 1 {
+					t.Fatalf("tool-dependent step must run inside LazyMind: %+v tasks=%d", execution, taskCount)
+				}
+			} else if execution.ExecutorHost != "external-agent" || execution.Status != "queued" || result.Control.Continuation == "awaiting_executor" || taskCount != 0 {
 				t.Fatalf("wrong dispatch: %+v %+v tasks=%d", execution, result.Control, taskCount)
 			}
 		})
