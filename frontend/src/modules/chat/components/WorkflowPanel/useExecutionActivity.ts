@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { AgentAppsAuth } from '@/components/auth';
+import type { TaskArtifact } from '@/modules/chat/store/taskCenter';
 import type { WorkflowSession } from '@/modules/chat/store/workflowPanel';
 import { taskStreamUrl } from '@/modules/chat/utils/request';
 import { Method, SSE } from '@/modules/chat/utils/sse';
@@ -9,9 +10,10 @@ export interface ExecutionActivity {
   tool?: string;
   progress?: number;
   finished?: boolean;
+  artifacts?: TaskArtifact[];
 }
 
-/** Keep only display metadata, never tool arguments, results or thought text. */
+/** Keep display metadata and published artifacts, never tool arguments or thought text. */
 export function reduceActivity(previous: ExecutionActivity, event: Record<string, unknown>): ExecutionActivity {
   if (previous.finished) return previous;
   switch (event.type) {
@@ -29,7 +31,14 @@ export function reduceActivity(previous: ExecutionActivity, event: Record<string
         ? { ...previous, progress: Math.max(previous.progress ?? 0, Math.min(100, Math.max(0, progress))) }
         : previous;
     }
-    case 'done':
+    case 'artifact': {
+      if (typeof event.slot !== 'string' || typeof event.content_type !== 'string'
+        || !Number.isInteger(event.seq) || Number(event.seq) < 1 || event.value == null) return previous;
+      const artifact: TaskArtifact = { slot: event.slot, content_type: event.content_type, seq: Number(event.seq), value: event.value };
+      const artifacts = (previous.artifacts ?? []).filter(item => item.slot !== artifact.slot || item.seq !== artifact.seq);
+      return { ...previous, artifacts: [...artifacts, artifact] };
+    }
+    case 'done': return { finished: true, ...(previous.artifacts ? { artifacts: previous.artifacts } : {}) };
     case 'error': return { finished: true };
     default: return previous;
   }
@@ -65,7 +74,7 @@ export function useExecutionActivity(session?: WorkflowSession | null): Record<s
       const connect = () => {
         if (closed) return;
         const current = ++generation;
-        activity = {};
+        activity = { artifacts: activity.artifacts };
         publish();
         stream = new SSE(taskStreamUrl(taskId), {
           method: Method.GET,
@@ -87,7 +96,7 @@ export function useExecutionActivity(session?: WorkflowSession | null): Record<s
               if (closed || current !== generation || activity.finished || retry) return;
               generation += 1;
               stream?.close();
-              activity = { kind: 'reconnecting' };
+              activity = { kind: 'reconnecting', artifacts: activity.artifacts };
               publish();
               retry = setTimeout(() => { retry = undefined; connect(); }, 1500);
             },

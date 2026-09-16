@@ -4541,3 +4541,9 @@
 @media (prefers-reduced-motion: reduce) {
   .workflow-panel__progress-ring--indeterminate { animation: none; }
 }
+
+.workflow-panel__preview-label {
+  color: #64748b;
+  font-size: 12px;
+  padding: 0 0 6px;
+}

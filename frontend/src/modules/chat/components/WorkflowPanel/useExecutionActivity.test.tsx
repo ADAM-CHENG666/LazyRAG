@@ -64,3 +64,23 @@ it('reconnects after transport errors and cancels retries on unmount', () => {
   act(() => vi.advanceTimersByTime(1500));
   expect(streams).toHaveLength(2);
 });
+
+it('streams published pages, retains them across reconnect, and clears them when the step settles', () => {
+  vi.useFakeTimers();
+  const hook = renderHook(({ run }) => useExecutionActivity(run), { initialProps: { run: session() } });
+  const page = { type: 'artifact', slot: 'html', content_type: 'text', seq: 1, value: { text: 'page 1' } };
+  act(() => streams[0].callbacks.message({ data: JSON.stringify(page) }));
+  expect(hook.result.current.one.artifacts).toHaveLength(1);
+  act(() => streams[0].callbacks.error());
+  expect(hook.result.current.one.artifacts).toHaveLength(1);
+  act(() => vi.advanceTimersByTime(1500));
+  expect(hook.result.current.one.artifacts).toHaveLength(1);
+  act(() => streams[1].callbacks.message({ data: JSON.stringify(page) }));
+  expect(hook.result.current.one.artifacts).toHaveLength(1);
+  act(() => streams[1].callbacks.message({ data: JSON.stringify({ type: 'done' }) }));
+  expect(hook.result.current.one.artifacts).toHaveLength(1);
+  expect(streams[1].close).toHaveBeenCalled();
+  hook.rerender({ run: session('one', 'succeeded') });
+  expect(hook.result.current).toEqual({});
+  hook.unmount();
+});

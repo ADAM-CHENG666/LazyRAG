@@ -2431,6 +2431,7 @@ workflowControlCancellationAccepted: 'The original agent has acknowledged cancel
     workflowPanelExpandShort: "Expand",
     workflowPanelShrinkShort: "Shrink",
     workflowRailConversation: "Chat",
+    workflowGeneratingPreview: "Generating preview",
     workflowActivity_thinking: "Thinking…",
     workflowActivity_tool: "Using tool: {{tool}}",
     workflowActivity_working: "Processing results…",

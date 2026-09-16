@@ -55,6 +55,7 @@ import { WorkflowControlActions } from './WorkflowControlActions';
 import type { WorkflowActionIntent, WorkflowControlView } from '@/modules/chat/utils/workflowControl';
 import { resolvePendingApprovalStep } from './workflowApproval';
 import { activeExecutionTasks, useExecutionActivity } from './useExecutionActivity';
+import { executionPreview } from './executionPreview';
 import { workflowEmptyStateKey } from './workflowEmptyState';
 import { moveSelectedCompositePages, sameCompositePageOrder } from './compositePageReorder';
 import {
@@ -2201,7 +2202,10 @@ export function WorkflowPanel({
       {!collapsed && (
         <div className='workflow-panel__body' key={session.session_id}>
           {hasTabs ? (
-            tabs.map((tab, idx) => (
+            tabs.map((tab, idx) => {
+              const preview = executionPreview(session, tab, activities);
+              const previewing = preview !== session;
+              return (
               <div
                 key={tab.id}
                 id={`workflow-tab-panel-${tab.id}`}
@@ -2209,11 +2213,12 @@ export function WorkflowPanel({
                 hidden={idx !== visibleActiveTabIdx}
               >
                 <WorkflowPanelTabActiveContext.Provider value={idx === visibleActiveTabIdx}>
-                <SlotDownloadContext.Provider value={workflowTabAllowsDownload(tab, idx, tabs.length)}>
+                <SlotDownloadContext.Provider value={!previewing && workflowTabAllowsDownload(tab, idx, tabs.length)}>
+                  {previewing && <div className="workflow-panel__preview-label" role="status">{t('chat.workflowGeneratingPreview')}</div>}
                   <TabSlotGrid
-                    tab={tab}
-                    readOnly={tabReadOnly(tab)}
-                    session={session}
+                    tab={previewing ? { ...tab, actions: [] } : tab}
+                    readOnly={previewing || tabReadOnly(tab)}
+                    session={preview}
                     tasks={taskCenterTasks}
                     onRefresh={refresh}
                     onReference={onReference}
@@ -2222,7 +2227,8 @@ export function WorkflowPanel({
                 </SlotDownloadContext.Provider>
                 </WorkflowPanelTabActiveContext.Provider>
               </div>
-            ))
+              );
+            })
           ) : (
             <AutoSlotGrid
               readOnly={tabReadOnly()}
