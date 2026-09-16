@@ -84,6 +84,7 @@ func hostedTestService(t *testing.T) (*Service, *gorm.DB) {
 		&orm.WorkflowCommand{}, &orm.WorkflowRevision{}, &orm.WorkflowRevisionEntry{}, &orm.WorkflowBlob{},
 		&orm.WorkflowAttemptInputBinding{}, &orm.WorkflowInputBinding{}, &orm.WorkflowSlotRevision{},
 		&orm.WorkflowHumanArtifact{}, &orm.WorkflowSlotOrder{}, &orm.WorkflowRouteDecision{}, &orm.SubAgentArtifact{},
+		&orm.WorkflowApprovalPreference{},
 	}
 	if err := db.AutoMigrate(models...); err != nil {
 		t.Fatal(err)
