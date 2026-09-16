@@ -54,6 +54,7 @@ import { resolveCompletedContinueStep } from './workflowContinue';
 import { WorkflowControlActions } from './WorkflowControlActions';
 import type { WorkflowActionIntent, WorkflowControlView } from '@/modules/chat/utils/workflowControl';
 import { resolvePendingApprovalStep } from './workflowApproval';
+import { activeExecutionTasks, useExecutionActivity } from './useExecutionActivity';
 import { workflowEmptyStateKey } from './workflowEmptyState';
 import { moveSelectedCompositePages, sameCompositePageOrder } from './compositePageReorder';
 import {
@@ -1666,6 +1667,10 @@ export function WorkflowPanel({
   const { t, i18n } = useTranslation();
   const { session, loading, refresh: refreshConversation } = useWorkflowSession(conversationId);
   const refresh = onRefresh ?? refreshConversation;
+  const activities = useExecutionActivity(embedded ? session : undefined);
+  const runningTasks = embedded ? activeExecutionTasks(session) : [];
+  const latestActivity = runningTasks.map(step => activities[step.task_id]).find(activity => activity?.kind && !activity.finished);
+
   const taskCenterTasks = useTaskCenterStore((state) =>
     conversationId
       ? state.tasksByConversation[conversationId] ?? EMPTY_TASK_CENTER_TASKS
@@ -2023,6 +2028,9 @@ export function WorkflowPanel({
           >
             {statusLabel ?? t(displayStatusKey)}
           </span>
+          {latestActivity?.kind && <span className='workflow-panel__activity' role='status'>
+            {t(`chat.workflowActivity_${latestActivity.kind}`, { tool: latestActivity.tool })}
+          </span>}
         </div>
         <div className='workflow-panel__header-right'>
           {hasIntent && (
@@ -2150,6 +2158,9 @@ export function WorkflowPanel({
                 || b.attempt - a.attempt
               ))[0];
             const stepStatus = step?.status;
+            const running = runningTasks.find(task => statusStepIds.includes(task.step_id));
+            const activity = running ? activities[running.task_id] : undefined;
+            const showProgress = Boolean(running && !activity?.finished);
             return (
               <React.Fragment key={tab.id}>
                 <button
@@ -2160,7 +2171,14 @@ export function WorkflowPanel({
                   onClick={() => handleTabChange(idx, tab.id)}
                   type='button'
                 >
-                  <span className='workflow-panel__tab-badge'>{idx + 1}</span>
+                  <span className='workflow-panel__tab-badge'>{idx + 1}
+                    {showProgress && <svg className={`workflow-panel__progress-ring${activity?.progress === undefined ? ' workflow-panel__progress-ring--indeterminate' : ''}`}
+                      viewBox='0 0 32 32' role='progressbar' aria-label={t('chat.workflowStepProgress', { step: tab.label })}
+                      aria-valuemin={0} aria-valuemax={100} aria-valuenow={activity?.progress}>
+                      <circle className='workflow-panel__progress-track' cx='16' cy='16' r='14' />
+                      <circle cx='16' cy='16' r='14' pathLength='100' strokeDasharray={`${activity?.progress ?? 25} 100`} />
+                    </svg>}
+                  </span>
                   <span className='workflow-panel__tab-label'>{tab.label}</span>
                   {stepStatus && stepStatus !== 'succeeded' && (
                     <span

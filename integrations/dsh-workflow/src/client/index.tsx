@@ -112,8 +112,7 @@ export function apply(ctx: ClientContext, config: { serverName?: string } = {}):
           borderBottom: '1px solid #d9d9d9', cursor: 'grab', touchAction: 'none', userSelect: 'none', flexShrink: 0 }}>
         <strong>LazyMind Workflow</strong>
         <span>
-          <button onPointerDown={event => event.stopPropagation()} onClick={() => windows.minimize(sessionId)}>Minimize</button>
-          <button style={{ marginLeft: 8 }} onPointerDown={event => event.stopPropagation()} onClick={() => windows.minimize(sessionId)}>Close</button>
+          <button onPointerDown={event => event.stopPropagation()} onClick={() => windows.minimize(sessionId)}>Close</button>
         </span>
       </header>
       <iframe title="LazyMind Workflow" src={url} style={{ width: '100%', flex: 1, minHeight: 0, border: 0 }} />

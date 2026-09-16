@@ -534,16 +534,11 @@ function apply(ctx, config = {}) {
 						userSelect: "none",
 						flexShrink: 0
 					},
-					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("strong", { children: "LazyMind Workflow" }), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-						onPointerDown: (event) => event.stopPropagation(),
-						onClick: () => windows.minimize(sessionId),
-						children: "Minimize"
-					}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-						style: { marginLeft: 8 },
+					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("strong", { children: "LazyMind Workflow" }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
 						onPointerDown: (event) => event.stopPropagation(),
 						onClick: () => windows.minimize(sessionId),
 						children: "Close"
-					})] })]
+					}) })]
 				}),
 				/* @__PURE__ */ (0, react_jsx_runtime.jsx)("iframe", {
 					title: "LazyMind Workflow",
