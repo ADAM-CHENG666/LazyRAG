@@ -1,3 +1,4 @@
+import { Popconfirm } from 'antd';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { WorkflowPanelControlContext } from '@/modules/chat/components/WorkflowPanel';
@@ -12,12 +13,16 @@ export function WorkflowControlActions({ context, control, act }: {
   const [skipApproval, setSkipApproval] = useState(false);
   const available = new Set(control.available_actions);
   const review = control.reviews.find(item => item.status === 'pending' && context.stepIds.includes(item.step_id));
-  const otherReview = !review && control.reviews.find(item => item.status === 'pending');
   const deliveryBusy = deliveryPending(control);
   const latest = context.session.steps?.filter(step => step.step_id === context.stepId && step.validity !== 'stale')
     .sort((a, b) => b.attempt - a.attempt)[0];
-  const canRetry = !!latest && ['failed', 'interrupted', 'cancelled', 'canceled'].includes(latest.status);
-  const canRewind = latest?.status === 'succeeded';
+  const executing = control.active_executions > 0
+    || ['continue', 'awaiting_executor', 'draining'].includes(control.continuation)
+    || deliveryBusy && control.delivery?.kind === 'continue';
+  const settled = !executing && !deliveryBusy
+    && ['awaiting_user', 'completed', 'failed'].includes(control.continuation);
+  const canRetry = settled && !!latest && ['failed', 'interrupted', 'cancelled', 'canceled'].includes(latest.status);
+  const canRewind = control.continuation !== 'stopped' && latest?.status === 'succeeded';
   const showConfirmContinue = !!review && available.has('confirm_and_continue');
   // Confirm-only is the fallback when the host cannot be resumed from this panel.
   const showConfirmOnly = !!review && available.has('confirm') && !showConfirmContinue;
@@ -38,11 +43,18 @@ export function WorkflowControlActions({ context, control, act }: {
         kind: 'confirm_and_continue', review, preferenceScope: skipApproval ? 'step' : undefined,
       }, !deliveryBusy, 'primary')}
     </>}
-    {otherReview && <span role='status'>{t('chat.workflowControlOtherReview', { step: otherReview.step_id })}</span>}
-    {!review && available.has('continue') && button(t('chat.workflowContinue'), { kind: 'continue' }, !deliveryBusy, 'primary')}
     {available.has('retry') && canRetry && button(t('chat.workflowRetry'), { kind: 'retry', stepId: context.stepId }, !!context.stepId && !deliveryBusy)}
-    {available.has('rewind') && canRewind && button(t(review ? 'chat.workflowControlRegenerate' : 'chat.workflowControlRewind'), { kind: 'rewind', stepId: context.stepId }, !!context.stepId && !deliveryBusy)}
-    {available.has('stop') && button(t('chat.workflowStop'), { kind: 'stop' }, true, 'danger', false)}
-    {available.has('resume') && button(t('chat.workflowControlResume'), { kind: 'resume' }, !deliveryBusy, 'primary', false)}
+    {available.has('rewind') && canRewind && <Popconfirm key={context.stepId}
+      title={t('chat.workflowControlRegenerate')}
+      description={t(executing ? 'chat.workflowRegenerateRunningConfirm' : 'chat.workflowRegenerateConfirm')}
+      okText={t('chat.workflowControlRegenerate')}
+      cancelText={t('chat.workflowRegenerateCancel')}
+      disabled={context.pending || !context.stepId}
+      onConfirm={() => perform({ kind: 'rewind', stepId: context.stepId })}>
+      <button type='button' className='workflow-panel__action-btn workflow-panel__action-btn--secondary'
+        disabled={context.pending || !context.stepId}>{t('chat.workflowControlRegenerate')}</button>
+    </Popconfirm>}
+    {executing && available.has('stop') && button(t('chat.workflowStop'), { kind: 'stop' }, true, 'danger', false)}
+    {control.continuation === 'stopped' && control.active_executions === 0 && available.has('resume') && button(t(deliveryBusy ? 'chat.workflowStopping' : 'chat.workflowContinue'), { kind: 'resume' }, !deliveryBusy, 'primary', false)}
   </>;
 }

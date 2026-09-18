@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { WorkflowSession } from '@/modules/chat/store/workflowPanel';
 import type { WorkflowControlView } from '@/modules/chat/utils/workflowControl';
@@ -47,11 +47,11 @@ function renderActions(options?: { dirty?: boolean; stepStatus?: string; control
 }
 
 describe('WorkflowControlActions review footer', () => {
-  it('keeps confirm-and-continue, regenerate, and stop during a succeeded review', () => {
+  it('shows review and regeneration actions without stop while awaiting review', () => {
     renderActions();
     expect(screen.getByRole('button', { name: 'chat.workflowControlConfirmContinue' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'chat.workflowControlRegenerate' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'chat.workflowStop' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'chat.workflowStop' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'chat.workflowControlConfirm' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'chat.workflowControlSave' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'chat.workflowRetry' })).not.toBeInTheDocument();
@@ -91,6 +91,81 @@ describe('WorkflowControlActions review footer', () => {
   it('rewinds the current succeeded step from regenerate', async () => {
     const { act } = renderActions();
     fireEvent.click(screen.getByRole('button', { name: 'chat.workflowControlRegenerate' }));
-    expect(act).toHaveBeenCalledWith({ kind: 'rewind', stepId: 'script' });
+    expect(act).not.toHaveBeenCalled();
+    const dialog = await screen.findByRole('tooltip');
+    expect(within(dialog).getByText('chat.workflowRegenerateConfirm')).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'chat.workflowControlRegenerate' }));
+    await waitFor(() => expect(act).toHaveBeenCalledWith({ kind: 'rewind', stepId: 'script' }));
   });
+});
+
+it('does not regenerate when confirmation is cancelled', async () => {
+  const { act } = renderActions();
+  fireEvent.click(screen.getByRole('button', { name: 'chat.workflowControlRegenerate' }));
+  const dialog = await screen.findByRole('tooltip');
+  fireEvent.click(within(dialog).getByRole('button', { name: 'chat.workflowRegenerateCancel' }));
+  expect(act).not.toHaveBeenCalled();
+});
+it('regenerates a past step while a later step awaits review', async () => {
+  const { act } = renderActions({ control: control({ reviews: [{ ...review, step_id: 'later_step' }] }) });
+  expect(screen.getByRole('button', { name: 'chat.workflowControlRegenerate' })).toBeInTheDocument();
+  expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  expect(screen.queryByText('later_step')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'chat.workflowControlRegenerate' }));
+  const dialog = await screen.findByRole('tooltip');
+  fireEvent.click(within(dialog).getByRole('button', { name: 'chat.workflowControlRegenerate' }));
+  await waitFor(() => expect(act).toHaveBeenCalledWith({ kind: 'rewind', stepId: 'script' }));
+});
+
+
+describe('workflow action visibility across execution phases', () => {
+  const allActions = ['continue', 'confirm', 'confirm_and_continue', 'rewind', 'retry', 'stop', 'resume'];
+  it.each([
+    ['initial', 'queued', 'continue', 0],
+    ['external execution', 'running', 'continue', 1],
+    ['native execution', 'running', 'awaiting_executor', 1],
+  ])('shows only stop during %s even with broad server capabilities', (_label, stepStatus, continuation, active) => {
+    renderActions({ stepStatus: String(stepStatus), control: control({
+      continuation: String(continuation), active_executions: Number(active), reviews: [], available_actions: allActions,
+    }) });
+    expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['chat.workflowStop']);
+  });
+  it('shows resume only after stopping', () => {
+    renderActions({ stepStatus: 'cancelled', control: control({ continuation: 'stopped', reviews: [], available_actions: allActions }) });
+    expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['chat.workflowContinue']);
+  });
+  it('shows regeneration without continue or stop after completion', () => {
+    renderActions({ control: control({ continuation: 'completed', reviews: [], available_actions: allActions }) });
+    expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['chat.workflowControlRegenerate']);
+  });
+  it('keeps regeneration available for a completed step during delivery', () => {
+    renderActions({ control: control({ continuation: 'continue', reviews: [], available_actions: allActions,
+      delivery: { id: 'action', kind: 'continue', status: 'dispatching', execution_id: '', consumed_at: undefined, last_error: '' },
+    }) });
+    expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['chat.workflowControlRegenerate', 'chat.workflowStop']);
+  });
+});
+
+it('confirms interruption before regenerating a completed step while a later step runs', async () => {
+  const { act } = renderActions({ control: control({ continuation: 'awaiting_executor', reviews: [], active_executions: 1,
+    available_actions: ['stop', 'rewind'],
+  }) });
+  fireEvent.click(screen.getByRole('button', { name: 'chat.workflowControlRegenerate' }));
+  expect(act).not.toHaveBeenCalled();
+  const dialog = await screen.findByRole('tooltip');
+  expect(within(dialog).getByText('chat.workflowRegenerateRunningConfirm')).toBeInTheDocument();
+  fireEvent.click(within(dialog).getByRole('button', { name: 'chat.workflowControlRegenerate' }));
+  await waitFor(() => expect(act).toHaveBeenCalledWith({ kind: 'rewind', stepId: 'script' }));
+});
+
+it('explains why continuing is disabled until cancellation is acknowledged', () => {
+  renderActions({ control: control({ continuation: 'stopped', reviews: [], available_actions: ['resume'],
+    delivery: { id: 'cancel', kind: 'cancel', status: 'dispatching', execution_id: '', consumed_at: undefined, last_error: '' },
+  }) });
+  expect(screen.getByRole('button', { name: 'chat.workflowStopping' })).toBeDisabled();
+});
+it('sends resume when the user clicks continue after stopping', () => {
+  const { act } = renderActions({ control: control({ continuation: 'stopped', reviews: [], available_actions: ['resume'] }) });
+  fireEvent.click(screen.getByRole('button', { name: 'chat.workflowContinue' }));
+  expect(act).toHaveBeenCalledWith({ kind: 'resume' });
 });

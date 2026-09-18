@@ -159,8 +159,10 @@ func (s WorkflowControlService) Execute(ctx context.Context, owner, sessionID st
 			if command.StepID == "" {
 				return controlstore.Reject("INVALID_COMMAND", "step_id is required for recovery")
 			}
-			if err := ensureNoActiveAttempts(tx, session.ID); err != nil {
-				return err
+			if command.Kind == "retry" {
+				if err := ensureNoActiveAttempts(tx, session.ID); err != nil {
+					return err
+				}
 			}
 			// Invalidate exactly the checkpoints replaced by the recovery transition.
 			transition := transitionCommandRequest{CommandID: command.CommandID, Operation: command.Kind,
@@ -204,6 +206,11 @@ func (s WorkflowControlService) Execute(ctx context.Context, owner, sessionID st
 			if err != nil {
 				return err
 			}
+			if command.Kind == "resume" {
+				if err := resumeWorkflowExecution(ctx, tx, session, command.CommandID, &result.Receipt); err != nil {
+					return err
+				}
+			}
 		default:
 			return controlstore.Reject("INVALID_COMMAND", "unsupported workflow control operation")
 		}
@@ -222,6 +229,73 @@ func (s WorkflowControlService) Execute(ctx context.Context, owner, sessionID st
 		return err
 	})
 	return result, err
+}
+
+// Resume is one user operation: restore admission and schedule the next execution.
+// Reviews remain a barrier; cancelled executions get fresh attempts and leases.
+func resumeWorkflowExecution(ctx context.Context, tx *gorm.DB, session *orm.WorkflowSession, commandID string, receipt *WorkflowControlReceipt) error {
+	state, err := controlstore.Read(tx, *session)
+	if err != nil {
+		return err
+	}
+	if state != nil && !state.Admission.CanBegin {
+		if state.Continuation == "binding_required" {
+			return controlstore.Reject("BINDING_REQUIRED", "reconnect the workflow host before continuing")
+		}
+		receipt.ResumeReason = state.Continuation
+		return nil
+	}
+	projection, err := projectSession(ctx, tx, session)
+	if err != nil {
+		return err
+	}
+	var cancelled []orm.WorkflowSessionStep
+	if err := tx.Where("session_id = ? AND validity = 'effective' AND status IN ?", session.ID, []string{"cancelled", "interrupted"}).Order("created_at ASC, id ASC").Find(&cancelled).Error; err != nil {
+		return err
+	}
+	target, operation := "", "execute"
+	for _, attempt := range cancelled {
+		if containsProjectionStep(projection.Projection.Retryable, attempt.StepID) {
+			target, operation = attempt.StepID, "retry"
+			break
+		}
+	}
+	if target == "" && len(projection.Projection.Ready) > 0 {
+		target = projection.Projection.Ready[0]
+	}
+	if target == "" {
+		session.Status = SessionStatusWaiting
+		if projection.Projection.Completed {
+			session.Status = SessionStatusCompleted
+		} else if len(projection.Projection.Retryable) > 0 {
+			session.Status = SessionStatusFailed
+		}
+		if err := tx.Model(session).Update("status", session.Status).Error; err != nil {
+			return err
+		}
+		receipt.ResumeReason = session.Status
+		return nil
+	}
+	response, updated, tasks, err := applyWorkflowTransition(ctx, tx, session.ID, transitionCommandRequest{
+		CommandID: commandID, Operation: operation, RetryOrigin: "user", TargetStepID: target,
+		ExpectedStateVersion: session.StateVersion, HandOff: true, controlAuthorized: true,
+	})
+	if err != nil {
+		return err
+	}
+	if !response.Accepted || len(tasks) != 1 {
+		return controlstore.Reject("RECOVERY_REJECTED", "resume did not create one execution")
+	}
+	*session = updated
+	var execution orm.WorkflowSessionStep
+	if err := tx.Where("task_id = ? AND session_id = ?", tasks[0], session.ID).First(&execution).Error; err != nil {
+		return err
+	}
+	receipt.ExecutionID = execution.ID
+	if state != nil && state.Binding.Bound {
+		receipt.ActionID, err = controlstore.EnqueueHostAction(tx, *session, commandID, "continue", execution.ID)
+	}
+	return err
 }
 
 func ensureNoActiveAttempts(tx *gorm.DB, sessionID string) error {

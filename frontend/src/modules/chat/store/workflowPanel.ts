@@ -320,6 +320,7 @@ export interface SlotWidgetConfig {
   readOnly?: boolean;
   maxHeight?: number;
   collapsed?: boolean;
+  collapseWhenEmpty?: boolean;
   itemLayout?: 'scroll' | 'grid';
   gridMaxCols?: number;
   itemWidth?: number;

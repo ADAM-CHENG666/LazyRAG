@@ -56,7 +56,7 @@ import {
   type FloatingToolbarAnchor,
   type MarkdownSelection,
 } from './artifactRewriteSelection';
-import { WorkflowPanelTabActiveContext, SlotEditingContext } from './slotEditingContext';
+import { WorkflowPanelTabActiveContext, SlotEditingContext, WorkflowEditBlocked } from './slotEditingContext';
 import type {
   RewriteSelectionPreview,
   WriterHeadingNumberingMode,
@@ -498,8 +498,13 @@ interface MarkdownArtifactEditorProps {
 
 function isRevisionConflict(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false;
-  const response = (error as { response?: { status?: unknown } }).response;
-  return response?.status === 409;
+  const response = (error as { response?: { status?: unknown; data?: {
+    message?: string; data?: { code?: string };
+  } } }).response;
+  if (response?.status !== 409) return false;
+  const code = response.data?.data?.code;
+  if (code) return code === 'REVISION_CONFLICT' || code === 'ARTIFACT_REVISION_CONFLICT';
+  return !response.data?.message || /revision conflict/i.test(response.data.message);
 }
 
 function isMarkdownToolbarInteractionTarget(node: Node | null | undefined): boolean {
@@ -1139,6 +1144,8 @@ export function MarkdownArtifactEditor({
         setPendingSource((current) => (
           current?.revision === revisionBeforeSave ? undefined : current
         ));
+        // Fetch the choices without replacing the unsaved local draft.
+        void Promise.resolve().then(() => onRefresh?.()).catch(() => undefined);
       }
       setConflict(isRevisionConflict(error));
       setSaveError(
@@ -1151,7 +1158,7 @@ export function MarkdownArtifactEditor({
       savingRef.current = false;
       setSaving(false);
     }
-  }, [onSave, readOnly, replaceMarkdownSilently, t]);
+  }, [onRefresh, onSave, readOnly, replaceMarkdownSilently, t]);
 
   const saveChanges = useCallback(async (mode: MarkdownSaveMode = 'draft'): Promise<boolean> => {
     if (!dirty || savingRef.current || readOnly) return false;
@@ -1225,7 +1232,12 @@ export function MarkdownArtifactEditor({
     void persistMarkdown(draftMarkdownRef.current, pendingSource.revision);
   };
 
-  const handleMarkdownChange = useCallback((nextDraft: string) => {
+  const handleMarkdownChange = useCallback((nextDraft: string, initialMarkdownNormalize = false) => {
+    // MDXEditor normalizes imported Markdown on mount. This is not a user edit.
+    if (initialMarkdownNormalize) {
+      if (dirtyRef.current) return;
+      setBaseMarkdown(nextDraft);
+    }
     draftMarkdownRef.current = nextDraft;
     setDraftMarkdown(nextDraft);
     if (!conflictRef.current) setSaveError(undefined);
@@ -1247,10 +1259,12 @@ export function MarkdownArtifactEditor({
         });
       }
       if (!dirtyRef.current) return true;
-      if (conflictRef.current) return false;
-      return saveChangesRef.current('checkpoint');
+      if (conflictRef.current || !(await saveChangesRef.current('checkpoint'))) {
+        throw new WorkflowEditBlocked(t('chat.workflowEditsBlocked'), rootRef.current);
+      }
+      return true;
     });
-  }, [editingKey, readOnly, registerFlush]);
+  }, [editingKey, readOnly, registerFlush, t]);
 
   useEffect(() => {
     if (!editingKey || !onDownload || !tabActive) return undefined;
@@ -1662,7 +1676,7 @@ export function MarkdownArtifactEditor({
       )}
       {conflict && (
         <div className='writer-markdown-editor__notice writer-markdown-editor__notice--warning' role='alert'>
-          <span>{t('chat.writerMarkdown.externalUpdate')}</span>
+          <span>{saveError ?? t('chat.writerMarkdown.externalUpdate')}</span>
           {pendingSource && !readOnly && (
             <>
               <button
@@ -1696,7 +1710,7 @@ export function MarkdownArtifactEditor({
         </div>
       )}
 
-      {saveError && (
+      {saveError && !conflict && (
         <div className='writer-markdown-editor__notice writer-markdown-editor__notice--error' role='alert'>
           <span>{saveError}</span>
           {!conflict && (

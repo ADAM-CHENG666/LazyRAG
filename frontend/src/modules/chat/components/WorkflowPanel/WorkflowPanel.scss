@@ -4582,3 +4582,13 @@
   font-size: 12px;
   padding: 0 0 6px;
 }
+
+.workflow-panel .workflow-panel__tab-badge--review {
+  background: #fff7e6;
+  border-color: #d48806;
+  color: #ad6800;
+}
+.workflow-panel__tab--active .workflow-panel__tab-badge--review {
+  outline: 2px solid #2f54eb;
+  outline-offset: 3px;
+}

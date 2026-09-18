@@ -170,8 +170,9 @@ func Read(tx *gorm.DB, session orm.WorkflowSession) (*Snapshot, error) {
 		if pending > 0 {
 			result.AvailableActions = append(result.AvailableActions, "save", "confirm")
 		}
+		result.AvailableActions = append(result.AvailableActions, "rewind")
 		if result.ActiveExecutions == 0 {
-			result.AvailableActions = append(result.AvailableActions, "retry", "rewind")
+			result.AvailableActions = append(result.AvailableActions, "retry")
 			if result.Binding.Bound {
 				if pending == 1 {
 					result.AvailableActions = append(result.AvailableActions, "confirm_and_continue")

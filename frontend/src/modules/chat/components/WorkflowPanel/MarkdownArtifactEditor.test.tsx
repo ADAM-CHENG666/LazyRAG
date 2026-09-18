@@ -2,6 +2,8 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+const editorProbe = vi.hoisted(() => ({ normalize: false }));
+
 vi.mock('@mdxeditor/editor', async () => {
   const React = await import('react');
   const { flushSync } = await import('react-dom');
@@ -25,6 +27,11 @@ vi.mock('@mdxeditor/editor', async () => {
         else update();
       },
     }));
+    React.useEffect(() => {
+      if (editorProbe.normalize) {
+        (props.onChange as (markdown: string, initial: boolean) => void)('Normalized document', true);
+      }
+    }, []);
     const plugins = props.plugins as Array<{ toolbarContents?: () => React.ReactNode }>;
     const toolbar = plugins.find((plugin) => plugin.toolbarContents)?.toolbarContents?.();
     const hasInternalReference = renderedMarkdown.includes('[beta](#block-sec-1)');
@@ -187,6 +194,7 @@ const rangeClientRectsDescriptor = Object.getOwnPropertyDescriptor(
 );
 
 beforeEach(() => {
+  editorProbe.normalize = false;
   Object.defineProperty(window.Range.prototype, 'getBoundingClientRect', {
     configurable: true,
     value: () => rect(),
@@ -873,8 +881,7 @@ describe('MarkdownArtifactEditor conflict refresh', () => {
     editable.textContent = 'Unsaved local document';
     fireEvent.input(editable);
     await screen.findByText('chat.writerMarkdown.revisionConflict', {}, { timeout: 2000 });
-    expect(screen.queryByRole('button', { name: 'chat.writerMarkdown.useRemoteVersion' })).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'common.refresh' }));
+    await screen.findByRole('button', { name: 'chat.writerMarkdown.useRemoteVersion' });
     expect(editable).toHaveTextContent('Unsaved local document');
     fireEvent.click(screen.getByRole('button', { name: 'chat.writerMarkdown.useRemoteVersion' }));
     expect(container.querySelector('.writer-markdown-editor__surface')).toHaveAttribute('data-markdown', 'Fresh server document');
@@ -919,6 +926,55 @@ describe('MarkdownArtifactEditor conflict refresh', () => {
 });
 
 describe('MarkdownArtifactEditor autosave', () => {
+  it('does not save initial normalization before a workflow action, but saves real edits', async () => {
+    editorProbe.normalize = true;
+    const onSave = vi.fn(async () => 8);
+    const setEditing = vi.fn();
+    let flush: (() => Promise<boolean>) | undefined;
+    render(<SlotEditingContext.Provider value={{
+      setEditing,
+      registerFlush: (_key, callback) => { flush = callback; return () => undefined; },
+      registerFooterAction: () => () => undefined,
+    }}>
+      <MarkdownArtifactEditor markdown='Original document' sourceRevision={7}
+        editingKey='step3:prompt' onSave={onSave} />
+    </SlotEditingContext.Provider>);
+    await act(async () => { expect(await flush!()).toBe(true); });
+    expect(onSave).not.toHaveBeenCalled();
+    expect(setEditing).not.toHaveBeenCalledWith('step3:prompt', true);
+    const editable = screen.getByTestId('markdown-editable');
+    editable.textContent = 'Real user edit';
+    fireEvent.input(editable);
+    await act(async () => { expect(await flush!()).toBe(true); });
+    expect(onSave).toHaveBeenCalledWith('Real user edit', 7, 'checkpoint', undefined);
+  });
+
+  it('identifies the editor blocking a workflow action and retains its draft', async () => {
+    const onSave = vi.fn().mockRejectedValue({ response: { status: 409,
+      data: { data: { code: 'REVIEW_SEALED' } } } });
+    let flush: (() => Promise<boolean>) | undefined;
+    render(<SlotEditingContext.Provider value={{
+      setEditing: vi.fn(),
+      registerFlush: (_key, callback) => { flush = callback; return () => undefined; },
+      registerFooterAction: () => () => undefined,
+    }}>
+      <MarkdownArtifactEditor markdown='Original document' sourceRevision={7}
+        editingKey='step3:prompt' onSave={onSave} />
+    </SlotEditingContext.Provider>);
+    const editable = screen.getByTestId('markdown-editable');
+    editable.textContent = 'Retained draft';
+    fireEvent.input(editable);
+    await act(async () => {
+      await expect(flush!()).rejects.toMatchObject({
+        name: 'WorkflowEditBlocked', message: 'chat.workflowEditsBlocked',
+        element: expect.any(HTMLElement),
+      });
+    });
+    expect(editable).toHaveTextContent('Retained draft');
+    expect(screen.getByText('chat.writerMarkdown.saveFailed')).toBeInTheDocument();
+    expect(screen.queryByText('chat.writerMarkdown.revisionConflict')).toBeNull();
+  });
+
   it('uses a checkpoint when pending edits are flushed at a version boundary', async () => {
     const onSave = vi.fn(async () => 8);
     let flush: (() => Promise<boolean>) | undefined;

@@ -40,3 +40,11 @@ export const SlotEditingContext = createContext<SlotEditingContextValue>({
 
 /** True when this slot tree is inside the currently selected plugin tab panel. */
 export const WorkflowPanelTabActiveContext = createContext(true);
+
+/** A failed save retains its draft and identifies the editor that needs attention. */
+export class WorkflowEditBlocked extends Error {
+  constructor(message: string, readonly element: HTMLElement | null) {
+    super(message);
+    this.name = 'WorkflowEditBlocked';
+  }
+}

@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { ArtifactPendingContext } from '../artifactPendingContext';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { SlotRevision } from '@/modules/chat/store/workflowPanel';
 import { WorkflowSessionApi, type RewriteSelectionPreview } from '@/modules/chat/utils/request';
@@ -19,13 +21,23 @@ function isSpaFallbackHtml(text: string): boolean {
   return lower.includes('<div id="root"') || lower.includes('id="app"');
 }
 
+export function isEmptySlideArtifact(raw: unknown): boolean {
+  if (raw == null || raw === '') return true;
+  if (typeof raw === 'string') return raw.trim() === '';
+  if (typeof raw !== 'object') return false;
+  const value = raw as Record<string, unknown>;
+  return !Object.keys(value).length || Object.keys(value).every(key =>
+    ['text', 'data', 'html', 'path', 'url', 'type', 'list_index', 'caption'].includes(key))
+    && [value.text, value.data, value.html, value.path, value.url].every(item => item == null || typeof item === 'string' && !item.trim());
+}
+
 async function loadArtifactText(raw: unknown): Promise<string> {
   if (raw == null) return '';
   if (typeof raw === 'string') return raw;
   if (typeof raw !== 'object') return String(raw);
   const obj = raw as Record<string, unknown>;
   if (typeof obj.text === 'string') return obj.text;
-  if (obj.path && (obj.type === 'text' || obj.type === 'json')) {
+  if (obj.path || obj.url) {
     const pathForSign = String(obj.path ?? obj.url ?? '').trim();
     const apiUrlRaw = obj.url ? String(obj.url).trim() : '';
     const apiUrl = apiUrlRaw ? resolveCoreAssetUrl(apiUrlRaw) : '';
@@ -165,6 +177,9 @@ export function SlotHtmlSlide({
   readOnly?: boolean;
   onRefresh?: () => void;
 }) {
+  const { t } = useTranslation();
+  const pending = useContext(ArtifactPendingContext);
+  const [waiting, setWaiting] = useState(false);
   const hostRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const frameCleanupRef = useRef(new Map<HTMLIFrameElement, () => void>());
@@ -220,15 +235,21 @@ export function SlotHtmlSlide({
   useEffect(() => {
     let cancelled = false;
     setError(null);
+    setHtml(null);
+    setWaiting(false);
     setEditPreview(null);
     setApplyError(undefined);
     clearSelectedNode();
     (async () => {
+      if (pending && isEmptySlideArtifact(slot.artifact_value)) {
+        setWaiting(true);
+        return;
+      }
       const text = await loadArtifactText(slot.artifact_value);
       if (cancelled) return;
       const extracted = extractHtmlFromArtifact(text) || extractHtmlFromArtifact(slot.artifact_value);
       if (!extracted) {
-        setError('Not a valid HTML slide');
+        setError(t('chat.workflowSlideInvalid'));
         setHtml(null);
         return;
       }
@@ -236,12 +257,12 @@ export function SlotHtmlSlide({
       if (!cancelled) setHtml(withCharts);
     })().catch(() => {
       if (!cancelled) {
-        setError('Failed to load HTML slide');
+        setError(t('chat.workflowSlideLoadFailed'));
         setHtml(null);
       }
     });
     return () => { cancelled = true; };
-  }, [clearSelectedNode, slot.artifact_value, slot.revision, slot.slot_id]);
+  }, [clearSelectedNode, slot.artifact_value, slot.revision, slot.slot_id, pending, t]);
 
   useEffect(() => {
     const viewport = viewportRef.current;
@@ -254,7 +275,7 @@ export function SlotHtmlSlide({
     const observer = new ResizeObserver(update);
     observer.observe(viewport);
     return () => observer.disconnect();
-  }, [compact]);
+  }, [compact, error]);
 
   const selectElement = useCallback((
     frame: HTMLIFrameElement,
@@ -415,7 +436,7 @@ export function SlotHtmlSlide({
     return (
       <div ref={hostRef} className={`slot-html-slide${compact ? ' slot-html-slide--compact' : ''}`}>
         <div ref={viewportRef} className='slot-html-slide__viewport slot-html-slide__viewport--placeholder'>
-          <div className='slot-html-slide slot-html-slide--loading'>Loading slide…</div>
+          <div className='slot-html-slide slot-html-slide--loading'>{t(waiting ? 'chat.workflowSlideWaiting' : 'chat.workflowSlideLoading')}</div>
         </div>
       </div>
     );

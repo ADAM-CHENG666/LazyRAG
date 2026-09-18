@@ -1,3 +1,6 @@
+import { useWorkflowTabNavigation } from './useWorkflowTabNavigation';
+import { useSlotCollapse } from './useSlotCollapse';
+import { ArtifactPendingContext } from './artifactPendingContext';
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
@@ -48,7 +51,7 @@ import {
 } from './SlotComponents';
 import { SlideThumb } from './ppt/SlideThumb';
 import { WorkflowTabActions } from './actions/WorkflowTabActions';
-import { WorkflowPanelTabActiveContext, SlotEditingContext, type SlotFooterAction } from './slotEditingContext';
+import { WorkflowPanelTabActiveContext, SlotEditingContext, WorkflowEditBlocked, type SlotFooterAction } from './slotEditingContext';
 import { findWriterArtifactStream } from './writerArtifactStream';
 import { resolveCompletedContinueStep } from './workflowContinue';
 import { WorkflowControlActions } from './WorkflowControlActions';
@@ -874,6 +877,7 @@ function CompositeSlotGrid({
   readOnly?: boolean;
 }) {
   const { t } = useTranslation();
+  const pending = React.useContext(ArtifactPendingContext);
   const reorderSlotItems = useWorkflowStore((state) => state.reorderSlotItems);
   const rows = getCompositeRows(tab, session);
   const columns = filterColumnsByVisibleSlots(
@@ -998,7 +1002,7 @@ function CompositeSlotGrid({
             readOnly={readOnly}
           />
         ) : (
-          <div className='composite-grid__cell-empty'>—</div>
+          <div className='composite-grid__cell-empty'>{def?.widget?.widgetType === 'html-slide' && pending ? t('chat.workflowSlideWaiting') : '—'}</div>
         )}
       </div>
     );
@@ -1435,7 +1439,10 @@ function NamedTabSlot({
   const slotLabel = slotDef.label ?? slotDef.id;
   const isImageList = slotDef.type === 'image' && slotDef.cardinality === 'list';
   const isDraggable = Boolean(slotDef.ordered) && !readOnly;
-  const [contentCollapsed, setContentCollapsed] = useState(slotDef.widget?.collapsed === true);
+  const collapseWhenEmpty = slotDef.widget?.collapseWhenEmpty === true;
+  const [contentCollapsed, toggleContentCollapsed] = useSlotCollapse(
+    revisions.length > 0 || Boolean(artifactStream), collapseWhenEmpty, slotDef.widget?.collapsed === true,
+  );
   const prefersFullGridRow = slotDef.widget?.itemLayout === 'grid'
     || (slotDef.widget?.itemWidth ?? 0) >= 600
     || slotDef.widget?.collapsed === true;
@@ -1500,13 +1507,13 @@ function NamedTabSlot({
         {(slotDef.label || slotDef.id) && (
           <span className='workflow-panel__slot-label'>{slotLabel}</span>
         )}
-        {slotDef.widget?.collapsed !== undefined && (
+        {(slotDef.widget?.collapsed !== undefined || collapseWhenEmpty) && (
           <button
             type='button'
             className={`workflow-panel__slot-collapse${contentCollapsed ? ' workflow-panel__slot-collapse--collapsed' : ''}`}
             aria-expanded={!contentCollapsed}
             aria-label={contentCollapsed ? t('chat.workflowPanelExpand') : t('chat.workflowPanelCollapse')}
-            onClick={() => setContentCollapsed((value) => !value)}
+            onClick={toggleContentCollapsed}
           >
             <span aria-hidden='true'>⌃</span>
           </button>
@@ -1682,7 +1689,6 @@ export function WorkflowPanel({
     conversationId ? (s.autoRunningByConversation[conversationId] ?? false) : false,
   );
   const setAutoRunning = useWorkflowStore((s) => s.setAutoRunning);
-  const [activeTabIdx, setActiveTabIdx] = React.useState(0);
   const [collapsed, setCollapsed] = useState(false);
   const fetchWorkflowUI = useWorkflowStore((s) => s.fetchWorkflowUI);
   const setFocusedTab = useWorkflowStore((s) => s.setFocusedTab);
@@ -1692,6 +1698,13 @@ export function WorkflowPanel({
   const focusedTabByConversation = useWorkflowStore((s) => s.focusedTabByConversation);
   const persistedFocusedTab = conversationId ? focusedTabByConversation[conversationId] : undefined;
   const [ui, setUI] = useState<WorkflowUI>({});
+  const tabs = filterWorkflowTabs(ui.tabs ?? [], session?.slots ?? [], ui.tab_visibility_ready_material);
+  const navigation = useWorkflowTabNavigation({
+    tabs, sessionId: session?.session_id, currentStepId: session?.current_step_id,
+    terminal: session?.status === 'completed' || session?.status === 'failed',
+    persistedTab: persistedFocusedTab,
+    persist: tabId => setFocusedTab(conversationId, tabId),
+  });
   const [dismissing, setDismissing] = useState(false);
   const [stateGraphOpen, setStateGraphOpen] = useState(false);
   const [expanded, setExpanded] = useState(() => readPersistedExpanded(conversationId));
@@ -1812,9 +1825,13 @@ export function WorkflowPanel({
       ? (selectedFlusher ? [selectedFlusher] : [])
       : [...flushFns.current.values()];
     if (flushers.length === 0) return true;
-    const results = await Promise.all(flushers.map((flush) => flush()));
-    return results.every(Boolean);
-  }, []);
+    const results = await Promise.allSettled(flushers.map((flush) => flush()));
+    for (const result of results) {
+      if (result.status === 'rejected') throw result.reason;
+      if (!result.value) throw new Error(t('chat.workflowEditsBlocked'));
+    }
+    return true;
+  }, [t]);
 
   useEffect(() => {
     editingSlots.current.clear();
@@ -1835,52 +1852,10 @@ export function WorkflowPanel({
     fetchWorkflowUI(session.workflow_id).then(setUI);
   }, [session?.workflow_id, fetchWorkflowUI, i18n.language]);
 
-  // Restore the previously focused tab when UI loads.
-  useEffect(() => {
-    const tabs = filterWorkflowTabs(
-      ui.tabs ?? [],
-      session?.slots ?? [],
-      ui.tab_visibility_ready_material,
-    );
-    if (!tabs.length || !persistedFocusedTab) return;
-    const idx = tabs.findIndex((t) => t.id === persistedFocusedTab);
-    if (idx !== -1) setActiveTabIdx(idx);
-  }, [ui.tabs, ui.tab_visibility_ready_material, persistedFocusedTab, session?.slots]);
-
-  // Until the user explicitly chooses a visible tab, follow the runtime
-  // frontier. This also moves focus immediately when a skip material removes
-  // the previously selected tab.
-  useEffect(() => {
-    const tabs = filterWorkflowTabs(
-      ui.tabs ?? [],
-      session?.slots ?? [],
-      ui.tab_visibility_ready_material,
-    );
-    const focusedTabVisible = Boolean(
-      persistedFocusedTab && tabs.some((tab) => tab.id === persistedFocusedTab),
-    );
-    if (!tabs.length || focusedTabVisible || !session) return;
-    let idx = tabs.findIndex((tab) => getTabStepId(tab) === session.current_step_id);
-    if (idx === -1 && (session.status === 'completed' || session.status === 'failed')) {
-      idx = tabs.length - 1;
-    }
-    if (idx !== -1) setActiveTabIdx(idx);
-  }, [
-    ui.tabs,
-    ui.tab_visibility_ready_material,
-    persistedFocusedTab,
-    session?.current_step_id,
-    session?.session_id,
-    session?.slots,
-    session?.status,
-  ]);
-
-  // Track focused tab changes.
-  const handleTabChange = useCallback((idx: number, tabId: string) => {
-    setActiveTabIdx(idx);
-    setFocusedTab(conversationId, tabId);
+  const handleTabChange = (_idx: number, tabId: string) => {
+    navigation.select(tabId);
     setFocusedSortOrder(conversationId, undefined);
-  }, [conversationId, setFocusedTab, setFocusedSortOrder]);
+  };
 
   const handleFocusSortOrder = useCallback((sortOrder: number | undefined) => {
     setFocusedSortOrder(conversationId, sortOrder);
@@ -1898,17 +1873,11 @@ export function WorkflowPanel({
 
   if (!session) return null;
 
-  const tabs = filterWorkflowTabs(
-    ui.tabs ?? [],
-    session.slots ?? [],
-    ui.tab_visibility_ready_material,
-  );
   const hasTabs = tabs.length > 0;
-  const visibleActiveTabIdx = hasTabs
-    ? Math.min(activeTabIdx, tabs.length - 1)
-    : 0;
+  const visibleActiveTabIdx = navigation.index;
   const controlTab = tabs[visibleActiveTabIdx];
   const { stepId: controlStepId, stepIds: controlStepIds } = resolveWorkflowControlScope(controlTab, session);
+  const preserveViewedTab = navigation.preserve;
   const hasIntent = true;
   const showActions =
     session.status === 'waiting' ||
@@ -1945,10 +1914,6 @@ export function WorkflowPanel({
     session,
     tabs[visibleActiveTabIdx],
   );
-  // Workflow packages may expose a follow-on action from a completed tab.
-  const showContinue = displayStatus === 'waiting'
-    || displayStatus === 'active'
-    || Boolean(completedContinueStepId);
   const showStepRollback =
     (session.status === 'completed' || session.status === 'failed')
     && Boolean(session.steps && session.steps.length > 0);
@@ -1968,6 +1933,22 @@ export function WorkflowPanel({
   const effectivePast = new Set(session.projection?.past ?? []);
   const continueDisabled = buttonsDisabled || currentStepStatus === 'failed';
   const approvalStepId = resolvePendingApprovalStep(session, displayStatus);
+  const readyToStart = displayStatusKey === 'chat.workflowStatusReady';
+  const canResumeStep = ['interrupted', 'cancelled', 'canceled'].includes(currentStepStatus ?? '');
+  const showRetry = !sessionBusy && currentStepStatus === 'failed';
+  // Automatic handoffs are not requests for user input.
+  const showContinue = !sessionBusy && (readyToStart
+    || displayStatus === 'waiting' && canResumeStep
+    || Boolean(completedContinueStepId));
+
+  function reportActionError(error: unknown) {
+    if (error instanceof WorkflowEditBlocked) {
+      const panel = error.element?.closest<HTMLElement>('[data-workflow-tab-id]');
+      if (panel?.dataset.workflowTabId) navigation.select(panel.dataset.workflowTabId);
+      requestAnimationFrame(() => error.element?.scrollIntoView({ block: 'center' }));
+    }
+    antdMessage.error(error instanceof Error ? error.message : t('chat.workflowRunControlFailed'));
+  }
 
   async function runFooterAction(action: () => void | Promise<void>, flushKey?: string) {
     if (sessionBusy || actionPending) return;
@@ -1976,6 +1957,8 @@ export function WorkflowPanel({
       const saved = await flushPendingEdits(flushKey);
       if (!saved) return;
       await action();
+    } catch (error) {
+      reportActionError(error);
     } finally {
       setActionPending(false);
     }
@@ -1988,7 +1971,7 @@ export function WorkflowPanel({
       if (flush && !(await flushPendingEdits())) return;
       await action();
     } catch (error) {
-      antdMessage.error(error instanceof Error ? error.message : t('chat.workflowRunControlFailed'));
+      reportActionError(error);
     } finally { setActionPending(false); }
   }
 
@@ -2186,6 +2169,9 @@ export function WorkflowPanel({
                 || b.attempt - a.attempt
               ))[0];
             const stepStatus = step?.status;
+            const awaitingReview = control
+              ? control.reviews.some(review => review.status === 'pending' && statusStepIds.includes(review.step_id))
+              : Boolean(approvalStepId && statusStepIds.includes(approvalStepId));
             const running = runningTasks.find(task => statusStepIds.includes(task.step_id));
             const activity = running ? activities[running.task_id] : undefined;
             const showProgress = Boolean(running && !activity?.finished);
@@ -2199,7 +2185,7 @@ export function WorkflowPanel({
                   onClick={() => handleTabChange(idx, tab.id)}
                   type='button'
                 >
-                  <span className='workflow-panel__tab-badge'>{idx + 1}
+                  <span className={`workflow-panel__tab-badge${awaitingReview ? ' workflow-panel__tab-badge--review' : ''}`} title={awaitingReview ? t('chat.workflowStepAwaitingReview') : undefined} aria-label={awaitingReview ? t('chat.workflowStepAwaitingReview') : undefined}>{idx + 1}
                     {showProgress && <svg className={`workflow-panel__progress-ring${activity?.progress === undefined ? ' workflow-panel__progress-ring--indeterminate' : ''}`}
                       viewBox='0 0 32 32' role='progressbar' aria-label={t('chat.workflowStepProgress', { step: tab.label })}
                       aria-valuemin={0} aria-valuemax={100} aria-valuenow={activity?.progress}>
@@ -2227,7 +2213,12 @@ export function WorkflowPanel({
 
       {/* Body */}
       {!collapsed && (
-        <div className='workflow-panel__body' key={session.session_id}>
+        <div className='workflow-panel__body' key={session.session_id}
+          onWheelCapture={() => preserveViewedTab()}
+          onTouchStartCapture={() => preserveViewedTab()}
+          onPointerDownCapture={() => preserveViewedTab()}
+          onScrollCapture={() => preserveViewedTab()}
+          onKeyDownCapture={() => preserveViewedTab()}>
           {hasTabs ? (
             tabs.map((tab, idx) => {
               const preview = executionPreview(session, tab, activities);
@@ -2236,10 +2227,12 @@ export function WorkflowPanel({
               <div
                 key={tab.id}
                 id={`workflow-tab-panel-${tab.id}`}
+                data-workflow-tab-id={tab.id}
                 role='tabpanel'
                 hidden={idx !== visibleActiveTabIdx}
               >
                 <WorkflowPanelTabActiveContext.Provider value={idx === visibleActiveTabIdx}>
+                <ArtifactPendingContext.Provider value={Boolean(session.steps?.some(step => (tab.status_step_ids ?? [tab.step_id ?? tab.id]).includes(step.step_id) && step.validity !== 'stale' && ['queued', 'claimed', 'running'].includes(step.status)))}>
                 <SlotDownloadContext.Provider value={!previewing && workflowTabAllowsDownload(tab, idx, tabs.length)}>
                   {previewing && <div className="workflow-panel__preview-label" role="status">{t('chat.workflowGeneratingPreview')}</div>}
                   <TabSlotGrid
@@ -2252,6 +2245,7 @@ export function WorkflowPanel({
                     onFocusSortOrder={handleFocusSortOrder}
                   />
                 </SlotDownloadContext.Provider>
+                </ArtifactPendingContext.Provider>
                 </WorkflowPanelTabActiveContext.Provider>
               </div>
               );
@@ -2353,7 +2347,7 @@ export function WorkflowPanel({
               {t('chat.workflowStop')}
             </button>
           )}
-          {session.status !== 'completed' && (
+          {showRetry && (
             <button
               type='button'
               className='workflow-panel__action-btn workflow-panel__action-btn--secondary'
@@ -2394,7 +2388,7 @@ export function WorkflowPanel({
                           : continueLabel
               }
             >
-              {actionPending ? t('chat.workflowSavingBeforeAction') : continueLabel}
+              {actionPending ? t('chat.workflowSavingBeforeAction') : readyToStart ? t('chat.workflowStartExecution') : continueLabel}
             </button>
           )}
           {showStepRollback && (

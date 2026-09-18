@@ -997,7 +997,30 @@ func invalidateForOperation(ctx context.Context, tx *gorm.DB, session *orm.Workf
 			continue
 		}
 		seen[current.ID] = true
-		if err := tx.Model(&orm.WorkflowSessionStep{}).Where("id = ?", current.ID).Update("validity", "stale").Error; err != nil {
+		// Revoke only executions in the dependency invalidation closure. The session
+		// lock makes this atomic with publication and the replacement execution.
+		updates := map[string]any{"validity": "stale"}
+		switch current.Status {
+		case "pending", "queued", "claimed", "running":
+			now := time.Now().UTC()
+			updates["status"] = "cancelled"
+			updates["lease_token"] = ""
+			updates["lease_expires_at"] = nil
+			updates["fencing_generation"] = gorm.Expr("fencing_generation + 1")
+			updates["terminal_code"] = "WORKFLOW_REGENERATED"
+			updates["updated_at"] = now
+			if err := tx.Model(&orm.WorkflowOutbox{}).Where("attempt_id = ? AND status IN ?", current.ID, []string{"pending", "claimed"}).
+				Updates(map[string]any{"status": "cancelled", "updated_at": now}).Error; err != nil {
+				return err
+			}
+			if current.TaskID != "" {
+				if err := tx.Model(&orm.SubAgentTask{}).Where("id = ? AND status IN ?", current.TaskID, []string{"pending", "running"}).
+					Updates(map[string]any{"status": "interrupted", "updated_at": now}).Error; err != nil {
+					return err
+				}
+			}
+		}
+		if err := tx.Model(&orm.WorkflowSessionStep{}).Where("id = ?", current.ID).Updates(updates).Error; err != nil {
 			return err
 		}
 		var outputs []orm.WorkflowSlotRevision
