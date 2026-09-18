@@ -111,14 +111,24 @@ def load_workflow_package_tools(
     files = package.get('files') if isinstance(package.get('files'), dict) else {}
     wanted = set(names)
     declarations = _workflow_document(files).get('tool_scripts')
+    if declarations is not None and not isinstance(declarations, list):
+        raise ValueError('Workflow tool_scripts must be a list')
     scripts: Dict[str, set[str]] = {}
     if declarations is not None:
         owners: Dict[str, str] = {}
         for entry in declarations:
-            path = str(entry.get('path') or '')
-            if not path.startswith('scripts/') or not path.endswith('.py') or '..' in Path(path).parts:
+            if not isinstance(entry, dict):
                 continue
-            for name in entry.get('functions') or []:
+            path = str(entry.get('path') or '')
+            if (not path.startswith('scripts/') or not path.endswith('.py') or '..' in Path(path).parts
+                    or '\\' in path or path.startswith('scripts/tests/') or '/__tests__/' in path):
+                continue
+            functions = entry.get('functions')
+            if not isinstance(functions, list):
+                continue
+            for name in functions:
+                if not isinstance(name, str):
+                    continue
                 if name in owners and owners[name] != path:
                     raise ValueError(f'Workflow tool {name!r} is declared in multiple scripts')
                 owners[name] = path
@@ -128,6 +138,7 @@ def load_workflow_package_tools(
         # Older published packages did not declare tool_scripts.
         scripts = {path: wanted for path in sorted(files)
                    if path.startswith('scripts/') and path.endswith('.py')
+                   and '..' not in path.split('/') and '\\' not in path
                    and not path.startswith('scripts/tests/') and '/__tests__/' not in path}
     if not scripts:
         return {}

@@ -1,6 +1,7 @@
 import { useWorkflowTabNavigation } from './useWorkflowTabNavigation';
 import { useSlotCollapse } from './useSlotCollapse';
 import { ArtifactPendingContext } from './artifactPendingContext';
+import { getLocalizedErrorMessage } from "@/components/request";
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
@@ -2029,8 +2030,8 @@ export function WorkflowPanel({
           approval_required: false,
         });
         if (isContinuationCurrent()) onSendMessage?.(t('chat.workflowContinue'));
-      } catch {
-        antdMessage.error(t('chat.workflowApprovalPreferenceSaveFailed'));
+      } catch (error) {
+        antdMessage.error(getLocalizedErrorMessage(error));
       }
     });
   }
