@@ -91,16 +91,37 @@ func dshExecutable() (string, error) {
 	return "", errors.New("DeepSeek Harness CLI was not found")
 }
 
+// Keep discovery and process execution injectable without changing global state.
+type dshPluginRuntime struct {
+	findDSH        func() (string, error)
+	findExecutable func(string) (string, error)
+	run            func(context.Context, string, []string, func([]byte) error) error
+}
+
 func runDSHPlugin(ctx context.Context, profile string, args ...string) error {
-	dsh, err := dshExecutable()
+	return runDSHPluginWith(ctx, dshPluginRuntime{
+		findDSH: dshExecutable,
+		findExecutable: func(name string) (string, error) {
+			return agentexec.FindExecutable("", []string{name})
+		},
+		run: func(ctx context.Context, binary string, arguments []string, output func([]byte) error) error {
+			return (agentexec.StreamCommand{Binary: binary, Arguments: arguments,
+				Environment: agentexec.SafeEnvironment("DSH_HOME=" + dshHome()),
+			}).Run(ctx, output)
+		},
+	}, profile, args...)
+}
+
+func runDSHPluginWith(ctx context.Context, runtime dshPluginRuntime, profile string, args ...string) error {
+	dsh, err := runtime.findDSH()
 	if err != nil {
 		return errors.New("DeepSeek Harness CLI was not found; start DSH Web once so LazyMind can use the existing installation")
 	}
 	binary := dsh
 	arguments := append([]string{"plugin", "--profile", profile}, args...)
-	if _, err := agentexec.FindExecutable("", []string{"pnpm"}); err != nil {
+	if _, err := runtime.findExecutable("pnpm"); err != nil {
 		// Supply only DSH's package manager dependency. Never download another DSH.
-		npx, err := agentexec.FindExecutable("", []string{"npx"})
+		npx, err := runtime.findExecutable("npx")
 		if err != nil {
 			return errors.New("pnpm or Node.js/npm is required to install the LazyMind plugin into DSH")
 		}
@@ -108,9 +129,7 @@ func runDSHPlugin(ctx context.Context, profile string, args ...string) error {
 		arguments = append([]string{"--yes", "--package=pnpm@10.0.0", "--", dsh}, arguments...)
 	}
 	var output strings.Builder
-	err = (agentexec.StreamCommand{Binary: binary, Arguments: arguments,
-		Environment: agentexec.SafeEnvironment("DSH_HOME=" + dshHome()),
-	}).Run(ctx, func(line []byte) error {
+	err = runtime.run(ctx, binary, arguments, func(line []byte) error {
 		if output.Len() < 2048 {
 			output.Write(line)
 			output.WriteByte('\n')
