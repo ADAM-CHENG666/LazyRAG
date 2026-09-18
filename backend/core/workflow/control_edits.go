@@ -33,6 +33,9 @@ func reviewMaterialTransaction(ctx context.Context, db *gorm.DB, sessionID, slot
 		if err := write(tx); err != nil {
 			return err
 		}
+		if err := tx.First(&session, "id = ?", sessionID).Error; err != nil {
+			return err
+		}
 		if !controlstore.Controlled(session) {
 			return nil
 		}

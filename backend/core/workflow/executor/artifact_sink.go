@@ -15,8 +15,10 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
+	"lazymind/core/common"
 	"lazymind/core/common/orm"
 	"lazymind/core/workflow/artifactfile"
+	"lazymind/core/workflow/artifactgraph"
 	"lazymind/core/workflow/controlstore"
 )
 
@@ -30,7 +32,8 @@ func validateDeclaredArtifactType(attempt AttemptContext, artifact Artifact) err
 	if declared == "" {
 		return nil
 	}
-	valid := actual == declared
+	valid := actual == declared ||
+		(common.IsTextArtifactContentType(declared) && common.IsTextArtifactContentType(actual))
 	if declared == "file" {
 		valid = actual == "file" || actual == "file_list"
 	} else if actual == "file" && (declared == "text" || declared == "json") {
@@ -120,6 +123,7 @@ func (sink DBArtifactSink) Save(ctx context.Context, attempt AttemptContext, art
 	if err != nil {
 		return err
 	}
+	storedValue = common.CanonicalizeTextArtifactValue(artifact.ContentType, storedValue)
 	var caption *string
 	var metadata map[string]any
 	if json.Unmarshal(storedValue, &metadata) == nil {
@@ -128,7 +132,8 @@ func (sink DBArtifactSink) Save(ctx context.Context, attempt AttemptContext, art
 		}
 	}
 	persisted := false
-	err = sink.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err = common.TransactionWithSQLiteBusyRetry(ctx, sink.DB, func(tx *gorm.DB) error {
+		persisted = false
 		lockedSession, err := controlstore.LockSession(tx, attempt.SessionID)
 		if err != nil {
 			return err
@@ -153,13 +158,10 @@ func (sink DBArtifactSink) Save(ctx context.Context, attempt AttemptContext, art
 			}
 			return nil
 		}
-		if err != gorm.ErrRecordNotFound {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
-		var session orm.WorkflowSession
-		if err := tx.Where("id = ?", attempt.SessionID).First(&session).Error; err != nil {
-			return err
-		}
+		session := &lockedSession
 		cardinality := strings.TrimSpace(attempt.OutputCardinality[artifact.Slot])
 		if cardinality == "" {
 			var loadErr error
@@ -180,6 +182,23 @@ func (sink DBArtifactSink) Save(ctx context.Context, attempt AttemptContext, art
 			return err
 		}
 		selected := tx.Model(&orm.WorkflowSlotRevision{}).Where(
+			"session_id = ? AND slot_id = ? AND selected = ?", attempt.SessionID, artifact.Slot, true,
+		)
+		if cardinality == "list" {
+			selected = selected.Where("list_index = ?", *listIndex)
+		}
+		var replaced []orm.WorkflowSlotRevision
+		if err := selected.Select("id").Find(&replaced).Error; err != nil {
+			return err
+		}
+		replacedIDs := make([]string, 0, len(replaced))
+		for _, revision := range replaced {
+			replacedIDs = append(replacedIDs, revision.ID)
+		}
+		if err := artifactgraph.InvalidateConsumers(ctx, tx, attempt.SessionID, replacedIDs...); err != nil {
+			return err
+		}
+		selected = tx.Model(&orm.WorkflowSlotRevision{}).Where(
 			"session_id = ? AND slot_id = ? AND selected = ?", attempt.SessionID, artifact.Slot, true,
 		)
 		if cardinality == "list" {
@@ -211,7 +230,7 @@ func (sink DBArtifactSink) Save(ctx context.Context, attempt AttemptContext, art
 			}
 		}
 		stateVersion := session.StateVersion + 1
-		if err := tx.Model(&session).Updates(map[string]any{"state_version": stateVersion, "updated_at": now}).Error; err != nil {
+		if err := tx.Model(session).Updates(map[string]any{"state_version": stateVersion, "updated_at": now}).Error; err != nil {
 			return err
 		}
 		payload, _ := json.Marshal(map[string]any{"artifact_id": row.ID, "attempt_id": attempt.AttemptID,

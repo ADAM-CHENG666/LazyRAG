@@ -71,6 +71,43 @@ func TestMaterialEditPreservesProducerAndIndependentExecution(t *testing.T) {
 	}
 }
 
+func TestCheckpointSaveCancelsConsumersAtomically(t *testing.T) {
+	for _, conflict := range []bool{false, true} {
+		name := "save"
+		if conflict {
+			name = "version-conflict"
+		}
+		t.Run(name, func(t *testing.T) {
+			fixture := seedArtifactDependencyFixture(t, "running", "succeeded", false)
+			baseRevision, baseDraft := 1, int64(1)
+			if conflict {
+				baseDraft = 99
+			}
+			revision, _, _, err := SaveHumanArtifactValue(context.Background(), fixture.db.DB,
+				"session-dependency", "source-slot-id", "source-artifact-key", "source-step", 1, "single", nil,
+				"text", json.RawMessage(`{"text":"edited"}`), nil, &baseRevision, &baseDraft, false)
+			var consumer orm.WorkflowSessionStep
+			fixture.db.First(&consumer, "id = ?", fixture.directAttemptID)
+			session := loadArtifactEventSession(t, fixture.db, "session-dependency")
+			if conflict {
+				if err == nil || revision != nil || consumer.Status != "running" || consumer.Validity != "effective" || controlstore.EditPaused(session) {
+					t.Fatalf("failed save leaked changes: err=%v consumer=%+v session=%+v", err, consumer, session)
+				}
+				requireRevisionState(t, fixture, fixture.sourceRevisionID, "effective", true)
+				return
+			}
+			if err != nil || revision == nil || revision.Revision != 2 {
+				t.Fatalf("checkpoint save: revision=%+v err=%v", revision, err)
+			}
+			if consumer.Status != "cancelled" || consumer.Validity != "stale" || !controlstore.EditPaused(session) {
+				t.Fatalf("save did not pause and cancel: consumer=%+v session=%+v", consumer, session)
+			}
+			requireAttemptValidity(t, fixture, fixture.downstreamAttemptID, "stale")
+			requireAttemptValidity(t, fixture, fixture.unrelatedAttemptID, "effective")
+		})
+	}
+}
+
 func TestStoppedMaterialEditAndFailedSave(t *testing.T) {
 	svc, _ := hostControlFixture(t)
 	db := svc.DB
@@ -86,7 +123,7 @@ func TestStoppedMaterialEditAndFailedSave(t *testing.T) {
 	}
 	// The draft fast path must roll back preparation when it falls back to
 	// creating an immutable revision, rather than invalidating before a real save.
-	if _, updated, err := UpdateSelectedHumanArtifactValue(context.Background(), db, "run", "draft", nil, "text", json.RawMessage(`{"text":"edited"}`), nil); err != nil || updated {
+	if _, _, updated, err := UpdateSelectedHumanArtifactValue(context.Background(), db, "run", "draft", nil, "text", json.RawMessage(`{"text":"edited"}`), nil, nil, nil); err != nil || updated {
 		t.Fatalf("draft fallback: %v %v", updated, err)
 	}
 	var beforeSave orm.WorkflowSession

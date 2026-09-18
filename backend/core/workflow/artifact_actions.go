@@ -22,9 +22,22 @@ import (
 )
 
 type artifactActionPreviewBody struct {
-	Action       string         `json:"action"`
-	BaseRevision int            `json:"base_revision"`
-	Input        map[string]any `json:"input"`
+	Action           string         `json:"action"`
+	BaseRevision     int            `json:"base_revision"`
+	BaseDraftVersion *int64         `json:"base_draft_version"`
+	Input            map[string]any `json:"input"`
+}
+
+func isPortableDocumentConversion(body artifactActionPreviewBody) bool {
+	if body.Action != "convert_document" {
+		return false
+	}
+	switch body.Input["output_format"] {
+	case "markdown", "latex", "text":
+		return true
+	default:
+		return false
+	}
 }
 
 func PreviewArtifactAction(w http.ResponseWriter, r *http.Request) {
@@ -32,10 +45,14 @@ func PreviewArtifactAction(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	llmConfig, err := modelconfig.LoadLLMConfig(r.Context(), target.db, store.UserID(r))
-	if err != nil {
-		common.ReplyErr(w, "load model config failed", http.StatusInternalServerError)
-		return
+	var llmConfig map[string]any
+	if !isPortableDocumentConversion(body) {
+		var err error
+		llmConfig, err = modelconfig.LoadLLMConfig(r.Context(), target.db, store.UserID(r))
+		if err != nil {
+			common.ReplyErr(w, "load model config failed", http.StatusInternalServerError)
+			return
+		}
 	}
 	userID := store.UserID(r)
 	actionWorkflow, err := resolveArtifactActionWorkflow(r.Context(), target, body.Action)
@@ -68,6 +85,9 @@ func PreviewArtifactAction(w http.ResponseWriter, r *http.Request) {
 	result["status"] = "ready"
 	result["action"] = body.Action
 	result["base_revision"] = body.BaseRevision
+	if body.BaseDraftVersion != nil {
+		result["base_draft_version"] = *body.BaseDraftVersion
+	}
 	result["action_revision_id"] = actionWorkflow.revisionID
 	common.ReplyOK(w, result)
 }
@@ -139,9 +159,12 @@ func ExecuteArtifactAction(w http.ResponseWriter, r *http.Request) {
 		target.revision.StepID, target.revision.Attempt, cardinality,
 		target.revision.ListIndex, actionResult.Artifact.ContentType,
 		resolveValuePaths(actionResult.Artifact.Value), actionResult.Artifact.Caption,
-		&expected,
+		"human", &expected, body.BaseDraftVersion,
 	)
 	if err != nil {
+		if replyDraftVersionPreconditionError(w, err) {
+			return
+		}
 		if errors.Is(err, ErrConflict) {
 			common.ReplyErrWithData(w, "revision conflict", map[string]any{
 				"code": "REVISION_CONFLICT",
@@ -160,6 +183,7 @@ func ExecuteArtifactAction(w http.ResponseWriter, r *http.Request) {
 	result["action"] = body.Action
 	result["base_revision"] = body.BaseRevision
 	result["revision"] = newRevision.Revision
+	result["draft_version"] = int64(1)
 	result["action_revision_id"] = actionWorkflow.revisionID
 	common.ReplyOK(w, result)
 }
@@ -248,18 +272,24 @@ func prepareArtifactActionPreview(
 	w http.ResponseWriter, r *http.Request,
 ) (*artifactActionTarget, artifactActionPreviewBody, bool) {
 	var body artifactActionPreviewBody
-	if json.NewDecoder(r.Body).Decode(&body) != nil || body.Action == "" ||
-		body.BaseRevision <= 0 || body.Input == nil {
+	if json.NewDecoder(r.Body).Decode(&body) != nil || body.Action == "" || body.Input == nil {
 		common.ReplyErr(w, "invalid artifact action preview request", http.StatusBadRequest)
 		return nil, body, false
 	}
-	target, ok := prepareArtifactActionTarget(w, r, body.BaseRevision)
+	if body.BaseRevision <= 0 {
+		common.ReplyErrWithData(w, "base_revision required", map[string]any{
+			"code": "REVISION_REQUIRED",
+		}, http.StatusBadRequest)
+		return nil, body, false
+	}
+	target, ok := prepareArtifactActionTarget(w, r, body.BaseRevision, body.BaseDraftVersion)
 	return target, body, ok
 }
 
 func prepareArtifactActionTarget(
 	w http.ResponseWriter, r *http.Request,
 	baseRevision int,
+	baseDraftVersion *int64,
 ) (*artifactActionTarget, bool) {
 	sessionID, slotID := common.PathVar(r, "session_id"), common.PathVar(r, "slot_id")
 	listIndex, err := strconv.Atoi(common.PathVar(r, "list_index"))
@@ -299,6 +329,24 @@ func prepareArtifactActionTarget(
 			"current_revision": revision.Revision,
 		}, http.StatusConflict)
 		return nil, false
+	}
+	if revision.HumanArtifactID != nil && *revision.HumanArtifactID != "" {
+		if baseDraftVersion == nil {
+			replyDraftVersionPreconditionError(w, ErrDraftVersionRequired)
+			return nil, false
+		}
+		var humanArtifact orm.WorkflowHumanArtifact
+		if err := db.WithContext(r.Context()).
+			Select("draft_version").
+			Where("id = ?", *revision.HumanArtifactID).
+			First(&humanArtifact).Error; err != nil {
+			common.ReplyErr(w, "artifact draft version lookup failed", http.StatusInternalServerError)
+			return nil, false
+		}
+		if humanArtifact.DraftVersion != *baseDraftVersion {
+			replyDraftVersionPreconditionError(w, ErrDraftVersionConflict)
+			return nil, false
+		}
 	}
 	return &artifactActionTarget{
 		db: db, session: session, revision: revision, artifact: artifact,
