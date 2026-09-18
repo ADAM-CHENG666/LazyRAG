@@ -13,7 +13,6 @@ import (
 	"lazymind/core/common"
 	"lazymind/core/common/orm"
 	"lazymind/core/store"
-	"lazymind/core/workflow/artifactgraph"
 	"lazymind/core/workflow/controlstore"
 	"lazymind/core/workflow/executor"
 	"lazymind/core/workflow/graphengine"
@@ -349,11 +348,11 @@ func persistRouteDecision(ctx context.Context, db *gorm.DB, sessionID, from, att
 
 func freezeRouteDecision(ctx context.Context, db *gorm.DB, sessionID, from, taskID string) error {
 	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		session, err := artifactgraph.LockSession(tx, sessionID)
-		if err != nil {
+		var session orm.WorkflowSession
+		if err := tx.Where("id = ?", sessionID).First(&session).Error; err != nil {
 			return err
 		}
-		graph, err := loadSessionGraph(ctx, tx, session)
+		graph, err := loadSessionGraph(ctx, tx, &session)
 		if err != nil {
 			return err
 		}
@@ -364,7 +363,7 @@ func freezeRouteDecision(ctx context.Context, db *gorm.DB, sessionID, from, task
 		decision := graphengine.DecideRoute(graph, from, snapshot.Materials)
 		var attempt orm.WorkflowSessionStep
 		if err := tx.Select("id", "result_json").Where(
-			"session_id = ? AND step_id = ? AND (task_id = ? OR id = ?) AND validity = ?", sessionID, from, taskID, taskID, "effective",
+			"session_id = ? AND step_id = ? AND (task_id = ? OR id = ?)", sessionID, from, taskID, taskID,
 		).First(&attempt).Error; err != nil {
 			return err
 		}
@@ -388,7 +387,7 @@ func freezeRouteDecision(ctx context.Context, db *gorm.DB, sessionID, from, task
 		if err := persistRouteDecision(ctx, tx, sessionID, from, attempt.ID, decision.Activated, decision.Pruned, decision.Bypassed, decision.Witnesses, session.StateVersion); err != nil {
 			return err
 		}
-		return reconcileSessionProjection(ctx, tx, session)
+		return reconcileSessionProjection(ctx, tx, &session)
 	})
 }
 

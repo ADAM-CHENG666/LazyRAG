@@ -373,7 +373,6 @@ func (h Handler) ListArtifacts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for index := range values {
-		h.Store.DescribeArtifact(r.Context(), owner, &values[index], strings.TrimSpace(r.Header.Get("X-LazyMind-External-Ref")) == "")
 		values[index].Value = artifactfile.Metadata(values[index].Value)
 	}
 	writeJSON(w, http.StatusOK, envelope{Data: map[string]any{"artifacts": values}})
@@ -397,7 +396,6 @@ func (h Handler) ReadArtifact(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusServiceUnavailable, "ARTIFACT_READ_FAILED", err.Error(), true)
 		return
 	}
-	h.Store.DescribeArtifact(r.Context(), owner, &value, strings.TrimSpace(r.Header.Get("X-LazyMind-External-Ref")) == "")
 	value.Value, err = artifactfile.Inline(value.Value)
 	if err != nil {
 		fail(w, http.StatusServiceUnavailable, "ARTIFACT_READ_FAILED", err.Error(), true)
@@ -411,16 +409,12 @@ func (h Handler) PatchArtifact(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 20<<20)
 	var body struct {
-		NumberingUpdate  json.RawMessage `json:"numbering_update"`
-		Mode             string          `json:"mode"`
-		BaseDraftVersion *int64          `json:"base_draft_version"`
-		BaseRevision     int             `json:"base_revision"`
-		ContentType      string          `json:"content_type"`
-		Value            json.RawMessage `json:"value"`
-		Caption          *string         `json:"caption"`
-		CommandID        string          `json:"command_id"`
+		BaseRevision int             `json:"base_revision"`
+		ContentType  string          `json:"content_type"`
+		Value        json.RawMessage `json:"value"`
+		Caption      *string         `json:"caption"`
+		CommandID    string          `json:"command_id"`
 	}
 	if json.NewDecoder(r.Body).Decode(&body) != nil || body.BaseRevision < 1 || len(body.Value) == 0 {
 		fail(w, http.StatusUnprocessableEntity, "INVALID_ARTIFACT_PATCH", "base_revision and value are required", false)
@@ -436,65 +430,14 @@ func (h Handler) PatchArtifact(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusUnprocessableEntity, "IDEMPOTENCY_KEY_REQUIRED", "command_id is required", false)
 		return
 	}
-	if body.Mode != "" || len(body.NumberingUpdate) > 0 {
-		if body.Mode == "" {
-			body.Mode = "checkpoint"
-		}
-		if body.Mode != "draft" && body.Mode != "checkpoint" {
-			fail(w, 400, "INVALID_ARTIFACT_PATCH", "invalid save mode", false)
-			return
-		}
-		revision, err := workflowcore.SaveDocumentArtifactValue(r.Context(), h.Store.Database(), owner, mux.Vars(r)["artifact_id"], body.BaseRevision, body.BaseDraftVersion, body.ContentType, body.Value, body.Caption, body.Mode == "draft", body.NumberingUpdate)
-		if err != nil {
-			code, status := "ARTIFACT_PATCH_FAILED", 500
-			if err.Error() == "ARTIFACT_NOT_FOUND" {
-				code, status = "ARTIFACT_NOT_FOUND", 404
-			}
-			switch {
-			case errors.Is(err, workflowcore.ErrDraftVersionRequired):
-				code, status = "DRAFT_VERSION_REQUIRED", 400
-			case errors.Is(err, workflowcore.ErrDraftVersionConflict):
-				code, status = "DRAFT_VERSION_CONFLICT", 409
-			case errors.Is(err, workflowcore.ErrConflict):
-				code, status = "ARTIFACT_REVISION_CONFLICT", 409
-			case errors.Is(err, workflowcore.ErrArtifactInUse):
-				code, status = "ARTIFACT_IN_USE", 409
-			}
-			fail(w, status, code, "artifact save failed", false)
-			return
-		}
-		artifact, err := h.Store.ReadArtifact(r.Context(), owner, revision.ID)
-		if err != nil {
-			fail(w, 500, "ARTIFACT_PATCH_FAILED", "artifact read failed", false)
-			return
-		}
-		writeJSON(w, 200, envelope{Data: artifact})
-		return
-	}
 	value, err := h.Store.PatchArtifact(r.Context(), owner, mux.Vars(r)["artifact_id"],
-		body.BaseRevision, body.ContentType, body.Value, body.Caption, body.CommandID, body.BaseDraftVersion)
-	if errors.Is(err, workflowstore.ErrPermissionDenied) || errors.Is(err, workflowstore.ErrNotFound) {
-		fail(w, 404, "ARTIFACT_NOT_FOUND", "artifact not found", false)
-		return
-	}
-	if errors.Is(err, workflowstore.ErrDraftVersionRequired) {
-		fail(w, 400, "DRAFT_VERSION_REQUIRED", "base_draft_version is required", false)
-		return
-	}
-	if errors.Is(err, workflowstore.ErrDraftVersionConflict) {
-		fail(w, 409, "DRAFT_VERSION_CONFLICT", "draft version changed", false)
-		return
-	}
-	if errors.Is(err, workflowstore.ErrArtifactInUse) {
-		fail(w, http.StatusConflict, "ARTIFACT_IN_USE", "artifact is in use by a running workflow attempt", false)
-		return
-	}
+		body.BaseRevision, body.ContentType, body.Value, body.Caption, body.CommandID)
 	if errors.Is(err, workflowstore.ErrIdempotencyConflict) {
 		fail(w, http.StatusConflict, "ARTIFACT_REVISION_CONFLICT", "artifact revision is no longer selected", false)
 		return
 	}
 	if err != nil {
-		fail(w, http.StatusServiceUnavailable, "ARTIFACT_PATCH_FAILED", "artifact patch failed", true)
+		fail(w, http.StatusServiceUnavailable, "ARTIFACT_PATCH_FAILED", err.Error(), true)
 		return
 	}
 	writeJSON(w, http.StatusOK, envelope{Data: value})
@@ -522,10 +465,6 @@ func (h Handler) DeleteArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	value, err := h.Store.DeleteArtifact(r.Context(), owner, mux.Vars(r)["artifact_id"],
 		body.BaseRevision, body.CommandID)
-	if errors.Is(err, workflowstore.ErrArtifactInUse) {
-		fail(w, http.StatusConflict, "ARTIFACT_IN_USE", "artifact is in use by a running workflow attempt", false)
-		return
-	}
 	if errors.Is(err, workflowstore.ErrIdempotencyConflict) {
 		fail(w, http.StatusConflict, "ARTIFACT_REVISION_CONFLICT", "artifact revision is no longer selected", false)
 		return

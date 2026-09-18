@@ -467,10 +467,10 @@ describe("task center workflow events", () => {
     },
   );
 
-  it.each(['workflow_runtime_updated', 'step_waiting', 'workflow_completed', 'workflow_error', 'step_partial_done'])("does not refresh the Panel from conversation %s events", async (type) => {
+  it("does not refresh the Panel from conversation runtime events", async () => {
     useTaskCenterStore.getState().subscribeConvEvents("conversation-1");
     emitConversationEvent({
-      type,
+      type: "workflow_runtime_updated",
       payload: { task_id: "workflow-task-1", change: "artifact" },
     });
     await vi.advanceTimersByTimeAsync(100);

@@ -24,7 +24,6 @@ import (
 	"lazymind/core/workflow/artifactfile"
 	"lazymind/core/workflow/attempt"
 	"lazymind/core/workflow/controlstore"
-	"lazymind/core/workflow/document"
 )
 
 var unsafeArtifactFilename = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
@@ -53,12 +52,6 @@ type remoteEnvelope struct {
 	OK              bool           `json:"ok"`
 	Data            any            `json:"data,omitempty"`
 	Error           map[string]any `json:"error,omitempty"`
-}
-
-type attemptInputReadError struct {
-	Status  int
-	Code    string
-	Message string
 }
 
 func remoteReply(w http.ResponseWriter, status int, data any, code, message string) {
@@ -149,9 +142,9 @@ func (h RemoteHandler) Input(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]map[string]any, 0, len(bindings))
 	for _, binding := range bindings {
-		item, readErr := h.readAttemptInput(r.Context(), materialID, binding)
-		if readErr != nil {
-			remoteReply(w, readErr.Status, nil, readErr.Code, readErr.Message)
+		item, message := h.readAttemptInput(r.Context(), materialID, binding)
+		if message != "" {
+			remoteReply(w, 404, nil, "ATTEMPT_INPUT_NOT_FOUND", message)
 			return
 		}
 		items = append(items, item)
@@ -163,16 +156,7 @@ func (h RemoteHandler) Input(w http.ResponseWriter, r *http.Request) {
 	remoteReply(w, 200, map[string]any{"material_id": materialID, "items": items}, "", "")
 }
 
-func (h RemoteHandler) readAttemptInput(
-	ctx context.Context,
-	materialID string,
-	binding map[string]any,
-) (map[string]any, *attemptInputReadError) {
-	notFound := func(message string) (map[string]any, *attemptInputReadError) {
-		return nil, &attemptInputReadError{
-			Status: http.StatusNotFound, Code: "ATTEMPT_INPUT_NOT_FOUND", Message: message,
-		}
-	}
+func (h RemoteHandler) readAttemptInput(ctx context.Context, materialID string, binding map[string]any) (map[string]any, string) {
 	resourceID, _ := binding["source_id"].(string)
 	if binding["source_type"] == "artifact" {
 		var revision orm.WorkflowSlotRevision
@@ -181,21 +165,11 @@ func (h RemoteHandler) readAttemptInput(
 			_ = h.DB.WithContext(ctx).Where("id = ?", resourceID).First(&revision).Error
 		}
 		if revision.ID == "" {
-			return notFound("artifact revision was not found")
+			return nil, "artifact revision was not found"
 		}
 		var artifact orm.WorkflowHumanArtifact
 		if revision.HumanArtifactID == nil || h.DB.WithContext(ctx).Where("id = ?", *revision.HumanArtifactID).First(&artifact).Error != nil {
-			return notFound("artifact value was not found")
-		}
-		expectedHash, _ := binding["content_hash"].(string)
-		if expectedHash = strings.TrimSpace(expectedHash); expectedHash != "" {
-			actualHash := fmt.Sprintf("sha256:%x", sha256.Sum256(artifact.Value))
-			if actualHash != expectedHash {
-				return nil, &attemptInputReadError{
-					Status: http.StatusConflict, Code: "ATTEMPT_INPUT_CHANGED",
-					Message: "artifact input changed after the Attempt was bound",
-				}
-			}
+			return nil, "artifact value was not found"
 		}
 		if artifact.ContentType == "file" || artifact.ContentType == "image" {
 			var file struct {
@@ -203,7 +177,7 @@ func (h RemoteHandler) readAttemptInput(
 				Path     string `json:"path"`
 			}
 			if json.Unmarshal(artifact.Value, &file) != nil || file.Path == "" {
-				return notFound("artifact file path was not found")
+				return nil, "artifact file path was not found"
 			}
 			// Web-found images and public static-file references are durable artifact
 			// values, not paths in Core's filesystem. Return their metadata unchanged
@@ -214,11 +188,11 @@ func (h RemoteHandler) readAttemptInput(
 				return map[string]any{"material_id": materialID,
 					"resource_id": revision.ID, "revision": revision.Revision, "name": revision.Slot + ".json",
 					"mime_type": "application/json", "size": len(artifact.Value),
-					"content_base64": base64.StdEncoding.EncodeToString(artifact.Value)}, nil
+					"content_base64": base64.StdEncoding.EncodeToString(artifact.Value)}, ""
 			}
 			content, readErr := os.ReadFile(file.Path)
 			if readErr != nil {
-				return notFound("artifact file was not found")
+				return nil, "artifact file was not found"
 			}
 			name := file.Filename
 			if name == "" {
@@ -231,36 +205,21 @@ func (h RemoteHandler) readAttemptInput(
 			return map[string]any{"material_id": materialID,
 				"resource_id": revision.ID, "revision": revision.Revision, "name": name,
 				"mime_type": mediaType, "size": len(content),
-				"content_base64": base64.StdEncoding.EncodeToString(content)}, nil
-		}
-		// Editor revisions store Markdown inline. Export the document bytes, not
-		// the persistence envelope, so file consumers retain the .md contract.
-		contentType := strings.ToLower(strings.TrimSpace(strings.SplitN(artifact.ContentType, ";", 2)[0]))
-		if contentType == "text/markdown" || contentType == "markdown" {
-			content, failure := document.ReadContent(artifact.Value, artifact.ContentType, func() (bool, error) { return false, nil })
-			var markdown string
-			if failure != nil || content == nil || content.Representation != "markdown" || json.Unmarshal(content.Value, &markdown) != nil {
-				return nil, &attemptInputReadError{Status: http.StatusUnprocessableEntity,
-					Code: "ATTEMPT_INPUT_INVALID", Message: "Markdown artifact input is invalid"}
-			}
-			return map[string]any{"material_id": materialID,
-				"resource_id": revision.ID, "revision": revision.Revision, "name": revision.Slot + ".md",
-				"mime_type": "text/markdown", "size": len(markdown),
-				"content_base64": base64.StdEncoding.EncodeToString([]byte(markdown))}, nil
+				"content_base64": base64.StdEncoding.EncodeToString(content)}, ""
 		}
 		return map[string]any{"material_id": materialID,
 			"resource_id": revision.ID, "revision": revision.Revision, "name": revision.Slot + ".json",
 			"mime_type": "application/json", "size": len(artifact.Value),
-			"content_base64": base64.StdEncoding.EncodeToString(artifact.Value)}, nil
+			"content_base64": base64.StdEncoding.EncodeToString(artifact.Value)}, ""
 	}
 	var resource orm.WorkflowInputResource
 	if err := h.DB.WithContext(ctx).Where("id = ?", resourceID).First(&resource).Error; err != nil {
-		return notFound("input resource was not found")
+		return nil, "input resource was not found"
 	}
 	return map[string]any{"material_id": materialID, "resource_id": resource.ID,
 		"revision": resource.Revision, "name": resource.Name, "mime_type": resource.MimeType,
 		"size": resource.Size, "content_hash": resource.ContentHash,
-		"content_base64": base64.StdEncoding.EncodeToString(resource.Content)}, nil
+		"content_base64": base64.StdEncoding.EncodeToString(resource.Content)}, ""
 }
 
 func (h RemoteHandler) SaveArtifact(w http.ResponseWriter, r *http.Request) {

@@ -38,15 +38,12 @@ type AttemptContext struct {
 	Metadata                map[string]string   `json:"metadata,omitempty"`
 }
 
-// AttemptArtifact distinguishes executor output from persisted document artifacts in OpenAPI.
-type AttemptArtifact struct {
+type Artifact struct {
 	Slot        string          `json:"slot"`
 	ContentType string          `json:"content_type"`
 	Value       json.RawMessage `json:"value"`
 	Seq         int             `json:"seq"`
 }
-
-type Artifact = AttemptArtifact
 
 type Control struct {
 	NextStep string `json:"next_step,omitempty"`
