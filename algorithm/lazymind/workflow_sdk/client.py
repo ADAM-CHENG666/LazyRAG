@@ -334,8 +334,8 @@ class WorkflowClient:
         ))
 
     def complete_execution(self, session_id: str, execution_id: str, execution_handle: str,
-                         *, outcome: str,
-                         summary: str = '', error_code: str = '', executor_ref: str = '') -> WorkflowResponse:
+                           *, outcome: str,
+                           summary: str = '', error_code: str = '', executor_ref: str = '') -> WorkflowResponse:
         """Complete with the caller's exact handle; preserve Core's fixed receipt and current control."""
         if not execution_handle:
             raise WorkflowClientError('EXECUTION_HANDLE_REQUIRED', 'execution_handle is required')
