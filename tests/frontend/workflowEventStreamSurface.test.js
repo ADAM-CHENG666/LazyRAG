@@ -20,7 +20,7 @@ describe('Workflow Panel live update surface', () => {
     expect(store).toContain('watchWorkflowRun');
   });
 
-  it('keeps conversation SSE from driving Panel slot refresh except session creation', () => {
+  it('keeps conversation runtime events from driving Panel slot refresh', () => {
     const taskStore = read('frontend/src/modules/chat/store/taskCenter.ts');
     expect(taskStore).toContain('_convStream: SSE | null');
     expect(taskStore).not.toContain('_convStreams:');
@@ -28,8 +28,11 @@ describe('Workflow Panel live update surface', () => {
     expect(taskStore).toContain("type === 'workflow_session_created'");
     expect(taskStore).toContain('scheduleWorkflowSessionRefresh(conversationId');
     expect(taskStore).not.toContain("type === 'workflow_completed' ? 800 : 100");
+    // Legacy artifact/intent events below this block still require a snapshot
+    // refresh; they are not runtime notifications from the Workflow stream.
     const runtimeRefresh = taskStore.split("type === 'workflow_runtime_updated'")[1]
-      ?.split("type === 'workflow_session_created'")[0] ?? '';
+      ?.split("type === 'step_partial_done'")[0] ?? '';
+    expect(runtimeRefresh).toContain('WORKFLOW_GRAPH_REFRESH_EVENT');
     expect(runtimeRefresh).not.toContain('scheduleWorkflowSessionRefresh');
   });
 
