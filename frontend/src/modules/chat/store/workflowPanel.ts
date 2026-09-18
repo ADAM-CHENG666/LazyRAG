@@ -85,7 +85,7 @@ export const draftStore = {
    *  apiListIndex: the list_index to use for the backend PATCH call.
    *  Pass -1 for single (non-list) slots. Defaults to listIndex when omitted.
    */
-  setDraft(sessionId: string, slotId: string, listIndex: number, value: Record<string, unknown>, apiListIndex?: number) {
+  setDraft(sessionId: string, slotId: string, listIndex: number, value: Record<string, unknown>, apiListIndex?: number, manualSave = false) {
     const key = _draftKey(sessionId, slotId, listIndex);
     const existing = _drafts.get(key);
     if (existing?.timer) clearTimeout(existing.timer);
@@ -93,10 +93,12 @@ export const draftStore = {
       localStorage.setItem(DRAFT_LS_PREFIX + key, JSON.stringify(value));
     } catch { /* storage full — ignore */ }
     const effectiveApiIndex = apiListIndex ?? existing?.apiListIndex ?? listIndex;
-    const timer = setTimeout(() => {
-      draftStore.flushDraft(sessionId, slotId, listIndex, effectiveApiIndex);
+    const timer = manualSave ? undefined : setTimeout(() => {
+      void draftStore.flushDraft(sessionId, slotId, listIndex, effectiveApiIndex).catch(() => {
+        // Keep the draft for an explicit retry if a background save fails.
+      });
     }, DRAFT_FLUSH_DELAY_MS);
-    _drafts.set(key, { value, timer, apiListIndex: effectiveApiIndex });
+    _drafts.set(key, { value, timer: timer ?? null, apiListIndex: effectiveApiIndex });
   },
 
   /** Clear timer and call patchSlotItemValue to produce a human revision. Does NOT clear localStorage.
@@ -144,9 +146,7 @@ export const draftStore = {
       }
     }
 
-    try {
-      await WorkflowSessionApi().patchSlotItem(sessionId, slotId, targetIndex, patchValue);
-    } catch { /* best-effort — ignore */ }
+    await WorkflowSessionApi().patchSlotItem(sessionId, slotId, targetIndex, patchValue);
     _drafts.delete(key);
     try { localStorage.removeItem(DRAFT_LS_PREFIX + key); } catch { /* ignore */ }
   },
@@ -234,6 +234,7 @@ export interface SlotRevision {
 }
 
 export interface WorkflowSession {
+  edit_paused?: boolean;
   session_id: string;
   state_version?: number;
   conversation_id: string;

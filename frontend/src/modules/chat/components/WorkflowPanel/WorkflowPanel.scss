@@ -167,6 +167,47 @@
       max-height: 100%;
     }
 
+    // A single Markdown result (for example the PPT outline) fills the same
+    // resizable workspace as a writer document, including the version footer.
+    .workflow-panel__tab-content--list:has(> .workflow-panel__named-slot--single-markdown:only-child) {
+      overflow: hidden;
+    }
+
+    .workflow-panel__named-slot--single-markdown:only-child {
+      flex: 1 1 0;
+      min-height: 0;
+      overflow: hidden;
+
+      > [role='button'],
+      .workflow-slot--text,
+      .writer-markdown-editor {
+        display: flex;
+        flex-direction: column;
+        flex: 1 1 0;
+        min-height: 0;
+        min-width: 0;
+        max-height: none;
+        overflow: hidden;
+      }
+
+      .writer-markdown-editor__document-layout {
+        flex: 1 1 0;
+        grid-template-rows: minmax(0, 1fr);
+        align-items: stretch;
+      }
+
+      .writer-markdown-editor__surface {
+        max-height: none;
+        overflow-y: auto;
+      }
+
+      .workflow-panel__slot-header,
+      .workflow-slot--text > :not(.writer-markdown-editor),
+      .writer-markdown-editor__display-toolbar {
+        flex-shrink: 0;
+      }
+    }
+
     // Composite cells size themselves from their content. Let the grid own
     // scrolling instead of assigning flex-basis: 0 to the editor inside an
     // auto-height cell, which collapses persisted Markdown to one line.

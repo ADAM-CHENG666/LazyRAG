@@ -5,7 +5,7 @@
   display: flex;
   flex-direction: column;
   min-height: 0;
-  max-height: 620px;
+  max-height: var(--writer-markdown-max-height, 620px);
   border: 1px solid var(--color-border, #d9dce3);
   border-radius: 8px;
   overflow: hidden;
@@ -966,4 +966,21 @@
 
 .mdxeditor-popup-container {
   z-index: 1300;
+}
+
+// A capped editor must shrink its inner scrollport rather than clip the last
+// lines outside it. This also applies when workflow YAML supplies maxHeight.
+.writer-markdown-editor:not(.writer-markdown-editor--chat) .writer-markdown-editor__document-layout {
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+.writer-markdown-editor:not(.writer-markdown-editor--chat) .writer-markdown-editor__main {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+.writer-markdown-editor:not(.writer-markdown-editor--chat) .writer-markdown-editor__surface {
+  flex: 1 1 auto;
 }

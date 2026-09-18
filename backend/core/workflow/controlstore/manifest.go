@@ -146,37 +146,28 @@ func RefreshReviews(tx *gorm.DB, session *orm.WorkflowSession) error {
 }
 
 func GuardMaterialEdit(tx *gorm.DB, session orm.WorkflowSession, slot string) error {
-	if !Controlled(session) {
-		return nil
+	if session.Dismissed {
+		return Reject("SESSION_STOPPED", "workflow has been dismissed")
 	}
-	if session.Status == "stopped" || session.Dismissed {
-		return Reject("SESSION_STOPPED", "resume the workflow before editing")
-	}
-	var reviews []orm.WorkflowReviewCheckpoint
-	if err := tx.Where("session_id = ? AND status IN ?", session.ID, []string{"pending", "accepted"}).Order("created_at DESC").Find(&reviews).Error; err != nil {
+	// Never edit a producer's partial output while it still owns publication.
+	var active int64
+	if err := tx.Model(&orm.WorkflowSessionStep{}).Where("session_id = ? AND validity = 'effective' AND status IN ? AND step_id IN (?)", session.ID, []string{"pending", "queued", "claimed", "running"}, tx.Model(&orm.WorkflowSlotRevision{}).Select("step_id").Where("session_id = ? AND slot_id = ? AND selected = ?", session.ID, slot, true)).Count(&active).Error; err != nil {
 		return err
 	}
-	for _, review := range reviews {
-		var slots []string
-		if err := json.Unmarshal([]byte(review.SlotsJSON), &slots); err != nil {
+	if active > 0 {
+		return Reject("EXECUTION_ACTIVE", "stop this step before editing its output")
+	}
+	if Controlled(session) && session.Status == "stopped" {
+		binding, err := DecodeBinding(session)
+		if err != nil {
 			return err
 		}
-		for _, s := range slots {
-			if s != slot {
-				continue
-			}
-			if review.Status == "pending" {
-				return nil
-			}
-			var fresh int64
-			if err := tx.Model(&orm.WorkflowSessionStep{}).Where("session_id = ? AND step_id = ? AND validity = 'effective' AND id <> ? AND status IN ?",
-				session.ID, review.StepID, review.AttemptID, []string{"queued", "claimed", "running", "pending"}).Count(&fresh).Error; err != nil {
-				return err
-			}
-			if fresh == 0 {
-				return Reject("REVIEW_SEALED", "confirmed artifacts are immutable; retry or rewind this step before editing")
-			}
-			return nil
+		var pending int64
+		if err := tx.Model(&orm.WorkflowHostAction{}).Where("session_id = ? AND binding_generation = ? AND kind = 'cancel' AND status IN ?", session.ID, binding.Generation, []string{"pending", "dispatching", "unknown"}).Count(&pending).Error; err != nil {
+			return err
+		}
+		if pending > 0 {
+			return Reject("DELIVERY_PENDING", "wait for cancellation before editing")
 		}
 	}
 	return nil
@@ -193,9 +184,6 @@ func IsSealedRevision(tx *gorm.DB, sessionID, revisionID string) (bool, error) {
 		}
 		return false, err
 	}
-	if !Controlled(session) {
-		return false, nil
-	}
 	// An execution input is also immutable even when its producer ran in auto mode.
 	var consumers int64
 	if tx.Migrator().HasTable(&orm.WorkflowAttemptInputBinding{}) {
@@ -206,8 +194,11 @@ func IsSealedRevision(tx *gorm.DB, sessionID, revisionID string) (bool, error) {
 			return true, nil
 		}
 	}
+	if !Controlled(session) {
+		return false, nil
+	}
 	var reviews []orm.WorkflowReviewCheckpoint
-	if err := tx.Where("session_id = ? AND status = ?", sessionID, "accepted").Find(&reviews).Error; err != nil {
+	if err := tx.Where("session_id = ? AND status IN ?", sessionID, []string{"accepted", "pending"}).Find(&reviews).Error; err != nil {
 		return false, err
 	}
 	for _, review := range reviews {

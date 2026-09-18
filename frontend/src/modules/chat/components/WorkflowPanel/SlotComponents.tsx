@@ -1841,7 +1841,7 @@ export function SlotText({ slot, widget, sessionId, slotId, revisionCount, onRef
   const raw = slot.artifact_value;
   const isJsonBlock = widget?.widgetType === 'json-block';
   const { patchSlotCaption, patchSlotItemValue } = useWorkflowStore();
-  const { setEditing: notifyEditing } = useContext(SlotEditingContext);
+  const { setEditing: notifyEditing, registerFlush, manualSave } = useContext(SlotEditingContext);
   const editingKey = `${sessionId}:${slotId}:${slot.list_index ?? -1}`;
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
@@ -1948,15 +1948,16 @@ export function SlotText({ slot, widget, sessionId, slotId, revisionCount, onRef
     (!isOffloaded && (raw === undefined || raw === null));
 
   // On mount: restore localStorage draft only if it differs from the current artifact text.
-  // Also restart the 60s flush timer so the draft doesn't stay in localStorage forever.
+  // Workflow panels keep restored drafts local until the user saves.
   useEffect(() => {
     if (!canEdit || !sessionId || !slotId || showPending) return;
     const saved = draftStore.getLocalDraft(sessionId, slotId, effectiveListIndex);
     if (saved?.text !== undefined && String(saved.text) !== text) {
       setDraft(String(saved.text));
       setHasPendingDraft(true);
-      // Re-register with draftStore to restart the 60s flush timer lost on page reload.
-      draftStore.setDraft(sessionId, slotId, effectiveListIndex, saved, apiListIndex);
+      // Re-register the draft, preserving the panel's explicit-save policy.
+      draftStore.setDraft(sessionId, slotId, effectiveListIndex, saved, apiListIndex, manualSave);
+      notifyEditing(editingKey, true);
     } else if (saved?.text !== undefined) {
       draftStore.cancelDraft(sessionId, slotId, effectiveListIndex);
       setHasPendingDraft(false);
@@ -2021,7 +2022,7 @@ export function SlotText({ slot, widget, sessionId, slotId, revisionCount, onRef
           ? (raw as any).path.split('/').pop() ?? 'artifact.txt'
           : 'artifact.txt';
       }
-      draftStore.setDraft(sessionId, slotId, effectiveListIndex, draftPayload, apiListIndex);
+      draftStore.setDraft(sessionId, slotId, effectiveListIndex, draftPayload, apiListIndex, manualSave);
     }
   };
 
@@ -2039,7 +2040,7 @@ export function SlotText({ slot, widget, sessionId, slotId, revisionCount, onRef
             ? (raw as any).path.split('/').pop() ?? 'artifact.txt'
             : 'artifact.txt';
         }
-        draftStore.setDraft(sessionId, slotId, effectiveListIndex, draftPayload, apiListIndex);
+        draftStore.setDraft(sessionId, slotId, effectiveListIndex, draftPayload, apiListIndex, manualSave);
         setHasPendingDraft(true);
       } else {
         draftStore.cancelDraft(sessionId, slotId, effectiveListIndex);
@@ -2047,8 +2048,21 @@ export function SlotText({ slot, widget, sessionId, slotId, revisionCount, onRef
       }
     }
     setEditing(false);
-    notifyEditing(editingKey, false);
+    notifyEditing(editingKey, !!manualSave && draft !== text);
   };
+
+  useEffect(() => {
+    if (canEditMarkdown) return undefined;
+    return registerFlush(editingKey, async () => {
+      if (readOnly || !sessionId || !slotId) return true;
+      await draftStore.flushDraft(sessionId, slotId, effectiveListIndex, apiListIndex);
+      setHasPendingDraft(false);
+      setEditing(false);
+      notifyEditing(editingKey, false);
+      onRefresh?.();
+      return true;
+    });
+  }, [canEditMarkdown, editingKey, readOnly, sessionId, slotId, effectiveListIndex, apiListIndex, registerFlush, notifyEditing, onRefresh]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 's') {

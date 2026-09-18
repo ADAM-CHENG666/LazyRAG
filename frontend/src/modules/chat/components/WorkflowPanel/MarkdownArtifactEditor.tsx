@@ -561,7 +561,7 @@ export function MarkdownArtifactEditor({
 }: MarkdownArtifactEditorProps) {
   const { t } = useTranslation();
   const tabActive = useContext(WorkflowPanelTabActiveContext);
-  const { setEditing, registerFlush, registerFooterAction } = useContext(SlotEditingContext);
+  const { setEditing, registerFlush, registerFooterAction, manualSave, beforeSave } = useContext(SlotEditingContext);
   const chatPresentation = presentation === 'chat';
   const [baseMarkdown, setBaseMarkdown] = useState(() => normalizeMarkdownForMdxEditor(markdown));
   const [draftMarkdown, setDraftMarkdown] = useState(() => normalizeMarkdownForMdxEditor(markdown));
@@ -1096,6 +1096,8 @@ export function MarkdownArtifactEditor({
     numberingUpdate?: WriterNumberingUpdate,
   ): Promise<boolean> => {
     if (savingRef.current || readOnly) return false;
+    if (beforeSave && !(await beforeSave())) return false;
+    if (savingRef.current) return false;
     savingRef.current = true;
     setSaving(true);
     setSaveError(undefined);
@@ -1158,7 +1160,7 @@ export function MarkdownArtifactEditor({
       savingRef.current = false;
       setSaving(false);
     }
-  }, [onRefresh, onSave, readOnly, replaceMarkdownSilently, t]);
+  }, [onRefresh, onSave, readOnly, replaceMarkdownSilently, t, beforeSave]);
 
   const saveChanges = useCallback(async (mode: MarkdownSaveMode = 'draft'): Promise<boolean> => {
     if (!dirty || savingRef.current || readOnly) return false;
@@ -1168,7 +1170,7 @@ export function MarkdownArtifactEditor({
   saveChangesRef.current = saveChanges;
 
   useEffect(() => {
-    if (!chatPresentation || readOnly) return undefined;
+    if (manualSave || !chatPresentation || readOnly) return undefined;
     const flush = () => {
       if (
         dirtyRef.current
@@ -1190,14 +1192,14 @@ export function MarkdownArtifactEditor({
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       flush();
     };
-  }, [chatPresentation, readOnly]);
+  }, [chatPresentation, readOnly, manualSave]);
 
   useEffect(() => {
     if (autoSaveTimerRef.current !== undefined) {
       window.clearTimeout(autoSaveTimerRef.current);
       autoSaveTimerRef.current = undefined;
     }
-    if (!dirty || readOnly || saving || saveError || conflict) return undefined;
+    if (manualSave || !dirty || readOnly || saving || saveError || conflict) return undefined;
 
     autoSaveTimerRef.current = window.setTimeout(() => {
       autoSaveTimerRef.current = undefined;
@@ -1210,7 +1212,7 @@ export function MarkdownArtifactEditor({
         autoSaveTimerRef.current = undefined;
       }
     };
-  }, [conflict, dirty, draftMarkdown, readOnly, saveError, saving]);
+  }, [conflict, dirty, draftMarkdown, readOnly, saveError, saving, manualSave]);
 
   const useRemoteVersion = () => {
     if (!pendingSource || savingRef.current) return;
@@ -1493,7 +1495,7 @@ export function MarkdownArtifactEditor({
     } as CSSProperties
     : undefined;
   const editorStyle: CSSProperties | undefined = selectionToolbarStyle || maxHeight !== undefined
-    ? { ...selectionToolbarStyle, ...(maxHeight !== undefined ? { maxHeight } : {}) }
+    ? { ...selectionToolbarStyle, ...(maxHeight !== undefined ? { '--writer-markdown-max-height': `${maxHeight}px` } : {}) }
     : undefined;
 
   return (

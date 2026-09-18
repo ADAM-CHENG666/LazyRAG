@@ -22,7 +22,7 @@ export function WorkflowControlActions({ context, control, act }: {
   const settled = !executing && !deliveryBusy
     && ['awaiting_user', 'completed', 'failed'].includes(control.continuation);
   const canRetry = settled && !!latest && ['failed', 'interrupted', 'cancelled', 'canceled'].includes(latest.status);
-  const canRewind = control.continuation !== 'stopped' && latest?.status === 'succeeded';
+  const canRewind = latest?.status === 'succeeded';
   const showConfirmContinue = !!review && available.has('confirm_and_continue');
   // Confirm-only is the fallback when the host cannot be resumed from this panel.
   const showConfirmOnly = !!review && available.has('confirm') && !showConfirmContinue;
@@ -31,7 +31,6 @@ export function WorkflowControlActions({ context, control, act }: {
     <button type='button' className={`workflow-panel__action-btn workflow-panel__action-btn--${tone}`}
       disabled={context.pending || !enabled} onClick={() => perform(intent, flush)}>{label}</button>;
   return <>
-    {available.has('save') && context.dirty && button(t('chat.workflowControlSave'), { kind: 'save' }, true)}
     {showConfirmOnly && button(t('chat.workflowControlConfirm'), { kind: 'confirm', review }, true)}
     {showConfirmContinue && <>
       <label className='workflow-panel__footer-skip-approval'>
@@ -49,12 +48,13 @@ export function WorkflowControlActions({ context, control, act }: {
       description={t(executing ? 'chat.workflowRegenerateRunningConfirm' : 'chat.workflowRegenerateConfirm')}
       okText={t('chat.workflowControlRegenerate')}
       cancelText={t('chat.workflowRegenerateCancel')}
-      disabled={context.pending || !context.stepId}
+      disabled={context.pending || !context.stepId || (control.continuation === 'stopped' && deliveryBusy)}
       onConfirm={() => perform({ kind: 'rewind', stepId: context.stepId })}>
       <button type='button' className='workflow-panel__action-btn workflow-panel__action-btn--secondary'
-        disabled={context.pending || !context.stepId}>{t('chat.workflowControlRegenerate')}</button>
+        disabled={context.pending || !context.stepId || (control.continuation === 'stopped' && deliveryBusy)}>{t('chat.workflowControlRegenerate')}</button>
     </Popconfirm>}
     {executing && available.has('stop') && button(t('chat.workflowStop'), { kind: 'stop' }, true, 'danger', false)}
-    {control.continuation === 'stopped' && control.active_executions === 0 && available.has('resume') && button(t(deliveryBusy ? 'chat.workflowStopping' : 'chat.workflowContinue'), { kind: 'resume' }, !deliveryBusy, 'primary', false)}
+    {!review && !executing && control.continuation === 'awaiting_user' && available.has('continue') && button(t('chat.workflowContinue'), { kind: 'continue' }, !deliveryBusy, 'primary')}
+    {control.continuation === 'stopped' && control.active_executions === 0 && available.has('resume') && button(t(deliveryBusy ? 'chat.workflowStopping' : 'chat.workflowContinue'), { kind: 'resume' }, !deliveryBusy, 'primary')}
   </>;
 }

@@ -118,7 +118,7 @@ func TestDeleteArtifactCreatesTombstoneAndPreservesHistory(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 	if err := repo.db.AutoMigrate(&orm.WorkflowSession{}, &orm.WorkflowHumanArtifact{},
-		&orm.WorkflowSlotRevision{}); err != nil {
+		&orm.WorkflowSlotRevision{}, &orm.WorkflowSessionStep{}, &orm.WorkflowAttemptInputBinding{}, &orm.WorkflowRouteDecision{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := repo.db.Create(&orm.WorkflowSession{ID: "s1", CreateUserID: "u1",

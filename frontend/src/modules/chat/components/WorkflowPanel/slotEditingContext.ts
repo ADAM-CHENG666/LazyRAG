@@ -27,6 +27,8 @@ export interface SlotFooterAction {
 }
 
 export interface SlotEditingContextValue {
+  manualSave?: boolean;
+  beforeSave?: () => Promise<boolean>;
   setEditing: (key: string, editing: boolean) => void;
   registerFlush: (key: string, flush: () => Promise<boolean>) => () => void;
   registerFooterAction: (key: string, action: SlotFooterAction | null) => () => void;

@@ -39,6 +39,7 @@ func (e *Error) Error() string          { return e.Code + ": " + e.Message }
 func Reject(code, message string) error { return &Error{Code: code, Message: message} }
 
 type Binding struct {
+	EditPaused     bool   `json:"edit_paused,omitempty"`
 	Required       bool   `json:"required"`
 	Provider       string `json:"provider,omitempty"`
 	ConnectorID    string `json:"connector_id,omitempty"`
@@ -156,6 +157,10 @@ func Read(tx *gorm.DB, session orm.WorkflowSession) (*Snapshot, error) {
 	result.Continuation, result.Admission = controlpolicy.Decide(controlpolicy.Facts{Status: session.Status,
 		Dismissed: session.Dismissed, PendingReviews: pending, ActiveAttempts: result.ActiveExecutions, NativeAttempts: int64(len(result.NativeExecutionIDs)),
 		BindingRequired: binding.Required, Bound: result.Binding.Bound})
+	if binding.EditPaused && session.Status != "stopped" {
+		result.Continuation = "awaiting_user"
+		result.Admission = controlpolicy.Admission{Reason: "edits_pending_continue"}
+	}
 	var action orm.WorkflowHostAction
 	err = tx.Where("session_id = ? AND binding_generation = ?", session.ID, binding.Generation).Order("created_at DESC, id DESC").First(&action).Error
 	if err == nil {
@@ -167,8 +172,9 @@ func Read(tx *gorm.DB, session orm.WorkflowSession) (*Snapshot, error) {
 		if session.Status != "completed" {
 			result.AvailableActions = append(result.AvailableActions, "stop")
 		}
+		result.AvailableActions = append(result.AvailableActions, "save")
 		if pending > 0 {
-			result.AvailableActions = append(result.AvailableActions, "save", "confirm")
+			result.AvailableActions = append(result.AvailableActions, "confirm")
 		}
 		result.AvailableActions = append(result.AvailableActions, "rewind")
 		if result.ActiveExecutions == 0 {
@@ -177,18 +183,21 @@ func Read(tx *gorm.DB, session orm.WorkflowSession) (*Snapshot, error) {
 				if pending == 1 {
 					result.AvailableActions = append(result.AvailableActions, "confirm_and_continue")
 				}
-				if pending == 0 && session.Status != "completed" && session.Status != "failed" {
+				if pending == 0 && (binding.EditPaused || session.Status != "completed" && session.Status != "failed") {
 					result.AvailableActions = append(result.AvailableActions, "continue")
 				}
 			}
 		}
 	} else if !session.Dismissed {
-		result.AvailableActions = append(result.AvailableActions, "resume")
+		result.AvailableActions = append(result.AvailableActions, "resume", "save", "rewind")
 	}
 	return result, nil
 }
 
 func GuardBegin(tx *gorm.DB, session orm.WorkflowSession) error {
+	if EditPaused(session) {
+		return Reject("EDITS_PENDING_CONTINUE", "continue explicitly after saving edits")
+	}
 	if session.Status == "stopped" || session.Dismissed {
 		return Reject("SESSION_STOPPED", "the workflow is stopped")
 	}

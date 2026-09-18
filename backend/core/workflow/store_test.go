@@ -30,6 +30,8 @@ func newTestDB(t *testing.T) *orm.DB {
 		&orm.WorkflowEvent{},
 		&orm.WorkflowSlotOrder{},
 		&orm.WorkflowStepIntent{},
+		&orm.WorkflowAttemptInputBinding{},
+		&orm.WorkflowRouteDecision{},
 	}
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("TEST_DB_DRIVER")), orm.DriverPostgres) {
 		return orm.MigrateTestDB(t, models...)
@@ -576,6 +578,10 @@ func TestLoadDisplaySlots_IncludesLatestRevisionPerStep(t *testing.T) {
 		t.Fatalf("expected historical display rows to remain unselected")
 	}
 
+	// Version selection is a human edit and requires settled producers.
+	if err := db.Model(&orm.WorkflowSessionStep{}).Where("session_id = ?", "ps-display").Update("status", "succeeded").Error; err != nil {
+		t.Fatal(err)
+	}
 	outlineRev := byStep["generate_outline"].Revision
 	if _, err := RollbackSlotRevision(ctx, db.DB,
 		"ps-display", "writing_context_slot", nil, outlineRev, "test"); err != nil {

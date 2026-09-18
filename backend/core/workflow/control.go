@@ -67,7 +67,10 @@ func (s WorkflowControlService) Execute(ctx context.Context, owner, sessionID st
 	digest := controlstore.Hash(body)
 	err = controlstore.Transaction(ctx, s.DB, sessionID, func(tx *gorm.DB, session *orm.WorkflowSession) error {
 		if err := controlOwner(*session, owner); err != nil {
-			return err
+			// Native chat sessions share explicit continuation and regeneration commands.
+			if owner == "" || owner != session.CreateUserID || (command.Kind != "continue" && command.Kind != "rewind" && command.Kind != "retry") {
+				return err
+			}
 		}
 		var saved orm.WorkflowCommand
 		if err := tx.Where("command_id = ?", command.CommandID).First(&saved).Error; err == nil {
@@ -115,6 +118,9 @@ func (s WorkflowControlService) Execute(ctx context.Context, owner, sessionID st
 			}
 
 		case "confirm", "confirm_and_continue":
+			if err := controlstore.ClearEditPause(tx, session); err != nil {
+				return err
+			}
 			if err := confirmWorkflowReview(ctx, tx, session, owner, command); err != nil {
 				return err
 			}
@@ -134,11 +140,33 @@ func (s WorkflowControlService) Execute(ctx context.Context, owner, sessionID st
 				}
 			}
 		case "continue":
+			wasEditPaused := controlstore.EditPaused(*session)
+			if !controlstore.Controlled(*session) && !wasEditPaused {
+				return controlstore.Reject("CONTROL_PROTOCOL_REQUIRED", "native continuation requires saved edits")
+			}
+			if err := controlstore.ClearEditPause(tx, session); err != nil {
+				return err
+			}
+			if wasEditPaused && !controlstore.Controlled(*session) {
+				if err := ensureNoActiveAttempts(tx, session.ID); err != nil {
+					return err
+				}
+				if err := resumeWorkflowExecution(ctx, tx, session, command.CommandID, &result.Receipt); err != nil {
+					return err
+				}
+				break
+			}
 			if err := controlstore.GuardBegin(tx, *session); err != nil {
 				return err
 			}
 			if err := ensureNoActiveAttempts(tx, session.ID); err != nil {
 				return err
+			}
+			if wasEditPaused {
+				if err := resumeWorkflowExecution(ctx, tx, session, command.CommandID, &result.Receipt); err != nil {
+					return err
+				}
+				break
 			}
 			// This explicit user action supersedes completed-execution notifications,
 			// but must not replay an earlier user continuation with an unknown outcome.
@@ -154,7 +182,12 @@ func (s WorkflowControlService) Execute(ctx context.Context, owner, sessionID st
 			}
 		case "retry", "rewind":
 			if session.Status == "stopped" {
-				return controlstore.Reject("SESSION_STOPPED", "resume before retrying")
+				if _, _, err := controlstore.ApplyLifecycle(tx, session, command.CommandID, false); err != nil {
+					return err
+				}
+			}
+			if err := controlstore.ClearEditPause(tx, session); err != nil {
+				return err
 			}
 			if command.StepID == "" {
 				return controlstore.Reject("INVALID_COMMAND", "step_id is required for recovery")
@@ -207,6 +240,9 @@ func (s WorkflowControlService) Execute(ctx context.Context, owner, sessionID st
 				return err
 			}
 			if command.Kind == "resume" {
+				if err := controlstore.ClearEditPause(tx, session); err != nil {
+					return err
+				}
 				if err := resumeWorkflowExecution(ctx, tx, session, command.CommandID, &result.Receipt); err != nil {
 					return err
 				}
@@ -244,6 +280,20 @@ func resumeWorkflowExecution(ctx context.Context, tx *gorm.DB, session *orm.Work
 		}
 		receipt.ResumeReason = state.Continuation
 		return nil
+	}
+	// A material edit can invalidate a conditional route without invalidating
+	// the successful producer. Re-evaluate it against the new selected revisions.
+	var succeeded []orm.WorkflowSessionStep
+	if err := tx.Where("session_id = ? AND validity = 'effective' AND status = 'succeeded'", session.ID).Find(&succeeded).Error; err != nil {
+		return err
+	}
+	for _, attempt := range succeeded {
+		if err := FinalizeHostAttempt(ctx, tx, session.ID, attempt.StepID, attempt.ID, "succeeded"); err != nil {
+			return err
+		}
+	}
+	if err := tx.First(session, "id = ?", session.ID).Error; err != nil {
+		return err
 	}
 	projection, err := projectSession(ctx, tx, session)
 	if err != nil {

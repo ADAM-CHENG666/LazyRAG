@@ -335,7 +335,7 @@ func (r *Repository) PatchArtifact(ctx context.Context, owner, artifactID string
 		if err != nil {
 			return err
 		}
-		if err := controlstore.GuardMaterialEdit(tx, session, current.SlotID); err != nil {
+		if err := controlstore.PrepareMaterialEdit(tx, &session, current.SlotID); err != nil {
 			return err
 		}
 
@@ -404,7 +404,7 @@ func (r *Repository) DeleteArtifact(ctx context.Context, owner, artifactID strin
 		if err != nil {
 			return err
 		}
-		if err := controlstore.GuardMaterialEdit(tx, session, current.SlotID); err != nil {
+		if err := controlstore.PrepareMaterialEdit(tx, &session, current.SlotID); err != nil {
 			return err
 		}
 

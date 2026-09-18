@@ -14,6 +14,7 @@ import (
 	"lazymind/core/common/orm"
 	"lazymind/core/store"
 	"lazymind/core/subagent"
+	"lazymind/core/workflow/controlstore"
 )
 
 // resolveValuePaths normalises a human-uploaded value by ensuring it carries a stable
@@ -50,6 +51,7 @@ func enrichArtifactValue(raw json.RawMessage, contentType string) json.RawMessag
 
 // sessionDTO is the frontend shape for a WorkflowSession.
 type sessionDTO struct {
+	EditPaused     bool   `json:"edit_paused,omitempty"`
 	StateVersion   int64  `json:"state_version"`
 	SessionID      string `json:"session_id"`
 	ConversationID string `json:"conversation_id"`
@@ -115,6 +117,7 @@ type slotDTO struct {
 
 func toSessionDTO(s *orm.WorkflowSession) sessionDTO {
 	return sessionDTO{
+		EditPaused:       controlstore.EditPaused(*s),
 		StateVersion:     s.StateVersion,
 		SessionID:        s.ID,
 		ConversationID:   s.ConversationID,

@@ -2694,6 +2694,8 @@ workflowControlCancellationAccepted: 'The original agent has acknowledged cancel
   workflowStopping: 'Stopping, please wait…',
   workflowStartExecution: 'Start',
   workflowControlRegenerate: 'Regenerate',
+  workflowIncompleteEditHint: "This step is incomplete. Continuing or retrying will run it again and may replace its current content.",
+  workflowSaveEditsConfirm: "Save your edits and invalidate dependent results, cancelling affected executions. Saving alone does not continue execution. If you selected Continue or Regenerate, that action runs after saving.",
   workflowControlSave: "Save changes",
     workflowControlConfirm: "Confirm this step",
     workflowControlConfirmContinue: "Confirm and continue",

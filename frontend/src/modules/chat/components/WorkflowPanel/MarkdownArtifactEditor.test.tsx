@@ -926,6 +926,33 @@ describe('MarkdownArtifactEditor conflict refresh', () => {
 });
 
 describe('MarkdownArtifactEditor autosave', () => {
+  it('keeps workflow edits local until an explicit confirmed save', async () => {
+    vi.useFakeTimers();
+    try {
+      const onSave = vi.fn(async () => 8);
+      const beforeSave = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+      let flush: (() => Promise<boolean>) | undefined;
+      render(<SlotEditingContext.Provider value={{
+        manualSave: true, beforeSave, setEditing: vi.fn(),
+        registerFlush: (_key, callback) => { flush = callback; return () => undefined; },
+        registerFooterAction: () => () => undefined,
+      }}><MarkdownArtifactEditor markdown='Original' sourceRevision={7}
+        editingKey='workflow:step' onSave={onSave} /></SlotEditingContext.Provider>);
+      const editable = screen.getByTestId('markdown-editable');
+      editable.textContent = 'User changes';
+      fireEvent.input(editable);
+      await act(async () => { await vi.advanceTimersByTimeAsync(65000); });
+      fireEvent(window, new Event('pagehide'));
+      expect(onSave).not.toHaveBeenCalled();
+      expect(beforeSave).not.toHaveBeenCalled();
+      await act(async () => { await expect(flush!()).rejects.toMatchObject({ name: 'WorkflowEditBlocked' }); });
+      expect(onSave).not.toHaveBeenCalled();
+      expect(editable.textContent).toBe('User changes');
+      await act(async () => { expect(await flush!()).toBe(true); });
+      expect(onSave).toHaveBeenCalledWith('User changes', 7, 'checkpoint', undefined);
+    } finally { vi.useRealTimers(); }
+  });
+
   it('does not save initial normalization before a workflow action, but saves real edits', async () => {
     editorProbe.normalize = true;
     const onSave = vi.fn(async () => 8);

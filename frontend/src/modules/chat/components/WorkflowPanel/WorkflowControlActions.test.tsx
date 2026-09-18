@@ -58,9 +58,9 @@ describe('WorkflowControlActions review footer', () => {
     expect(screen.queryByRole('button', { name: 'chat.workflowSkipThisApproval' })).not.toBeInTheDocument();
   });
 
-  it('shows save only while the current tab has unsaved edits', () => {
+  it('leaves saving to the shared panel footer', () => {
     renderActions({ dirty: true });
-    expect(screen.getByRole('button', { name: 'chat.workflowControlSave' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'chat.workflowControlSave' })).not.toBeInTheDocument();
   });
 
   it('falls back to confirm-only when the host cannot continue from the panel', () => {

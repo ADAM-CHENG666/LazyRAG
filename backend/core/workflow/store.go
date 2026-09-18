@@ -556,7 +556,7 @@ func WriteSlotRevision(ctx context.Context, db *gorm.DB,
 		}
 
 		return nil
-	}); err != nil {
+	}, true); err != nil {
 		return nil, err
 	}
 
@@ -660,7 +660,7 @@ func WriteSlotRevisionWithSnapshot(ctx context.Context, db *gorm.DB,
 			}
 		}
 		return nil
-	}); err != nil {
+	}, src != "human"); err != nil {
 		return nil, err
 	}
 
@@ -1185,6 +1185,7 @@ func UpdateSelectedHumanArtifactValue(
 		expected = expectedRevision[0]
 	}
 	updated := false
+	needsRevision := controlstore.Reject("NEW_REVISION_REQUIRED", "immutable artifact requires a new revision")
 
 	err := reviewMaterialTransaction(ctx, db, sessionID, slotID, func(tx *gorm.DB) error {
 		q := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
@@ -1205,10 +1206,10 @@ func UpdateSelectedHumanArtifactValue(
 			return sealErr
 		}
 		if sealed {
-			return nil
+			return needsRevision
 		}
 		if selected.ChangeSource != "human" || selected.HumanArtifactID == nil || *selected.HumanArtifactID == "" {
-			return nil
+			return needsRevision
 		}
 
 		updates := map[string]any{
@@ -1226,6 +1227,9 @@ func UpdateSelectedHumanArtifactValue(
 		updated = true
 		return nil
 	})
+	if errors.Is(err, needsRevision) {
+		return &selected, false, nil
+	}
 	if err != nil {
 		return nil, false, err
 	}

@@ -4,7 +4,7 @@ import { ArtifactPendingContext } from './artifactPendingContext';
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { message as antdMessage, Popconfirm, Tooltip } from 'antd';
+import { message as antdMessage, Modal, Popconfirm, Tooltip } from 'antd';
 import {
   CloudUploadOutlined,
   DownloadOutlined,
@@ -55,7 +55,7 @@ import { WorkflowPanelTabActiveContext, SlotEditingContext, WorkflowEditBlocked,
 import { findWriterArtifactStream } from './writerArtifactStream';
 import { resolveCompletedContinueStep, resolveWorkflowContinueAction } from './workflowContinue';
 import { WorkflowControlActions } from './WorkflowControlActions';
-import type { WorkflowActionIntent, WorkflowControlView } from '@/modules/chat/utils/workflowControl';
+import { deliveryPending, type WorkflowActionIntent, type WorkflowControlView } from '@/modules/chat/utils/workflowControl';
 import { resolvePendingApprovalStep } from './workflowApproval';
 import { activeExecutionTasks, useExecutionActivity } from './useExecutionActivity';
 import { executionPreview } from './executionPreview';
@@ -1434,6 +1434,7 @@ function NamedTabSlot({
     || (slotDef.widget?.itemWidth ?? 0) >= 600
     || slotDef.widget?.collapsed === true;
   const isWriterDocument = slotDef.widget?.widgetType === 'writer-document';
+  const isSingleMarkdown = slotDef.widget?.widgetType === 'text-markdown' && revisions.length === 1 && !contentCollapsed;
   const showStream = Boolean(artifactStream && (
     revisions.length === 0 || artifactStream.state === 'streaming'
   ));
@@ -1489,7 +1490,7 @@ function NamedTabSlot({
   );
 
   return (
-    <div className={`workflow-panel__named-slot${prefersFullGridRow ? ' workflow-panel__named-slot--full-grid-row' : ''}${isWriterDocument ? ' workflow-panel__named-slot--writer-document' : ''}`}>
+    <div className={`workflow-panel__named-slot${prefersFullGridRow ? ' workflow-panel__named-slot--full-grid-row' : ''}${isWriterDocument ? ' workflow-panel__named-slot--writer-document' : ''}${isSingleMarkdown ? ' workflow-panel__named-slot--single-markdown' : ''}`}>
       <div className='workflow-panel__slot-heading'>
         {(slotDef.label || slotDef.id) && (
           <span className='workflow-panel__slot-label'>{slotLabel}</span>
@@ -1773,6 +1774,8 @@ export function WorkflowPanel({
   }, [session, dismissing, anySlotEditing, refresh, t, onDismissed, bumpDismissedRefresh, conversationId]);
   const [intentOpen, setIntentOpen] = useState(false);
 
+  const saveApproved = useRef(false);
+
   const handleSlotEditingChange = useCallback((key: string, editing: boolean) => {
     if (editing) {
       editingSlots.current.add(key);
@@ -1876,12 +1879,11 @@ export function WorkflowPanel({
     [footerActions],
   );
   const tabReadOnly = (tab?: TabDef) => {
-    if (!controlled || !control) return false;
-    if (control.continuation === 'stopped') return true;
-    if (!tab) return control.continuation === 'completed';
-    const ids = tab.status_step_ids ?? [tab.step_id ?? tab.id];
-    const reviews = control.reviews.filter(review => ids.includes(review.step_id));
-    return reviews.some(review => review.status === 'accepted') && !reviews.some(review => review.status === 'pending');
+    if (control?.continuation === 'stopped' && deliveryPending(control)) return true;
+    const ids = tab ? tab.status_step_ids ?? [tab.step_id ?? tab.id] : undefined;
+    return !!session.steps?.some(step => step.validity !== 'stale'
+      && (!ids || ids.includes(step.step_id))
+      && ['pending', 'queued', 'claimed', 'running'].includes(step.status));
   };
   const displayStatus = autoRunning ? 'active' : session.status;
   const approvalStepId = resolvePendingApprovalStep(session, displayStatus);
@@ -1896,7 +1898,8 @@ export function WorkflowPanel({
     : STATUS_KEY[displayStatus] ?? displayStatus;
   // Only block footer actions while the plugin is actually running (or flush-in-progress).
   // Dirty editors no longer disable retry — click flushes saves first, then proceeds.
-  const sessionBusy = displayStatus === 'active' || autoRunning;
+  const sessionBusy = displayStatus === 'active' || autoRunning || !!session.steps?.some(step =>
+    step.validity !== 'stale' && ['pending', 'queued', 'claimed', 'running'].includes(step.status));
   const buttonsDisabled = sessionBusy || actionPending;
   const dismissDisabled = dismissing || anySlotEditing || actionPending;
   const collapseDisabled = (anySlotEditing || actionPending) && !collapsed;
@@ -1904,9 +1907,9 @@ export function WorkflowPanel({
     session,
     tabs[visibleActiveTabIdx],
   );
-  const showStepRollback =
-    (session.status === 'completed' || session.status === 'failed')
-    && Boolean(session.steps && session.steps.length > 0);
+  const viewedAttempt = session.steps?.filter(step => step.step_id === controlStepId && step.validity !== 'stale')
+    .sort((a, b) => b.attempt - a.attempt)[0];
+  const showStepRollback = viewedAttempt?.status === 'succeeded';
 
   // A failed step cannot be checkpoint-resumed — the SubAgent exited uncleanly and there is
   // no valid checkpoint to restore. Only "重试" (full restart) is meaningful in this case.
@@ -1920,13 +1923,12 @@ export function WorkflowPanel({
         ?.filter((s) => s.step_id === session.current_step_id && s.validity !== 'stale')
         ?.sort((a, b) => b.attempt - a.attempt)[0]?.status
       : undefined);
-  const effectivePast = new Set(session.projection?.past ?? []);
   const continueDisabled = buttonsDisabled || currentStepStatus === 'failed';
   const readyToStart = displayStatusKey === 'chat.workflowStatusReady';
   const continueAction = resolveWorkflowContinueAction(session, displayStatus, tabs[visibleActiveTabIdx]);
   const showRetry = !sessionBusy && currentStepStatus === 'failed';
   // Automatic handoffs are not requests for user input.
-  const showContinue = !sessionBusy && (readyToStart || Boolean(continueAction));
+  const showContinue = !sessionBusy && (session.edit_paused || readyToStart || Boolean(continueAction));
 
   function reportActionError(error: unknown) {
     if (error instanceof WorkflowEditBlocked) {
@@ -1937,16 +1939,36 @@ export function WorkflowPanel({
     antdMessage.error(error instanceof Error ? error.message : t('chat.workflowRunControlFailed'));
   }
 
+  function confirmSaveEdits(): Promise<boolean> {
+    return new Promise(resolve => Modal.confirm({
+      title: t('chat.workflowControlSave'),
+      content: t('chat.workflowSaveEditsConfirm'),
+      okText: t('chat.workflowControlSave'),
+      cancelText: t('chat.workflowRegenerateCancel'),
+      onOk: () => resolve(true), onCancel: () => resolve(false),
+    }));
+  }
+
+  async function saveEdits() {
+    await runControlledAction(async () => {
+      await refresh();
+      antdMessage.success(t('chat.workflowControlSaved'));
+    });
+  }
+
   async function runFooterAction(action: () => void | Promise<void>, flushKey?: string) {
     if (sessionBusy || actionPending) return;
     setActionPending(true);
     try {
+      if (anySlotEditing && !(await confirmSaveEdits())) return;
+      saveApproved.current = true;
       const saved = await flushPendingEdits(flushKey);
       if (!saved) return;
       await action();
     } catch (error) {
       reportActionError(error);
     } finally {
+      saveApproved.current = false;
       setActionPending(false);
     }
   }
@@ -1955,19 +1977,30 @@ export function WorkflowPanel({
     if (actionPending) return;
     setActionPending(true);
     try {
+      if (flush && anySlotEditing && !(await confirmSaveEdits())) return;
+      saveApproved.current = flush;
       if (flush && !(await flushPendingEdits())) return;
       await action();
     } catch (error) {
       reportActionError(error);
-    } finally { setActionPending(false); }
+    } finally { saveApproved.current = false; setActionPending(false); }
   }
 
   function handleContinue() {
-    if (!isContinuationCurrent()) return;
+    if (!session) return;
+    if (!session.edit_paused && !isContinuationCurrent()) return;
     const message = completedContinueStepId
       ? `${t('chat.workflowRollbackPrefix')}${completedContinueStepId}`
       : t('chat.workflowContinue');
-    void runFooterAction(() => {
+    void runFooterAction(async () => {
+      const api = WorkflowSessionApi();
+      const response = await api.getSession(session.session_id);
+      const latest = response.data?.data;
+      if (latest?.edit_paused) {
+        await api.control(session.session_id, { command_id: crypto.randomUUID(), kind: 'continue', expected_state_version: latest.state_version });
+        await refresh();
+        return;
+      }
       if (isContinuationCurrent()) onSendMessage?.(message);
     });
   }
@@ -2007,10 +2040,17 @@ export function WorkflowPanel({
   }
 
   function handleRollback(stepId: string) {
-    void runFooterAction(() => onSendMessage?.(`${t('chat.workflowRollbackPrefix')}${stepId}`));
+    if (!session) return;
+    void runControlledAction(async () => {
+      const api = WorkflowSessionApi();
+      const response = await api.getSession(session.session_id);
+      await api.control(session.session_id, { command_id: crypto.randomUUID(), kind: 'rewind',
+        step_id: stepId, expected_state_version: response.data?.data?.state_version });
+      await refresh();
+    });
   }
 
-  const continueLabel = approvalStepId
+  const continueLabel = session.edit_paused ? t('chat.workflowContinue') : approvalStepId
     ? t('chat.workflowContinueExecution')
     : continueAction?.kind === 'resume'
       ? t('chat.workflowResumeExecution')
@@ -2020,6 +2060,8 @@ export function WorkflowPanel({
 
   const panel = (
     <SlotEditingContext.Provider value={{
+      manualSave: true,
+      beforeSave: () => saveApproved.current ? Promise.resolve(true) : confirmSaveEdits(),
       setEditing: handleSlotEditingChange,
       registerFlush,
       registerFooterAction,
@@ -2335,6 +2377,11 @@ export function WorkflowPanel({
               ) : null}
             </div>
           ) : null}
+          {!sessionBusy && viewedAttempt && ['failed', 'interrupted', 'cancelled', 'canceled'].includes(viewedAttempt.status) &&
+            <span role='status'>{t('chat.workflowIncompleteEditHint')}</span>}
+          {anySlotEditing && <button type='button'
+            className='workflow-panel__action-btn workflow-panel__action-btn--secondary'
+            disabled={actionPending} onClick={() => void saveEdits()}>{t('chat.workflowControlSave')}</button>}
           {controlled ? (control && onControl ? <WorkflowControlActions control={control} act={onControl} context={{
             session,
             stepId: controlStepId,
@@ -2397,37 +2444,14 @@ export function WorkflowPanel({
               {actionPending ? t('chat.workflowSavingBeforeAction') : readyToStart ? t('chat.workflowStartExecution') : continueLabel}
             </button>
           )}
-          {showStepRollback && (
-            <div style={{ flex: '1 1 100%', display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 500 }}>{t('chat.workflowRollbackLabel')}</span>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                {session.steps!
-                  .filter((step, index, all) => effectivePast.has(step.step_id)
-                    && step.validity !== 'stale'
-                    && all.findIndex((candidate) => candidate.step_id === step.step_id && candidate.validity !== 'stale') === index)
-                  .map((step) => (
-                  <button
-                    key={`${step.step_id}-${step.attempt}`}
-                    type='button'
-                    className='workflow-panel__action-btn workflow-panel__action-btn--secondary'
-                    style={{ padding: '3px 10px', fontSize: 12 }}
-                    disabled={buttonsDisabled}
-                    aria-disabled={buttonsDisabled}
-                    onClick={() => handleRollback(step.step_id)}
-                    title={
-                      actionPending
-                        ? t('chat.workflowSavingBeforeAction')
-                        : buttonsDisabled
-                          ? t('chat.workflowBtnDisabledHint')
-                          : `${t('chat.workflowRollbackPrefix')}${step.step_id}`
-                    }
-                  >
-                    {step.step_id}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
+          {showStepRollback && <Popconfirm
+            title={t('chat.workflowControlRegenerate')}
+            description={t(sessionBusy ? 'chat.workflowRegenerateRunningConfirm' : 'chat.workflowRegenerateConfirm')}
+            okText={t('chat.workflowControlRegenerate')} cancelText={t('chat.workflowRegenerateCancel')}
+            disabled={actionPending} onConfirm={() => handleRollback(controlStepId)}>
+            <button type='button' className='workflow-panel__action-btn workflow-panel__action-btn--secondary'
+              disabled={actionPending}>{t('chat.workflowControlRegenerate')}</button>
+          </Popconfirm>}
           </>}
         </div>
       )}
