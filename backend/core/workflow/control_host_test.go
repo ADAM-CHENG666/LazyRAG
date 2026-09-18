@@ -304,3 +304,72 @@ func TestPanelContinueConsumesDeliveredNativeResult(t *testing.T) {
 		t.Fatalf("old notification was not consumed: %+v %v", old, err)
 	}
 }
+
+func TestControlledRecoveryBindingModes(t *testing.T) {
+	for _, kind := range []string{"retry", "rewind"} {
+		for _, mode := range []string{"unbound", "bound", "required"} {
+			t.Run(kind+"/"+mode, func(t *testing.T) {
+				db, _ := setupBatchTransitionSession(t)
+				if err := db.AutoMigrate(&orm.WorkflowReviewCheckpoint{}, &orm.WorkflowHostAction{}, &orm.WorkflowCommand{}, &orm.WorkflowRevisionEntry{}, &orm.WorkflowBlob{}); err != nil {
+					t.Fatal(err)
+				}
+				binding := `{}`
+				if mode == "required" {
+					binding = `{"required":true}`
+				}
+				if err := db.Model(&orm.WorkflowSession{}).Where("id = ?", "batch-session").Updates(map[string]any{
+					"control_protocol": controlpolicy.Protocol, "control_binding_json": binding,
+					"origin_host": "external-agent", "controller_host": "external-agent", "status": "waiting",
+				}).Error; err != nil {
+					t.Fatal(err)
+				}
+				svc := WorkflowControlService{DB: db.DB}
+				ctx := context.Background()
+				if mode == "bound" {
+					if _, err := svc.Bind(ctx, "batch-user", "batch-session", WorkflowHostBindingRequest{ConnectorID: "connector", Credential: strings.Repeat("x", 64), Provider: "deepseek-harness", DriverSessionID: "driver"}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				status := "failed"
+				if kind == "rewind" {
+					status = "succeeded"
+				}
+				if err := db.Create(&orm.WorkflowSessionStep{ID: "failed", SessionID: "batch-session", StepID: "branch_b", TaskID: "failed", Attempt: 1, Status: status, Validity: "effective"}).Error; err != nil {
+					t.Fatal(err)
+				}
+				var session orm.WorkflowSession
+				if err := db.First(&session, "id = ?", "batch-session").Error; err != nil {
+					t.Fatal(err)
+				}
+				command := WorkflowControlCommand{CommandID: "recover", Kind: kind, StepID: "branch_b", StateVersion: session.StateVersion}
+				result, err := svc.Execute(ctx, "batch-user", session.ID, command)
+				if mode == "required" {
+					expectControlCode(t, err, "BINDING_REQUIRED")
+					var count int64
+					db.Model(&orm.WorkflowSessionStep{}).Where("session_id = ?", session.ID).Count(&count)
+					if count != 1 {
+						t.Fatalf("rejected recovery left %d attempts", count)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				var replacement orm.WorkflowSessionStep
+				if err := db.First(&replacement, "id = ?", result.Receipt.ExecutionID).Error; err != nil {
+					t.Fatal(err)
+				}
+				if replacement.Status != "queued" {
+					t.Fatalf("replacement not queued: %+v", replacement)
+				}
+				if (result.Receipt.ActionID != "") != (mode == "bound") {
+					t.Fatalf("wrong host delivery: %+v", result.Receipt)
+				}
+				replay, err := svc.Execute(ctx, "batch-user", session.ID, command)
+				if err != nil || replay.Receipt != result.Receipt {
+					t.Fatalf("replay diverged: %+v %v", replay, err)
+				}
+			})
+		}
+	}
+}

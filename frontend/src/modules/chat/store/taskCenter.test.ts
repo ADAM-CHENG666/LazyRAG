@@ -457,6 +457,16 @@ describe("task center workflow events", () => {
     dispatchSpy.mockRestore();
   });
 
+  it.each(['intent_updated', 'workflow_artifact_updated'])(
+    'refreshes the panel for legacy %s events', async (type) => {
+      useTaskCenterStore.getState().subscribeConvEvents('conversation-1');
+      workflowState.loadActiveSession.mockClear();
+      emitConversationEvent({ type, payload: { session_id: 'legacy-run' } });
+      await vi.advanceTimersByTimeAsync(100);
+      expect(workflowState.loadActiveSession).toHaveBeenCalledWith('conversation-1', { silentError: true });
+    },
+  );
+
   it("does not refresh the Panel from conversation runtime events", async () => {
     useTaskCenterStore.getState().subscribeConvEvents("conversation-1");
     emitConversationEvent({

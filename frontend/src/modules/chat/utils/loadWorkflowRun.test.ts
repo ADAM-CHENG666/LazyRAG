@@ -79,6 +79,7 @@ describe('loadWorkflowRunSnapshot', () => {
     });
     expect(snapshot.session.current_step_id).toBe('analyze_subject');
     expect(snapshot.session.status).toBe('active');
+    expect(snapshot.session.state_version).toBe(hostedControl.state_version);
     expect(snapshot.control?.protocol).toBe('workflow.control.v1');
   });
 

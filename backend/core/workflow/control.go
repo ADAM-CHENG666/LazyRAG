@@ -187,9 +187,17 @@ func (s WorkflowControlService) Execute(ctx context.Context, owner, sessionID st
 			if err := controlstore.ConsumeContinuation(tx, session.ID, ""); err != nil {
 				return err
 			}
-			result.Receipt.ActionID, err = controlstore.EnqueueHostAction(tx, *session, command.CommandID, "continue", result.Receipt.ExecutionID)
+			binding, err := controlstore.DecodeBinding(*session)
 			if err != nil {
 				return err
+			}
+			// Unbound MCP clients claim recovery executions themselves. Required or
+			// existing bindings still use transactional host delivery and its guards.
+			if binding.Required || binding.ConnectorID != "" || binding.DriverSession != "" {
+				result.Receipt.ActionID, err = controlstore.EnqueueHostAction(tx, *session, command.CommandID, "continue", result.Receipt.ExecutionID)
+				if err != nil {
+					return err
+				}
 			}
 		case "stop", "resume":
 			result.Receipt.ActionID, _, err = controlstore.ApplyLifecycle(tx, session, command.CommandID, command.Kind == "stop")

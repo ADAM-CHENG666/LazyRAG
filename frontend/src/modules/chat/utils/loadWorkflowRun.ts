@@ -48,6 +48,7 @@ export async function loadWorkflowRunSnapshot(
         control,
         session: {
           ...session,
+          state_version: control.state_version,
           projection,
           current_step_id: pending?.step_id ?? panelCurrentStep(session.current_step_id, projection, session.steps),
           status: control.continuation === 'completed'

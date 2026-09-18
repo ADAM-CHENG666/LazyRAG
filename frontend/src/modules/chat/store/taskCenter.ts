@@ -1003,6 +1003,9 @@ export const useTaskCenterStore = create<TaskCenterStore>()((set, get) => ({
                 new CustomEvent(WORKFLOW_GRAPH_REFRESH_EVENT, { detail: { conversationId } }),
               );
             }
+            scheduleWorkflowSessionRefresh(conversationId);
+          } else if (type === 'intent_updated') {
+            scheduleWorkflowSessionRefresh(conversationId);
           } else if (type === 'workflow_session_created') {
             if (!replayed) {
               window.dispatchEvent(

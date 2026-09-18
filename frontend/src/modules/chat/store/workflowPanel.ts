@@ -71,13 +71,9 @@ function syncConversationRunWatch(
 
 async function reloadConversationRun(conversationId: string, sessionId: string): Promise<void> {
   if (_runWatches.get(conversationId)?.sessionId !== sessionId) return;
-  try {
-    const snapshot = await loadWorkflowRunSnapshot(sessionId, WorkflowSessionApi(), { silentError: true });
-    if (_runWatches.get(conversationId)?.sessionId !== sessionId) return;
-    useWorkflowStore.getState().setSession(conversationId, snapshot.session);
-  } catch {
-    // Keep the last good snapshot; the next bell retries.
-  }
+  // Share the queue with conversation events and edits: a bell received during
+  // a load schedules one follow-up rather than racing another snapshot request.
+  await useWorkflowStore.getState().loadActiveSession(conversationId, { silentError: true });
 }
 
 function _draftKey(sessionId: string, slotId: string, listIndex: number): string {
@@ -239,6 +235,7 @@ export interface SlotRevision {
 
 export interface WorkflowSession {
   session_id: string;
+  state_version?: number;
   conversation_id: string;
   workflow_id: string;
   /** Execution mode selected when this immutable session was created. */
@@ -613,6 +610,10 @@ export const useWorkflowStore = create<WorkflowStore>()((set, get) => ({
 
   setSession: (conversationId, session) => {
     set((state) => {
+      const current = state.sessionByConversation[conversationId];
+      if (session && current?.session_id === session.session_id &&
+          current.state_version !== undefined && session.state_version !== undefined &&
+          session.state_version < current.state_version) return state;
       const next: Partial<WorkflowStore> = {
         sessionByConversation: { ...state.sessionByConversation, [conversationId]: session },
       };
@@ -666,6 +667,8 @@ export const useWorkflowStore = create<WorkflowStore>()((set, get) => ({
       return;
     }
 
+    const startingSessionId = get().sessionByConversation[conversationId]?.session_id;
+    const sessionChanged = () => get().sessionByConversation[conversationId]?.session_id !== startingSessionId;
     const load = (async () => {
       set((s) => ({
         loadingByConversation: { ...s.loadingByConversation, [conversationId]: true },
@@ -678,6 +681,7 @@ export const useWorkflowStore = create<WorkflowStore>()((set, get) => ({
           conversationId,
           requestOptions as never,
         );
+        if (sessionChanged()) return;
         const latest: WorkflowSession | null = res?.data?.data?.session ?? null;
         if (!latest?.session_id) {
           get().setSession(conversationId, null);
@@ -695,9 +699,11 @@ export const useWorkflowStore = create<WorkflowStore>()((set, get) => ({
             WorkflowSessionApi(),
             requestOptions,
           );
+          if (sessionChanged()) return;
           get().setSession(conversationId, snapshot.session);
           syncConversationRunWatch(conversationId, snapshot.session.session_id);
         } catch (error) {
+          if (sessionChanged()) return;
           const errorCode = extractErrorCode(error);
           get().setSession(conversationId, {
             ...latest,
