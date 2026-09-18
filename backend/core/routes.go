@@ -33,6 +33,7 @@ import (
 	"lazymind/core/knowledge_market"
 	"lazymind/core/knowledgeplaza"
 	"lazymind/core/learning"
+	"lazymind/core/localworkspace"
 	applog "lazymind/core/log"
 	"lazymind/core/mcp"
 	"lazymind/core/modelconfig"
@@ -97,6 +98,18 @@ func handleAgentThreadAPI(r *mux.Router, method, path string, perms []string, h 
 
 // registerAllRoutes text OpenAPI text（text Job），text handleAPI textPermissiontext（text extract_api_permissions.py text Kong RBAC）。
 func registerAllRoutes(r *mux.Router) {
+	handleAPI(r, "GET", "/local-workspaces", []string{"qa.read"}, localworkspace.List)
+	handleAPI(r, "POST", "/local-workspaces/{workspace_id}:revoke", []string{"qa.write"}, localworkspace.Revoke)
+	handleAPI(r, "GET", "/conversations/{conversation_id}:workspace", []string{"qa.read"}, localworkspace.ConversationBinding)
+	handleAPI(r, "PUT", "/conversations/{conversation_id}:workspace-permission", []string{"qa.write"}, localworkspace.UpdateConversationPermission)
+	handleAPI(r, "POST", "/internal/local-workspaces", nil, localworkspace.InternalRegister)
+	handleAPI(r, "POST", "/internal/local-workspaces/{workspace_id}:select", nil, localworkspace.InternalPrepareReauthorization)
+	handleAPI(r, "POST", "/internal/conversations/{conversation_id}/workspace-operations:prepare-batch", nil, localworkspace.InternalPrepareOperationBatch)
+	handleAPI(r, "GET", "/internal/conversations/{conversation_id}/workspace-operations/{operation_id}", nil, localworkspace.InternalOperationStatus)
+	handleAPI(r, "POST", "/internal/conversations/{conversation_id}/workspace-operations/{operation_id}:claim", nil, localworkspace.InternalClaimLocalOperation)
+	handleAPI(r, "POST", "/internal/conversations/{conversation_id}/workspace-operations/{operation_id}:complete", nil, localworkspace.InternalCompleteLocalOperation)
+	handleAPI(r, "GET", "/conversations/{conversation_id}:workspace-approvals", []string{"qa.write"}, localworkspace.ListOperationApprovals)
+	handleAPI(r, "POST", "/conversations/{conversation_id}/workspace-approvals/{operation_id}:decide", []string{"qa.write"}, localworkspace.DecideOperationHandler)
 	cloudSession := cloudsession.DefaultService()
 	cloudSessionHandler := cloudsession.Handler{Service: cloudSession}
 	credentialBackupHandler := credentialvault.BackupHandler{Service: credentialvault.DefaultBackupService()}
@@ -767,7 +780,7 @@ func registerAllRoutes(r *mux.Router) {
 	handleAPI(r, "GET", "/conversation-groups/{group_id}", []string{"qa.read"}, conversationgroup.GetGroup)
 	handleAPI(r, "PATCH", "/conversation-groups/{group_id}/placement", []string{"qa.write"}, conversationgroup.UpdateGroupPlacement)
 	handleAPI(r, "PATCH", "/conversation-groups/{group_id}", []string{"qa.write"}, conversationgroup.UpdateGroup)
-	handleAPI(r, "DELETE", "/conversation-groups/{group_id}", []string{"qa.write"}, conversationgroup.DeleteGroup)
+	handleAPI(r, "DELETE", "/conversation-groups/{group_id}", []string{"qa.write"}, chat.DeleteConversationGroup)
 	handleAPI(r, "POST", "/conversation-groups/{group_id}/conversations", []string{"qa.write"}, conversationgroup.AddMember)
 	handleAPI(r, "DELETE", "/conversation-groups/{group_id}/conversations/{conversation_id}", []string{"qa.write"}, conversationgroup.RemoveMember)
 	handleAPI(r, "POST", "/conversation-organizer-runs", []string{"qa.write"}, conversationgroup.StartOrganizer)
