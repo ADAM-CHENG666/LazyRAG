@@ -603,6 +603,54 @@ def test_workflow_tool_internal_text_is_not_forwarded(monkeypatch):
     assert '<html>' not in visible_text
 
 
+@pytest.mark.parametrize('serialized', [False, True])
+def test_terminal_outline_failure_cancels_worker_and_reports_original_error(monkeypatch, serialized):
+    task = {
+        **_DEFAULT_TASK,
+        'agent_type': 'workflow_step',
+        'params': {
+            'required_output_artifact_keys': ['result'],
+            'terminal_tools': ['ppt_build_outline'],
+        },
+    }
+    db = _install_fake_db(monkeypatch, task)
+    _install_fake_lazyllm(monkeypatch)
+    _install_fake_build(monkeypatch)
+    _install_fake_translator(monkeypatch)
+    failure = {'ok': False, 'value': 'outline: Extra data: line 2 column 1'}
+    _install_fake_drive(monkeypatch, [
+        {'tag': 'tool_results', 'tool_results': [{
+            'id': 'outline-1', 'name': 'ppt_build_outline',
+            'result': json.dumps(failure) if serialized else failure,
+        }]},
+        {'tag': 'tool_calls', 'tool_calls': [{
+            'id': 'outline-retry', 'name': 'ppt_build_outline', 'args': {},
+        }]},
+    ])
+    cancel = MagicMock(return_value=True)
+    monkeypatch.setattr(runner_mod, '_signal_task_cancel', cancel)
+
+    raw = asyncio.run(_collect(runner_mod.run_subagent_stream(
+        _DEFAULT_TASK_ID, task_spec=task,
+    )))
+    events = _sse_to_events(raw)
+    error = next(event for event in events if event['type'] == 'error')
+    assert error['status'] == 'failed'
+    assert 'outline: Extra data: line 2 column 1' in error['message']
+    assert not any(event['type'] == 'done' for event in events)
+    assert 'outline-retry' not in json.dumps(db.steps)
+    cancel.assert_called_once_with(_DEFAULT_TASK_ID)
+
+
+def test_terminal_success_and_nonterminal_failure_are_not_aborted():
+    for name, result in (
+        ('ppt_build_outline', {'ok': True, 'value': {'page_count': 3}}),
+        ('ppt_find_deck', {'ok': False, 'value': 'not found'}),
+    ):
+        event = {'tag': 'tool_results', 'tool_results': [{'name': name, 'result': result}]}
+        assert runner_mod._terminal_tool_failure(event, {'ppt_build_outline'}) == ''
+
+
 def test_workflow_tool_artifact_is_streamed_before_tool_returns(monkeypatch):
     workflow_task = {
         **_DEFAULT_TASK,

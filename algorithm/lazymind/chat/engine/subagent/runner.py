@@ -847,6 +847,9 @@ def _terminal_tool_failure(event: Dict[str, Any], terminal_tool_names: set[str])
                 return f'{name} failed: {payload}'
         if not isinstance(payload, dict):
             return f'{name} failed without a structured result: {payload!r}'
+        if payload.get('ok') is False:
+            reason = payload.get('value') or payload.get('error') or payload.get('msg')
+            return f'{name} failed: {reason or "tool returned ok=false"}'
     return ''
 
 
