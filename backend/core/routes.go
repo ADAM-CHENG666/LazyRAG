@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"time"
@@ -39,6 +40,7 @@ import (
 	"lazymind/core/wordgroup"
 	"lazymind/core/workflow"
 	workflowattempt "lazymind/core/workflow/attempt"
+	workflowexecution "lazymind/core/workflow/execution"
 	workflowexecutor "lazymind/core/workflow/executor"
 	workflowfacade "lazymind/core/workflow/facade"
 	workflowhosted "lazymind/core/workflow/hosted"
@@ -84,8 +86,11 @@ func registerAllRoutes(r *mux.Router) {
 		Hosts:      workflowexecutor.DefaultHostRegistry,
 		Projection: http.HandlerFunc(workflow.GetSessionProjection),
 	}
+	completionService := &workflowexecution.Service{DB: corestore.DB(), Store: workflowRepository,
+		Attempts: workflowattempt.New(corestore.DB(), workflowattempt.Config{}), Contexts: workflowexecutor.DBContextLoader{DB: corestore.DB()}}
 	hostedService := &workflowhosted.Service{
-		DB: corestore.DB(), Store: workflowRepository,
+		Completion: completionService,
+		DB:         corestore.DB(), Store: workflowRepository,
 		Attempts:  workflowattempt.New(corestore.DB(), workflowattempt.Config{LeaseDuration: 30 * time.Minute}),
 		Contexts:  workflowexecutor.DBContextLoader{DB: corestore.DB()},
 		Artifacts: workflowexecutor.DBArtifactSink{DB: corestore.DB()},
@@ -93,9 +98,12 @@ func registerAllRoutes(r *mux.Router) {
 	attemptHandler := workflowattempt.Handler{Service: workflowattempt.New(corestore.DB(), workflowattempt.Config{})}
 	remoteExecutorHandler := workflowexecutor.RemoteHandler{
 		DB: corestore.DB(), Attempts: attemptHandler.Service,
-		SettleControlled: hostedService.SettleNative,
-		Contexts:         workflowexecutor.DBContextLoader{DB: corestore.DB()},
-		Artifacts:        workflowexecutor.DBArtifactSink{DB: corestore.DB()},
+		Finish: func(ctx context.Context, owner, sessionID, attemptID string, input workflowexecutor.Completion) error {
+			_, err := completionService.Complete(ctx, owner, sessionID, attemptID, input)
+			return err
+		},
+		Contexts:  workflowexecutor.DBContextLoader{DB: corestore.DB()},
+		Artifacts: workflowexecutor.DBArtifactSink{DB: corestore.DB()},
 	}
 	handleAPI(r, "POST", "/internal/workflow-attempts:claim", nil, attemptHandler.Claim)
 	handleAPI(r, "GET", "/internal/workflow-attempts/{attempt_id}/context", nil, remoteExecutorHandler.Context)
@@ -435,7 +443,8 @@ func registerAllRoutes(r *mux.Router) {
 	handleAPI(r, "POST", "/workflow-sessions/{session_id}:advance-step-and-hand-off", []string{"qa.write"}, workflowFacade.Command(http.HandlerFunc(workflow.TransitionWorkflowSession)))
 	handleAPI(r, "POST", "/workflow-sessions/{session_id}/hosted-attempts/{attempt_id}:begin", []string{"qa.write"}, hostedHandler.Begin)
 	handleAPI(r, "POST", "/workflow-sessions/{session_id}/hosted-attempts/{attempt_id}:resume", []string{"qa.write"}, hostedHandler.Resume)
-	handleAPI(r, "POST", "/workflow-sessions/{session_id}/hosted-attempts/{attempt_id}:submit", []string{"qa.write"}, hostedHandler.Submit)
+	handleAPI(r, "POST", "/workflow-sessions/{session_id}/hosted-attempts/{attempt_id}:complete", []string{"qa.write"}, hostedHandler.Complete)
+	handleAPI(r, "POST", "/workflow-sessions/{session_id}/hosted-attempts/{attempt_id}/artifacts", []string{"qa.write"}, hostedHandler.Publish)
 	handleAPI(r, "POST", "/workflow-sessions/{session_id}/input-bindings", []string{"qa.write"}, workflowFacade.BindInput)
 	handleAPI(r, "GET", "/workflow-sessions/{session_id}/input-bindings", []string{"qa.read"}, workflowFacade.ListInputs)
 	handleAPI(r, "GET", "/workflow-sessions/{session_id}/artifacts", []string{"qa.read"}, workflowFacade.ListArtifacts)

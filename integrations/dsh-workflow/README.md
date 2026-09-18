@@ -27,3 +27,10 @@ lazymind internal agent deepseek-harness repair-log --file /absolute/path/sessio
 ```
 
 Inspect the reported event sequences, then apply explicitly with `--apply --offline`. The command makes a byte-for-byte backup, changes only missing `ignorable` flags on the known event, and refuses a log changed during the operation. Keep DSH stopped throughout repair. Restore the reported backup to the original path, with DSH stopped, to undo. Other unknown events are not repaired by this command.
+
+External steps publish each output with `workflow.artifact.publish` as soon as it
+is available, using a stable positive sequence per output slot. After every
+publication has been acknowledged, `workflow.step.complete` records the outcome
+without resending artifacts. Publications update the run page but do not finish
+the step or bypass review. Both native and external execution use the same Core
+artifact writer and completion service.

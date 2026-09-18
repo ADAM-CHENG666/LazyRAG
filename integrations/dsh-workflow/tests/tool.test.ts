@@ -22,7 +22,7 @@ async function runtime() {
 
 function definition(continuation = 'awaiting_user'): ToolDefinition {
   return {
-    name: 'mcp__lazymind__workflow_step_submit',
+    name: 'mcp__lazymind__workflow_step_complete',
     description: 'Submit fixture',
     parameters: { type: 'object', properties: {} },
     output: { schema: { type: 'object' }, render: () => [{ type: 'text', text: 'success' }] },
@@ -93,7 +93,7 @@ it('keeps opaque execution handles out of call titles and forwards original pres
   const original = definition()
   const presenter = vi.fn((_args: unknown, _result: ToolResult) => undefined)
   original.presentResult = presenter
-  const wrapped = workflowTool(original, {operation: 'step_submit'})
+  const wrapped = workflowTool(original, {operation: 'step_complete'})
   expect(JSON.stringify(wrapped.presentCall?.({execution_handle: 'private-handle', session_id: 'run-1'}))).not.toContain('private-handle')
   wrapped.presentResult?.({}, {content: [], isError: false, meta: {lazymind_workflow: {}, original: {rich: true}}})
   expect(presenter.mock.calls[0][1].meta).toEqual({rich: true})

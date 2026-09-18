@@ -321,16 +321,28 @@ class WorkflowClient:
             json={}, headers=self._headers(), timeout=self.timeout,
         ))
 
-    def submit_execution(self, session_id: str, execution_id: str, execution_handle: str,
-                         *, outcome: str, artifacts: Optional[List[Dict[str, Any]]] = None,
-                         summary: str = '', error_code: str = '', executor_ref: str = '') -> WorkflowResponse:
-        """Submit the caller's exact handle; preserve Core's fixed receipt and current control."""
+    def publish_artifact(self, session_id: str, execution_id: str, execution_handle: str,
+                         artifact: Dict[str, Any]) -> WorkflowResponse:
+        """Publish one result immediately, retaining its slot and seq on retries."""
         if not execution_handle:
             raise WorkflowClientError('EXECUTION_HANDLE_REQUIRED', 'execution_handle is required')
         return self._decode(self.transport.post(
             f'{self.base_url}/workflow-sessions/{quote(session_id, safe="")}'
-            f'/hosted-attempts/{quote(execution_id, safe="")}:submit',
-            json={'execution_handle': execution_handle, 'outcome': outcome, 'artifacts': artifacts or [],
+            f'/hosted-attempts/{quote(execution_id, safe="")}/artifacts',
+            json={'artifact': artifact, 'execution_handle': execution_handle},
+            headers=self._headers(), timeout=self.timeout,
+        ))
+
+    def complete_execution(self, session_id: str, execution_id: str, execution_handle: str,
+                         *, outcome: str,
+                         summary: str = '', error_code: str = '', executor_ref: str = '') -> WorkflowResponse:
+        """Complete with the caller's exact handle; preserve Core's fixed receipt and current control."""
+        if not execution_handle:
+            raise WorkflowClientError('EXECUTION_HANDLE_REQUIRED', 'execution_handle is required')
+        return self._decode(self.transport.post(
+            f'{self.base_url}/workflow-sessions/{quote(session_id, safe="")}'
+            f'/hosted-attempts/{quote(execution_id, safe="")}:complete',
+            json={'execution_handle': execution_handle, 'outcome': outcome,
                   'summary': summary, 'error_code': error_code, 'executor_ref': executor_ref},
             headers=self._headers(), timeout=self.timeout,
         ))

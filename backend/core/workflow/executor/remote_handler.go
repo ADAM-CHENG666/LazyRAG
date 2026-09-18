@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -39,11 +40,11 @@ func safeArtifactPathPart(value string) string {
 // RemoteHandler is the wire boundary used by out-of-process Host Executors.
 // It deliberately exposes no database handles or Host model configuration.
 type RemoteHandler struct {
-	DB               *gorm.DB
-	Attempts         *attempt.Service
-	Contexts         ContextLoader
-	Artifacts        ArtifactSink
-	SettleControlled func(context.Context, string, string, string, string, json.RawMessage) error
+	DB        *gorm.DB
+	Attempts  *attempt.Service
+	Contexts  ContextLoader
+	Artifacts ArtifactSink
+	Finish    func(context.Context, string, string, string, Completion) error
 }
 
 type remoteEnvelope struct {
@@ -226,6 +227,11 @@ func (h RemoteHandler) SaveArtifact(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	row, err := h.Attempts.Attempt(r.Context(), mux.Vars(r)["attempt_id"])
+	if err != nil || row.ExecutorHost != "lazymind" {
+		remoteReply(w, 409, nil, "EXECUTOR_MISMATCH", "native execution ownership is required")
+		return
+	}
 	var body Artifact
 	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<20)).Decode(&body) != nil || body.Slot == "" {
 		remoteReply(w, 422, nil, "INVALID_ARTIFACT", "slot and value are required")
@@ -239,32 +245,24 @@ func (h RemoteHandler) SaveArtifact(w http.ResponseWriter, r *http.Request) {
 		remoteReply(w, 503, nil, "ATTEMPT_CONTEXT_FAILED", err.Error())
 		return
 	}
-	if ctx.Metadata["control_protocol"] != "" {
-		remoteReply(w, 409, nil, "CONTROL_FINALIZATION_REQUIRED", "submit controlled artifacts atomically with the terminal result")
-		return
-	}
 	ctx.ExecutionHandle = token
-	declared := false
-	outputs := ctx.DeclaredOutputs
-	if len(outputs) == 0 {
-		outputs = ctx.RequiredOutputs
-	}
-	for _, slot := range outputs {
-		if slot == body.Slot {
-			declared = true
-			break
+	body, err = NormalizeArtifact(ctx, body)
+	if err != nil {
+		var rejection *controlstore.Error
+		code := "INVALID_ARTIFACT"
+		if errors.As(err, &rejection) {
+			code = rejection.Code
 		}
-	}
-	if !declared {
-		remoteReply(w, 422, nil, "OUTPUT_SLOT_UNDECLARED", "artifact slot is not declared by the step")
-		return
-	}
-	if err := validateDeclaredArtifactType(ctx, body); err != nil {
-		remoteReply(w, 422, nil, "OUTPUT_TYPE_MISMATCH", err.Error())
+		remoteReply(w, 422, nil, code, err.Error())
 		return
 	}
 	if err := h.Artifacts.Save(r.Context(), ctx, body); err != nil {
-		remoteReply(w, 503, nil, "ARTIFACT_WRITE_FAILED", err.Error())
+		code, status := "ARTIFACT_WRITE_FAILED", http.StatusServiceUnavailable
+		var rejection *controlstore.Error
+		if errors.As(err, &rejection) {
+			code, status = rejection.Code, rejection.HTTPStatus()
+		}
+		remoteReply(w, status, nil, code, err.Error())
 		return
 	}
 	remoteReply(w, 200, map[string]any{"saved": true, "slot": body.Slot, "seq": body.Seq}, "", "")
@@ -382,37 +380,31 @@ func (h RemoteHandler) terminal(w http.ResponseWriter, r *http.Request, status s
 	if len(body.Result) == 0 {
 		body.Result = json.RawMessage(`{}`)
 	}
-	if controlstore.Controlled(session) {
-		if h.SettleControlled == nil {
-			remoteReply(w, 503, nil, "CONTROL_FINALIZATION_REQUIRED", "controlled executor finalization is unavailable")
-			return
-		}
-		err = h.SettleControlled(r.Context(), id, lease, status, body.ErrorCode, body.Result)
-	} else {
-		if _, ok := h.authorize(w, r); !ok {
-			return
-		}
-		if status == "succeeded" {
-			ctx, loadErr := h.Contexts.LoadAttemptContext(r.Context(), id)
-			if loadErr != nil {
-				remoteReply(w, 503, nil, "ATTEMPT_CONTEXT_FAILED", loadErr.Error())
-				return
-			}
-			if err := h.ValidateCompletion(ctx); err != nil {
-				remoteReply(w, 422, nil, "REQUIRED_OUTPUT_MISSING", err.Error())
-				return
-			}
-		}
-		err = h.Attempts.Terminal(r.Context(), id, lease, status, body.ErrorCode, body.Result)
+	if row.ExecutorHost != "lazymind" || lease == "" || row.LeaseToken != lease {
+		remoteReply(w, 409, nil, "EXECUTOR_MISMATCH", "native execution ownership is required")
+		return
 	}
+	var result Result
+	decoder := json.NewDecoder(bytes.NewReader(body.Result))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&result); err != nil {
+		remoteReply(w, 422, nil, "INVALID_RESULT", err.Error())
+		return
+	}
+	if h.Finish == nil {
+		remoteReply(w, 503, nil, "CONTROL_FINALIZATION_REQUIRED", "execution completion is unavailable")
+		return
+	}
+	err = h.Finish(r.Context(), session.CreateUserID, session.ID, id, Completion{
+		ExecutionHandle: lease, Outcome: status, ErrorCode: body.ErrorCode,
+		Summary: result.Summary, ExecutorRef: result.ExecutorRef, Control: result.Control,
+	})
+
 	if err != nil {
 		httpStatus, code := http.StatusServiceUnavailable, "ATTEMPT_TERMINAL_REJECTED"
 		var rejection *controlstore.Error
 		if errors.As(err, &rejection) {
-			code, httpStatus = rejection.Code, http.StatusConflict
-			if code == "REQUIRED_OUTPUT_MISSING" || code == "OUTPUT_SLOT_UNDECLARED" || code == "DUPLICATE_ARTIFACT" || code == "INVALID_ARTIFACT" || code == "TOO_MANY_ARTIFACTS" {
-				httpStatus = http.StatusUnprocessableEntity
-			}
+			code, httpStatus = rejection.Code, rejection.HTTPStatus()
 		} else if errors.Is(err, attempt.ErrLeaseLost) || errors.Is(err, attempt.ErrAlreadyTerminal) {
 			httpStatus = http.StatusConflict
 		}
@@ -420,10 +412,4 @@ func (h RemoteHandler) terminal(w http.ResponseWriter, r *http.Request, status s
 		return
 	}
 	remoteReply(w, 200, map[string]any{"attempt_status": status}, "", "")
-}
-
-// ValidateCompletion is called by the terminal handler before accepting a
-// remote success. Runtime, not the worker, is authoritative for required output.
-func (h RemoteHandler) ValidateCompletion(ctx AttemptContext) error {
-	return ValidateRequiredOutputs(context.Background(), h.DB, ctx)
 }

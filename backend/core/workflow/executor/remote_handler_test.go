@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"lazymind/core/workflow/controlstore"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -54,6 +55,9 @@ func remoteHandlerFixture(t *testing.T, value AttemptContext) (RemoteHandler, *g
 	}
 	claim, err := service.Claim(context.Background(), "executor-test")
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&orm.WorkflowSessionStep{}).Where("id = ?", value.AttemptID).Update("executor_host", "lazymind").Error; err != nil {
 		t.Fatal(err)
 	}
 	return RemoteHandler{DB: db, Attempts: service, Contexts: staticContextLoader{value: value}}, db, claim
@@ -311,6 +315,15 @@ func TestRemoteHandlerCompletionRequiresDurableOutputs(t *testing.T) {
 	value := AttemptContext{AttemptID: "attempt-1", SessionID: "session-1", StepID: "step-1",
 		DeclaredOutputs: []string{"report"}, RequiredOutputs: []string{"report"}}
 	handler, db, claim := remoteHandlerFixture(t, value)
+	if err := db.Model(&orm.WorkflowSessionStep{}).Where("id = ?", value.AttemptID).Update("executor_host", "lazymind").Error; err != nil {
+		t.Fatal(err)
+	}
+	handler.Finish = func(ctx context.Context, owner, sessionID, id string, input Completion) error {
+		if err := ValidateRequiredOutputs(ctx, db, value); err != nil {
+			return controlstore.Reject("REQUIRED_OUTPUT_MISSING", err.Error())
+		}
+		return handler.Attempts.Terminal(ctx, id, input.ExecutionHandle, input.Outcome, input.ErrorCode, json.RawMessage(`{}`))
+	}
 	body := map[string]any{"lease_token": claim.LeaseToken, "result": map[string]any{"summary": "done"}}
 	rejected := remoteHandlerRequest(handler.Complete, http.MethodPost, "/complete", value.AttemptID, claim.LeaseToken, body)
 	if rejected.Code != http.StatusUnprocessableEntity {

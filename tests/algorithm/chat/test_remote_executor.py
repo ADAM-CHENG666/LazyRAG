@@ -56,7 +56,7 @@ async def test_post_step_capability_check_runs_in_analysis_attempt_without_anoth
             self.events.append(event)
 
         async def artifact(self, *_):
-            assert not controlled, 'controlled artifacts must publish only in finalization'
+            assert self.completed is None, 'artifacts must publish before completion'
             return None
 
         async def progress(self, *_):
@@ -100,7 +100,7 @@ async def test_post_step_capability_check_runs_in_analysis_attempt_without_anoth
     assert subagent_runs == 1
     assert checked == ['WORKFLOW: CREATE_NEW\nREQUIRES: image_generator']
     assert runtime.completed['summary'] == 'analyzed'
-    assert runtime.completed['artifacts'][0]['slot'] == 'workflow_routing'
+    assert 'artifacts' not in runtime.completed
     assert [event['type'] for event in runtime.events] == [
         'artifact', 'tool_calls', 'tool_results', 'done',
     ]

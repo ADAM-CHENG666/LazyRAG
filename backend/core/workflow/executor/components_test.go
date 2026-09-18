@@ -165,7 +165,7 @@ func TestDBArtifactSinkIsIdempotentAndEmitsRevisionEvents(t *testing.T) {
 	}
 	sink := DBArtifactSink{DB: db}
 	ctx := AttemptContext{AttemptID: "attempt-1", SessionID: "session-1", StepID: "write", AttemptNo: 1,
-		OutputCardinality: map[string]string{"report": "single", "attachments": "list"}}
+		DeclaredOutputs: []string{"report", "attachments"}, OutputCardinality: map[string]string{"report": "single", "attachments": "list"}}
 	first := Artifact{Slot: "report", ContentType: "text", Seq: 1, Value: json.RawMessage(`{"text":"one","caption":"first result"}`)}
 	if err := sink.Save(context.Background(), ctx, first); err != nil {
 		t.Fatal(err)
@@ -213,7 +213,7 @@ func TestDBArtifactSinkIsIdempotentAndEmitsRevisionEvents(t *testing.T) {
 		t.Fatalf("list revisions=%#v", listRevisions)
 	}
 	partial := AttemptContext{AttemptID: "attempt-2", SessionID: "session-1", StepID: "write", AttemptNo: 2,
-		OutputCardinality: map[string]string{"attachments": "list"}, PartialSelector: map[string][]int{"attachments": {0}}}
+		DeclaredOutputs: []string{"attachments"}, OutputCardinality: map[string]string{"attachments": "list"}, PartialSelector: map[string][]int{"attachments": {0}}}
 	if err := sink.Save(context.Background(), partial, Artifact{Slot: "attachments", Seq: 1,
 		ContentType: "text/plain", Value: json.RawMessage(`{"name":"replacement"}`)}); err != nil {
 		t.Fatal(err)
@@ -236,7 +236,7 @@ func TestDBArtifactSinkRejectsDeclaredTypeMismatch(t *testing.T) {
 	db := executorComponentDB(t)
 	sink := DBArtifactSink{DB: db}
 	ctx := AttemptContext{AttemptID: "attempt-image", SessionID: "session-image", StepID: "enhance",
-		DeclaredOutputTypes: map[string]string{"enhanced_image_output": "image"}}
+		DeclaredOutputs: []string{"enhanced_image_output"}, DeclaredOutputTypes: map[string]string{"enhanced_image_output": "image"}}
 	err := sink.Save(context.Background(), ctx, Artifact{Slot: "enhanced_image_output",
 		ContentType: "text", Seq: 1, Value: json.RawMessage(`{"text":"BLOCKED"}`)})
 	if err == nil || !strings.Contains(err.Error(), `requires content type "image"`) {
@@ -277,7 +277,7 @@ func TestDBArtifactSinkLegacyAttemptWithoutManifestDefaultsSingle(t *testing.T) 
 	}
 
 	sink := DBArtifactSink{DB: db}
-	ctx := AttemptContext{AttemptID: "attempt-legacy", SessionID: "session-legacy", StepID: "write", AttemptNo: 1}
+	ctx := AttemptContext{AttemptID: "attempt-legacy", SessionID: "session-legacy", StepID: "write", AttemptNo: 1, DeclaredOutputs: []string{"report"}}
 	if err := sink.Save(context.Background(), ctx, Artifact{Slot: "report", Seq: 1,
 		ContentType: "text/plain", Value: json.RawMessage(`{"text":"result"}`)}); err != nil {
 		t.Fatal(err)
@@ -317,7 +317,7 @@ func TestDBArtifactSinkAppendsListSlotsAndReplacesOnlyExplicitIndex(t *testing.T
 	}
 
 	sink := DBArtifactSink{DB: db}
-	ctx := AttemptContext{AttemptID: "attempt-list", SessionID: "session-list", StepID: "outline", AttemptNo: 1}
+	ctx := AttemptContext{AttemptID: "attempt-list", SessionID: "session-list", StepID: "outline", AttemptNo: 1, DeclaredOutputs: []string{"slide_outline"}}
 	for seq, text := range []string{"one", "two", "three"} {
 		artifact := Artifact{Slot: "slide_outline", ContentType: "text", Seq: seq + 1,
 			Value: json.RawMessage(`{"text":"` + text + `"}`)}

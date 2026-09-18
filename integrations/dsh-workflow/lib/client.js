@@ -20,7 +20,8 @@ const OPERATIONS = new Set([
 	"step_begin",
 	"step_claim",
 	"step_resume",
-	"step_submit",
+	"step_complete",
+	"artifact_publish",
 	"artifact_list",
 	"artifact_get"
 ]);
@@ -98,7 +99,7 @@ function eventRun(event, serverName) {
 		"step_begin",
 		"step_claim",
 		"step_resume",
-		"step_submit"
+		"step_complete"
 	].includes(workflowOperation(data.name, serverName) ?? "") || !Array.isArray(data.content)) return null;
 	for (const raw of [...data.content].reverse()) {
 		const content = object(raw);

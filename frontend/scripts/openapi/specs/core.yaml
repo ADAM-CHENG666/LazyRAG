@@ -1,5 +1,72 @@
 components:
     schemas:
+        workflowHostedCompletionReply:
+            properties:
+                contract_version:
+                    type: string
+                ok:
+                    type: boolean
+                result:
+                    $ref: '#/components/schemas/CompletionResult'
+            required:
+                - contract_version
+                - ok
+                - result
+            type: object
+        Publication:
+            properties:
+                artifact:
+                    $ref: '#/components/schemas/Artifact'
+                execution_handle:
+                    type: string
+            required:
+                - artifact
+                - execution_handle
+            type: object
+        CompletionResult:
+            properties:
+                already_terminal:
+                    type: boolean
+                attempt_status:
+                    type: string
+                control:
+                    $ref: '#/components/schemas/Snapshot'
+                execution_id:
+                    type: string
+                receipt:
+                    $ref: '#/components/schemas/CompletionReceipt'
+            required:
+                - attempt_status
+                - execution_id
+            type: object
+        CompletionReceipt:
+            properties:
+                command_id:
+                    type: string
+                execution_id:
+                    type: string
+            required:
+                - command_id
+                - execution_id
+            type: object
+        Completion:
+            properties:
+                control:
+                    $ref: '#/components/schemas/Control'
+                error_code:
+                    type: string
+                execution_handle:
+                    type: string
+                executor_ref:
+                    type: string
+                outcome:
+                    type: string
+                summary:
+                    type: string
+            required:
+                - execution_handle
+                - outcome
+            type: object
         ACLApiResponse:
             properties:
                 code:
@@ -3255,14 +3322,14 @@ components:
                 lease_expires_at:
                     format: date-time
                     type: string
-                review_after_submit:
+                review_after_complete:
                     type: boolean
                 step_contract:
                     $ref: '#/components/schemas/AttemptContext'
             required:
                 - execution_id
                 - lease_expires_at
-                - review_after_submit
+                - review_after_complete
                 - step_contract
             type: object
         ExportConversationsRequest:
@@ -5089,53 +5156,6 @@ components:
                 - failed_count
                 - requested_count
                 - started_count
-            type: object
-        Submission:
-            properties:
-                artifacts:
-                    items:
-                        $ref: '#/components/schemas/Artifact'
-                    type: array
-                control:
-                    $ref: '#/components/schemas/Control'
-                error_code:
-                    type: string
-                execution_handle:
-                    type: string
-                executor_ref:
-                    type: string
-                outcome:
-                    type: string
-                summary:
-                    type: string
-            required:
-                - outcome
-            type: object
-        SubmissionReceipt:
-            properties:
-                command_id:
-                    type: string
-                execution_id:
-                    type: string
-            required:
-                - command_id
-                - execution_id
-            type: object
-        SubmissionResult:
-            properties:
-                already_terminal:
-                    type: boolean
-                attempt_status:
-                    type: string
-                control:
-                    $ref: '#/components/schemas/Snapshot'
-                execution_id:
-                    type: string
-                receipt:
-                    $ref: '#/components/schemas/SubmissionReceipt'
-            required:
-                - attempt_status
-                - execution_id
             type: object
         SuspendJobRequest:
             properties:
@@ -9584,19 +9604,6 @@ components:
                 - ok
                 - result
             type: object
-        workflowHostedSubmissionReply:
-            properties:
-                contract_version:
-                    type: string
-                ok:
-                    type: boolean
-                result:
-                    $ref: '#/components/schemas/SubmissionResult'
-            required:
-                - contract_version
-                - ok
-                - result
-            type: object
         writerDocumentSyncOpenAPIRequest:
             properties:
                 base_revision:
@@ -9627,6 +9634,80 @@ info:
     version: 0.1.0
 openapi: 3.0.3
 paths:
+    /api/core/workflow-sessions/{session_id}/hosted-attempts/{attempt_id}/artifacts:
+        post:
+            parameters:
+                - in: path
+                  name: session_id
+                  required: true
+                  schema:
+                    type: string
+                - in: path
+                  name: attempt_id
+                  required: true
+                  schema:
+                    type: string
+            requestBody:
+                content:
+                    application/json:
+                        schema:
+                            $ref: '#/components/schemas/Publication'
+                required: true
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                additionalProperties:
+                                    properties: {}
+                                    type: object
+                                type: object
+                    description: Workflow control result
+                "409":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/workflowControlErrorReply'
+                    description: Stale state, invalid admission, or conflicting command
+            summary: Publish one artifact during execution
+            tags:
+                - workflow-control
+    /api/core/workflow-sessions/{session_id}/hosted-attempts/{attempt_id}:complete:
+        post:
+            description: workflow.control.v1 runs require execution_handle. Repeating the identical completion returns its receipt and current control; conflicting content is rejected.
+            parameters:
+                - in: path
+                  name: session_id
+                  required: true
+                  schema:
+                    type: string
+                - in: path
+                  name: attempt_id
+                  required: true
+                  schema:
+                    type: string
+            requestBody:
+                content:
+                    application/json:
+                        schema:
+                            $ref: '#/components/schemas/Completion'
+                required: true
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/workflowHostedCompletionReply'
+                    description: Workflow control result
+                "409":
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/workflowControlErrorReply'
+                    description: Stale state, invalid admission, or conflicting command
+            summary: Complete an execution using already published artifacts
+            tags:
+                - workflow-control
     /api/core/add_files_to_group:
         post:
             responses:
@@ -19762,42 +19843,6 @@ paths:
                                 $ref: '#/components/schemas/workflowControlErrorReply'
                     description: Stale state, invalid admission, or conflicting command
             summary: Rotate the existing execution handle for explicit recovery
-            tags:
-                - workflow-control
-    /api/core/workflow-sessions/{session_id}/hosted-attempts/{attempt_id}:submit:
-        post:
-            description: workflow.control.v1 runs require execution_handle. Repeating the identical terminal submission returns its receipt and current control; conflicting content is rejected.
-            parameters:
-                - in: path
-                  name: session_id
-                  required: true
-                  schema:
-                    type: string
-                - in: path
-                  name: attempt_id
-                  required: true
-                  schema:
-                    type: string
-            requestBody:
-                content:
-                    application/json:
-                        schema:
-                            $ref: '#/components/schemas/Submission'
-                required: true
-            responses:
-                "200":
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/workflowHostedSubmissionReply'
-                    description: Workflow control result
-                "409":
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/workflowControlErrorReply'
-                    description: Stale state, invalid admission, or conflicting command
-            summary: Atomically submit artifacts, terminal outcome, and required review
             tags:
                 - workflow-control
     /api/core/workflow-sessions/{session_id}/input-bindings:

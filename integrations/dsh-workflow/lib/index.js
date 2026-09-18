@@ -19,7 +19,8 @@ const OPERATIONS = new Set([
 	"step_begin",
 	"step_claim",
 	"step_resume",
-	"step_submit",
+	"step_complete",
+	"artifact_publish",
 	"artifact_list",
 	"artifact_get"
 ]);
@@ -104,7 +105,7 @@ function eventRun(event, serverName) {
 		"step_begin",
 		"step_claim",
 		"step_resume",
-		"step_submit"
+		"step_complete"
 	].includes(workflowOperation(data.name, serverName) ?? "") || !Array.isArray(data.content)) return null;
 	for (const raw of [...data.content].reverse()) {
 		const content = object(raw);
@@ -365,7 +366,7 @@ function installHost(ctx, bridge, config, instanceId) {
 				"step_begin",
 				"step_claim",
 				"step_resume",
-				"step_submit"
+				"step_complete"
 			].includes(run.operation)) continue;
 			if (!scope.runId) {
 				scope.runId = run.runId;
@@ -374,7 +375,7 @@ function installHost(ctx, bridge, config, instanceId) {
 				ownedSeq = event.seq;
 			}
 			if (run.runId !== scope.runId || !run.executionId) continue;
-			if (run.operation === "step_submit") finished.add(run.executionId);
+			if (run.operation === "step_complete") finished.add(run.executionId);
 			else if (ACQUIRE.has(run.operation) && !finished.has(run.executionId)) scope.grants.add(run.executionId);
 		}
 		if (latestInputSeq > ownedSeq) scope.automatic = false;
@@ -392,7 +393,7 @@ function installHost(ctx, bridge, config, instanceId) {
 		if (scope.unknown && (scope.activeOwned || operation)) return "Workflow state is unavailable; retry after reconnecting LazyMind.";
 		if (!paused(scope)) return void 0;
 		if (scope.control?.continuation === "stopped") return operation || scope.activeOwned ? "This Workflow has been stopped." : void 0;
-		if (operation === "step_submit" || operation === "step_resume" || operation === "step_claim") {
+		if (operation === "artifact_publish" || operation === "step_complete" || operation === "step_resume" || operation === "step_claim") {
 			const id = object(exec.arguments)?.execution_id;
 			return typeof id === "string" && scope.control?.active_execution_ids?.includes(id) ? void 0 : "Only an already granted execution may finish while review is pending.";
 		}
@@ -466,7 +467,7 @@ function installHost(ctx, bridge, config, instanceId) {
 			scope.activeOwned = scope.automatic = true;
 			scope.manual = false;
 		}
-		if (operation === "step_submit" && typeof fields?.execution_id === "string") {
+		if (operation === "step_complete" && typeof fields?.execution_id === "string") {
 			scope.grants.delete(fields.execution_id);
 			scope.returnPending = true;
 			scope.activeOwned = scope.automatic = true;

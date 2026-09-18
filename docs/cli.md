@@ -730,7 +730,8 @@ LazyMind 生成 Cursor 官方 `cursor://anysphere.cursor-deeplink/mcp/install` �
 - `workflow.session.resume`
 - `workflow.step.begin`
 - `workflow.step.resume`
-- `workflow.step.submit`
+- `workflow.artifact.publish` — publish each output during execution
+- `workflow.step.complete` — finish after publication acknowledgements
 - `workflow.artifact.list`
 - `workflow.artifact.get`
 

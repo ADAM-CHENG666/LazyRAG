@@ -180,8 +180,7 @@ class RemoteWorkflowExecutor:
                     await self.runtime.task_event(client, task_id, lease, {
                         **event, 'value': artifact['value'],
                     })
-                    if not metadata.get('control_protocol'):
-                        await self.runtime.artifact(client, attempt_id, lease, artifact)
+                    await self.runtime.artifact(client, attempt_id, lease, artifact)
                     artifacts.append(artifact)
                 elif kind not in {'done', 'error'}:
                     await self.runtime.task_event(client, task_id, lease, event)
@@ -227,7 +226,7 @@ class RemoteWorkflowExecutor:
                 await self.runtime.fail(client, attempt_id, lease, failure)
             else:
                 await self.runtime.complete(client, attempt_id, lease, {
-                    'summary': summary, 'executor_ref': task_id, 'artifacts': artifacts,
+                    'summary': summary, 'executor_ref': task_id,
                     **({'control': control} if control else {}),
                 })
         except httpx.HTTPStatusError as exc:

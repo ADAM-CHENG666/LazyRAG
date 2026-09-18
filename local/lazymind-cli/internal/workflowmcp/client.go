@@ -153,13 +153,13 @@ type StepContract struct {
 }
 
 type Execution struct {
-	ExecutorHost      string       `json:"executor_host,omitempty"`
-	AttemptStatus     string       `json:"attempt_status,omitempty"`
-	ReviewAfterSubmit bool         `json:"review_after_submit"`
-	ExecutionHandle   string       `json:"execution_handle,omitempty"`
-	ExecutionID       string       `json:"execution_id"`
-	LeaseExpires      string       `json:"lease_expires_at"`
-	StepContract      StepContract `json:"step_contract"`
+	ExecutorHost        string       `json:"executor_host,omitempty"`
+	AttemptStatus       string       `json:"attempt_status,omitempty"`
+	ReviewAfterComplete bool         `json:"review_after_complete"`
+	ExecutionHandle     string       `json:"execution_handle,omitempty"`
+	ExecutionID         string       `json:"execution_id"`
+	LeaseExpires        string       `json:"lease_expires_at"`
+	StepContract        StepContract `json:"step_contract"`
 }
 
 type BeginResult struct {
@@ -181,18 +181,17 @@ type Output struct {
 	Seq         int    `json:"seq,omitempty" jsonschema:"One-based idempotency sequence for list items or repeated revisions of one slot"`
 }
 
-type SubmitInput struct {
-	ExecutionHandle string   `json:"execution_handle,omitempty" jsonschema:"Opaque execution_handle returned by begin claim or resume; required for controlled runs; copy unchanged"`
-	SessionID       string   `json:"session_id" jsonschema:"required,Workflow session identifier"`
-	ExecutionID     string   `json:"execution_id" jsonschema:"required,Execution identifier returned by workflow.step.begin"`
-	Outcome         string   `json:"outcome" jsonschema:"required,One of succeeded failed or cancelled"`
-	Summary         string   `json:"summary,omitempty"`
-	ErrorCode       string   `json:"error_code,omitempty"`
-	ExecutorRef     string   `json:"executor_ref,omitempty" jsonschema:"Optional external Agent task or trace reference"`
-	Outputs         []Output `json:"outputs,omitempty" jsonschema:"Artifacts mapped to declared Workflow output slots"`
+type CompleteInput struct {
+	ExecutionHandle string `json:"execution_handle" jsonschema:"required,Opaque execution_handle returned by begin claim or resume; copy unchanged"`
+	SessionID       string `json:"session_id" jsonschema:"required,Workflow session identifier"`
+	ExecutionID     string `json:"execution_id" jsonschema:"required,Execution identifier returned by workflow.step.begin"`
+	Outcome         string `json:"outcome" jsonschema:"required,One of succeeded failed or cancelled"`
+	Summary         string `json:"summary,omitempty"`
+	ErrorCode       string `json:"error_code,omitempty"`
+	ExecutorRef     string `json:"executor_ref,omitempty" jsonschema:"Optional external Agent task or trace reference"`
 }
 
-type SubmitResult struct {
+type CompleteResult struct {
 	Control          map[string]any `json:"control,omitempty"`
 	Receipt          map[string]any `json:"receipt,omitempty"`
 	StateUnavailable bool           `json:"state_unavailable,omitempty"`
@@ -566,19 +565,19 @@ func (c *Client) begin(ctx context.Context, sessionID, executionID string, resum
 	return BeginResult{Execution: execution, State: state}, err
 }
 
-func (c *Client) Submit(ctx context.Context, input SubmitInput, artifacts []map[string]any) (SubmitResult, error) {
+func (c *Client) Complete(ctx context.Context, input CompleteInput) (CompleteResult, error) {
 	if strings.TrimSpace(input.SessionID) == "" || strings.TrimSpace(input.ExecutionID) == "" {
-		return SubmitResult{}, errors.New("session_id and execution_id are required")
+		return CompleteResult{}, errors.New("session_id and execution_id are required")
 	}
 	payload := map[string]any{
 		"outcome": input.Outcome, "summary": input.Summary, "error_code": input.ErrorCode,
-		"executor_ref": input.ExecutorRef, "artifacts": artifacts, "execution_handle": input.ExecutionHandle,
+		"executor_ref": input.ExecutorRef, "execution_handle": input.ExecutionHandle,
 	}
-	var result SubmitResult
+	var result CompleteResult
 	err := c.api.DoJSON(ctx, http.MethodPost, "/workflow-sessions/"+url.PathEscape(input.SessionID)+
-		"/hosted-attempts/"+url.PathEscape(input.ExecutionID)+":submit", payload, &result)
+		"/hosted-attempts/"+url.PathEscape(input.ExecutionID)+":complete", payload, &result)
 	if err != nil {
-		return SubmitResult{}, err
+		return CompleteResult{}, err
 	}
 	result.State, err = c.State(ctx, input.SessionID)
 	if err != nil && result.Control != nil {
@@ -645,4 +644,21 @@ func newID(prefix string) (string, error) {
 func sessionIDForKey(key string) string {
 	sum := sha256.Sum256([]byte(key))
 	return "mcp-" + hex.EncodeToString(sum[:16])
+}
+
+type PublishInput struct {
+	SessionID       string `json:"session_id" jsonschema:"required,Workflow session identifier"`
+	ExecutionID     string `json:"execution_id" jsonschema:"required,Execution identifier"`
+	ExecutionHandle string `json:"execution_handle" jsonschema:"required,Unchanged execution handle from begin claim or resume"`
+	Output          Output `json:"output" jsonschema:"required,One artifact to publish immediately; use a stable positive seq per slot across calls"`
+}
+
+func (c *Client) Publish(ctx context.Context, input PublishInput, artifact map[string]any) (map[string]any, error) {
+	if input.SessionID == "" || input.ExecutionID == "" || input.ExecutionHandle == "" {
+		return nil, errors.New("session_id execution_id and execution_handle are required")
+	}
+	payload := map[string]any{"execution_handle": input.ExecutionHandle, "artifact": artifact}
+	var result map[string]any
+	err := c.api.DoJSON(ctx, http.MethodPost, "/workflow-sessions/"+url.PathEscape(input.SessionID)+"/hosted-attempts/"+url.PathEscape(input.ExecutionID)+"/artifacts", payload, &result)
+	return result, err
 }

@@ -4,6 +4,8 @@ import (
 	"lazymind/core/common/orm"
 	"lazymind/core/workflow"
 	"lazymind/core/workflow/controlstore"
+	"lazymind/core/workflow/execution"
+	"lazymind/core/workflow/executor"
 	"lazymind/core/workflow/hosted"
 )
 
@@ -72,10 +74,10 @@ type workflowHostedExecutionReply struct {
 	OK              bool             `json:"ok"`
 	Result          hosted.Execution `json:"result"`
 }
-type workflowHostedSubmissionReply struct {
-	ContractVersion string                  `json:"contract_version"`
-	OK              bool                    `json:"ok"`
-	Result          hosted.SubmissionResult `json:"result"`
+type workflowHostedCompletionReply struct {
+	ContractVersion string                     `json:"contract_version"`
+	OK              bool                       `json:"ok"`
+	Result          execution.CompletionResult `json:"result"`
 }
 type workflowExecutionBeginBody struct {
 	CommandID            string `json:"command_id"`
@@ -115,7 +117,8 @@ func workflowControlOperations() []openAPIOperation {
 		operation("POST", "/workflow-host-actions/{action_id}:settle", "Record host acceptance or reconcile a durable native event", workflowHostActionPath{}, workflow.WorkflowHostReceipt{}, workflowHostReceiptReply{}),
 		operation("POST", "/workflow-sessions/{session_id}/hosted-attempts/{attempt_id}:begin", "Claim an existing queued execution and receive its fenced handle", workflowHostedPath{}, nil, workflowHostedExecutionReply{}),
 		operation("POST", "/workflow-sessions/{session_id}/hosted-attempts/{attempt_id}:resume", "Rotate the existing execution handle for explicit recovery", workflowHostedPath{}, nil, workflowHostedExecutionReply{}),
-		operation("POST", "/workflow-sessions/{session_id}/hosted-attempts/{attempt_id}:submit", "Atomically submit artifacts, terminal outcome, and required review", workflowHostedPath{}, hosted.Submission{}, workflowHostedSubmissionReply{}),
+		operation("POST", "/workflow-sessions/{session_id}/hosted-attempts/{attempt_id}:complete", "Complete an execution using already published artifacts", workflowHostedPath{}, executor.Completion{}, workflowHostedCompletionReply{}),
+		operation("POST", "/workflow-sessions/{session_id}/hosted-attempts/{attempt_id}/artifacts", "Publish one artifact during execution", workflowHostedPath{}, hosted.Publication{}, map[string]any{}),
 	}
 	result[1].QueryParams = struct {
 		View string `json:"view,omitempty"`
@@ -133,6 +136,6 @@ func workflowControlOperations() []openAPIOperation {
 			Credential string `json:"X-Workflow-Host-Credential"`
 		}{}
 	}
-	result[12].Description = "workflow.control.v1 runs require execution_handle. Repeating the identical terminal submission returns its receipt and current control; conflicting content is rejected."
+	result[12].Description = "workflow.control.v1 runs require execution_handle. Repeating the identical completion returns its receipt and current control; conflicting content is rejected."
 	return result
 }

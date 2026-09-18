@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -52,22 +53,72 @@ func validateDeclaredArtifactType(attempt AttemptContext, artifact Artifact) err
 	return nil
 }
 
+// NormalizeArtifact is the single output contract check for every executor.
+func NormalizeArtifact(attempt AttemptContext, artifact Artifact) (Artifact, error) {
+	artifact.Slot = strings.TrimSpace(artifact.Slot)
+	outputs := attempt.DeclaredOutputs
+	if len(outputs) == 0 {
+		outputs = attempt.RequiredOutputs
+	}
+	declared := false
+	for _, slot := range outputs {
+		if slot == artifact.Slot {
+			declared = true
+			break
+		}
+	}
+	if !declared {
+		return artifact, controlstore.Reject("OUTPUT_SLOT_UNDECLARED", "artifact slot is not declared: "+artifact.Slot)
+	}
+	if len(artifact.Value) == 0 || !json.Valid(artifact.Value) || bytes.Equal(bytes.TrimSpace(artifact.Value), []byte("null")) {
+		return artifact, controlstore.Reject("INVALID_ARTIFACT", "artifact value must be non-null JSON")
+	}
+	if artifact.Seq < 1 {
+		artifact.Seq = 1
+	}
+	if artifact.ContentType == "" {
+		artifact.ContentType = attempt.DeclaredOutputTypes[artifact.Slot]
+	}
+	if artifact.ContentType == "" {
+		artifact.ContentType = "application/json"
+	}
+	if err := validateDeclaredArtifactType(attempt, artifact); err != nil {
+		return artifact, controlstore.Reject("OUTPUT_TYPE_MISMATCH", err.Error())
+	}
+	return artifact, nil
+}
+
+// Immutable files have content hashes; their generated storage path is not identity.
+func artifactIdentity(raw json.RawMessage, contentType string) []byte {
+	var value any
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if decoder.Decode(&value) != nil {
+		return raw
+	}
+	// Snapshot materializes only the top-level file carrier, not arbitrary JSON.
+	if file, ok := value.(map[string]any); ok && file["storage"] == "managed_file" && contentType != "json" && contentType != "application/json" && !strings.HasPrefix(contentType, "text") {
+		if hash, ok := file["sha256"].(string); ok && strings.HasPrefix(hash, "sha256:") {
+			delete(file, "path")
+		}
+	}
+	encoded, _ := json.Marshal(value)
+	return encoded
+}
+
 func (sink DBArtifactSink) Save(ctx context.Context, attempt AttemptContext, artifact Artifact) error {
 	if sink.DB == nil || attempt.AttemptID == "" || artifact.Slot == "" {
 		return errors.New("artifact sink requires a database, attempt and slot")
 	}
-	if err := validateDeclaredArtifactType(attempt, artifact); err != nil {
+	artifact, err := NormalizeArtifact(attempt, artifact)
+	if err != nil {
 		return err
 	}
 	now := time.Now().UTC()
-	valueID, storedValue, cleanupDirectory := artifact.stagedID, artifact.Value, ""
-	var err error
-	if valueID == "" {
-		valueID = uuid.NewString()
-		storedValue, cleanupDirectory, err = artifactfile.Materialize(attempt.SessionID, valueID, artifact.Value)
-		if err != nil {
-			return err
-		}
+	valueID := uuid.NewString()
+	storedValue, cleanupDirectory, err := artifactfile.Snapshot(attempt.SessionID, valueID, artifact.ContentType, artifact.Value)
+	if err != nil {
+		return err
 	}
 	var caption *string
 	var metadata map[string]any
@@ -82,7 +133,7 @@ func (sink DBArtifactSink) Save(ctx context.Context, attempt AttemptContext, art
 		if err != nil {
 			return err
 		}
-		if controlstore.Controlled(lockedSession) {
+		if controlstore.Controlled(lockedSession) || attempt.ExecutionHandle != "" {
 			if err := controlstore.ValidateExecution(tx, lockedSession, attempt.AttemptID, attempt.ExecutionHandle); err != nil {
 				return err
 			}
@@ -90,6 +141,16 @@ func (sink DBArtifactSink) Save(ctx context.Context, attempt AttemptContext, art
 		var existing orm.WorkflowSlotRevision
 		err = tx.Where("producer_attempt_id = ? AND slot = ? AND artifact_seq = ?", attempt.AttemptID, artifact.Slot, artifact.Seq).First(&existing).Error
 		if err == nil {
+			var saved orm.WorkflowHumanArtifact
+			if existing.HumanArtifactID == nil {
+				return controlstore.Reject("COMMAND_CONFLICT", "artifact sequence is already used")
+			}
+			if err := tx.First(&saved, "id = ?", *existing.HumanArtifactID).Error; err != nil {
+				return err
+			}
+			if saved.ContentType != artifact.ContentType || !bytes.Equal(artifactIdentity(saved.Value, saved.ContentType), artifactIdentity(storedValue, artifact.ContentType)) {
+				return controlstore.Reject("COMMAND_CONFLICT", "artifact sequence was already published with different content")
+			}
 			return nil
 		}
 		if err != gorm.ErrRecordNotFound {

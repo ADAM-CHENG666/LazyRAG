@@ -19,7 +19,7 @@ export function object(value: unknown): Record<string, unknown> | null {
 }
 
 const OPERATIONS = new Set(['list', 'get', 'input_import', 'input_get', 'start', 'state', 'session_list',
-  'session_stop', 'session_resume', 'step_begin', 'step_claim', 'step_resume', 'step_submit', 'artifact_list', 'artifact_get'])
+  'session_stop', 'session_resume', 'step_begin', 'step_claim', 'step_resume', 'step_complete', 'artifact_publish', 'artifact_list', 'artifact_get'])
 
 export function workflowOperation(name: string, serverName: string): string | null {
   const prefix = `mcp__${serverName}__workflow_`
@@ -101,7 +101,7 @@ export function eventRun(event: unknown, serverName: string): RunLink | null {
     return null
   }
   if (value?.type !== 'tool/ptc-dispatch' || data?.isError !== false || typeof data.name !== 'string'
-    || !['start', 'state', 'step_begin', 'step_claim', 'step_resume', 'step_submit'].includes(workflowOperation(data.name, serverName) ?? '')
+    || !['start', 'state', 'step_begin', 'step_claim', 'step_resume', 'step_complete'].includes(workflowOperation(data.name, serverName) ?? '')
     || !Array.isArray(data.content)) return null
   for (const raw of [...data.content].reverse()) {
     const content = object(raw)

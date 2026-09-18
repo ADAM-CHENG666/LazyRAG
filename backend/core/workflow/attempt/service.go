@@ -367,7 +367,7 @@ func (s *Service) Terminal(ctx context.Context, attemptID, token, status, code s
 				return err
 			}
 			if controlstore.Controlled(session) && !s.controlFinalization {
-				return controlstore.Reject("CONTROL_FINALIZATION_REQUIRED", "use workflow.step.submit to settle this controlled execution")
+				return controlstore.Reject("CONTROL_FINALIZATION_REQUIRED", "use workflow.step.complete to settle this controlled execution")
 			}
 		}
 		if terminal(current.Status) {

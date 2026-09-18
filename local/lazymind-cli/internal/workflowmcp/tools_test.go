@@ -90,8 +90,8 @@ func TestWorkflowToolDescriptionsMatchExecutionFlow(t *testing.T) {
 	if !containsAll(got["workflow.artifact.get"], "artifact_id", "slot key", "get_artifact/read_artifact") {
 		t.Fatalf("workflow.artifact.get description=%q", got["workflow.artifact.get"])
 	}
-	if !containsAll(got["workflow.step.submit"], "text, json, image, file, or file_list", "local_path", "value", "save_artifact/save_artifacts", "key becomes slot", "when the step finishes") {
-		t.Fatalf("workflow.step.submit description=%q", got["workflow.step.submit"])
+	if !containsAll(got["workflow.artifact.publish"], "text, json, image, file, or file_list", "local_path", "value", "save_artifact/save_artifacts", "key becomes slot", "immediately") {
+		t.Fatalf("workflow.artifact.publish description=%q", got["workflow.artifact.publish"])
 	}
 }
 
@@ -119,8 +119,8 @@ func TestReadOnlyClassificationCoversEveryWorkflowTool(t *testing.T) {
 		"workflow.state": true, "workflow.session.list": true,
 		"workflow.artifact.list": true, "workflow.artifact.get": true,
 	}
-	if len(ToolNames) != 15 {
-		t.Fatalf("tool count=%d, want 15", len(ToolNames))
+	if len(ToolNames) != 16 {
+		t.Fatalf("tool count=%d, want 16", len(ToolNames))
 	}
 	for _, name := range ToolNames {
 		if IsReadOnlyTool(name) != readOnly[name] {
@@ -165,14 +165,14 @@ func TestEncodeOutputsKeepsSlotTypeAndAllowsAbsoluteFiles(t *testing.T) {
 	if err := os.WriteFile(inside, []byte("result"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	values, err := encodeOutputs([]Output{{Slot: "result", ContentType: "file", LocalPath: "result.txt"}})
+	values, err := encodeOutput(Output{Seq: 1, Slot: "result", ContentType: "file", LocalPath: "result.txt"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(values) != 1 || values[0]["content_type"] != "file" {
+	if values["content_type"] != "file" {
 		t.Fatalf("workspace file outputs=%#v", values)
 	}
-	payload, _ := values[0]["value"].(map[string]any)
+	payload, _ := values["value"].(map[string]any)
 	if payload["storage"] != "inline_base64" || payload["mime_type"] == nil {
 		t.Fatalf("workspace file payload=%#v", payload)
 	}
@@ -182,12 +182,12 @@ func TestEncodeOutputsKeepsSlotTypeAndAllowsAbsoluteFiles(t *testing.T) {
 	if err := os.WriteFile(outside, []byte("tmp"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	values, err = encodeOutputs([]Output{{Slot: "text_attachment", LocalPath: outside}})
+	values, err = encodeOutput(Output{Seq: 1, Slot: "text_attachment", LocalPath: outside})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if values[0]["content_type"] != "file" {
-		t.Fatalf("absolute file content_type=%v", values[0]["content_type"])
+	if values["content_type"] != "file" {
+		t.Fatalf("absolute file content_type=%v", values["content_type"])
 	}
 
 	parent := filepath.Join(filepath.Dir(workspace), "outside.txt")
@@ -195,34 +195,27 @@ func TestEncodeOutputsKeepsSlotTypeAndAllowsAbsoluteFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Remove(parent) })
-	if _, err := encodeOutputs([]Output{{Slot: "leak", LocalPath: filepath.Join("..", "outside.txt")}}); err == nil {
+	if _, err := encodeOutput(Output{Seq: 1, Slot: "leak", LocalPath: filepath.Join("..", "outside.txt")}); err == nil {
 		t.Fatal("relative path escaped the workspace")
 	}
 
-	values, err = encodeOutputs([]Output{{Slot: "image_attachment", ContentType: "image", Value: "https://placehold.co/640x360.png"}})
+	values, err = encodeOutput(Output{Seq: 1, Slot: "image_attachment", ContentType: "image", Value: "https://placehold.co/640x360.png"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if values[0]["content_type"] != "image" || values[0]["value"] != "https://placehold.co/640x360.png" {
+	if values["content_type"] != "image" || values["value"] != "https://placehold.co/640x360.png" {
 		t.Fatalf("image value outputs=%#v", values)
 	}
 }
 
-func TestEncodeOutputsAssignsSequenceWithinEachSlot(t *testing.T) {
-	values, err := encodeOutputs([]Output{
-		{Slot: "items", Value: "first"},
-		{Slot: "items", Value: "second"},
-		{Slot: "summary", Value: "only"},
-		{Slot: "items", Seq: 5, Value: "explicit"},
-		{Slot: "items", Value: "after explicit"},
-	})
-	if err != nil {
-		t.Fatal(err)
+func TestEncodeOutputRequiresStableSequenceAcrossCalls(t *testing.T) {
+	if _, err := encodeOutput(Output{Slot: "pages", Value: "page"}); err == nil {
+		t.Fatal("missing sequence accepted")
 	}
-	want := []int{1, 2, 1, 5, 6}
-	for index, value := range values {
-		if value["seq"] != want[index] {
-			t.Fatalf("output %d seq=%v, want %d", index, value["seq"], want[index])
+	for i := 0; i < 2; i++ {
+		value, err := encodeOutput(Output{Slot: "pages", Seq: 5, Value: "page"})
+		if err != nil || value["seq"] != 5 {
+			t.Fatalf("sequence changed on replay: %v %v", value, err)
 		}
 	}
 }

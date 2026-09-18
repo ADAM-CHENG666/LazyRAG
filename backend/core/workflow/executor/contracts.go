@@ -38,7 +38,6 @@ type AttemptContext struct {
 }
 
 type Artifact struct {
-	stagedID    string
 	Slot        string          `json:"slot"`
 	ContentType string          `json:"content_type"`
 	Value       json.RawMessage `json:"value"`
@@ -52,7 +51,6 @@ type Control struct {
 type Result struct {
 	Summary     string         `json:"summary,omitempty"`
 	ExecutorRef string         `json:"executor_ref,omitempty"`
-	Artifacts   []Artifact     `json:"artifacts,omitempty"`
 	Control     *Control       `json:"control,omitempty"`
 	Projection  map[string]any `json:"projection,omitempty"`
 }
@@ -63,4 +61,13 @@ type ContextLoader interface {
 
 type ArtifactSink interface {
 	Save(context.Context, AttemptContext, Artifact) error
+}
+
+type Completion struct {
+	ExecutionHandle string   `json:"execution_handle"`
+	Outcome         string   `json:"outcome"`
+	Summary         string   `json:"summary,omitempty"`
+	ErrorCode       string   `json:"error_code,omitempty"`
+	ExecutorRef     string   `json:"executor_ref,omitempty"`
+	Control         *Control `json:"control,omitempty"`
 }

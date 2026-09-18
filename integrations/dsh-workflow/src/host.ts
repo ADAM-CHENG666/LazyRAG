@@ -112,10 +112,10 @@ export function installHost(ctx: Context, bridge: HostTransport, config: HostCon
     for (const event of [...scope.agent.session.ownEvents()].reverse()) {
       if (event.type === 'user/message' && latestInputSeq < 0) latestInputSeq = event.seq
       const run = eventRun(event, config.serverName)
-      if (!run || run.hostSessionId !== root.session.id || !run.operation || !['start', 'step_begin', 'step_claim', 'step_resume', 'step_submit'].includes(run.operation)) continue
+      if (!run || run.hostSessionId !== root.session.id || !run.operation || !['start', 'step_begin', 'step_claim', 'step_resume', 'step_complete'].includes(run.operation)) continue
       if (!scope.runId) { scope.runId = run.runId; scope.automatic = true; ownedAt = event.time; ownedSeq = event.seq }
       if (run.runId !== scope.runId || !run.executionId) continue
-      if (run.operation === 'step_submit') finished.add(run.executionId)
+      if (run.operation === 'step_complete') finished.add(run.executionId)
       else if (ACQUIRE.has(run.operation) && !finished.has(run.executionId)) scope.grants.add(run.executionId)
     }
     // Restore ownership of a still-running workflow turn after plugin reload.
@@ -136,7 +136,7 @@ export function installHost(ctx: Context, bridge: HostTransport, config: HostCon
     if (scope.unknown && (scope.activeOwned || operation)) return 'Workflow state is unavailable; retry after reconnecting LazyMind.'
     if (!paused(scope)) return undefined
     if (scope.control?.continuation === 'stopped') return operation || scope.activeOwned ? 'This Workflow has been stopped.' : undefined
-    if (operation === 'step_submit' || operation === 'step_resume' || operation === 'step_claim') {
+    if (operation === 'artifact_publish' || operation === 'step_complete' || operation === 'step_resume' || operation === 'step_claim') {
       const id = object(exec.arguments)?.execution_id
       return typeof id === 'string' && scope.control?.active_execution_ids?.includes(id) ? undefined : 'Only an already granted execution may finish while review is pending.'
     }
@@ -201,7 +201,7 @@ export function installHost(ctx: Context, bridge: HostTransport, config: HostCon
       scope.activeOwned = scope.automatic = true
       scope.manual = false
     }
-    if (operation === 'step_submit' && typeof fields?.execution_id === 'string') {
+    if (operation === 'step_complete' && typeof fields?.execution_id === 'string') {
       scope.grants.delete(fields.execution_id)
       scope.returnPending = true
       scope.activeOwned = scope.automatic = true

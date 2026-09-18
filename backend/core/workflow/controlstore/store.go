@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"time"
 
 	"gorm.io/gorm"
@@ -20,6 +21,18 @@ import (
 type Error struct {
 	Code    string
 	Message string
+}
+
+// HTTPStatus keeps native and public execution errors consistent.
+func (e *Error) HTTPStatus() int {
+	switch e.Code {
+	case "REQUIRED_OUTPUT_MISSING", "OUTPUT_SLOT_UNDECLARED", "OUTPUT_TYPE_MISMATCH", "INVALID_ARTIFACT", "INVALID_OUTCOME":
+		return http.StatusUnprocessableEntity
+	case "EXECUTION_NOT_FOUND":
+		return http.StatusNotFound
+	default:
+		return http.StatusConflict
+	}
 }
 
 func (e *Error) Error() string          { return e.Code + ": " + e.Message }

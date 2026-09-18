@@ -39,8 +39,8 @@ func controlledService(t *testing.T) (*Service, *gorm.DB, Execution) {
 	return service, db, execution
 }
 
-func successfulSubmission(handle string) Submission {
-	return Submission{Outcome: "succeeded", ExecutionHandle: handle,
+func successfulSubmission(handle string) testCompletion {
+	return testCompletion{Outcome: "succeeded", ExecutionHandle: handle,
 		Artifacts: []executor.Artifact{{Slot: "report", ContentType: "text/plain", Seq: 1, Value: json.RawMessage(`{"text":"review me"}`)}}}
 }
 
@@ -48,7 +48,7 @@ func TestControlledHumanSubmitConfirmAndFreshReplay(t *testing.T) {
 	service, db, execution := controlledService(t)
 	ctx := context.Background()
 	input := successfulSubmission(execution.ExecutionHandle)
-	result, err := service.Submit(ctx, "owner", "session-1", "attempt-1", input)
+	result, err := publishAndComplete(service, ctx, "owner", "session-1", "attempt-1", input)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestControlledHumanSubmitConfirmAndFreshReplay(t *testing.T) {
 	if confirmed.Control.Continuation != "completed" || confirmed.Control.Reviews[0].Status != "accepted" {
 		t.Fatalf("last step did not complete after confirmation: %+v", confirmed.Control)
 	}
-	replay, err := service.Submit(ctx, "owner", session.ID, "attempt-1", input)
+	replay, err := publishAndComplete(service, ctx, "owner", session.ID, "attempt-1", input)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestControlledHumanSubmitConfirmAndFreshReplay(t *testing.T) {
 		t.Fatalf("historical receipt restored stale control: %+v", replay)
 	}
 	input.Summary = "different submission"
-	if _, err := service.Submit(ctx, "owner", session.ID, "attempt-1", input); err == nil {
+	if _, err := publishAndComplete(service, ctx, "owner", session.ID, "attempt-1", input); err == nil {
 		t.Fatal("conflicting terminal replay was accepted")
 	}
 	command.ManifestHash = "different content"
@@ -99,7 +99,7 @@ func TestControlledStaleHandleCannotPublishArtifacts(t *testing.T) {
 	if previous.ExecutionHandle == current.ExecutionHandle {
 		t.Fatal("resume did not rotate the execution handle")
 	}
-	_, err = service.Submit(context.Background(), "owner", "session-1", "attempt-1", successfulSubmission(previous.ExecutionHandle))
+	_, err = publishAndComplete(service, context.Background(), "owner", "session-1", "attempt-1", successfulSubmission(previous.ExecutionHandle))
 	var rejected *controlstore.Error
 	if !errors.As(err, &rejected) || rejected.Code != "EXECUTION_FENCED" {
 		t.Fatalf("stale handle: %v", err)
@@ -111,7 +111,7 @@ func TestControlledStaleHandleCannotPublishArtifacts(t *testing.T) {
 	}
 }
 
-func TestControlledFinalizationRollsBackArtifactsAndTerminalOnReviewFailure(t *testing.T) {
+func TestControlledCompletionPreservesPublishedArtifactsOnReviewFailure(t *testing.T) {
 	service, db, execution := controlledService(t)
 	if err := db.Callback().Create().Before("gorm:create").Register("test:reject-review", func(tx *gorm.DB) {
 		if tx.Statement.Table == "workflow_review_checkpoints" {
@@ -121,7 +121,7 @@ func TestControlledFinalizationRollsBackArtifactsAndTerminalOnReviewFailure(t *t
 		t.Fatal(err)
 	}
 	defer db.Callback().Create().Remove("test:reject-review")
-	if _, err := service.Submit(context.Background(), "owner", "session-1", "attempt-1", successfulSubmission(execution.ExecutionHandle)); err == nil {
+	if _, err := publishAndComplete(service, context.Background(), "owner", "session-1", "attempt-1", successfulSubmission(execution.ExecutionHandle)); err == nil {
 		t.Fatal("expected injected storage failure")
 	}
 	var attempt orm.WorkflowSessionStep
@@ -129,7 +129,11 @@ func TestControlledFinalizationRollsBackArtifactsAndTerminalOnReviewFailure(t *t
 	if attempt.Status != "claimed" || attempt.SubmissionHash != "" {
 		t.Fatalf("partial terminal commit: %+v", attempt)
 	}
-	for _, model := range []any{&orm.WorkflowSlotRevision{}, &orm.WorkflowHumanArtifact{}, &orm.WorkflowReviewCheckpoint{}, &orm.WorkflowCommand{}} {
+	var published int64
+	if err := db.Model(&orm.WorkflowSlotRevision{}).Count(&published).Error; err != nil || published != 1 {
+		t.Fatalf("published result lost after failed completion: %d %v", published, err)
+	}
+	for _, model := range []any{&orm.WorkflowReviewCheckpoint{}, &orm.WorkflowCommand{}} {
 		var count int64
 		if err := db.Model(model).Count(&count).Error; err != nil {
 			t.Fatal(err)
@@ -142,7 +146,7 @@ func TestControlledFinalizationRollsBackArtifactsAndTerminalOnReviewFailure(t *t
 
 func TestConfirmationRejectsStaleContentAndRollsBackRouteFailure(t *testing.T) {
 	service, db, execution := controlledService(t)
-	result, err := service.Submit(context.Background(), "owner", "session-1", "attempt-1", successfulSubmission(execution.ExecutionHandle))
+	result, err := publishAndComplete(service, context.Background(), "owner", "session-1", "attempt-1", successfulSubmission(execution.ExecutionHandle))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +182,7 @@ func TestAutoFinalSubmissionReturnsCommittedCompletion(t *testing.T) {
 	if err := db.Model(&orm.WorkflowSessionStep{}).Where("id = ?", "attempt-1").Update("review_required", false).Error; err != nil {
 		t.Fatal(err)
 	}
-	result, err := service.Submit(context.Background(), "owner", "session-1", "attempt-1", successfulSubmission(execution.ExecutionHandle))
+	result, err := publishAndComplete(service, context.Background(), "owner", "session-1", "attempt-1", successfulSubmission(execution.ExecutionHandle))
 	if err != nil || result.Control.Continuation != "completed" {
 		t.Fatalf("submit returned pre-commit lifecycle: %+v %v", result, err)
 	}
@@ -187,7 +191,7 @@ func TestAutoFinalSubmissionReturnsCommittedCompletion(t *testing.T) {
 func TestConfirmationCannotAcceptADeletedRequiredOutput(t *testing.T) {
 	service, db, execution := controlledService(t)
 	ctx := context.Background()
-	result, err := service.Submit(ctx, "owner", "session-1", "attempt-1", successfulSubmission(execution.ExecutionHandle))
+	result, err := publishAndComplete(service, ctx, "owner", "session-1", "attempt-1", successfulSubmission(execution.ExecutionHandle))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +224,7 @@ func TestApprovalPreferenceEntryPointsShareFuturePolicy(t *testing.T) {
 			t.Run(scope+"/"+entry, func(t *testing.T) {
 				service, db, execution := controlledService(t)
 				ctx := context.Background()
-				result, err := service.Submit(ctx, "owner", "session-1", "attempt-1", successfulSubmission(execution.ExecutionHandle))
+				result, err := publishAndComplete(service, ctx, "owner", "session-1", "attempt-1", successfulSubmission(execution.ExecutionHandle))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -325,11 +329,11 @@ func TestNativeExecutionSharesAtomicReviewAndHostContinuation(t *testing.T) {
 				t.Fatalf("native wait not guarded: %+v %v", waiting, err)
 			}
 			input := successfulSubmission(claim.LeaseToken)
-			if _, err := service.Submit(ctx, "owner", session.ID, claim.AttemptID, input); err == nil {
+			if _, err := publishAndComplete(service, ctx, "owner", session.ID, claim.AttemptID, input); err == nil {
 				t.Fatal("public submit accepted native artifacts")
 			}
 			missing := json.RawMessage(`{"summary":"missing artifacts"}`)
-			if err := service.SettleNative(ctx, claim.AttemptID, claim.LeaseToken, "succeeded", "", missing); err == nil {
+			if err := finishNative(service, ctx, claim.AttemptID, claim.LeaseToken, "succeeded", "", missing); err == nil {
 				t.Fatal("native completion skipped required outputs")
 			}
 			var count int64
@@ -337,12 +341,22 @@ func TestNativeExecutionSharesAtomicReviewAndHostContinuation(t *testing.T) {
 			if count != 0 {
 				t.Fatal("failed native completion published artifacts")
 			}
-			raw, _ := json.Marshal(executor.Result{Summary: "native result", Artifacts: input.Artifacts})
-			if err := service.SettleNative(ctx, claim.AttemptID, "stale", "succeeded", "", raw); err == nil {
+			raw, _ := json.Marshal(executor.Result{Summary: "native result"})
+			if err := finishNative(service, ctx, claim.AttemptID, "stale", "succeeded", "", raw); err == nil {
 				t.Fatal("stale native lease accepted")
 			}
+			contract, err := service.Contexts.LoadAttemptContext(ctx, claim.AttemptID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			contract.ExecutionHandle = claim.LeaseToken
+			for _, artifact := range input.Artifacts {
+				if err := service.Artifacts.Save(ctx, contract, artifact); err != nil {
+					t.Fatal(err)
+				}
+			}
 			for i := 0; i < 2; i++ {
-				if err := service.SettleNative(ctx, claim.AttemptID, claim.LeaseToken, "succeeded", "", raw); err != nil {
+				if err := finishNative(service, ctx, claim.AttemptID, claim.LeaseToken, "succeeded", "", raw); err != nil {
 					t.Fatal(err)
 				}
 			}

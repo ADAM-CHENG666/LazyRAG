@@ -116,7 +116,7 @@ class RemoteExecutorClient:
         payload = {
             'lease_token': lease,
             'error_code': 'LAZYMIND_EXECUTION_FAILED',
-            'result': {'error': message},
+            'result': {'summary': message},
         }
         response = await client.post(f'{self.base_url}/internal/workflow-attempts/{attempt}:fail',
                                      headers=self.headers(lease), json=payload)

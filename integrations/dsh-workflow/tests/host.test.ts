@@ -67,7 +67,8 @@ async function fixture(seedPTC = false, native = false, laterManualInput = false
     control = { ...control, state_version: 2, active_execution_ids: ['attempt-1'], active_executions: 1, ...(native ? { native_execution_ids: ['attempt-1'], continuation: 'awaiting_executor', admission: { can_begin: false } } : {}) }
     return { structuredContent: { execution: { execution_id: 'attempt-1', executor_host: native ? 'lazymind' : 'external-agent' }, state: { control } } }
   }))
-  ctx.tools.register(definition('mcp__lazymind__workflow_step_submit', async () => {
+  ctx.tools.register(definition('mcp__lazymind__workflow_artifact_publish', async () => ({ structuredContent: { saved: true } })))
+  ctx.tools.register(definition('mcp__lazymind__workflow_step_complete', async () => {
     control = { ...control, state_version: 3, active_execution_ids: [], active_executions: 0,
       continuation: 'awaiting_user', admission: { can_begin: false, reason: 'review_pending' } }
     return { structuredContent: { execution_id: 'attempt-1', control } }
@@ -79,10 +80,10 @@ async function fixture(seedPTC = false, native = false, laterManualInput = false
     control = { ...control, continuation: 'awaiting_user', state_version: 3, admission: { can_begin: false } }
     root.session.append('tool/ptc-dispatch', {
       rootCallId: 'code' as ToolExecutionInput['callId'], parentCallId: 'code' as ToolExecutionInput['callId'],
-      subCallId: 'code:1' as ToolExecutionInput['callId'], name: publicName('mcp__lazymind__workflow_step_submit'),
+      subCallId: 'code:1' as ToolExecutionInput['callId'], name: publicName('mcp__lazymind__workflow_step_complete'),
       arguments: {}, isError: false, content: [{type: 'text', text: JSON.stringify({lazymind_workflow: {
         runId: 'run-1', url: 'http://localhost:8090/workflow-runs/run-1', hostSessionId: 'native-root',
-        operation: 'step_submit', executionId: 'attempt-1',
+        operation: 'step_complete', executionId: 'attempt-1',
       }})}],
     })
   }
@@ -108,7 +109,7 @@ describe('workflow host isolation through DSH public scopes', () => {
     const f = await fixture()
     await f.execute('mcp__lazymind__workflow_start')
     await f.execute('mcp__lazymind__workflow_step_begin', f.root, { session_id: 'run-1' })
-    const result = await f.execute('mcp__lazymind__workflow_step_submit', f.root, { session_id: 'run-1', execution_id: 'attempt-1' })
+    const result = await f.execute('mcp__lazymind__workflow_step_complete', f.root, { session_id: 'run-1', execution_id: 'attempt-1' })
     expect(result).toMatchObject({ isError: false, concludesTurn: true })
     expect((await f.execute('shell')).isError).toBe(true)
     expect(f.shell).not.toHaveBeenCalled()
@@ -120,7 +121,7 @@ describe('workflow host isolation through DSH public scopes', () => {
     const f = await fixture()
     await f.execute('mcp__lazymind__workflow_start')
     await f.execute('mcp__lazymind__workflow_step_begin', f.child, { session_id: 'run-1' })
-    const submitted = await f.execute('mcp__lazymind__workflow_step_submit', f.child, { session_id: 'run-1', execution_id: 'attempt-1' })
+    const submitted = await f.execute('mcp__lazymind__workflow_step_complete', f.child, { session_id: 'run-1', execution_id: 'attempt-1' })
     expect(submitted.isError).toBe(false)
     expect(submitted).not.toHaveProperty('concludesTurn')
     expect((await f.execute('shell', f.child)).isError).toBe(true)
@@ -132,7 +133,7 @@ describe('workflow host isolation through DSH public scopes', () => {
     const f = await fixture()
     await f.execute('mcp__lazymind__workflow_start')
     await f.execute('mcp__lazymind__workflow_step_begin', f.root, { session_id: 'run-1' })
-    await f.execute('mcp__lazymind__workflow_step_submit', f.root, { session_id: 'run-1', execution_id: 'attempt-1' })
+    await f.execute('mcp__lazymind__workflow_step_complete', f.root, { session_id: 'run-1', execution_id: 'attempt-1' })
     const messages = [{ source: { kind: 'user', rpcId: 'manual-1' }, content: [{ type: 'text', text: 'Check something else' }] }] as unknown as UserMessage[]
     const decision = await f.ctx.waterfall(scopeTarget(f.root, f.root), 'agent/pre-step', {
       agent: f.root, turn: 2, step: 0, messages, signal: new AbortController().signal,
@@ -171,7 +172,7 @@ it('lets a child return its committed result even when the subsequent Bridge rea
   // Pre-execute read succeeds; only the committed result's synchronization fails.
   const current = await f.bridge.state('run-1', new AbortController().signal)
   read.mockResolvedValueOnce(current).mockRejectedValue(new Error('bridge offline'))
-  const submitted=await f.execute('mcp__lazymind__workflow_step_submit',f.child,{session_id:'run-1',execution_id:'attempt-1'})
+  const submitted=await f.execute('mcp__lazymind__workflow_step_complete',f.child,{session_id:'run-1',execution_id:'attempt-1'})
   expect(submitted.isError).toBe(false)
   expect((await f.execute('structured_output', f.child)).isError).toBe(false)
 })
@@ -222,4 +223,20 @@ it.each([
     expect(cancel).toHaveBeenCalledWith({ sessionId: f.root.session.id })
     expect(cancel.mock.invocationCallOrder[0]).toBeLessThan(prompt.mock.invocationCallOrder[0])
   }
+})
+
+
+it('publishes during an active grant without completing it, including review draining', async () => {
+  const f = await fixture()
+  await f.execute('mcp__lazymind__workflow_start')
+  await f.execute('mcp__lazymind__workflow_step_begin', f.root, { session_id: 'run-1' })
+  const args = { session_id: 'run-1', execution_id: 'attempt-1', output: { slot: 'pages', seq: 1, value: 'page' } }
+  const published = await f.execute('mcp__lazymind__workflow_artifact_publish', f.root, args)
+  expect(published.isError).toBe(false)
+  expect(published.concludesTurn).not.toBe(true)
+  vi.mocked(f.bridge.state).mockResolvedValue({ protocol: 'workflow.control.v1', session_id: 'run-1', state_version: 5,
+    continuation: 'draining', admission: { can_begin: false }, active_execution_ids: ['attempt-1'], active_executions: 1 })
+  await f.execute('mcp__lazymind__workflow_state', f.root)
+  expect((await f.execute('mcp__lazymind__workflow_artifact_publish', f.root, args)).isError).toBe(false)
+  expect((await f.execute('mcp__lazymind__workflow_artifact_publish', f.root, { ...args, execution_id: 'other' })).isError).toBe(true)
 })
