@@ -10,6 +10,7 @@ import (
 )
 
 func init() {
+	registerAdditionalError("LazyMind Cloud login is required", http.StatusUnauthorized, 2002920)
 	registerAdditionalError("executor unauthorized", http.StatusUnauthorized, 2001596)
 	registerAdditionalError("model config unavailable", http.StatusServiceUnavailable, 2001597)
 	registerAdditionalError("invalid task event", http.StatusBadRequest, 2001598)
@@ -877,7 +878,7 @@ func init() {
 	registerAdditionalError("cannot check tool configuration", http.StatusInternalServerError, 2002917)
 	registerAdditionalError("cannot load tool configuration", http.StatusInternalServerError, 2002918)
 	registerAdditionalError("workflow unavailable", http.StatusServiceUnavailable, 2002919)
-	registerAdditionalError("use the authenticated workflow page to change approval preferences", http.StatusForbidden, 2002920)
+	registerAdditionalError("use the authenticated workflow page to change approval preferences", http.StatusForbidden, 2002924)
 	registerAdditionalError("artifact file is outside LazyMind storage", http.StatusBadRequest, 2002921)
 	registerAdditionalError("artifact must be a regular file of at most 20 MiB", http.StatusBadRequest, 2002922)
 	registerAdditionalError("artifact exceeds 20 MiB", http.StatusRequestEntityTooLarge, 2002923)

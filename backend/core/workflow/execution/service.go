@@ -104,7 +104,7 @@ func (s *Service) Complete(ctx context.Context, owner, sessionID, attemptID stri
 				return controlstore.Reject("REQUIRED_OUTPUT_MISSING", err.Error())
 			}
 		}
-		terminal, err := json.Marshal(executor.Result{Summary: strings.TrimSpace(input.Summary), ExecutorRef: strings.TrimSpace(input.ExecutorRef), Control: input.Control})
+		terminal, err := json.Marshal(executor.Result{PostStepCheckpoint: input.PostStepCheckpoint, Summary: strings.TrimSpace(input.Summary), ExecutorRef: strings.TrimSpace(input.ExecutorRef), Control: input.Control})
 		if err != nil {
 			return err
 		}

@@ -112,3 +112,22 @@ describe('loadWorkflowRunSnapshot', () => {
     expect(snapshot.control).toBeUndefined();
   });
 });
+
+
+it('uses projection status and attempts from the same legacy snapshot', async () => {
+  const run = { session_id: 'legacy', status: 'active', state_version: 2,
+    current_step_id: 'old', steps: [] } as unknown as WorkflowSession;
+  const snapshot = await loadWorkflowRunSnapshot('legacy', {
+    getSession: async () => ({ data: { data: { session: run } } }),
+    getProjection: async () => ({ data: { data: {
+      state_version: 3, status: 'waiting', current_step_id: 'review',
+      projection: { current: [] },
+      attempt_history: { review: [{ task_id: 'task', attempt: 1, status: 'succeeded',
+        validity: 'effective', started_at: '' }] },
+    } } }),
+  });
+  expect(snapshot.session.state_version).toBe(3);
+  expect(snapshot.session.status).toBe('waiting');
+  expect(snapshot.session.current_step_id).toBe('review');
+  expect(snapshot.session.steps?.[0].step_id).toBe('review');
+});

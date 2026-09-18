@@ -398,6 +398,7 @@ func (h RemoteHandler) terminal(w http.ResponseWriter, r *http.Request, status s
 	err = h.Finish(r.Context(), session.CreateUserID, session.ID, id, Completion{
 		ExecutionHandle: lease, Outcome: status, ErrorCode: body.ErrorCode,
 		Summary: result.Summary, ExecutorRef: result.ExecutorRef, Control: result.Control,
+		PostStepCheckpoint: result.PostStepCheckpoint,
 	})
 
 	if err != nil {

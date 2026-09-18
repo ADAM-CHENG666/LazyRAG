@@ -888,7 +888,7 @@ export const useTaskCenterStore = create<TaskCenterStore>()((set, get) => ({
           const event = UIUtils.jsonParser(raw);
           if (!event || !event.type) return;
           const { type, payload } = event;
-          if (["task_created", "workflow_completed", "workflow_error", "step_waiting", "workflow_step_feedback", "auto_chat_started", "driver_input", "driver_fallback"].includes(type)) {
+          if (["task_created", "workflow_completed", "workflow_error", "step_waiting", "workflow_step_feedback", "workflow_runtime_updated", "auto_chat_started", "driver_input", "driver_fallback"].includes(type)) {
             requestConversationStatusRefresh(conversationId);
           }
           const replayed = event.replayed === true;
@@ -989,7 +989,7 @@ export const useTaskCenterStore = create<TaskCenterStore>()((set, get) => ({
               window.dispatchEvent(
                 new CustomEvent(WORKFLOW_GRAPH_REFRESH_EVENT, { detail: { conversationId } }),
               );
-              useWorkflowStore.getState().setAutoRunning(conversationId, false);
+              if (type !== 'workflow_runtime_updated') useWorkflowStore.getState().setAutoRunning(conversationId, false);
             }
           } else if (type === 'step_partial_done') {
             if (!replayed) {
@@ -1003,9 +1003,8 @@ export const useTaskCenterStore = create<TaskCenterStore>()((set, get) => ({
                 new CustomEvent(WORKFLOW_GRAPH_REFRESH_EVENT, { detail: { conversationId } }),
               );
             }
-            scheduleWorkflowSessionRefresh(conversationId);
           } else if (type === 'intent_updated') {
-            scheduleWorkflowSessionRefresh(conversationId);
+            // Workflow session events refresh the panel through watchWorkflowRun.
           } else if (type === 'workflow_session_created') {
             if (!replayed) {
               window.dispatchEvent(

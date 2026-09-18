@@ -200,7 +200,15 @@ func TestPartialOutputsSurviveFailureAndStopFencesPublication(t *testing.T) {
 							return e
 						}}
 						t.Setenv("LAZYMIND_WORKFLOW_EXECUTOR_TOKEN", "test-token")
-						raw, _ := json.Marshal(map[string]any{"result": map[string]any{"summary": "interrupted"}})
+						terminalResult := executor.Result{Summary: "interrupted"}
+						if outcome == "failed" {
+							terminalResult.Summary = "MEDIA_CAPABILITY_DEPENDENCY_MISSING {}"
+							terminalResult.PostStepCheckpoint = &executor.PostStepCheckpoint{
+								WorkflowRevision: contract.WorkflowRevision, Summary: "analysis complete",
+								Artifacts: []executor.Artifact{artifact}, Control: &executor.Control{NextStep: "next"},
+							}
+						}
+						raw, _ := json.Marshal(map[string]any{"result": terminalResult})
 						req := mux.SetURLVars(httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(raw)), map[string]string{"attempt_id": "attempt-1"})
 						req.Header.Set("Authorization", "Bearer test-token")
 						req.Header.Set("X-Workflow-Lease-Token", grant.ExecutionHandle)
@@ -212,6 +220,21 @@ func TestPartialOutputsSurviveFailureAndStopFencesPublication(t *testing.T) {
 						}
 						if rec.Code != 200 {
 							t.Fatalf("native terminal: %s", rec.Body.String())
+						}
+						if outcome == "failed" {
+							var row orm.WorkflowSessionStep
+							if err := db.First(&row, "id = ?", "attempt-1").Error; err != nil {
+								t.Fatal(err)
+							}
+							var saved executor.Result
+							if err := json.Unmarshal([]byte(row.ResultJSON), &saved); err != nil {
+								t.Fatal(err)
+							}
+							expected, _ := json.Marshal(terminalResult.PostStepCheckpoint)
+							actual, _ := json.Marshal(saved.PostStepCheckpoint)
+							if !bytes.Equal(expected, actual) {
+								t.Fatalf("checkpoint lost through completion: %s", row.ResultJSON)
+							}
 						}
 
 					} else {

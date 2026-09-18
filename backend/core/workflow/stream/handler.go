@@ -17,11 +17,9 @@ import (
 type SnapshotFunc func(*http.Request, string, string) (any, int64, error)
 
 type Handler struct {
-	Store     *workflowstore.Repository
-	Snapshot  SnapshotFunc
-	Heartbeat time.Duration
-	// PollInterval replays persisted events written by another Core process.
-	// Repository subscriptions only observe events published in this process.
+	Store        *workflowstore.Repository
+	Snapshot     SnapshotFunc
+	Heartbeat    time.Duration
 	PollInterval time.Duration
 }
 
@@ -93,52 +91,40 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = writeEvent(w, flusher, cursor, "snapshot", snapshot)
 		after = cursor
 	}
-	for {
-		events, err := h.Store.Replay(r.Context(), sessionID, owner, after, 1000)
-		if err != nil {
-			_ = writeEvent(w, flusher, 0, "error", streamError{Code: "STREAM_REPLAY_FAILED", Message: err.Error(), Retryable: true})
-			return
-		}
-		for _, event := range events {
-			if err := writeEvent(w, flusher, event.ID, event.EventType, event); err != nil {
-				return
+	drain := func() error {
+		for {
+			events, err := h.Store.Replay(r.Context(), sessionID, owner, after, 1000)
+			if err != nil {
+				_ = writeEvent(w, flusher, 0, "error", streamError{Code: "STREAM_REPLAY_FAILED", Message: err.Error(), Retryable: true})
+				return err
 			}
-			after = event.ID
+			for _, event := range events {
+				if err := writeEvent(w, flusher, event.ID, event.EventType, event); err != nil {
+					return err
+				}
+				after = event.ID
+			}
+			if len(events) < 1000 {
+				break
+			}
 		}
-		if len(events) < 1000 {
-			break
-		}
+		return nil
+	}
+	if err := drain(); err != nil {
+		return
 	}
 	heartbeat := h.Heartbeat
 	if heartbeat <= 0 {
 		heartbeat = 20 * time.Second
 	}
-	pollInterval := h.PollInterval
-	if pollInterval <= 0 {
-		pollInterval = time.Second
+	ticker := time.NewTicker(heartbeat)
+	defer ticker.Stop()
+	poll := h.PollInterval
+	if poll <= 0 {
+		poll = time.Second
 	}
-	heartbeatTicker := time.NewTicker(heartbeat)
-	defer heartbeatTicker.Stop()
-	pollTicker := time.NewTicker(pollInterval)
-	defer pollTicker.Stop()
-	replay := func() bool {
-		for {
-			events, err := h.Store.Replay(r.Context(), sessionID, owner, after, 1000)
-			if err != nil {
-				_ = writeEvent(w, flusher, 0, "error", streamError{Code: "STREAM_REPLAY_FAILED", Message: err.Error(), Retryable: true})
-				return false
-			}
-			for _, event := range events {
-				if err := writeEvent(w, flusher, event.ID, event.EventType, event); err != nil {
-					return false
-				}
-				after = event.ID
-			}
-			if len(events) < 1000 {
-				return true
-			}
-		}
-	}
+	poller := time.NewTicker(poll)
+	defer poller.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
@@ -147,15 +133,14 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if !open {
 				return
 			}
-			// A local event is a wakeup, never a cursor shortcut over another writer.
-			if !replay() {
+			if err := drain(); err != nil {
 				return
 			}
-		case <-pollTicker.C:
-			if !replay() {
+		case <-poller.C:
+			if err := drain(); err != nil {
 				return
 			}
-		case <-heartbeatTicker.C:
+		case <-ticker.C:
 			_, _ = fmt.Fprint(w, ": heartbeat\n\n")
 			flusher.Flush()
 		}

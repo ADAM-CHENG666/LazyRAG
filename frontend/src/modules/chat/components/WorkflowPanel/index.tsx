@@ -53,7 +53,7 @@ import { SlideThumb } from './ppt/SlideThumb';
 import { WorkflowTabActions } from './actions/WorkflowTabActions';
 import { WorkflowPanelTabActiveContext, SlotEditingContext, WorkflowEditBlocked, type SlotFooterAction } from './slotEditingContext';
 import { findWriterArtifactStream } from './writerArtifactStream';
-import { resolveCompletedContinueStep } from './workflowContinue';
+import { resolveCompletedContinueStep, resolveWorkflowContinueAction } from './workflowContinue';
 import { WorkflowControlActions } from './WorkflowControlActions';
 import type { WorkflowActionIntent, WorkflowControlView } from '@/modules/chat/utils/workflowControl';
 import { resolvePendingApprovalStep } from './workflowApproval';
@@ -390,19 +390,6 @@ function buildColumns(
 
 function getTabStepId(tab: TabDef): string | undefined {
   return tab.step_id ?? tab.id;
-}
-
-/**
- * Lock slot editing only while the plugin session is actively running.
- * When idle (waiting / failed / completed), editable artifact formats stay editable
- * according to their workflow readOnly setting, so the user can revise and re-run
- * a later step from the updated content.
- */
-function isWorkflowSessionReadOnly(
-  session: WorkflowSession,
-  autoRunning = false,
-): boolean {
-  return autoRunning || session.status === 'active';
 }
 
 function revisionMatchesTabScope(
@@ -1638,7 +1625,7 @@ function TabSlotGrid({
 const STATUS_KEY: Record<string, string> = {
   active: 'chat.workflowStatusRunning',
   completed: 'chat.workflowStatusDone',
-  waiting: 'chat.workflowStatusWaiting',
+  waiting: 'chat.workflowStatusPaused',
   failed: 'chat.workflowStatusFailed',
   stopped: 'chat.workflowStatusStopped',
 };
@@ -1897,7 +1884,10 @@ export function WorkflowPanel({
     return reviews.some(review => review.status === 'accepted') && !reviews.some(review => review.status === 'pending');
   };
   const displayStatus = autoRunning ? 'active' : session.status;
-  const displayStatusKey = isWorkflowReadyToStart(
+  const approvalStepId = resolvePendingApprovalStep(session, displayStatus);
+  const displayStatusKey = approvalStepId ? 'chat.workflowStatusWaiting'
+    : displayStatus === 'waiting' && (session.projection?.blocked?.length ?? 0) > 0 ? 'chat.workflowStatusBlocked'
+    : isWorkflowReadyToStart(
     displayStatus,
     session.projection,
     session.steps?.length ?? 0,
@@ -1932,14 +1922,11 @@ export function WorkflowPanel({
       : undefined);
   const effectivePast = new Set(session.projection?.past ?? []);
   const continueDisabled = buttonsDisabled || currentStepStatus === 'failed';
-  const approvalStepId = resolvePendingApprovalStep(session, displayStatus);
   const readyToStart = displayStatusKey === 'chat.workflowStatusReady';
-  const canResumeStep = ['interrupted', 'cancelled', 'canceled'].includes(currentStepStatus ?? '');
+  const continueAction = resolveWorkflowContinueAction(session, displayStatus, tabs[visibleActiveTabIdx]);
   const showRetry = !sessionBusy && currentStepStatus === 'failed';
   // Automatic handoffs are not requests for user input.
-  const showContinue = !sessionBusy && (readyToStart
-    || displayStatus === 'waiting' && canResumeStep
-    || Boolean(completedContinueStepId));
+  const showContinue = !sessionBusy && (readyToStart || Boolean(continueAction));
 
   function reportActionError(error: unknown) {
     if (error instanceof WorkflowEditBlocked) {
@@ -1976,22 +1963,39 @@ export function WorkflowPanel({
   }
 
   function handleContinue() {
+    if (!isContinuationCurrent()) return;
     const message = completedContinueStepId
       ? `${t('chat.workflowRollbackPrefix')}${completedContinueStepId}`
       : t('chat.workflowContinue');
-    void runFooterAction(() => onSendMessage?.(message));
+    void runFooterAction(() => {
+      if (isContinuationCurrent()) onSendMessage?.(message);
+    });
+  }
+
+  // Saving edits is asynchronous: execution may have advanced since the click.
+  function isContinuationCurrent() {
+    if (!continueAction && !readyToStart) return false;
+    const state = useWorkflowStore.getState();
+    const latest = state.sessionByConversation[conversationId];
+    if (!latest || latest.session_id !== session?.session_id
+      || latest.state_version !== session?.state_version || state.autoRunningByConversation[conversationId]) return false;
+    const action = resolveWorkflowContinueAction(latest, latest.status, tabs[visibleActiveTabIdx]);
+    if (readyToStart && !continueAction) return !latest.steps?.length && latest.status === session?.status;
+    return action?.kind === continueAction?.kind && action?.stepId === continueAction?.stepId;
   }
 
   function handleContinueWithApprovalPreference(scope: 'step' | 'following') {
-    if (!approvalStepId) return;
+    if (!session || !approvalStepId || !isContinuationCurrent()) return;
+    const sessionId = session.session_id;
     void runFooterAction(async () => {
+      if (!isContinuationCurrent()) return;
       try {
-        await WorkflowSessionApi().setApprovalPreference(session.session_id, {
+        await WorkflowSessionApi().setApprovalPreference(sessionId, {
           step_id: approvalStepId,
           scope,
           approval_required: false,
         });
-        onSendMessage?.(t('chat.workflowContinue'));
+        if (isContinuationCurrent()) onSendMessage?.(t('chat.workflowContinue'));
       } catch {
         antdMessage.error(t('chat.workflowApprovalPreferenceSaveFailed'));
       }
@@ -2008,6 +2012,8 @@ export function WorkflowPanel({
 
   const continueLabel = approvalStepId
     ? t('chat.workflowContinueExecution')
+    : continueAction?.kind === 'resume'
+      ? t('chat.workflowResumeExecution')
     : displayStatus === 'waiting'
       ? t('chat.workflowSaveAndContinue')
     : t('chat.workflowContinue');

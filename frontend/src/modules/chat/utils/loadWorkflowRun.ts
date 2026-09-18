@@ -1,5 +1,5 @@
 import { reconcileWorkflowSessionStatus } from '@/modules/chat/store/workflowStatus';
-import type { WorkflowSession, WorkflowSessionStep } from '@/modules/chat/store/workflowPanel';
+import type { WorkflowSession, WorkflowSessionStep, WorkflowRuntimeProjection } from '@/modules/chat/store/workflowPanel';
 import { subscribeWorkflowEventStream } from '@/modules/chat/utils/workflowEventStream';
 import type { WorkflowControlView } from '@/modules/chat/utils/workflowControl';
 
@@ -20,7 +20,7 @@ export interface WorkflowRunAPI {
   getProjection(
     id: string,
     options?: WorkflowRunRequestOptions,
-  ): Promise<{ data: { data: { projection?: WorkflowSession['projection'] } } }>;
+  ): Promise<{ data: { data: { projection?: WorkflowSession['projection']; state_version?: number; status?: WorkflowSession['status']; current_step_id?: string; attempt_history?: WorkflowRuntimeProjection['attempt_history'] } } }>;
 }
 
 export interface WorkflowRunSnapshot { session: WorkflowSession; control?: WorkflowControlView }
@@ -105,12 +105,14 @@ export async function loadWorkflowRun(
   const session = detail.data.data.session;
   if (!session || session.session_id !== id) throw new Error('Workflow run not found');
   const state = await api.getProjection(id, options);
-  const projection = state.data.data.projection;
-  const steps = (session.steps ?? []).filter((step) => step.step_id !== '__end__');
+  const snapshot = state.data.data;
+  const projection = snapshot.projection;
+  const steps = (workflowSnapshotSteps(id, snapshot.attempt_history) ?? session.steps ?? []).filter((step) => step.step_id !== '__end__');
   return {
     ...session,
-    current_step_id: panelCurrentStep(session.current_step_id, projection, steps),
-    status: reconcileWorkflowSessionStatus(session.status, projection),
+    state_version: snapshot.state_version ?? session.state_version,
+    current_step_id: panelCurrentStep(snapshot.current_step_id ?? session.current_step_id, projection, steps),
+    status: reconcileWorkflowSessionStatus(snapshot.status ?? session.status, projection),
     projection,
     steps,
   };
@@ -131,4 +133,14 @@ export function watchWorkflowRun(sessionId: string, onChange: () => void): () =>
     if (timer) clearTimeout(timer);
     subscription.close();
   };
+}
+
+export function workflowSnapshotSteps(sessionId: string, history: WorkflowRuntimeProjection['attempt_history']): WorkflowSessionStep[] | undefined {
+  if (!history) return undefined;
+  return Object.entries(history).flatMap(([stepId, attempts]) => stepId === '__end__' ? [] : attempts.map((attempt) => ({
+    id: attempt.task_id, session_id: sessionId, step_id: stepId, task_id: attempt.task_id,
+    attempt: attempt.attempt, status: attempt.status, validity: attempt.validity === "stale" ? "stale" as const : "effective" as const,
+    created_at: attempt.started_at, updated_at: attempt.updated_at ?? attempt.started_at,
+    intent_context: attempt.intent_context,
+  })));
 }

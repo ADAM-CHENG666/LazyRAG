@@ -279,6 +279,9 @@ export interface WorkflowSessionStep {
 }
 
 export interface WorkflowRuntimeProjection {
+  status?: string;
+  current_step_id?: string;
+  attempt_history?: Record<string, Array<{ attempt: number; task_id: string; status: string; validity: string; started_at: string; updated_at?: string; intent_context?: string }>>;
   completed?: boolean;
   past?: string[];
   current?: string[];
@@ -782,9 +785,11 @@ export const useWorkflowStore = create<WorkflowStore>()((set, get) => ({
   },
 
   setAutoRunning: (conversationId, running) => {
-    set((state) => ({
-      autoRunningByConversation: { ...state.autoRunningByConversation, [conversationId]: running },
-    }));
+    set((state) => {
+      const status = state.sessionByConversation[conversationId]?.status;
+      const effective = running && !['completed', 'failed', 'stopped'].includes(status ?? '');
+      return { autoRunningByConversation: { ...state.autoRunningByConversation, [conversationId]: effective } };
+    });
   },
 
   fetchWorkflowUI: async (workflowId) => {
