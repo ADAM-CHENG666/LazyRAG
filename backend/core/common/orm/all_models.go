@@ -52,6 +52,7 @@ func AllModelsForDDL() []interface{} {
 		&ConversationArtifact{},
 		&WorkflowSession{},
 		&WorkflowApprovalPreference{},
+		&ExternalWorkflowApprovalPreference{},
 		&WorkflowSessionStep{},
 		&WorkflowSlotRevision{},
 		&WorkflowAttemptInputBinding{},

@@ -1,0 +1,1 @@
+DROP TABLE external_workflow_approval_preferences;
