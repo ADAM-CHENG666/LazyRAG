@@ -26,18 +26,18 @@ class SiteCustomizeTest(unittest.TestCase):
             marker = root / "hook-marker"
             env = {**os.environ, "PYTHONPATH": str(root), "HOOK_MARKER": str(marker),
                    "LAZYMIND_DATABASE_URL": "sqliteproxy://test"}
-            reader, writer = os.pipe()
-            os.close(writer)
-            os.set_inheritable(reader, True)
-            try:
-                tracker = subprocess.run(
-                    [sys.executable, "-B", "-c",
-                     f"from multiprocessing.resource_tracker import main;main({reader})"],
-                    env=env, cwd=root, close_fds=False,
-                    capture_output=True, timeout=10,
-                )
-            finally:
-                os.close(reader)
+            tracker_script = (
+                "from pathlib import Path\n"
+                "import os\n"
+                "from multiprocessing import resource_tracker\n"
+                "Path(os.environ['HOOK_MARKER']).unlink()\n"
+                "resource_tracker._resource_tracker.ensure_running()\n"
+                "resource_tracker._resource_tracker._stop()\n"
+            )
+            tracker = subprocess.run(
+                [sys.executable, "-B", "-c", tracker_script],
+                env=env, cwd=root, capture_output=True, timeout=10,
+            )
             self.assertEqual(tracker.returncode, 0, tracker.stderr.decode())
             self.assertFalse(marker.exists(), "tracker imported business code")
             application = subprocess.run(
