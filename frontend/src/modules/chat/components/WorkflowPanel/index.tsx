@@ -1,3 +1,9 @@
+import { WorkflowApprovalActions } from './WorkflowApprovalActions';
+import { ExternalWorkflowPresentationContext, type ExternalWorkflowPresentation } from './external/presentation';
+import { activeExecutionTasks } from './external/useExecutionActivity';
+import { executionPreview, executionPreviewTab } from './external/executionPreview';
+import { workflowEmptyStateKey } from './external/workflowEmptyState';
+import { useSlotCollapse } from './external/useSlotCollapse';
 import { buildDocumentFooterItems } from './documentFooter';
 import { getLocalizedErrorMessage } from "@/components/request";
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
@@ -163,7 +169,21 @@ function IntentPopover({
   );
 }
 
+export interface WorkflowPanelControlContext {
+  session: WorkflowSession;
+  tab?: TabDef;
+  pending: boolean;
+  dirty: boolean;
+  runAction(action: () => Promise<void>, flush?: boolean): Promise<void>;
+}
+
 interface WorkflowPanelProps {
+  /** Optional external host surface; omitted by native chat callers. */
+  embedded?: boolean;
+  externalPresentation?: ExternalWorkflowPresentation;
+  onRefresh?: () => Promise<void>;
+  renderControls?: (context: WorkflowPanelControlContext) => React.ReactNode;
+
   conversationId: string;
   /** Called when the user clicks Continue or Retry — simulates sending a user message. */
   onSendMessage?: (text: string) => void;
@@ -191,10 +211,11 @@ function AutoSlotGrid({
   readOnly?: boolean;
 }) {
   const { t } = useTranslation();
+  const externalPresentation = React.useContext(ExternalWorkflowPresentationContext);
   if (!session.slots || session.slots.length === 0) {
     return (
       <div className='workflow-panel__empty' role='status' aria-live='polite'>
-        <span>{t('chat.workflowWaitingForResults')}</span>
+        <span>{t(externalPresentation ? workflowEmptyStateKey(session, session.current_step_id) : 'chat.workflowWaitingForResults')}</span>
       </div>
     );
   }
@@ -806,6 +827,7 @@ function CompositeSlotGrid({
   readOnly?: boolean;
 }) {
   const { t } = useTranslation();
+  const externalPresentation = React.useContext(ExternalWorkflowPresentationContext);
   const reorderSlotItems = useWorkflowStore((state) => state.reorderSlotItems);
   const rows = getCompositeRows(tab, session);
   const columns = filterColumnsByVisibleSlots(
@@ -899,7 +921,7 @@ function CompositeSlotGrid({
   if (rows.length === 0) {
     return (
       <div className='workflow-panel__empty' role='status' aria-live='polite'>
-        <span>{t('chat.workflowWaitingForResults')}</span>
+        <span>{t(externalPresentation ? workflowEmptyStateKey(session, resolveWorkflowTabStepId(tab, session.steps)) : 'chat.workflowWaitingForResults')}</span>
       </div>
     );
   }
@@ -1353,9 +1375,11 @@ function NamedTabSlot({
   onAddItem,
   readOnly,
   hideLabel = false,
+  slotStepId,
 }: {
   slotDef: SlotDef;
   hideLabel?: boolean;
+  slotStepId?: string;
   revisions: SlotRevision[];
   session: WorkflowSession;
   artifactStream?: TaskArtifactStream;
@@ -1366,10 +1390,16 @@ function NamedTabSlot({
   readOnly?: boolean;
 }) {
   const { t } = useTranslation();
+  const externalPresentation = React.useContext(ExternalWorkflowPresentationContext);
   const slotLabel = slotDef.label ?? slotDef.id;
   const isImageList = slotDef.type === 'image' && slotDef.cardinality === 'list';
   const isDraggable = Boolean(slotDef.ordered) && !readOnly;
-  const [contentCollapsed, setContentCollapsed] = useState(slotDef.widget?.collapsed === true);
+  const [nativeCollapsed, setContentCollapsed] = useState(slotDef.widget?.collapsed === true);
+  const collapseWhenEmpty = externalPresentation && slotDef.widget?.collapseWhenEmpty !== false;
+  const [externalCollapsed, toggleExternalCollapsed] = useSlotCollapse(
+    revisions.length > 0 || Boolean(artifactStream), collapseWhenEmpty, slotDef.widget?.collapsed === true,
+  );
+  const contentCollapsed = externalPresentation ? externalCollapsed : nativeCollapsed;
   const prefersFullGridRow = slotDef.widget?.itemLayout === 'grid'
     || (slotDef.widget?.itemWidth ?? 0) >= 600
     || slotDef.widget?.collapsed === true;
@@ -1385,7 +1415,7 @@ function NamedTabSlot({
       className='workflow-panel__slot-placeholder'
       aria-label={`${slotLabel} pending`}
     >
-      <span>—</span>
+      <span>{externalPresentation ? t(workflowEmptyStateKey(session, slotStepId)) : '—'}</span>
     </div>
   ) : isImageList ? (
     <SortableImageList
@@ -1430,17 +1460,19 @@ function NamedTabSlot({
 
   return (
     <div className={`workflow-panel__named-slot${prefersFullGridRow ? ' workflow-panel__named-slot--full-grid-row' : ''}${isWriterDocument ? ' workflow-panel__named-slot--writer-document' : ''}`}>
-      {!hideLabel && <div className='workflow-panel__slot-heading'>
+      {(!hideLabel || collapseWhenEmpty) && <div className='workflow-panel__slot-heading'>
         {(slotDef.label || slotDef.id) && (
           <span className='workflow-panel__slot-label'>{slotLabel}</span>
         )}
-        {slotDef.widget?.collapsed !== undefined && (
+        {externalPresentation && contentCollapsed && revisions.length === 0 && !artifactStream &&
+          <span className='workflow-panel__empty-summary' role='status'>{t(workflowEmptyStateKey(session, slotStepId))}</span>}
+        {(slotDef.widget?.collapsed !== undefined || collapseWhenEmpty) && (
           <button
             type='button'
             className={`workflow-panel__slot-collapse${contentCollapsed ? ' workflow-panel__slot-collapse--collapsed' : ''}`}
             aria-expanded={!contentCollapsed}
             aria-label={contentCollapsed ? t('chat.workflowPanelExpand') : t('chat.workflowPanelCollapse')}
-            onClick={() => setContentCollapsed((value) => !value)}
+            onClick={externalPresentation ? toggleExternalCollapsed : () => setContentCollapsed((value) => !value)}
           >
             <span aria-hidden='true'>⌃</span>
           </button>
@@ -1468,6 +1500,8 @@ function TabSlotGrid({
   onFocusSortOrder?: (sortOrder: number | undefined) => void;
   readOnly?: boolean;
 }) {
+  const externalPresentation = React.useContext(ExternalWorkflowPresentationContext);
+  const { t } = useTranslation();
   const addFileInputRef = useRef<HTMLInputElement>(null);
   const addingSlotIdRef = useRef<string>('');
   const addingSlotTypeRef = useRef<string>('');
@@ -1519,6 +1553,12 @@ function TabSlotGrid({
     )));
   };
   const visibleSlots = resolveVisibleSlots(resolvePreferredStructuredSlotDefs(tab, session));
+  const allHidden = visibleSlots.length === 0 || Boolean(tab.composite_behavior?.hide_empty_columns)
+    && visibleSlots.every(def => getTabSlotRevisions(session, tab, def.id).length === 0
+      && !findWriterArtifactStream(session, getTabStepId(tab), def.id, tasks));
+  if (externalPresentation && allHidden) return <div className='workflow-panel__empty' role='status'>
+    {t(workflowEmptyStateKey(session, resolveWorkflowTabStepId(tab, session.steps)))}
+  </div>;
   return (
     <div className={`workflow-panel__tab-content workflow-panel__tab-content--${tab.layout ?? 'vertical'}`}>
       {/* Hidden file input for adding new items */}
@@ -1547,6 +1587,7 @@ function TabSlotGrid({
           <NamedTabSlot
             key={slotDef.id}
             slotDef={slotDef}
+            slotStepId={resolveWorkflowTabStepId(tab, session.steps)}
             hideLabel={visibleSlots.length === 1 && slotDef.widget?.widgetType === 'writer-document'
               && slotDef.widget?.collapsed === undefined && slotDef.label === tab.label}
             revisions={revisions}
@@ -1597,9 +1638,14 @@ export function WorkflowPanel({
   onReference,
   onStop,
   onDismissed,
+  embedded = false, onRefresh, renderControls, externalPresentation,
 }: WorkflowPanelProps) {
   const { t, i18n } = useTranslation();
-  const { session, loading, refresh } = useWorkflowSession(conversationId);
+  const { session, loading, refresh: refreshConversation } = useWorkflowSession(conversationId, Boolean(onRefresh));
+  const refresh = onRefresh ?? refreshConversation;
+  const activities = externalPresentation?.activities ?? {};
+  const runningTasks = externalPresentation ? activeExecutionTasks(session) : [];
+  const latestActivity = runningTasks.map(step => activities[step.task_id]).find(activity => activity?.kind && !activity.finished);
   const taskCenterTasks = useTaskCenterStore((state) =>
     conversationId
       ? state.tasksByConversation[conversationId] ?? EMPTY_TASK_CENTER_TASKS
@@ -1980,7 +2026,22 @@ export function WorkflowPanel({
       ? t('chat.workflowSaveAndContinue')
     : t('chat.workflowContinue');
 
+  const externalControls = renderControls?.({ session, tab: tabs[visibleActiveTabIdx],
+    pending: actionPending, dirty: anySlotEditing,
+    runAction: async (action, flush = true) => {
+      if (actionPending) return;
+      setActionPending(true);
+      try {
+        if (flush && !(await flushPendingEdits())) return;
+        await action();
+      } catch (error) {
+        antdMessage.error(error instanceof Error ? error.message : t('chat.workflowRunControlFailed'));
+      } finally { setActionPending(false); }
+    },
+  });
+
   const panel = (
+    <ExternalWorkflowPresentationContext.Provider value={Boolean(externalPresentation)}>
     <SlotEditingContext.Provider value={{
       setEditing: handleSlotEditingChange,
       registerFlush,
@@ -1989,7 +2050,7 @@ export function WorkflowPanel({
       registerFooterAction,
     }}>
     <div
-      className={`workflow-panel workflow-panel--${displayStatus}${collapsed ? ' workflow-panel--collapsed' : ''}${expanded ? ' workflow-panel--expanded' : ''}`}
+      className={`workflow-panel workflow-panel--${displayStatus}${collapsed ? ' workflow-panel--collapsed' : ''}${expanded && !embedded ? ' workflow-panel--expanded' : ''}${embedded ? ' workflow-panel--embedded' : ''}${externalPresentation ? ' workflow-panel--external-presentation' : ''}`}
       data-session-id={session.session_id}
       aria-label={t('chat.workflowPanelTitle')}
     >
@@ -1998,14 +2059,17 @@ export function WorkflowPanel({
       <div className='workflow-panel__header'>
         <div className='workflow-panel__header-left'>
           <span className='workflow-panel__title'>{ui.name || session.workflow_id}</span>
+          {latestActivity?.kind && <span className='workflow-panel__activity' role='status'>
+            {t(`chat.workflowActivity_${latestActivity.kind}`, { tool: latestActivity.tool })}
+          </span>}
           <button
             type='button'
             className={`workflow-panel__status workflow-panel__status--${displayStatus}`}
-            aria-label={t('chat.workflowStatusAria', { status: t(displayStatusKey) })}
+            aria-label={t('chat.workflowStatusAria', { status: externalPresentation?.statusLabel ?? t(displayStatusKey) })}
             onClick={() => session && setStateGraphOpen(true)}
             title={t('chat.workflowViewWorkflow')}
           >
-            {t(displayStatusKey)}
+            {externalPresentation?.statusLabel ?? t(displayStatusKey)}
           </button>
         </div>
         <div className='workflow-panel__header-right'>
@@ -2028,13 +2092,14 @@ export function WorkflowPanel({
           <button
             type='button'
             className='workflow-panel__expand-btn'
+            hidden={embedded}
             onClick={() => setExpandedMode(!expanded)}
             aria-label={t(expanded ? 'chat.workflowPanelShrink' : 'chat.workflowPanelExpand')}
             title={t(expanded ? 'chat.workflowPanelShrink' : 'chat.workflowPanelExpand')}
           >
             {expanded ? <FullscreenExitOutlined /> : <FullscreenOutlined />}
           </button>
-          {!expanded && (
+          {!embedded && !expanded && (
             <Tooltip
               title={anySlotEditing ? t('chat.workflowFinishEditingFirst') : undefined}
               placement='bottomRight'
@@ -2070,7 +2135,7 @@ export function WorkflowPanel({
               </span>
             </Tooltip>
           )}
-          {!expanded && (
+          {!embedded && !expanded && (
             <Tooltip
               title={collapseDisabled ? t('chat.workflowFinishEditingFirst') : undefined}
               placement='bottomRight'
@@ -2133,6 +2198,9 @@ export function WorkflowPanel({
                 || b.attempt - a.attempt
               ))[0];
             const stepStatus = step?.status;
+            const running = runningTasks.find(task => statusStepIds.includes(task.step_id));
+            const activity = running ? activities[running.task_id] : undefined;
+            const showProgress = Boolean(running && !activity?.finished);
             return (
               <React.Fragment key={tab.id}>
                 {idx > 0 && (
@@ -2150,7 +2218,14 @@ export function WorkflowPanel({
                   onClick={() => handleTabChange(idx, tab.id)}
                   type='button'
                 >
-                  <span className='workflow-panel__tab-badge' aria-hidden='true'>{idx + 1}</span>
+                  <span className='workflow-panel__tab-badge' aria-hidden={externalPresentation ? undefined : true}>{idx + 1}
+                    {showProgress && <svg className={`workflow-panel__progress-ring${activity?.progress === undefined ? ' workflow-panel__progress-ring--indeterminate' : ''}`}
+                      viewBox='0 0 32 32' role='progressbar' aria-label={tab.label}
+                      aria-valuemin={0} aria-valuemax={100} aria-valuenow={activity?.progress}>
+                      <circle className='workflow-panel__progress-track' cx='16' cy='16' r='14' />
+                      <circle cx='16' cy='16' r='14' pathLength='100' strokeDasharray={`${activity?.progress ?? 25} 100`} />
+                    </svg>}
+                  </span>
                   <span className='workflow-panel__tab-label'>{tab.label}</span>
                   {stepStatus && stepStatus !== 'succeeded' && (
                     <span
@@ -2177,8 +2252,10 @@ export function WorkflowPanel({
       {!collapsed && (
         <div className='workflow-panel__body' key={session.session_id}>
           {hasTabs ? (
-            tabs.map((tab, idx) => (
-              <div
+            tabs.map((tab, idx) => {
+              const preview = externalPresentation && !anySlotEditing ? executionPreview(session, tab, activities) : session;
+              const previewing = preview !== session;
+              return <div
                 key={tab.id}
                 id={`workflow-tab-panel-${tab.id}`}
                 role='tabpanel'
@@ -2186,10 +2263,12 @@ export function WorkflowPanel({
                 hidden={idx !== visibleActiveTabIdx}
               >
                 <WorkflowPanelTabActiveContext.Provider value={idx === visibleActiveTabIdx}>
-                <SlotDownloadContext.Provider value={workflowTabAllowsDownload(tab, idx, tabs.length)}>
+                <SlotDownloadContext.Provider value={!previewing && workflowTabAllowsDownload(tab, idx, tabs.length)}>
+                  {previewing && <div className="workflow-panel__preview-label" role="status">{t('chat.workflowGeneratingPreview')}</div>}
                   <TabSlotGrid
-                    tab={tab}
-                    session={session}
+                    tab={executionPreviewTab(tab, session, preview)}
+                    session={preview}
+                    readOnly={previewing}
                     tasks={taskCenterTasks}
                     onRefresh={refresh}
                     onReference={onReference}
@@ -2197,8 +2276,8 @@ export function WorkflowPanel({
                   />
                 </SlotDownloadContext.Provider>
                 </WorkflowPanelTabActiveContext.Provider>
-              </div>
-            ))
+              </div>;
+            })
           ) : (
             <AutoSlotGrid
               session={session}
@@ -2210,7 +2289,7 @@ export function WorkflowPanel({
       )}
 
       {/* Footer */}
-      {!collapsed && showActions && (documentFooter.actionItems.length > 0 || documentFooter.statusMessages.length > 0
+      {!collapsed && (showActions || renderControls) && (renderControls || documentFooter.actionItems.length > 0 || documentFooter.statusMessages.length > 0
         || rollbackSteps.length > 0 || sessionBusy || (showContinue && !approvalStepId) || displayStatus === 'failed' || displayStatus === 'stopped') && (
         <div className='workflow-panel__footer' role='group' aria-label={t('chat.workflowSessionControls')}>
           {documentFooter.actionItems.length > 0 || documentFooter.statusMessages.length > 0 ? (
@@ -2296,6 +2375,7 @@ export function WorkflowPanel({
               ) : null}
             </div>
           ) : null}
+          {renderControls ? externalControls : <>
           {sessionBusy && !approvalStepId && (
             <span className='workflow-panel__execution-status' role='status'>
               {t('chat.workflowStatusRunning')}{session.current_step_id ? ` · ${stepLabel(session.current_step_id)}` : ''}
@@ -2373,41 +2453,14 @@ export function WorkflowPanel({
               </div>
             </div>
           )}
+          </>}
         </div>
       )}
-    {!collapsed && approvalStepId && (
-      <div className='workflow-panel__approval-bar' role='group' aria-label={t('chat.workflowApprovalActions')}>
-        <span className='workflow-panel__approval-label'>{t('chat.workflowApprovalRequired')}</span>
-        <button
-          type='button'
-          className='workflow-panel__action-btn workflow-panel__action-btn--primary'
-          disabled={continueDisabled}
-          aria-disabled={continueDisabled}
-          onClick={handleContinue}
-        >
-          {t('chat.workflowContinueExecution')}
-        </button>
-        <button
-          type='button'
-          className='workflow-panel__action-btn workflow-panel__action-btn--secondary'
-          disabled={continueDisabled}
-          aria-disabled={continueDisabled}
-          onClick={() => handleContinueWithApprovalPreference('step')}
-          title={t('chat.workflowSkipThisApprovalHint')}
-        >
-          {t('chat.workflowSkipThisApproval')}
-        </button>
-        <button
-          type='button'
-          className='workflow-panel__action-btn workflow-panel__action-btn--secondary'
-          disabled={continueDisabled}
-          aria-disabled={continueDisabled}
-          onClick={() => handleContinueWithApprovalPreference('following')}
-          title={t('chat.workflowSkipFollowingApprovalsHint')}
-        >
-          {t('chat.workflowSkipFollowingApprovals')}
-        </button>
-      </div>
+    {!renderControls && !collapsed && approvalStepId && (
+      <WorkflowApprovalActions disabled={continueDisabled} onContinue={scope => {
+        if (scope) void handleContinueWithApprovalPreference(scope);
+        else void handleContinue();
+      }} />
     )}
     </div>
     {session && (
@@ -2421,9 +2474,10 @@ export function WorkflowPanel({
       />
     )}
     </SlotEditingContext.Provider>
+    </ExternalWorkflowPresentationContext.Provider>
   );
 
-  if (expanded) {
+  if (expanded && !embedded) {
     const host = document.querySelector('.detail-container');
     if (host) return createPortal(panel, host);
   }

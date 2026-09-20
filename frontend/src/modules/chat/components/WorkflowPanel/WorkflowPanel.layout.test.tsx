@@ -20,6 +20,7 @@ vi.mock('@/modules/chat/hooks/useWorkflow', () => ({
 vi.mock('@/modules/chat/store/workflowPanel', async (original) => {
   const actual = await original<typeof import('@/modules/chat/store/workflowPanel')>();
   const state = {
+    get sessionByConversation() { return { 'layout-test': fixture.session }; },
     bumpDismissedRefresh: vi.fn(), autoRunningByConversation: {}, setAutoRunning: vi.fn(),
     fetchWorkflowUI: () => Promise.resolve(fixture.ui), setFocusedTab: fixture.setFocusedTab,
     setFocusedSortOrder: vi.fn(), focusedTabByConversation: {}, workflowUIByWorkflow: {},
@@ -34,7 +35,7 @@ vi.mock('./SlotComponents', () => ({
   isWriterIrSource: () => false,
   SlotDownloadContext: React.createContext(true),
   SlotMarkdownStream: () => null,
-  SlotRenderer: ({ slotId }: { slotId: string }) => {
+  SlotRenderer: ({ slotId, slot, readOnly, widget }: { widget?: { widgetType?: string }; slotId: string; slot: { artifact_value?: { text?: string } }; readOnly?: boolean }) => {
     const context = useContext(SlotEditingContext);
     const active = useContext(WorkflowPanelTabActiveContext);
     useEffect(() => {
@@ -46,7 +47,7 @@ vi.mock('./SlotComponents', () => ({
       });
       return () => { unregisterFlush(); unregisterAction(); };
     }, [active, context.registerFlush, context.registerFooterAction, slotId]);
-    return <article>正文 {slotId}</article>;
+    return <article onDoubleClick={() => context.setEditing(slotId, true)} data-widget={widget?.widgetType} data-readonly={Boolean(readOnly)} data-value={slot.artifact_value?.text}>正文 {slotId}</article>;
   },
 }));
 
@@ -184,8 +185,14 @@ describe('shared workflow compact layout', () => {
     expect(screen.getByRole('button', { name: '重试' })).toBeEnabled();
   });
 
-  it('keeps approval actions inside the panel and preserves approval scope', async () => {
+  it.each([
+    ['chat.workflowContinueExecution', undefined],
+    ['chat.workflowSkipThisApproval', 'step'],
+    ['chat.workflowSkipFollowingApprovals', 'following'],
+  ] as const)('keeps shared approval choice %s on the native path', async (label, scope) => {
     fixture.session.status = 'waiting';
+    // The approval resolver uses the latest effective attempt, not array order.
+    fixture.session.steps!.find(step => step.step_id === 'write_document')!.created_at = '2026-09-16T00:01:00Z';
     fixture.session.projection!.nodes = { write_document: {
       execution: 'succeeded', requires_approval: true, validity: 'effective', reachability: '', readiness: '', branch: '',
     } };
@@ -194,9 +201,120 @@ describe('shared workflow compact layout', () => {
     await screen.findByText('正文 document');
     const approval = within(view.container.querySelector('.workflow-panel') as HTMLElement).getByRole('group', { name: '工作流审批操作' });
     expect(within(approval).getByRole('button', { name: '继续执行' })).toBeEnabled();
-    const scopeButton = within(approval).getByRole('button', { name: String(i18n.t('chat.workflowSkipThisApproval')) });
+    const scopeButton = within(approval).getByRole('button', { name: String(i18n.t(label)) });
     await act(async () => fireEvent.click(scopeButton));
-    expect(fixture.setApprovalPreference).toHaveBeenCalledWith('layout-test', { step_id: 'write_document', scope: 'step', approval_required: false });
+    if (scope) {
+      expect(fixture.setApprovalPreference).toHaveBeenCalledWith('layout-test', { step_id: 'write_document', scope, approval_required: false });
+    } else {
+      expect(fixture.setApprovalPreference).not.toHaveBeenCalled();
+    }
     expect(send).toHaveBeenCalledWith(i18n.t('chat.workflowContinue'));
   });
+});
+
+
+describe('external workflow surface boundary', () => {
+  it('injects external actions while retaining the shared document footer and flush behavior', async () => {
+    const execute = vi.fn(async () => {});
+    render(<WorkflowPanel conversationId='layout-test' embedded onRefresh={vi.fn(async () => {})}
+      renderControls={context => <button onClick={() => void context.runAction(execute)}>外部继续</button>} />);
+    await screen.findByRole('button', { name: '发布' });
+    expect(screen.queryByRole('group', { name: '重新运行步骤' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '展开工作流面板' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '外部继续' }));
+    await waitFor(() => expect(execute).toHaveBeenCalledOnce());
+    expect(fixture.flush).toHaveBeenCalledOnce();
+    expect(fixture.flush.mock.invocationCallOrder[0]).toBeLessThan(execute.mock.invocationCallOrder[0]);
+  });
+
+  it('blocks external continuation when the shared editor cannot save', async () => {
+    fixture.flush.mockResolvedValue(false);
+    const execute = vi.fn(async () => {});
+    render(<WorkflowPanel conversationId='layout-test'
+      renderControls={context => <button onClick={() => void context.runAction(execute)}>外部继续</button>} />);
+    await screen.findByRole('button', { name: '发布' });
+    fireEvent.click(screen.getByRole('button', { name: '外部继续' }));
+    await waitFor(() => expect(fixture.flush).toHaveBeenCalledOnce());
+    expect(execute).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('external presentation opt-in', () => {
+  it('shows activity and readonly previews only for the external surface, without changing stored artifacts', async () => {
+    fixture.session.status = 'active';
+    fixture.session.steps![1] = { ...fixture.session.steps![1], status: 'running', task_id: 'task' };
+    const original = JSON.stringify(fixture.session);
+    const activities = { task: { kind: 'tool' as const, tool: 'search', progress: 45,
+      artifacts: [{ slot: 'document', content_type: 'text', seq: 2, value: { text: 'provisional' } }] } };
+    const view = render(<WorkflowPanel conversationId='layout-test' externalPresentation={{ activities }} />);
+    expect(await screen.findByText('正在调用工具：search')).toBeVisible();
+    expect(await screen.findByText('生成中预览')).toBeVisible();
+    expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '45');
+    expect(screen.getByText('正文 document')).toHaveAttribute('data-readonly', 'true');
+    expect(screen.getByText('正文 document')).toHaveAttribute('data-value', 'provisional');
+    expect(screen.getByText('正文 document')).toHaveAttribute('data-widget', 'text-markdown');
+    expect(JSON.stringify(fixture.session)).toBe(original);
+    view.rerender(<WorkflowPanel conversationId='layout-test' />);
+    expect(screen.queryByText('正在调用工具：search')).not.toBeInTheDocument();
+    expect(screen.queryByText('生成中预览')).not.toBeInTheDocument();
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+    expect(screen.getByText('正文 document')).toHaveAttribute('data-readonly', 'false');
+    expect(screen.getByText('正文 document')).toHaveAttribute('data-value', '正文');
+  });
+
+  it('describes the displayed step rather than another running step, only on external panels', async () => {
+    fixture.session.slots = [];
+    fixture.session.projection = { nodes: {
+      write_document: { execution: 'failed', validity: 'effective', requires_approval: false, reachability: 'reachable', readiness: 'blocked', branch: '' },
+      prepare: { execution: 'running', validity: 'effective', requires_approval: false, reachability: 'reachable', readiness: 'blocked', branch: '' },
+    } } as WorkflowSession['projection'];
+    const view = render(<WorkflowPanel conversationId='layout-test' externalPresentation={{ activities: {} }} />);
+    await screen.findByRole('tab', { name: /成稿/ });
+    await waitFor(() => expect(screen.getByText('步骤执行失败')).toBeVisible());
+    view.rerender(<WorkflowPanel conversationId='layout-test' />);
+    expect(screen.queryByText('步骤执行失败')).not.toBeInTheDocument();
+    expect(view.container.querySelector('.workflow-panel__slot-placeholder')).toHaveTextContent('—');
+  });
+
+  it('auto-expands an empty external slot when content arrives and respects an explicit collapse', async () => {
+    fixture.session.slots = [];
+    fixture.ui.tabs![1].slots[0].widget = { widgetType: 'text-markdown', collapseWhenEmpty: true };
+    const view = render(<WorkflowPanel conversationId='layout-test' externalPresentation={{ activities: {} }} />);
+    await screen.findByRole('tab', { name: /成稿/ });
+    const button = () => view.container.querySelector<HTMLButtonElement>('.workflow-panel__slot-collapse')!;
+    expect(button()).toHaveAttribute('aria-expanded', 'false');
+    fixture.session.slots = [{ slot_id: 'document', slot: 'document', step_id: 'write_document', selected: true, revision: 1, artifact_value: { text: 'arrived' } }] as WorkflowSession['slots'];
+    view.rerender(<WorkflowPanel conversationId='layout-test' externalPresentation={{ activities: {} }} />);
+    expect(button()).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByText('正文 document')).toBeVisible();
+    fireEvent.click(button());
+    view.rerender(<WorkflowPanel conversationId='layout-test' externalPresentation={{ activities: {} }} />);
+    expect(button()).toHaveAttribute('aria-expanded', 'false');
+    view.rerender(<WorkflowPanel conversationId='layout-test' />);
+    expect(button()).toBeNull();
+    expect(screen.getByText('正文 document')).toBeVisible();
+  });
+});
+
+
+it('keeps external streaming previews from replacing an editor with pending changes', async () => {
+  fixture.session.status = 'active';
+  fixture.session.steps![1] = { ...fixture.session.steps![1], status: 'running', task_id: 'task' };
+  const view = render(<WorkflowPanel conversationId='layout-test' externalPresentation={{ activities: {} }} />);
+  await screen.findByRole('tab', { name: /成稿/ });
+  fireEvent.doubleClick(screen.getByText('正文 document'));
+  view.rerender(<WorkflowPanel conversationId='layout-test' externalPresentation={{ activities: {
+    task: { artifacts: [{ slot: 'document', content_type: 'text', seq: 2, value: { text: 'provisional' } }] },
+  } }} />);
+  expect(screen.queryByText('生成中预览')).not.toBeInTheDocument();
+  expect(screen.getByText('正文 document')).toHaveAttribute('data-value', '正文');
+  expect(screen.getByText('正文 document')).toHaveAttribute('data-readonly', 'false');
+});
+
+it('uses external control status without overriding the native header', async () => {
+  const view = render(<WorkflowPanel conversationId='layout-test' externalPresentation={{ activities: {}, statusLabel: '等待宿主绑定' }} />);
+  expect(await screen.findByText('等待宿主绑定')).toBeVisible();
+  view.rerender(<WorkflowPanel conversationId='layout-test' />);
+  expect(screen.queryByText('等待宿主绑定')).not.toBeInTheDocument();
 });
