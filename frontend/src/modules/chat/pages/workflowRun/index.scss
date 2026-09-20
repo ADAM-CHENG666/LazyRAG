@@ -47,50 +47,18 @@ html.workflow-run-embed #app {
   width: 100%;
   max-height: none;
   margin: 0;
-  .workflow-panel__body { flex: 1 1 auto; min-height: 0; overflow: auto; }
+  .workflow-panel__body { flex: 1 1 0; min-height: 0; max-height: none; overflow: auto; }
+  .workflow-panel__footer { margin-top: auto; }
+  .workflow-panel__approval-bar { flex-shrink: 1; max-width: 100%; box-sizing: border-box; }
+  .workflow-panel__body > [role='tabpanel']:not([hidden]) { overflow: auto; flex: 1 0 auto; }
+  .workflow-slot__text { max-height: none; }
+
   .workflow-panel__header, .workflow-panel__tabs, .workflow-panel__footer,
   .workflow-panel__approval-bar { flex-shrink: 0; }
 }
 
 // Scoped to the external presentation opt-in; native panels retain upstream styles.
 .workflow-panel--external-presentation {
-.workflow-panel__activity {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: #64748b;
-  font-size: 12px;
-}
-
-.workflow-panel__tab-badge {
-  position: relative;
-}
-
-.workflow-panel__progress-ring {
-  position: absolute;
-  inset: -5px;
-  width: 32px;
-  height: 32px;
-  fill: none;
-  stroke: #2563eb;
-  stroke-width: 2;
-  stroke-linecap: round;
-  transform: rotate(-90deg);
-  pointer-events: none;
-
-  .workflow-panel__progress-track { stroke: #dbeafe; }
-  &--indeterminate { animation: workflow-progress-spin 1.4s linear infinite; }
-}
-
-@keyframes workflow-progress-spin {
-  to { transform: rotate(270deg); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .workflow-panel__progress-ring--indeterminate { animation: none; }
-}
-
 .workflow-panel__preview-label {
   color: #64748b;
   font-size: 12px;
@@ -100,3 +68,24 @@ html.workflow-run-embed #app {
 }
 
 .workflow-panel--external-presentation .workflow-panel__empty-summary { color: #64748b; font-size: 12px; }
+
+.workflow-external-activity {
+  flex: 0 0 auto;
+  padding: 8px 12px;
+  border-bottom: 1px solid #f0f1f3;
+  color: #64748b;
+  font-size: 12px;
+  &__text { overflow-wrap: anywhere; margin-bottom: 6px; }
+  &__progress {
+    height: 3px;
+    overflow: hidden;
+    background: #dbeafe;
+    border-radius: 2px;
+    > span { display: block; height: 100%; background: #2563eb; }
+    &--indeterminate > span { animation: workflow-external-progress 1.5s ease-in-out infinite alternate; }
+  }
+}
+@keyframes workflow-external-progress { from { transform: translateX(0); } to { transform: translateX(230%); } }
+@media (prefers-reduced-motion: reduce) {
+  .workflow-external-activity__progress--indeterminate > span { animation: none; }
+}

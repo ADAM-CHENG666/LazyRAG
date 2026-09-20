@@ -1,0 +1,52 @@
+initial: __start__
+start_route: all
+
+transitions:
+  __start__: [{to: external_draft}]
+  external_draft: [{to: native_check}]
+  native_check: [{to: external_finalize}]
+  external_finalize: [{to: __end__}]
+
+steps:
+  external_draft:
+    label: External Draft
+    mode: human
+    prompt: |
+      Summarize the authoritative user request in one concise sentence in the
+      user's language. Save only that sentence as external_draft with
+      content_type="text".
+    outputs:
+      - {material: external_draft, required: true}
+    acceptance_criteria: external_draft is present and non-empty.
+
+  native_check:
+    label: Native Check
+    mode: human
+    prompt: |
+      Read external_draft. Call calculator exactly once with expression "6 * 7".
+      Save native_check with content_type="json" using this shape:
+      {"scriptless": true, "executor": "lazymind", "calculation": 42,
+      "status": "ok"}. Do not call any workflow-local or shell tool.
+    tools: [calculator]
+    inputs:
+      - {material: external_draft, required: true}
+    outputs:
+      - {material: native_check, required: true}
+    acceptance_criteria: >
+      native_check is valid JSON with scriptless=true, calculation=42, and
+      status="ok".
+
+  external_finalize:
+    label: External Finalize
+    mode: human
+    prompt: |
+      Read external_draft and native_check. If both are present and native_check
+      contains calculation=42, save the exact text "Full workflow control test
+      passed" as final_result with content_type="text". Do not call any
+      workflow-local or shell tool.
+    inputs:
+      - {material: external_draft, required: true}
+      - {material: native_check, required: true}
+    outputs:
+      - {material: final_result, required: true}
+    acceptance_criteria: final_result equals Full workflow control test passed.

@@ -1971,11 +1971,6 @@ const enUS = {
   // Chat
   chat: {
     workflowRunSyncFailed: 'Status sync failed; displayed information may be outdated',
-    workflowControlReviewStatus: 'Awaiting confirmation',
-    workflowControlBindingStatus: 'Awaiting host binding',
-    workflowControlDrainingStatus: 'Finishing active tasks before review',
-    workflowControlExecutorStatus: 'Executing in LazyMind',
-    workflowControlHostStatus: 'Awaiting external host continuation',
 
     workspace: {
       retry: "Retry",
@@ -2957,11 +2952,6 @@ const enUS = {
     workflowRunLoadFailed: "Unable to load workflow",
     workflowEditsBlocked: 'This step has unsaved edits. Resolve the save error or version conflict, then try again.',
     workflowRunControlFailed: "Unable to send operation",
-    workflowControlConfirm: "Confirm this step",
-    workflowControlConfirmContinue: "Confirm and continue",
-    workflowControlRewind: "Rewind to this step",
-    workflowControlResume: "Resume workflow",
-    workflowControlOtherReview: "Step {{step}} needs review. Open its tab to confirm.",
     workflowControlSaved: "Changes saved.",
     workflowControlConfirmed: "This step is confirmed.",
     workflowControlRecovered: "This step ran again. Deterministic steps may produce the same content.",

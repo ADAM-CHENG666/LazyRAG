@@ -1,0 +1,69 @@
+id: scriptless-test-workflow
+name: Full Control Workflow Test
+description: >
+  A three-step workflow for checking external execution, native execution,
+  human review, continuation, progress updates, and artifact previews without
+  loading or executing workflow-local scripts.
+
+when_to_use: >
+  Use only when the user explicitly asks to test the Workflow runtime or the
+  external Workflow panel without scripts. Do not select it for normal tasks.
+
+steps:
+  - id: external_draft
+    label: External Draft
+  - id: native_check
+    label: Native Check
+  - id: external_finalize
+    label: External Finalize
+
+slots:
+  - id: external_draft
+    label: External Draft
+    type: text
+    cardinality: single
+    exposed: true
+  - id: native_check
+    label: Native Check
+    type: json
+    cardinality: single
+    exposed: true
+  - id: final_result
+    label: Final Result
+    type: text
+    cardinality: single
+    exposed: true
+
+ui:
+  tabs:
+    - id: external_draft
+      step_id: external_draft
+      label: External Draft
+      layout: list
+      slots: [{id: external_draft}]
+    - id: native_check
+      step_id: native_check
+      label: Native Check
+      layout: list
+      slots: [{id: native_check}]
+    - id: external_finalize
+      step_id: external_finalize
+      label: Final Result
+      layout: list
+      slots: [{id: final_result}]
+
+i18n:
+  zh-CN:
+    name: 完整控制流测试（无本地脚本）
+    steps:
+      external_draft: {label: 外部执行}
+      native_check: {label: 本体执行}
+      external_finalize: {label: 外部收尾}
+    tabs:
+      external_draft: {label: 外部执行}
+      native_check: {label: 本体执行}
+      external_finalize: {label: 外部收尾}
+    slots:
+      external_draft: {label: 外部执行结果}
+      native_check: {label: 本体检查结果}
+      final_result: {label: 最终测试结果}

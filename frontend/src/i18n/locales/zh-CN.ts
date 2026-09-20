@@ -1921,11 +1921,6 @@ const zhCN = {
 
   chat: {
     workflowRunSyncFailed: '状态同步失败，当前显示可能不是最新状态',
-    workflowControlReviewStatus: '等待确认',
-    workflowControlBindingStatus: '等待宿主绑定',
-    workflowControlDrainingStatus: '等待当前任务结束后确认',
-    workflowControlExecutorStatus: 'LazyMind 本体执行中',
-    workflowControlHostStatus: '等待外部宿主接续',
 
     workspace: {
       retry: "重试",
@@ -2888,11 +2883,6 @@ const zhCN = {
     workflowRunLoadFailed: "加载工作流失败",
     workflowEditsBlocked: '该步骤有未保存的修改，请先处理保存失败或版本冲突，再重新操作。',
     workflowRunControlFailed: "发送操作失败",
-    workflowControlConfirm: "确认当前步骤",
-    workflowControlConfirmContinue: "确认并继续",
-    workflowControlRewind: "退回当前步骤",
-    workflowControlResume: "恢复工作流",
-    workflowControlOtherReview: "待审步骤：{{step}}，请切换到对应标签页。",
     workflowControlSaved: "修改已保存。",
     workflowControlConfirmed: "当前步骤已确认。",
     workflowControlRecovered: "已重新执行当前步骤。确定性步骤可能产出相同内容。",

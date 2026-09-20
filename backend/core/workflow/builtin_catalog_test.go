@@ -102,6 +102,27 @@ func TestBuiltinPackageIgnoresPythonRuntimeCacheFiles(t *testing.T) {
 	}
 }
 
+func TestScriptlessTestWorkflowIsSeededWithoutScriptCapability(t *testing.T) {
+	root := filepath.Join("..", "..", "..", "workflows", "scriptless-test-workflow")
+	files, err := readBuiltinPackageFiles(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := make([]string, 0, len(files))
+	for path := range files {
+		paths = append(paths, path)
+	}
+	if hasScriptPath(paths) {
+		t.Fatalf("scriptless Workflow contains executable script paths: %v", paths)
+	}
+	if _, exists := files["workflow.yaml"]; !exists {
+		t.Fatal("scriptless Workflow manifest is missing")
+	}
+	if _, exists := files["scenario/state.yml"]; !exists {
+		t.Fatal("scriptless Workflow state graph is missing")
+	}
+}
+
 func TestReadBuiltinPackageFilesIgnoresDirectorySymlink(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "workflow.yaml"), []byte("keep"), 0o600); err != nil {

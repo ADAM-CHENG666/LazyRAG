@@ -4,18 +4,46 @@ import { Alert, Button, Spin } from 'antd';
 import { useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { AgentAppsAuth } from '@/components/auth';
-import { WorkflowControlActions } from '@/modules/chat/components/WorkflowPanel/WorkflowControlActions';
 import { WorkflowPanel } from '@/modules/chat/components/WorkflowPanel';
 import { useWorkflowStore } from '@/modules/chat/store/workflowPanel';
 import { WorkflowSessionApi } from '@/modules/chat/utils/request';
 import { CONTROL_NOTICE_TTL_MS, controlActions, controlNoticeKey, deliveryBanner, overlayInfoBanner, REVIEW_CHANGED_NOTICE, ReviewRefreshRequired, type WorkflowActionIntent } from '@/modules/chat/utils/workflowControl';
-import { controlStatusKey, loadWorkflowRunSnapshot, watchWorkflowRun, type WorkflowRunSnapshot } from './loadRun';
+import { loadWorkflowRunSnapshot, watchWorkflowRun, type WorkflowRunSnapshot } from './loadRun';
 import './index.scss';
 
 /** Shared run workbench: user intent goes to Core, never to an interpreted chat prompt. */
 export default function WorkflowRunPage({ embedded = false }: { embedded?: boolean }) {
   const { sessionId = '' } = useParams();
   const { t } = useTranslation();
+  const [hostExpanded, setHostExpanded] = useState(false);
+  const [hostCollapsed, setHostCollapsed] = useState(false);
+  const hostOrigin = useMemo(() => {
+    const value = new URLSearchParams(window.location.search).get('hostOrigin');
+    try { const url = new URL(value ?? ''); return ['http:', 'https:'].includes(url.protocol) ? url.origin : undefined; }
+    catch { return undefined; }
+  }, []);
+  const toggleHostExpand = useCallback(() => {
+    if (hostOrigin) window.parent.postMessage({ type: 'lazymind.workflow.toggle-expand', sessionId }, hostOrigin);
+  }, [hostOrigin, sessionId]);
+  const toggleHostCollapse = useCallback(() => {
+    if (hostOrigin) window.parent.postMessage({ type: 'lazymind.workflow.toggle-collapse', sessionId }, hostOrigin);
+  }, [hostOrigin, sessionId]);
+  useEffect(() => {
+    if (!embedded || !hostOrigin) return;
+    const receive = (event: MessageEvent) => {
+      if (event.source === window.parent && event.origin === hostOrigin
+        && event.data?.type === 'lazymind.workflow.expansion' && event.data.sessionId === sessionId
+        && typeof event.data.expanded === 'boolean') setHostExpanded(event.data.expanded);
+      if (event.source === window.parent && event.origin === hostOrigin
+        && event.data?.type === 'lazymind.workflow.collapse' && event.data.sessionId === sessionId
+        && typeof event.data.collapsed === 'boolean') setHostCollapsed(event.data.collapsed);
+    };
+    const keydown = (event: KeyboardEvent) => { if (event.key === 'Escape' && hostExpanded) toggleHostExpand(); };
+    window.addEventListener('message', receive);
+    window.addEventListener('keydown', keydown);
+    return () => { window.removeEventListener('message', receive); window.removeEventListener('keydown', keydown); };
+  }, [embedded, hostOrigin, sessionId, hostExpanded, toggleHostExpand]);
+
   const user = AgentAppsAuth.getUserInfo();
   const key = `workflow-run:${window.location.origin}:${user?.tenantId ?? user?.tenant_id ?? ''}:${user?.userId ?? user?.username ?? ''}:${sessionId}`;
   const [error, setError] = useState('');
@@ -118,10 +146,11 @@ export default function WorkflowRunPage({ embedded = false }: { embedded?: boole
     {snapshot && <>
       {!embedded && <Button onClick={() => { void refresh().catch(reason => setError(String(reason))); }}>{t('chat.workflowRunRefresh')}</Button>}
       <WorkflowPanel conversationId={key} onRefresh={() => refresh().then(() => {})}
-        embedded={embedded} externalPresentation={{ activities, statusLabel: control ? t(controlStatusKey(control)) : undefined }}
-        renderControls={context => control
-          ? <WorkflowControlActions context={context} control={control} act={act} />
-          : <span role="status">{t('chat.workflowControlLegacy')}</span>} />
+        embedded={embedded} externalPresentation={{ activities, expanded: hostExpanded,
+          onToggleExpand: embedded && hostOrigin ? toggleHostExpand : undefined,
+          collapsed: embedded ? hostCollapsed : undefined,
+          onToggleCollapse: embedded && hostOrigin ? toggleHostCollapse : undefined }}
+        controlAdapter={control ? { control, execute: act } : undefined} />
     </>}
   </main>;
 }

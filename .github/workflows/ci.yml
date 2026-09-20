@@ -132,6 +132,9 @@ jobs:
       - name: Install frontend dependencies
         working-directory: frontend
         run: pnpm install --frozen-lockfile
+      - name: Type-check workflow panel integration
+        working-directory: frontend
+        run: pnpm typecheck
       - name: Test native and external workflow panel boundaries
         working-directory: frontend
         run: pnpm test:workflow-panel
