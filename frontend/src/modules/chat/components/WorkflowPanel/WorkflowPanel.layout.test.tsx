@@ -5,6 +5,10 @@ import i18n from '@/i18n';
 import type { WorkflowSession, WorkflowUI } from '@/modules/chat/store/workflowPanel';
 import { SlotEditingContext, WorkflowPanelTabActiveContext } from './slotEditingContext';
 import { WorkflowPanel } from './index';
+import { WorkflowControlActions } from './WorkflowControlActions';
+import { controlActions, type WorkflowControlView } from '@/modules/chat/utils/workflowControl';
+import { loadWorkflowRunSnapshot } from '@/modules/chat/utils/loadWorkflowRun';
+import { controlStatusKey } from '@/modules/chat/pages/workflowRun/loadRun';
 
 const fixture = vi.hoisted(() => ({
   session: {} as WorkflowSession,
@@ -317,4 +321,69 @@ it('uses external control status without overriding the native header', async ()
   expect(await screen.findByText('等待宿主绑定')).toBeVisible();
   view.rerender(<WorkflowPanel conversationId='layout-test' />);
   expect(screen.queryByText('等待宿主绑定')).not.toBeInTheDocument();
+});
+
+it('keeps saved output visible after execution fails and retries through external control', async () => {
+  // API and slot renderer are test doubles. Snapshot normalization, shared panel,
+  // previews, controls and command construction below are the real modules.
+  const stored = structuredClone(fixture.session);
+  stored.status = 'active';
+  stored.steps = [{ ...stored.steps![1], status: 'running', task_id: 'task' }];
+  const control: WorkflowControlView = {
+    protocol: 'workflow.control.v1', session_id: stored.session_id, state_version: 4,
+    continuation: 'awaiting_executor', active_executions: 1, active_execution_ids: ['attempt'],
+    reviews: [], binding: { bound: true, generation: 1 }, delivery: null,
+    admission: { can_begin: false }, available_actions: ['stop'],
+  };
+  const getControl = vi.fn(async () => ({ data: { data: {
+    session: structuredClone(stored), control: structuredClone(control),
+    projection: { current: control.active_executions ? ['write_document'] : [] },
+  } } }));
+  const getSession = vi.fn(async () => { throw new Error('unexpected native fallback'); });
+  const getProjection = vi.fn(async () => { throw new Error('unexpected native fallback'); });
+  const read = () => loadWorkflowRunSnapshot(stored.session_id, { getControl, getSession, getProjection });
+  const write = vi.fn(async () => {});
+  const commands = controlActions(async () => (await read()).control!, write, () => 'retry-command');
+  let snapshot = await read();
+  fixture.session = snapshot.session;
+  const activities = { task: { progress: 90, artifacts: [
+    { slot: 'document', content_type: 'text', seq: 2, value: { text: 'unfinished preview' } },
+  ] } };
+  const panel = () => <WorkflowPanel conversationId='layout-test'
+    externalPresentation={{ activities, statusLabel: String(i18n.t(controlStatusKey(snapshot.control!))) }}
+    renderControls={context => <WorkflowControlActions context={context} control={snapshot.control!}
+      act={commands.execute} />} />;
+  const view = render(panel());
+  expect(await screen.findByText('生成中预览')).toBeVisible();
+  expect(screen.getByText('正文 document')).toHaveAttribute('data-value', 'unfinished preview');
+
+  // The worker persisted a valid output before a post-step check failed.
+  // A leftover streaming preview must neither hide that output nor imply success.
+  stored.steps![0].status = 'failed';
+  stored.slots![0].artifact_value = { text: 'saved before check failed' };
+  control.state_version = 5;
+  control.continuation = 'failed';
+  control.active_executions = 0;
+  control.active_execution_ids = [];
+  control.available_actions = ['retry'];
+  control.admission = { can_begin: false, reason: 'recovery_required' };
+  snapshot = await read();
+  fixture.session = snapshot.session;
+  view.rerender(panel());
+
+  expect(await screen.findByText(String(i18n.t('chat.workflowStatusFailed')))).toBeVisible();
+  expect(screen.queryByText('生成中预览')).not.toBeInTheDocument();
+  expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+  expect(screen.getByText('正文 document')).toHaveAttribute('data-value', 'saved before check failed');
+  expect(screen.queryByRole('button', { name: String(i18n.t('chat.workflowContinueExecution')) })).not.toBeInTheDocument();
+  expect(write).not.toHaveBeenCalled();
+
+  fireEvent.click(screen.getByRole('button', { name: String(i18n.t('chat.workflowRetry')) }));
+  await waitFor(() => expect(write).toHaveBeenCalledWith({
+    command_id: 'retry-command', kind: 'retry', expected_state_version: 5, step_id: 'write_document',
+  }));
+  expect(write).toHaveBeenCalledOnce();
+  expect(fixture.flush.mock.invocationCallOrder[0]).toBeLessThan(write.mock.invocationCallOrder[0]);
+  expect(getSession).not.toHaveBeenCalled();
+  expect(getProjection).not.toHaveBeenCalled();
 });

@@ -113,6 +113,29 @@ jobs:
           cd tests/frontend
           npx c8 check-coverage --lines 10 --functions 10 --branches 10
 
+  test-workflow-panel:
+    name: Test Workflow Panel boundaries
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '10.0.0'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+      - name: Test native and external workflow panel boundaries
+        working-directory: frontend
+        run: pnpm test:workflow-panel
+
   test-local-runtime:
     needs: [lint, doc_check]
     name: Test local runtime (${{ matrix.os }})
