@@ -28,11 +28,13 @@ class SiteCustomizeTest(unittest.TestCase):
                    "LAZYMIND_DATABASE_URL": "sqliteproxy://test"}
             reader, writer = os.pipe()
             os.close(writer)
+            os.set_inheritable(reader, True)
             try:
                 tracker = subprocess.run(
                     [sys.executable, "-B", "-c",
                      f"from multiprocessing.resource_tracker import main;main({reader})"],
-                    env=env, cwd=root, pass_fds=(reader,), capture_output=True, timeout=10,
+                    env=env, cwd=root, close_fds=False,
+                    capture_output=True, timeout=10,
                 )
             finally:
                 os.close(reader)
