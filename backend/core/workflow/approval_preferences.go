@@ -137,7 +137,7 @@ func SetWorkflowApprovalPreference(w http.ResponseWriter, r *http.Request) {
 		common.ReplyErr(w, "workflow step not found", http.StatusNotFound)
 		return
 	}
-	stepID, err := saveWorkflowApprovalPreference(approvalPreferenceDB(store.DB().WithContext(r.Context()), session), userID, session.WorkflowID, req.StepID, req.Scope)
+	stepID, err := saveWorkflowApprovalPreference(store.DB().WithContext(r.Context()), userID, session.WorkflowID, req.StepID, req.Scope)
 	if err != nil {
 		common.ReplyErr(w, "save approval preference failed", http.StatusInternalServerError)
 		return

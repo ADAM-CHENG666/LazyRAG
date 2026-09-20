@@ -548,7 +548,6 @@ func TestBundledWorkflowsCompileForRuntime(t *testing.T) {
 		"writer-workflow",
 		"image-workflow",
 		"test-workflow",
-		"scriptless-test-workflow",
 		"ppt-workflow",
 		"bid_tech_proposal_writer",
 		"academic_research_pipeline",

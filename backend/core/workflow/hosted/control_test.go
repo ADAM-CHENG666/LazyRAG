@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -24,7 +25,7 @@ func controlledService(t *testing.T) (*Service, *gorm.DB, Execution) {
 	t.Helper()
 	service, db := hostedTestService(t)
 	service.Completion = &execution.Service{DB: db, Store: service.Store, Attempts: service.Attempts, Contexts: service.Contexts}
-	if err := db.AutoMigrate(&orm.WorkflowReviewCheckpoint{}, &orm.WorkflowHostAction{}, &orm.WorkflowApprovalPreference{}, &orm.ExternalWorkflowApprovalPreference{}); err != nil {
+	if err := db.AutoMigrate(&orm.WorkflowReviewCheckpoint{}, &orm.WorkflowHostAction{}, &orm.WorkflowApprovalPreference{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Model(&orm.WorkflowSession{}).Where("id = ?", "session-1").Updates(map[string]any{
@@ -44,6 +45,64 @@ func controlledService(t *testing.T) (*Service, *gorm.DB, Execution) {
 func successfulSubmission(handle string) testCompletion {
 	return testCompletion{Outcome: "succeeded", ExecutionHandle: handle,
 		Artifacts: []executor.Artifact{{Slot: "report", ContentType: "text/plain", Seq: 1, Value: json.RawMessage(`{"text":"review me"}`)}}}
+}
+
+func TestControlSnapshotSharesNativeDocumentCapabilities(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/document:inspect" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"is_document":true,"representation":"markdown","schema":"text/markdown","features":{"headings":true,"numbering":false,"cross_references":false,"provider_binding":false}}`))
+	}))
+	defer server.Close()
+	t.Setenv("LAZYMIND_CHAT_SERVICE_URL", server.URL)
+	service, db, execution := controlledService(t)
+	input := successfulSubmission(execution.ExecutionHandle)
+	input.Artifacts[0].ContentType = "json"
+	input.Artifacts[0].Value = json.RawMessage(`{"schema":"text/markdown","data":"# Review me"}`)
+	if _, err := publishAndComplete(service, context.Background(), "owner", "session-1", "attempt-1", input); err != nil {
+		t.Fatal(err)
+	}
+	oldDB, oldState := corestore.DB(), corestore.State()
+	corestore.Init(db, db, nil)
+	t.Cleanup(func() { corestore.Init(oldDB, oldDB, oldState) })
+	read := func(handler http.HandlerFunc) []map[string]any {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodGet, "/workflow-sessions/session-1", nil)
+		r = mux.SetURLVars(r, map[string]string{"session_id": "session-1"})
+		r.Header.Set("X-User-Id", "owner")
+		w := httptest.NewRecorder()
+		handler(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("snapshot: %d %s", w.Code, w.Body.String())
+		}
+		var result struct {
+			Data struct {
+				Session struct {
+					Slots []map[string]any `json:"slots"`
+				} `json:"session"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		return result.Data.Session.Slots
+	}
+	native := read(workflowcore.GetSessionDetail)
+	external := read((workflowcore.WorkflowControlHandler{Service: workflowcore.WorkflowControlService{DB: db}}).Read)
+	if len(native) != 1 || len(external) != 1 {
+		t.Fatalf("slots: native=%v external=%v", native, external)
+	}
+	if native[0]["document"] == nil {
+		t.Fatalf("native fixture has no document descriptor: %v", native)
+	}
+	for _, field := range []string{"artifact_id", "document", "document_error", "revision_count", "artifact_value"} {
+		if !reflect.DeepEqual(native[0][field], external[0][field]) {
+			t.Errorf("%s differs: native=%v external=%v", field, native[0][field], external[0][field])
+		}
+	}
 }
 
 func TestControlledHumanSubmitConfirmAndFreshReplay(t *testing.T) {
@@ -263,13 +322,9 @@ func TestApprovalPreferenceEntryPointsShareFuturePolicy(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				var preferences []orm.ExternalWorkflowApprovalPreference
+				var preferences []orm.WorkflowApprovalPreference
 				if err := db.Where("user_id = ?", "owner").Find(&preferences).Error; err != nil {
 					t.Fatal(err)
-				}
-				var nativeCount int64
-				if err := db.Model(&orm.WorkflowApprovalPreference{}).Count(&nativeCount).Error; err != nil || nativeCount != 0 {
-					t.Fatalf("external preference leaked into native: count=%d err=%v", nativeCount, err)
 				}
 				step := review.StepID
 				if scope == "following" {
@@ -299,7 +354,7 @@ func TestNativeExecutionSharesAtomicReviewAndHostContinuation(t *testing.T) {
 		t.Run(map[bool]string{false: "automatic", true: "human"}[review], func(t *testing.T) {
 			service, db := hostedTestService(t)
 			service.Completion = &execution.Service{DB: db, Store: service.Store, Attempts: service.Attempts, Contexts: service.Contexts}
-			if err := db.AutoMigrate(&orm.WorkflowReviewCheckpoint{}, &orm.WorkflowHostAction{}, &orm.WorkflowApprovalPreference{}, &orm.ExternalWorkflowApprovalPreference{}); err != nil {
+			if err := db.AutoMigrate(&orm.WorkflowReviewCheckpoint{}, &orm.WorkflowHostAction{}, &orm.WorkflowApprovalPreference{}); err != nil {
 				t.Fatal(err)
 			}
 			if err := db.Model(&orm.WorkflowSession{}).Where("id = ?", "session-1").Updates(map[string]any{

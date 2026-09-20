@@ -394,7 +394,7 @@ func confirmWorkflowReview(ctx context.Context, tx *gorm.DB, session *orm.Workfl
 		return err
 	}
 	if command.PreferenceScope != "" {
-		if _, err := saveWorkflowApprovalPreference(approvalPreferenceDB(tx, *session), owner, session.WorkflowID, review.StepID, command.PreferenceScope); err != nil {
+		if _, err := saveWorkflowApprovalPreference(tx, owner, session.WorkflowID, review.StepID, command.PreferenceScope); err != nil {
 			return err
 		}
 	}
@@ -508,6 +508,7 @@ func (h WorkflowControlHandler) Read(w http.ResponseWriter, r *http.Request) {
 			dto.Slots = append(dto.Slots, toSlotDTO(&revisions[i]))
 		}
 		enrichSlots(r.Context(), tx, session.ID, dto.Slots)
+		enrichDocumentSlots(r.Context(), tx, session.CreateUserID, dto.Slots)
 		steps, err := ListSteps(r.Context(), tx, session.ID)
 		if err != nil {
 			return err

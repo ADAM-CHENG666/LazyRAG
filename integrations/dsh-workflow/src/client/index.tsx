@@ -85,7 +85,7 @@ export function apply(ctx: ClientContext, config: { serverName?: string } = {}):
     const url = new URL(`/workflow-runs/${encodeURIComponent(current.run.runId)}/embed`, origin)
     url.searchParams.set('hostOrigin', window.location.origin)
     return <section aria-label="LazyMind Workflow" style={{
-      height: collapsed && !expanded ? 66 : 'min(360px, 45dvh)', minHeight: 0, flexShrink: 0,
+      height: collapsed && !expanded ? 66 : 'min(480px, 55dvh)', minHeight: 0, flexShrink: 0,
       width: '100%', maxWidth: 'var(--dsh-chat-content-width, 920px)', alignSelf: 'center', boxSizing: 'border-box',
       display: current.minimized ? 'none' : 'flex', flexDirection: 'column',
       ...(expanded ? { position: 'fixed', inset: 16, width: 'auto', maxWidth: 'none', alignSelf: 'stretch', height: 'auto', zIndex: 1000 } as const : {}),

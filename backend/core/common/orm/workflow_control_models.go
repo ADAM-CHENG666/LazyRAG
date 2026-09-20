@@ -45,11 +45,3 @@ type WorkflowHostAction struct {
 }
 
 func (WorkflowHostAction) TableName() string { return "workflow_host_actions" }
-
-// ExternalWorkflowApprovalPreference is deliberately separate from native user preferences.
-// Both directions inherit package defaults, never the other controller's opt-outs.
-type ExternalWorkflowApprovalPreference WorkflowApprovalPreference
-
-func (ExternalWorkflowApprovalPreference) TableName() string {
-	return "external_workflow_approval_preferences"
-}

@@ -1,4 +1,3 @@
-DROP TABLE IF EXISTS external_workflow_approval_preferences;
 DROP TABLE IF EXISTS document_publication_bindings;
 DROP TABLE IF EXISTS document_publication_operations;
 DROP TABLE IF EXISTS workflow_host_actions;

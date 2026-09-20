@@ -29,13 +29,13 @@ func TestWorkflowControlMigrationPreservesNativeRuns(t *testing.T) {
 			}
 			var additions []migrationFile
 			for _, migration := range catalog.Modes[len(catalog.Modes)-1].Dev {
-				if migration.FileVersion == 20260908093904 || migration.FileVersion == 20260909053754 || migration.FileVersion == 20260920021806 {
+				if migration.FileVersion == 20260908093904 || migration.FileVersion == 20260909053754 {
 					additions = append(additions, migration)
 				} else {
 					execMigrationFileForDriver(t, db, migration.UpPath, driver)
 				}
 			}
-			if len(additions) != 3 {
+			if len(additions) != 2 {
 				t.Fatal("missing external workflow migrations")
 			}
 			if _, err := db.Exec(`INSERT INTO plugin_sessions(id,conversation_id,plugin_id,status,created_at,updated_at) VALUES ('native','conv','writer','active',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`); err != nil {
@@ -63,32 +63,30 @@ func TestWorkflowControlMigrationPreservesNativeRuns(t *testing.T) {
 	}
 }
 
-func TestExternalPreferencesSQLiteAggregateMatchesDev(t *testing.T) {
+func TestWorkflowMigrationsDoNotCreateControllerSpecificApprovalPreferences(t *testing.T) {
 	catalog, err := (&Runner{dir: "../migrations"}).loadCatalog()
 	if err != nil {
 		t.Fatal(err)
 	}
-	release := openRawSQLite(t, filepath.Join(t.TempDir(), "release.db"))
-	dev := openRawSQLite(t, filepath.Join(t.TempDir(), "dev.db"))
-	for i, mode := range catalog.Modes {
-		execMigrationFileForDriver(t, release, mode.Aggregate.UpPath, "sqlite")
-		if i == len(catalog.Modes)-1 {
-			for _, migration := range mode.Dev {
-				execMigrationFileForDriver(t, dev, migration.UpPath, "sqlite")
+	for _, path := range []string{"release", "dev"} {
+		t.Run(path, func(t *testing.T) {
+			db := openRawSQLite(t, filepath.Join(t.TempDir(), path+".db"))
+			for i, mode := range catalog.Modes {
+				if path == "release" || i < len(catalog.Modes)-1 {
+					execMigrationFileForDriver(t, db, mode.Aggregate.UpPath, "sqlite")
+					continue
+				}
+				for _, migration := range mode.Dev {
+					execMigrationFileForDriver(t, db, migration.UpPath, "sqlite")
+				}
 			}
-		} else {
-			execMigrationFileForDriver(t, dev, mode.Aggregate.UpPath, "sqlite")
-		}
-	}
-	var releaseSQL, devSQL string
-	query := `SELECT sql FROM sqlite_master WHERE type='table' AND name='external_workflow_approval_preferences'`
-	if err := release.QueryRow(query).Scan(&releaseSQL); err != nil {
-		t.Fatal(err)
-	}
-	if err := dev.QueryRow(query).Scan(&devSQL); err != nil {
-		t.Fatal(err)
-	}
-	if releaseSQL != devSQL {
-		t.Fatalf("external preference schemas differ: %s / %s", releaseSQL, devSQL)
+			var count int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='external_workflow_approval_preferences'`).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != 0 {
+				t.Fatal("controller-specific workflow approval preferences table still exists")
+			}
+		})
 	}
 }

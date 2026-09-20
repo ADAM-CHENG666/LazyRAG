@@ -309,7 +309,7 @@ function apply(ctx, config = {}) {
 		return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("section", {
 			"aria-label": "LazyMind Workflow",
 			style: {
-				height: collapsed && !expanded ? 66 : "min(360px, 45dvh)",
+				height: collapsed && !expanded ? 66 : "min(480px, 55dvh)",
 				minHeight: 0,
 				flexShrink: 0,
 				width: "100%",

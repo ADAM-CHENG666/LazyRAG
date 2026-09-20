@@ -60,7 +60,7 @@ it('docks above input and retains the iframe through updates, expansion and rest
   message('http://localhost:8090', frame.contentWindow, 'run-1', 'lazymind.workflow.toggle-collapse');
   expect(container.style.height).toBe('66px');
   message('http://localhost:8090', frame.contentWindow, 'run-1', 'lazymind.workflow.toggle-collapse');
-  expect(container.style.height).toBe('min(360px, 45dvh)');
+  expect(container.style.height).toBe('min(480px, 55dvh)');
   message('http://localhost:8090', frame.contentWindow);
   message('http://localhost:8090', frame.contentWindow);
   expect(container.style.position).not.toBe('fixed');
