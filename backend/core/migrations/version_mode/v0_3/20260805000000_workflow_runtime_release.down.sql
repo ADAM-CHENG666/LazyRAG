@@ -1,3 +1,5 @@
+DROP TABLE IF EXISTS external_agent_skill_sources;
+DROP TABLE IF EXISTS external_agent_workflow_tasks;
 DROP TABLE IF EXISTS document_publication_bindings;
 DROP TABLE IF EXISTS document_publication_operations;
 DROP TABLE IF EXISTS workflow_host_actions;
