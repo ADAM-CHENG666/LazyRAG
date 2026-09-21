@@ -140,7 +140,7 @@ func TestRepositoryStructuredMigrationCatalogLoads(t *testing.T) {
 	if !containsMigrationFileVersion(v03.Dev, 20260908084250) {
 		t.Fatal("v0_3 dev migrations are missing conversation history order")
 	}
-	for _, version := range []uint64{20260820120000, 20260826062049, 20260906140951, 20260909073741, 20260909193000, 20260910075430, 20260912063102, 20260912065741, 20260914090000} {
+	for _, version := range []uint64{20260820120000, 20260826062049, 20260906140951, 20260909073741, 20260909193000, 20260910075430, 20260912063102, 20260912065741, 20260914090000, 20260918100000} {
 		if !containsMigrationFileVersion(v03.Dev, version) {
 			t.Fatalf("v0_3 dev migrations are missing %d", version)
 		}
