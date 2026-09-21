@@ -1653,6 +1653,7 @@
   "2002805": {"en-US": "Failed to save generated script audit", "zh-CN": "保存生成脚本审计失败"},
   "2002806": {"en-US": "Failed to save repaired script audit", "zh-CN": "保存修复脚本审计失败"},
   "2002807": {"en-US": "Failed to sync Workflow capabilities", "zh-CN": "同步 Workflow 能力声明失败"},
+  "2002808": {"en-US": "Failed to finalize Workflow draft", "zh-CN": "最终化 Workflow 草稿失败"},
   "2002810": {
     "zh-CN": "项目设置无效，请检查名称和目录",
     "en-US": "Invalid project settings; check the name and directory"
