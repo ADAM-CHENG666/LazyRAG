@@ -6,6 +6,15 @@ The supported SDK baseline is DSH 0.1.6-alpha.1. The Node Host adapter uses publ
 
 Workflow approval, execution fencing and delivery intent live in Core. The local Bridge authenticates the plugin with a scoped pairing file and relays protocol messages. `concludeTurn` is used only on successful results; already granted workers can drain, including their required structured output. Delivery uncertainty is reconciled against standard host input records and is not blindly retried.
 
+## Shared integration
+
+`../workflow-agent-core` owns protocol parsing, binding restoration, runtime
+coordination, delivery and Panel state. `src/host.ts` wires DSH hooks;
+`src/host-adapter.ts` translates its session, history and goal APIs, and
+`src/events.ts` normalizes DSH tool events. The shared library is bundled into
+this plugin, so installation still uses a single archive. No MCP proxy or extra
+service is introduced. Shared SDK-free contract tests run with the DSH suite.
+
 ## Build and validate
 
 From this directory, run `pnpm install --frozen-lockfile`, `pnpm run typecheck`, `pnpm test` and `pnpm run bundle`. Then run `go run ./cmd/package-workflow-bundle` from `local/lazymind-cli` to refresh its embedded deterministic tarball. Commit source, compiled JS, lockfile and embedded archive together. CI verifies they match.
