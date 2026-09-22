@@ -73,7 +73,7 @@ func TestWorkflowToolDescriptionsMatchExecutionFlow(t *testing.T) {
 	for _, tool := range listed.Tools {
 		got[tool.Name] = tool.Description
 	}
-	if !containsAll(got["workflow.start"], "Next call workflow.step.begin", "workflow_id", "revision_id") {
+	if !containsAll(got["workflow.start"], "open_in_codex", "interaction_url", "placement=bottom", "workflow.step.begin", "workflow_id", "revision_id") {
 		t.Fatalf("workflow.start description=%q", got["workflow.start"])
 	}
 	if !containsAll(got["workflow.get"], "inspecting package scripts", "tool_scripts", "compiled_graph") {

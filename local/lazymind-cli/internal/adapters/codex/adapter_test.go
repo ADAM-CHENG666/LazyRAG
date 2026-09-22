@@ -36,6 +36,14 @@ func TestConfiguredCodexDiscoveryDoesNotExecuteBinary(t *testing.T) {
 	}
 }
 
+func TestCurrentEnvironmentCarriesWorkflowPanelURL(t *testing.T) {
+	t.Setenv("LAZYMIND_WEB_URL", "https://mind.example.test")
+	environment := currentEnvironment("/state", "host-1")
+	if environment["LAZYMIND_WEB_URL"] != "https://mind.example.test" {
+		t.Fatalf("environment=%#v", environment)
+	}
+}
+
 func TestCodexDesktopStatusDoesNotRequireCLILogin(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fixture uses a POSIX script")

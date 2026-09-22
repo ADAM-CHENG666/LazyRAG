@@ -11,8 +11,8 @@
 - Core 管理权威状态。
 - Controller 推进流程。
 - Executor 执行具体步骤。
-- iframe 提供用户界面。
-- HostAction 负责从 Core 唤醒外部 Controller。
+- 复用 WorkflowPanel；DSH 用 iframe，Codex 用内置浏览器。
+- 支持 Runtime Adapter 的宿主通过 HostAction 唤醒外部 Controller；Codex 当前仅接入工具和浏览器展示。
 
 ## 2. 本次边界
 
@@ -33,8 +33,9 @@ Agent Adapter                      保留宿主专用代码
 | Agent → MCP → LazyMind | 调用 workflow 工具，读取状态、开始和完成执行 | 保留原协议和通信路径 |
 | 宿主插件 → 本地 Bridge → Core | 绑定、获取 HostAction、提交投递回执 | 提取共享逻辑，通过 Adapter 调用宿主 API |
 | iframe → Core | 用户审核、Continue、Stop 等操作 | 保留原路径 |
+| Codex → 内置浏览器 | 启动后自动打开返回的 Workflow URL | 复用 HTTP 页面，不新增 UI 服务 |
 
-用户点击 Continue 后，Core 创建 HostAction；共享集成层获取通知，Adapter 唤醒 Agent；Agent 再通过 MCP 继续工作。插件还会观察 MCP 结果以展示 Panel 或结束等待中的 turn，但不会替 Agent 转发 MCP 请求。
+DSH 这类具有 Runtime SDK 的宿主由 Core 创建 HostAction，共享集成层获取通知并由 Adapter 唤醒 Agent。Codex 当前未接入这条自动唤醒链路；用户在网页提交操作后，需要在对话中要求继续，Agent 重新调用 `workflow.state`。页面与本体共享 Core 状态，不等于页面可以自动唤醒 Codex。
 
 本次不修改：
 
@@ -167,17 +168,22 @@ DSH 专属实现包括工具名 hash 处理、`tool/result` 和 `tool/ptc-dispat
 
 ### 4.3 WorkflowPanel 与运行环境
 
-WorkflowPanel 继续由 LazyMind Web 托管：
+WorkflowPanel 继续由 LazyMind Web 托管，直接向 Core 提交用户操作，不经过 Agent 解释或重新实现业务逻辑。
 
-```text
-/workflow-runs/{session_id}/embed
-```
+- DSH UI Adapter 使用 `/workflow-runs/{session_id}/embed` 挂载 iframe，保留 `hostOrigin`、来源窗口与 session 校验，以及展开/收起交互。
+- Codex 使用 `/workflow-runs/{session_id}`，由内置浏览器直接加载。页面、API 和状态刷新沿用现有实现。
 
-UI Adapter 负责挂载 iframe，共享 Panel store 只管理展示状态；Panel 仍直接向 Core 提交用户操作，不经过运行协调模块。
+共享 Panel store 只管理展示状态，不参与绑定、审核或执行授权。浏览器 UI 不导入 Runtime 凭据或 Node 专用依赖。
 
-第一阶段在支持嵌入的宿主使用 iframe，不能嵌入时保留链接入口。未来可增加 MCP Apps UI Adapter，不改变 Workflow 业务协议。
+### 4.4 Codex 最小适配
 
-共享包应分别提供协议、Runtime、UI 入口。浏览器 UI 不导入 Node 文件访问或本地配对凭据；凭据加载与 HTTP transport 分离。继续校验可信 URL；iframe 消息校验 origin、source 与 session ID。
+`workflow.start` 返回 `session_id` 和 `interaction_url` 后，Agent 自动调用宿主 `open_in_codex`，参数为 `target.type=browser`、`target.url=interaction_url`、`placement=bottom`。每个新 Session 打开一次，不随状态查询重复打开，不要求用户手动点击链接。URL 使用工具返回值，不硬编码端口；本地 HTTP 页面已通过展示和刷新验证。
+
+自动打开由 MCP 服务指令与工具描述引导 Agent 调用宿主工具，不是 MCP 服务直接操纵窗口。工具缺失或失败时明确报告并提供链接，不声称已打开。正在运行的 MCP 连接需要重新加载才能使用更新后的指令。
+
+Codex 不再注册 MCP App HTML 资源或专用面板工具，不需要额外 HTTPS 代理、端口或本地 CA。通用 `LAZYMIND_WEB_URL` 覆盖能力仍保留供有需要的部署使用。
+
+当前能力边界：浏览器展示与 Core 状态读取可用；启动后的自动打开流程仍需真实启动验收。Continue/Resume 后自动唤醒 Codex、精确取消原生 turn、HostAction 投递回执未接入。不得借助放宽 Core 的绑定要求来假装具备这些能力；未来按 Runtime Adapter 契约单独实现。
 
 ## 5. HostAction
 
@@ -239,7 +245,8 @@ Core → session_id + interaction_url
 共享集成层 → 为创建该 Workflow 的 driver 建立绑定
 Core → 返回最新 control
 UI Adapter → 展示 Panel
-Agent 页面 → iframe → LazyMind WorkflowPanel
+DSH 页面 → iframe → LazyMind WorkflowPanel
+Codex → open_in_codex → 内置浏览器 → LazyMind WorkflowPanel
 ```
 
 ### 6.2 用户继续流程
@@ -316,7 +323,7 @@ Core → 返回该执行的路由与授权结果
 | Confirm and Continue | iframe → Core | 是 |
 | Continue | iframe → Core | 是 |
 | Retry / Rewind | iframe → Core | 需要继续编排时唤醒 |
-| Stop | iframe → Core 立即生效 | 通知取消 |
+| Stop | iframe → Core 立即生效 | 支持取消 API 的 Runtime Adapter 执行取消；Codex 暂不支持取消原生 turn |
 | Resume | iframe → Core | 需要继续编排时唤醒 |
 
 ## 8. 建议代码结构
@@ -387,7 +394,7 @@ CLI 接入基础设施也需要同步调整：
 4. 将 DSH 专用事件和生命周期操作留在 Adapter，同步泛化 CLI pairing/Bridge，保持现有配对兼容。
 5. 运行现有 DSH 与 Core 相关测试，验证构建、打包、安装后的行为。
 6. 接入第二个 Agent，执行相同契约测试及端到端验证；不支持的能力明确说明降级范围。
-7. 后续在兼容宿主中增加 MCP Apps UI Adapter，保留 iframe/链接入口。
+7. Codex 复用既有 MCP 工具，并在 start 成功后通过宿主工具自动打开 HTTP Workflow 页面；工具不可用时明确降级。
 
 最低验收场景：
 
@@ -407,4 +414,5 @@ CLI 接入基础设施也需要同步调整：
 - 共享包当前作为源码库参与 DSH 构建，最终内联进插件产物，不要求用户额外安装共享包。
 - CLI 提供 `EnsureForProvider`；旧 `Ensure` 仍创建兼容的 DSH 配对。Bridge 使用可信配对中的 provider，不接受请求体指定身份。
 - 新增 SDK 无关的 Fake Adapter 契约测试；这证明共享逻辑不依赖 DSH，但不能替代第二个真实宿主的端到端验收。
-- 本次未新增第二宿主的安装入口，也未实现 MCP Apps。它们需要结合目标宿主的实际 API 单独接入。
+- Codex 继续使用既有 STDIO MCP 安装入口，新增展示行为仅为启动后自动调用宿主浏览器工具；复用原有 WorkflowPanel 和 Core API。
+- Codex 当前没有接入共享 Runtime Adapter 的自动唤醒、精确 run 取消与 HostAction 回执能力。Stop 在 Core 生效，不保证正在执行的原生 Codex turn 立即停止。

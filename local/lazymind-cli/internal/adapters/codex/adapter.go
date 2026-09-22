@@ -245,8 +245,12 @@ func (a *Adapter) hasCurrentEnvironment(config mcpConfig) bool {
 	if configuredHome == "." {
 		configuredHome = ""
 	}
-	return configuredHome == a.home && config.Transport.Env["LAZYMIND_AGENT_PROVIDER"] == "codex" &&
-		config.Transport.Env["LAZYMIND_AGENT_HOST_ID"] == a.hostID
+	if configuredHome != a.home || config.Transport.Env["LAZYMIND_AGENT_PROVIDER"] != "codex" ||
+		config.Transport.Env["LAZYMIND_AGENT_HOST_ID"] != a.hostID {
+		return false
+	}
+	webURL := strings.TrimSpace(os.Getenv("LAZYMIND_WEB_URL"))
+	return webURL == "" || config.Transport.Env["LAZYMIND_WEB_URL"] == webURL
 }
 
 func currentEnvironment(home, hostID string) map[string]string {
@@ -255,6 +259,9 @@ func currentEnvironment(home, hostID string) map[string]string {
 	}
 	if home != "" {
 		environment["LAZYMIND_HOME"] = home
+	}
+	if webURL := strings.TrimSpace(os.Getenv("LAZYMIND_WEB_URL")); webURL != "" {
+		environment["LAZYMIND_WEB_URL"] = webURL
 	}
 	return environment
 }
