@@ -15,6 +15,18 @@ coordination, delivery and Panel state. `src/host.ts` wires DSH hooks;
 this plugin, so installation still uses a single archive. No MCP proxy or extra
 service is introduced. Shared SDK-free contract tests run with the DSH suite.
 
+## DSH Adapter capabilities and limits
+
+| Capability | DSH implementation | Limit |
+| --- | --- | --- |
+| Wake a Controller session | `SessionController.prompt` queues input with the HostAction ID as `requestId`. | The receipt means the application accepted the input, not that the Agent ran it. |
+| Reconcile uncertain input | `SessionController.follow/page` searches persisted user messages for the same `rpcId`. | No matching durable input means the result stays unknown; the Adapter does not resend. |
+| Check queued input at execution time | `agent/pre-step` reads the current action and Control before the queued input starts. | Core remains the final authority for Workflow MCP operations. |
+| Cancel an owned run | Shared coordination checks Workflow ownership, then calls `SessionController.cancel({ sessionId })`. | DSH's call targets the session, without an expected turn ID. It cannot atomically reject a cancellation if a different turn takes over between the ownership check and the application's handling of the call. |
+
+These are properties of this DSH Adapter and SDK integration, not requirements
+imposed on other external Agent applications.
+
 ## Build and validate
 
 From this directory, run `pnpm install --frozen-lockfile`, `pnpm run typecheck`, `pnpm test` and `pnpm run bundle`. Then run `go run ./cmd/package-workflow-bundle` from `local/lazymind-cli` to refresh its embedded deterministic tarball. Commit source, compiled JS, lockfile and embedded archive together. CI verifies they match.

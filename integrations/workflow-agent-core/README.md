@@ -20,9 +20,15 @@ UI entry points remain separate from the credential-bearing transport.
 
 ## Implementing a host
 
-Implement `RuntimeAdapter<A>` with an opaque host agent handle. Normalize tool
-operations, input sources and history into `ToolCall`, `HostInput` and `HostEvent`.
-Never treat a host tool name or a Panel read alone as proof of driver ownership.
+Implement the minimal `RuntimeAdapter<A>` delivery surface with an opaque host
+agent handle: `id`, `resolve`, `prompt`, `cancel` and `warn`. The optional
+`reconcile`/`eventSeq` methods provide durable receipt evidence; without them,
+an uncertain delivery stays unknown. Hosts with turn/tool hooks can additionally
+provide `parent`, `isLive`, `isRunning`, `history` and `canReturnResult` for
+ownership recovery, nested workers and result coordination. Normalize tool
+operations, input sources and history into `ToolCall`, `HostInput` and `HostEvent`
+only when those hooks exist. Never treat a host tool name or a Panel read alone
+as proof of driver ownership.
 
 Create a coordinator and dispatcher with one shared AbortSignal. Wire host hooks:
 
@@ -40,7 +46,7 @@ Create a coordinator and dispatcher with one shared AbortSignal. Wire host hooks
 `prompt` resolves after host admission and returns its durable event sequence
 (zero is allowed on initial admission if the host has acknowledged receipt).
 It must use the action ID as the input correlation ID. A thrown exception after
-dispatch becomes unknown, never a blind retry. `reconcile` returns the exact
+dispatch becomes unknown, never a blind retry. When available, `reconcile` returns the exact
 persisted input sequence; zero means no evidence, not permission to resend.
 Hosts without compatible durable input evidence cannot claim full automatic
 recovery under the existing Core receipt protocol.

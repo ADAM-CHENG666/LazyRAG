@@ -99,6 +99,23 @@ describe('shared delivery contract with an SDK-free host', () => {
     expect(f.action().status).toBe('unknown')
   })
 
+  it('reads Core before checking host evidence for an uncertain continuation', async () => {
+    const f = fixture()
+    f.updateAction({ status: 'unknown' })
+    await f.dispatcher.deliver(f.action())
+    expect(vi.mocked(f.bridge.action).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(f.runtime.reconcile!).mock.invocationCallOrder[0])
+  })
+
+  it('does not reconcile a continuation already accepted by Core', async () => {
+    const f = fixture()
+    f.updateAction({ status: 'unknown' })
+    vi.mocked(f.bridge.action).mockImplementationOnce(async () => ({ action: { ...f.action(), status: 'accepted' }, control: f.control() }))
+    await f.dispatcher.deliver(f.action())
+    expect(f.runtime.reconcile).not.toHaveBeenCalled()
+    expect(f.bridge.claim).not.toHaveBeenCalled()
+  })
+
   it('does not resend after a dispatch lease expires without receipt evidence', async () => {
     const f = fixture()
     f.updateAction({ status: 'dispatching' })
@@ -116,6 +133,39 @@ describe('shared delivery contract with an SDK-free host', () => {
     await f.dispatcher.deliver(f.action())
     expect(f.runtime.prompt).not.toHaveBeenCalled()
     expect(f.runtime.cancel).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { continuation: 'awaiting_user', canBegin: false },
+    { continuation: 'continue', canBegin: false },
+  ])('does not admit an ordinary continuation after control changes: %j', async ({ continuation, canBegin }) => {
+    const f = fixture()
+    vi.mocked(f.bridge.action).mockImplementationOnce(async () => ({ action: f.action(), control: {
+      ...f.control(), continuation, admission: { can_begin: canBegin },
+    } }))
+    await f.dispatcher.deliver(f.action())
+    expect(f.runtime.prompt).not.toHaveBeenCalled()
+    expect(f.action().status).toBe('failed')
+  })
+
+  it('does not admit an execution update after the workflow stops', async () => {
+    const f = fixture()
+    f.updateAction({ execution_id: 'retry-execution' })
+    vi.mocked(f.bridge.action).mockImplementationOnce(async () => ({ action: f.action(), control: {
+      ...f.control(), continuation: 'stopped', admission: { can_begin: false },
+    } }))
+    await f.dispatcher.deliver(f.action())
+    expect(f.runtime.prompt).not.toHaveBeenCalled()
+    expect(f.action().status).toBe('failed')
+  })
+
+  it('keeps an unknown continuation unresolved without a reconciliation capability', async () => {
+    const f = fixture()
+    f.updateAction({ status: 'unknown' })
+    delete f.runtime.reconcile
+    await f.dispatcher.deliver(f.action())
+    expect(f.runtime.prompt).not.toHaveBeenCalled()
+    expect(f.action().status).toBe('unknown')
   })
 
   it('uses claim for an existing execution instead of starting a replacement', async () => {

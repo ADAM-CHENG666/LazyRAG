@@ -17,13 +17,17 @@ export function createDispatcher<A>(runtime: RuntimeAdapter<A>, coordinator: Coo
       const scope = ensure(resolved.agent)
       if (scope.runId === action.session_id && (scope.activeOwned || scope.grants.size > 0)) await runtime.cancel(resolved.agent)
       if (scope.runId === action.session_id) suspendGoal(scope)
-      const seq = runtime.eventSeq(resolved.agent)
+      const seq = runtime.eventSeq?.(resolved.agent) ?? 0
       if (seq > 0) await bridge.settle(action.id, instanceId, '', 'accepted', seq, '', signal)
       return
     }
     if (action.kind === 'continue' && action.status !== 'pending') {
-      const seq = await runtime.reconcile(action.native_session_id, action.id, signal)
-      if (seq > 0) { await bridge.settle(action.id, instanceId, '', 'accepted', seq, '', signal); return }
+      const current = await bridge.action(action.id, signal)
+      if (!['pending', 'dispatching', 'unknown'].includes(current.action.status)) return
+      if (current.action.status !== 'pending') {
+        const seq = await runtime.reconcile?.(action.native_session_id, action.id, signal) ?? 0
+        if (seq > 0) { await bridge.settle(action.id, instanceId, '', 'accepted', seq, '', signal); return }
+      }
     }
     const claim = await bridge.claim(action.id, instanceId, signal)
     coordinator.cacheClaim(claim)
@@ -34,9 +38,15 @@ export function createDispatcher<A>(runtime: RuntimeAdapter<A>, coordinator: Coo
     if (scope.runId === action.session_id) publish(action.session_id, claim.control)
     // Revalidate immediately before the host call; pre-step/guards cover the remaining race.
     const current = await bridge.action(action.id, signal)
-    if (current.action.consumed_at || current.action.status === 'superseded'
-      || current.control.binding?.generation !== action.binding_generation
-      || action.kind === 'cancel' && current.control.continuation !== 'stopped') return
+    if (current.action.consumed_at || current.action.status !== 'dispatching'
+      || current.control.binding?.generation !== action.binding_generation) return
+    const validControl = action.kind === 'cancel' ? current.control.continuation === 'stopped'
+      : action.execution_id ? !['stopped', 'binding_required'].includes(current.control.continuation)
+        : current.control.continuation === 'continue' && current.control.admission.can_begin
+    if (!validControl) {
+      await bridge.settle(action.id, instanceId, claim.dispatch_token, 'failed', 0, 'Workflow control changed before host admission', signal)
+      return
+    }
     let seq = 0
     try {
       if (action.kind === 'cancel') {
@@ -54,7 +64,7 @@ export function createDispatcher<A>(runtime: RuntimeAdapter<A>, coordinator: Coo
             : `The user clicked Continue in the LazyMind panel for workflow ${action.session_id} and has finished the current review. Call workflow.state, then workflow.step.begin for a ready step when control.continuation=continue and admission.can_begin=true. A human step requires review AFTER execution; its mode or requires_approval flag does not require another confirmation before begin. Continue until awaiting_user, awaiting_executor, stopped, or completed. Execute each granted step_contract and submit using execution_handle. Do not ask the user to confirm the review again or create a new workflow.` }, signal)
         if (scope.runId === action.session_id) resumeGoal(scope)
       }
-      if (action.kind === 'cancel') seq = runtime.eventSeq(resolved.agent)
+      if (action.kind === 'cancel') seq = runtime.eventSeq?.(resolved.agent) ?? 0
       await bridge.settle(action.id, instanceId, claim.dispatch_token, 'accepted', seq, '', signal)
     } catch (error) {
       // Once a host call begins, failure cannot prove that the prompt was not admitted.

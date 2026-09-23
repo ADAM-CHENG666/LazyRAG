@@ -157,14 +157,14 @@ function createCoordinator(runtime, bridge, webUrl, lifetime) {
 		const visited = /* @__PURE__ */ new Set();
 		while (!visited.has(agent)) {
 			visited.add(agent);
-			const parent = runtime.parent(agent);
+			const parent = runtime.parent?.(agent);
 			if (!parent) return agent;
 			agent = parent;
 		}
 		throw new Error("Workflow driver ownership contains a cycle");
 	};
 	const paused = (scope) => scope.unknown || !!scope.control && PAUSED.has(scope.control.continuation);
-	const completion = (scope) => driver(scope.agent) !== scope.agent && scope.returnPending && runtime.canReturnResult(scope.agent);
+	const completion = (scope) => driver(scope.agent) !== scope.agent && scope.returnPending && !!runtime.canReturnResult?.(scope.agent);
 	function publish(runId, control) {
 		if (control.protocol !== "workflow.control.v1" || control.session_id !== runId) throw new Error("Invalid workflow control response");
 		for (const scope of scopes.values()) {
@@ -194,7 +194,7 @@ function createCoordinator(runtime, bridge, webUrl, lifetime) {
 		let ownedAt = 0;
 		let ownedSeq = -1;
 		let latestInputSeq = -1;
-		for (const event of [...runtime.history(scope.agent)].reverse()) {
+		for (const event of [...runtime.history?.(scope.agent) ?? []].reverse()) {
 			if (event.user && latestInputSeq < 0) latestInputSeq = event.seq;
 			const run = event.run;
 			if (!run || run.hostSessionId !== runtime.id(root) || !run.operation || ![
@@ -215,7 +215,7 @@ function createCoordinator(runtime, bridge, webUrl, lifetime) {
 			else if (ACQUIRE.has(run.operation) && !finished.has(run.executionId)) scope.grants.add(run.executionId);
 		}
 		if (latestInputSeq > ownedSeq) scope.automatic = false;
-		scope.activeOwned = runtime.isRunning(scope.agent) && scope.automatic;
+		scope.activeOwned = !!runtime.isRunning?.(scope.agent) && scope.automatic;
 		if (!scope.runId && root !== scope.agent) scope.runId = ensure(root).runId;
 		const goal = runtime.goal?.(root);
 		if (goal && ownedAt && goal.createdAt <= ownedAt) scope.goalId = goal.id;
@@ -258,7 +258,7 @@ function createCoordinator(runtime, bridge, webUrl, lifetime) {
 		try {
 			let state = await bridge.state(scope.runId, signal(caller));
 			const root = driver(scope.agent);
-			if (state.continuation === "binding_required" && !state.binding?.bound && !state.binding?.driver_session_id && runtime.history(root).some((event) => {
+			if (state.continuation === "binding_required" && !state.binding?.bound && !state.binding?.driver_session_id && (runtime.history?.(root) ?? []).some((event) => {
 				const run = event.run;
 				return !!run && run.runId === scope.runId && run.operation === "start" && run.hostSessionId === runtime.id(root);
 			})) state = await bridge.bind(scope.runId, runtime.id(root), signal(caller));
@@ -276,7 +276,7 @@ function createCoordinator(runtime, bridge, webUrl, lifetime) {
 		}
 	}
 	async function afterResult(value, exec) {
-		if (!exec.agent || !runtime.isLive(exec.agent) || lifetime.aborted) return null;
+		if (!exec.agent || runtime.isLive?.(exec.agent) === false || lifetime.aborted) return null;
 		const scope = ensure(exec.agent);
 		const root = driver(exec.agent);
 		const rootScope = ensure(root);
@@ -469,15 +469,23 @@ function createDispatcher(runtime, coordinator, bridge, instanceId, signal) {
 			const scope$1 = ensure(resolved$1.agent);
 			if (scope$1.runId === action.session_id && (scope$1.activeOwned || scope$1.grants.size > 0)) await runtime.cancel(resolved$1.agent);
 			if (scope$1.runId === action.session_id) suspendGoal(scope$1);
-			const seq$1 = runtime.eventSeq(resolved$1.agent);
+			const seq$1 = runtime.eventSeq?.(resolved$1.agent) ?? 0;
 			if (seq$1 > 0) await bridge.settle(action.id, instanceId, "", "accepted", seq$1, "", signal);
 			return;
 		}
 		if (action.kind === "continue" && action.status !== "pending") {
-			const seq$1 = await runtime.reconcile(action.native_session_id, action.id, signal);
-			if (seq$1 > 0) {
-				await bridge.settle(action.id, instanceId, "", "accepted", seq$1, "", signal);
-				return;
+			const current$1 = await bridge.action(action.id, signal);
+			if (![
+				"pending",
+				"dispatching",
+				"unknown"
+			].includes(current$1.action.status)) return;
+			if (current$1.action.status !== "pending") {
+				const seq$1 = await runtime.reconcile?.(action.native_session_id, action.id, signal) ?? 0;
+				if (seq$1 > 0) {
+					await bridge.settle(action.id, instanceId, "", "accepted", seq$1, "", signal);
+					return;
+				}
 			}
 		}
 		const claim = await bridge.claim(action.id, instanceId, signal);
@@ -491,7 +499,11 @@ function createDispatcher(runtime, coordinator, bridge, instanceId, signal) {
 		const scope = ensure(resolved.agent);
 		if (scope.runId === action.session_id) publish(action.session_id, claim.control);
 		const current = await bridge.action(action.id, signal);
-		if (current.action.consumed_at || current.action.status === "superseded" || current.control.binding?.generation !== action.binding_generation || action.kind === "cancel" && current.control.continuation !== "stopped") return;
+		if (current.action.consumed_at || current.action.status !== "dispatching" || current.control.binding?.generation !== action.binding_generation) return;
+		if (!(action.kind === "cancel" ? current.control.continuation === "stopped" : action.execution_id ? !["stopped", "binding_required"].includes(current.control.continuation) : current.control.continuation === "continue" && current.control.admission.can_begin)) {
+			await bridge.settle(action.id, instanceId, claim.dispatch_token, "failed", 0, "Workflow control changed before host admission", signal);
+			return;
+		}
 		let seq = 0;
 		try {
 			if (action.kind === "cancel") {
@@ -505,7 +517,7 @@ function createDispatcher(runtime, coordinator, bridge, instanceId, signal) {
 				}, signal);
 				if (scope.runId === action.session_id) resumeGoal(scope);
 			}
-			if (action.kind === "cancel") seq = runtime.eventSeq(resolved.agent);
+			if (action.kind === "cancel") seq = runtime.eventSeq?.(resolved.agent) ?? 0;
 			await bridge.settle(action.id, instanceId, claim.dispatch_token, "accepted", seq, "", signal);
 		} catch (error) {
 			await bridge.settle(action.id, instanceId, claim.dispatch_token, "unknown", 0, String(error), signal);

@@ -31,7 +31,7 @@ export function createCoordinator<A>(runtime: RuntimeAdapter<A>, bridge: HostTra
     const visited = new Set<A>()
     while (!visited.has(agent)) {
       visited.add(agent)
-      const parent = runtime.parent(agent)
+      const parent = runtime.parent?.(agent)
       if (!parent) return agent
       agent = parent
     }
@@ -39,7 +39,7 @@ export function createCoordinator<A>(runtime: RuntimeAdapter<A>, bridge: HostTra
   }
   const paused = (scope: Scope<A>) => scope.unknown || !!scope.control && PAUSED.has(scope.control.continuation)
   const completion = (scope: Scope<A>) => driver(scope.agent) !== scope.agent && scope.returnPending
-    && runtime.canReturnResult(scope.agent)
+    && !!runtime.canReturnResult?.(scope.agent)
 
   function publish(runId: string, control: WorkflowControl) {
     if (control.protocol !== 'workflow.control.v1' || control.session_id !== runId) throw new Error('Invalid workflow control response')
@@ -70,7 +70,7 @@ export function createCoordinator<A>(runtime: RuntimeAdapter<A>, bridge: HostTra
     let ownedAt = 0
     let ownedSeq = -1
     let latestInputSeq = -1
-    for (const event of [...runtime.history(scope.agent)].reverse()) {
+    for (const event of [...(runtime.history?.(scope.agent) ?? [])].reverse()) {
       if (event.user && latestInputSeq < 0) latestInputSeq = event.seq
       const run = event.run
       if (!run || run.hostSessionId !== runtime.id(root) || !run.operation || !['start', 'step_begin', 'step_claim', 'step_resume', 'step_complete'].includes(run.operation)) continue
@@ -82,7 +82,7 @@ export function createCoordinator<A>(runtime: RuntimeAdapter<A>, bridge: HostTra
     // Restore ownership of a still-running workflow turn after plugin reload.
     // A later explicit user message belongs to the user, not this workflow.
     if (latestInputSeq > ownedSeq) scope.automatic = false
-    scope.activeOwned = runtime.isRunning(scope.agent) && scope.automatic
+    scope.activeOwned = !!runtime.isRunning?.(scope.agent) && scope.automatic
     if (!scope.runId && root !== scope.agent) scope.runId = ensure(root).runId
     const goal = runtime.goal?.(root)
     if (goal && ownedAt && goal.createdAt <= ownedAt) scope.goalId = goal.id
@@ -125,7 +125,7 @@ export function createCoordinator<A>(runtime: RuntimeAdapter<A>, bridge: HostTra
       // Repair only an unbound run created by this driver, proven by its own
       // persisted tool receipt. Reading an arbitrary run never grants ownership.
       const createdHere = state.continuation === 'binding_required' && !state.binding?.bound
-        && !state.binding?.driver_session_id && runtime.history(root).some(event => {
+        && !state.binding?.driver_session_id && (runtime.history?.(root) ?? []).some(event => {
           const run = event.run
           return !!run && run.runId === scope.runId && run.operation === 'start' && run.hostSessionId === runtime.id(root)
         })
@@ -142,7 +142,7 @@ export function createCoordinator<A>(runtime: RuntimeAdapter<A>, bridge: HostTra
   }
 
   async function afterResult(value: unknown, exec: ToolCall<A>): Promise<WorkflowControl | null> {
-    if (!exec.agent || !runtime.isLive(exec.agent) || lifetime.aborted) return null
+    if (!exec.agent || runtime.isLive?.(exec.agent) === false || lifetime.aborted) return null
     const scope = ensure(exec.agent)
     const root = driver(exec.agent)
     const rootScope = ensure(root)
