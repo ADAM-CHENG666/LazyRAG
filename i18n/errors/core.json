@@ -1850,5 +1850,7 @@
   "2003110": {"en-US": "Task event could not be accepted", "zh-CN": "无法接收任务更新"},
   "2003111": {"en-US": "Workflow session unavailable", "zh-CN": "工作流会话不可用"},
   "2003112": {"en-US": "Task sources exceed the supported limit", "zh-CN": "任务来源数量或大小超过限制"},
-  "2003113": {"en-US": "Task update could not be saved", "zh-CN": "暂时无法保存任务更新"}
+  "2003113": {"en-US": "Task update could not be saved", "zh-CN": "暂时无法保存任务更新"},
+  "2003114": {"en-US": "The summary model returned instructions instead of a summary", "zh-CN": "摘要模型返回了指令而非摘要"},
+  "2003115": {"en-US": "The summary model returned empty content", "zh-CN": "摘要模型返回内容为空"}
 }
