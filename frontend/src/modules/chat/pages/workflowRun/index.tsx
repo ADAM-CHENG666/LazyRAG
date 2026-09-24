@@ -147,6 +147,7 @@ export default function WorkflowRunPage({ embedded = false }: { embedded?: boole
       {!embedded && <Button onClick={() => { void refresh().catch(reason => setError(String(reason))); }}>{t('chat.workflowRunRefresh')}</Button>}
       <WorkflowPanel conversationId={key} onRefresh={() => refresh().then(() => {})}
         embedded={embedded} externalPresentation={{ activities, expanded: hostExpanded,
+          compactEmptyStates: control?.binding?.provider !== 'codex',
           onToggleExpand: embedded && hostOrigin ? toggleHostExpand : undefined,
           collapsed: embedded ? hostCollapsed : undefined,
           onToggleCollapse: embedded && hostOrigin ? toggleHostCollapse : undefined }}

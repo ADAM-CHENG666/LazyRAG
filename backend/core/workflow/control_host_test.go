@@ -134,6 +134,40 @@ func TestStopFencesOldWritesAndResumePreservesReview(t *testing.T) {
 	expectControlCode(t, err, "BINDING_STALE")
 }
 
+func TestCodexStopRemainsSuccessfulAfterUnsupportedCancellation(t *testing.T) {
+	svc, _ := hostControlFixture(t)
+	ctx := context.Background()
+	if err := svc.DB.Model(&orm.WorkflowSession{}).Where("id = ?", "run").Update("control_binding_json",
+		`{"required":true,"provider":"codex","connector_id":"connector","driver_session_id":"driver","generation":1}`).Error; err != nil {
+		t.Fatal(err)
+	}
+	// A stale panel version must not prevent revoking execution authority.
+	command := WorkflowControlCommand{CommandID: "codex-stop", Kind: "stop", StateVersion: -1}
+	stopped, err := svc.Execute(ctx, "owner", "run", command)
+	if err != nil || stopped.Control.Continuation != "stopped" {
+		t.Fatalf("stop: %+v %v", stopped, err)
+	}
+	// Model the dispatcher receipt without invoking a real Codex task.
+	if err := svc.DB.Model(&orm.WorkflowHostAction{}).Where("id = ?", stopped.Receipt.ActionID).
+		Updates(map[string]any{"status": "failed", "last_error": "This host does not support interrupting the current turn; Workflow is stopped in Core."}).Error; err != nil {
+		t.Fatal(err)
+	}
+	refreshed := currentControl(t, svc.DB)
+	if refreshed.Continuation != "stopped" || refreshed.Delivery == nil || refreshed.Delivery.Status != "failed" {
+		t.Fatalf("host cancellation failure changed the stopped snapshot: %+v", refreshed)
+	}
+	// Retrying an uncertain response reuses the receipt after host settlement.
+	replayed, err := svc.Execute(ctx, "owner", "run", command)
+	if err != nil || replayed.Receipt != stopped.Receipt || replayed.Control.Continuation != "stopped" {
+		t.Fatalf("replayed stop: %+v %v", replayed, err)
+	}
+	command.CommandID = "codex-stop-again"
+	repeated, err := svc.Execute(ctx, "owner", "run", command)
+	if err != nil || repeated.Control.Continuation != "stopped" {
+		t.Fatalf("repeated stop: %+v %v", repeated, err)
+	}
+}
+
 func TestControlledRetryCreatesOneReplacementForCancelledAttempt(t *testing.T) {
 	db, _ := setupBatchTransitionSession(t)
 	if err := db.AutoMigrate(&orm.WorkflowReviewCheckpoint{}, &orm.WorkflowHostAction{}, &orm.WorkflowCommand{}, &orm.WorkflowRevisionEntry{}, &orm.WorkflowBlob{}); err != nil {

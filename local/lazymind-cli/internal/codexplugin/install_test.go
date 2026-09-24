@@ -147,3 +147,40 @@ func TestMarketplaceConflictDoesNotReplaceEntry(t *testing.T) {
 		t.Fatal("modified marketplace on conflict")
 	}
 }
+
+func TestFailedInstallRemainsRetryable(t *testing.T) {
+	for _, upgrade := range []bool{false, true} {
+		t.Run(map[bool]string{false: "first install", true: "upgrade"}[upgrade], func(t *testing.T) {
+			home, profile, self, binary := fixture(t)
+			workingBinary, err := os.ReadFile(binary)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if upgrade {
+				if _, err := Install(t.Context(), home, self, binary, profile, "host"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(binary, []byte("#!/bin/sh\nif [ \"$1\" = \"queue\" ]; then exit 0; fi\nexit 1\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Install(t.Context(), home, self, binary, profile, "host"); err == nil {
+				t.Fatal("expected install failure")
+			}
+			record, err := Read()
+			if err != nil || record.BuildID != "" || record.Home != home || record.Profile != profile {
+				t.Fatalf("failed install must retain ownership without a successful build: %+v %v", record, err)
+			}
+			if err := os.WriteFile(binary, workingBinary, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Install(t.Context(), home, self, binary, profile, "host"); err != nil {
+				t.Fatalf("retry failed: %v", err)
+			}
+			record, err = Read()
+			if err != nil || record.BuildID != BuildID() {
+				t.Fatalf("successful retry did not commit build: %+v %v", record, err)
+			}
+		})
+	}
+}

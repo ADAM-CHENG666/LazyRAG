@@ -172,6 +172,13 @@ func Install(ctx context.Context, home, self, binary, profile, hostID string) (I
 	manifestBytes, _ := assets.ReadFile("assets/lazymind-workflow/.codex-plugin/plugin.json")
 	sum := sha256.Sum256(append([]byte(record.BuildID), mcpBytes...))
 	record.Version = "0.1.0+codex." + hex.EncodeToString(sum[:8])
+	// Preserve ownership for retries, including a failed first installation,
+	// without advertising the new build as successfully installed.
+	pending := record
+	pending.BuildID = ""
+	if err := writeJSON(filepath.Join(root, ".lazymind-installation.json"), pending); err != nil {
+		return Installation{}, err
+	}
 	if err := fs.WalkDir(assets, "assets/lazymind-workflow", func(path string, entry fs.DirEntry, err error) error {
 		if err != nil || entry.IsDir() {
 			return err
@@ -196,9 +203,6 @@ func Install(ctx context.Context, home, self, binary, profile, hostID string) (I
 	if err := writeAtomic(filepath.Join(root, ".mcp.json"), mcpBytes); err != nil {
 		return Installation{}, err
 	}
-	if err := writeJSON(filepath.Join(root, ".lazymind-installation.json"), record); err != nil {
-		return Installation{}, err
-	}
 	if err := writeJSON(marketPath, market); err != nil {
 		return Installation{}, err
 	}
@@ -206,6 +210,9 @@ func Install(ctx context.Context, home, self, binary, profile, hostID string) (I
 	defer cancel()
 	if _, err := agentexec.Run(install, binary, "plugin", "add", Name+"@"+record.Marketplace, "--json"); err != nil {
 		return Installation{}, fmt.Errorf("install Codex plugin: %w", err)
+	}
+	if err := writeJSON(filepath.Join(root, ".lazymind-installation.json"), record); err != nil {
+		return Installation{}, err
 	}
 	return record, nil
 }
