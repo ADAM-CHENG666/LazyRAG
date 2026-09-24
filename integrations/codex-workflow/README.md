@@ -9,6 +9,7 @@
 - `workflow.start` 在 MCP 内完成 Controller 绑定，返回绑定后的最新状态；不扫描会话，不额外发送首次绑定唤醒。
 - 不支持中断当前 Codex turn。Panel Stop 仍立即在 Core 停止 Workflow、撤销授权；cancel 通知结算为 failed，并明确说明宿主不支持中断。
 - 人工审核依赖 MCP 指令、状态返回的 `agent_instruction` 和唤醒 prompt：遇到 `awaiting_user` 结束当前 turn，不代审、不继续下一步、不轮询等待。DSH 仍使用既有钩子。
+- 启动前缺少页数等必填参数时，Codex 异步提问后保持当前 turn，等待真实回答；`accepted` 仅代表问题已展示。此时尚未进入 Workflow 的 `awaiting_user`，不能套用结束 turn 的规则。提问工具失败或选项窗消失时，完整列出问题和选项，允许用户通过文字回答。
 
 ## 一键安装
 
@@ -71,3 +72,4 @@ pnpm --dir integrations/codex-workflow build
 
 自动测试覆盖 queue 参数、原会话 UUID、取消不支持、过期通知、重复领取、超时、回执丢失与 dispatcher 重启。
 真实桌面验收应在专门的测试 Workflow 中确认启动绑定 → 审核结束 turn → Panel Continue 唤醒同一会话；自动测试不替代这项端到端验收。
+启动前询问也需手动验收：省略 PPT 页数等必填参数，待选项出现后至少等 15 秒，确认 agent 未发最终回复且选项仍可提交；回答后才调用 `workflow.start`。这项规则属于插件对 agent 的指引，不能替代 Codex 原生输入 UI 的生命周期保障。
