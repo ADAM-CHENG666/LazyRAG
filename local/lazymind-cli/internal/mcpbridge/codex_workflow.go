@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"lazymind/agentconnector/internal/credentials"
 	"lazymind/agentconnector/internal/workflowhost"
@@ -24,7 +25,9 @@ func (b *Bridge) bindCodexController(ctx context.Context, runID, threadID string
 	if err != nil {
 		return err
 	}
-	if !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
+	// Windows reports synthetic POSIX mode bits; access is governed by the
+	// profile's ACL, as with the credential store, not chmod permissions.
+	if !info.Mode().IsRegular() || runtime.GOOS != "windows" && info.Mode().Perm()&0077 != 0 {
 		return errors.New("Codex pairing must be a private file (0600)")
 	}
 	body, err := os.ReadFile(path)

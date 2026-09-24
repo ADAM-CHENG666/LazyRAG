@@ -29,7 +29,8 @@ async function main() {
   }
   if (!path) throw new Error('LazyMind did not return a pairing file')
   const info = await stat(path)
-  if (!info.isFile() || (info.mode & 0o077) !== 0) throw new Error('Pairing must be a private file (0600)')
+  // Windows uses profile ACLs, not the synthetic POSIX mode returned by stat.
+  if (!info.isFile() || process.platform !== 'win32' && (info.mode & 0o077) !== 0) throw new Error('Pairing must be a private file (0600)')
   const pairing = JSON.parse(await readFile(path, 'utf8'))
   if (pairing.provider !== 'codex' || pairing.enabled !== true || pairing.profile !== profile
     || !/^host-[a-f0-9]{32}$/.test(pairing.connector_id) || !/^[a-f0-9]{64}$/.test(pairing.token)) {

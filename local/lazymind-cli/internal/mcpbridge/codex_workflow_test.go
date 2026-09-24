@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"lazymind/agentconnector/internal/coreapi"
@@ -48,6 +50,23 @@ func TestCodexBindingUsesCurrentAccountAndProfilePairing(t *testing.T) {
 	if received["provider"] != "codex" || received["driver_session_id"] != "thread-1" || received["connector_id"] != pair.ConnectorID || received["credential"] != pair.Token {
 		t.Fatal("binding did not use paired identity")
 	}
+	if runtime.GOOS != "windows" {
+		path := filepath.Join(home, "workflow-hosts", pair.ConnectorID+".json")
+		if err := os.Chmod(path, 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := bridge.bindCodexController(context.Background(), "run-1", "thread-1"); err == nil {
+			t.Fatal("accepted a publicly readable POSIX pairing file")
+		}
+		if err := os.Chmod(path, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("LAZYMIND_WORKFLOW_PAIRING_FILE", t.TempDir())
+	if err := bridge.bindCodexController(context.Background(), "run-1", "thread-1"); err == nil {
+		t.Fatal("accepted a directory as a pairing file")
+	}
+	t.Setenv("LAZYMIND_WORKFLOW_PAIRING_FILE", filepath.Join(home, "workflow-hosts", pair.ConnectorID+".json"))
 	t.Setenv("CODEX_HOME", t.TempDir())
 	if err := bridge.bindCodexController(context.Background(), "run-1", "thread-1"); err == nil {
 		t.Fatal("accepted wrong profile")
