@@ -12,7 +12,7 @@
 - Controller 推进流程。
 - Executor 执行具体步骤。
 - 复用 WorkflowPanel；DSH 用 iframe，Codex 用内置浏览器。
-- 支持 Runtime Adapter 的宿主通过 HostAction 唤醒外部 Controller；Codex 当前仅接入工具和浏览器展示。
+- 支持 Runtime Adapter 的宿主通过 HostAction 唤醒外部 Controller；Codex 的 queue Adapter 可显式启用。
 
 ## 2. 本次边界
 
@@ -35,7 +35,7 @@ Agent Adapter                      保留宿主专用代码
 | iframe → Core | 用户审核、Continue、Stop 等操作 | 保留原路径 |
 | Codex → 内置浏览器 | 启动后自动打开返回的 Workflow URL | 复用 HTTP 页面，不新增 UI 服务 |
 
-DSH 这类具有 Runtime SDK 的宿主由 Core 创建 HostAction，共享集成层获取通知并由 Adapter 唤醒 Agent。Codex 当前未接入这条自动唤醒链路；用户在网页提交操作后，需要在对话中要求继续，Agent 重新调用 `workflow.state`。页面与本体共享 Core 状态，不等于页面可以自动唤醒 Codex。
+Core 创建 HostAction，共享集成层获取通知，再由宿主 Adapter 唤醒 Agent。DSH 通过 Runtime SDK 接入；Codex 通过桌面自带 CLI 的 queue 投递唤醒；桌面端到端时序仍需验收。
 
 本次不修改：
 
@@ -171,7 +171,7 @@ DSH 专属实现包括工具名 hash 处理、`tool/result` 和 `tool/ptc-dispat
 WorkflowPanel 继续由 LazyMind Web 托管，直接向 Core 提交用户操作，不经过 Agent 解释或重新实现业务逻辑。
 
 - DSH UI Adapter 使用 `/workflow-runs/{session_id}/embed` 挂载 iframe，保留 `hostOrigin`、来源窗口与 session 校验，以及展开/收起交互。
-- Codex 使用 `/workflow-runs/{session_id}`，由内置浏览器直接加载。页面、API 和状态刷新沿用现有实现。
+- Codex 使用 `/workflow-runs/{session_id}/embed`，由内置浏览器直接加载共享 WorkflowPanel；MCP 返回的 `interaction_url` 已包含 `/embed`。页面、API 和状态刷新沿用现有实现。
 
 共享 Panel store 只管理展示状态，不参与绑定、审核或执行授权。浏览器 UI 不导入 Runtime 凭据或 Node 专用依赖。
 
@@ -183,7 +183,12 @@ WorkflowPanel 继续由 LazyMind Web 托管，直接向 Core 提交用户操作�
 
 Codex 不再注册 MCP App HTML 资源或专用面板工具，不需要额外 HTTPS 代理、端口或本地 CA。通用 `LAZYMIND_WEB_URL` 覆盖能力仍保留供有需要的部署使用。
 
-当前能力边界：浏览器展示与 Core 状态读取可用；启动后的自动打开流程仍需真实启动验收。Continue/Resume 后自动唤醒 Codex、精确取消原生 turn、HostAction 投递回执未接入。不得借助放宽 Core 的绑定要求来假装具备这些能力；未来按 Runtime Adapter 契约单独实现。
+当前 Codex 接入采用 queue：MCP 在 `workflow.start` 内绑定原会话并返回最新状态，dispatcher 向该会话排队投递 continue。元数据缺失时允许 Agent 传入从宿主取得的真实 thread UUID；这是协议明确记录的身份信任降级。启动不再需要扫描会话或额外绑定唤醒。
+
+Codex 暂不支持原生 turn 中断。Stop 仍在 Core 生效，cancel 通知明确记录为不支持；人工审核通过 MCP 指令、状态返回和唤醒 prompt 要求 Agent 结束当前 turn。无 pre-tool / pre-step 钩子，不能宣称与 DSH 完全等价。
+
+安装通过既有 Codex Connect 入口完成：注册个人市场插件、自动配对并迁移旧 MCP 入口。插件 MCP 进程管理 queue dispatcher 生命周期，退出时清理 worker；构建产物内嵌到 LazyMind CLI。源码入口为 `make codex-workflow-install`。配置和验收步骤见 [Codex queue 接入](../../integrations/codex-workflow/README.md)。不需要 App Server Socket，不安装额外 CLI，不启动另一份 Codex 后端。
+
 
 ## 5. HostAction
 
@@ -222,7 +227,7 @@ unknown → accepted（核对接收证据后）
 
 `accepted` 不表示 Agent 已开始或完成执行。HostAction 不另建“Agent 执行完成确认”，执行结果由 Workflow 协议管理。
 
-如果消息已进入宿主队列，但返回响应时断线，投递结果是 `unknown`。dispatcher 应核对相同 action ID 的持久化输入；不能盲目重发。当前协议中 dispatch 租约过期也进入 unknown，unknown 只能凭接收证据转 accepted，不能自动恢复为 pending。当前 Core 的恢复回执使用正数 `native_event_seq`；第二宿主必须验证能否提供符合该语义的证据，不能随意编造序号。
+如果消息已进入宿主队列，但返回响应时断线，投递结果是 `unknown`。dispatcher 应核对相同 action ID 的持久化输入；不能盲目重发。当前协议中 dispatch 租约过期也进入 unknown，unknown 只能凭接收证据转 accepted，不能自动恢复为 pending。DSH 可回报正数 `native_event_seq`；Codex 当前没有可供 Core 接收的原生事件序号，结果不明时保持 `unknown`，不得编造数字序号。
 
 `failed` 表示确定的投递失败，不能用它表示“宿主可能已经收到”的异常。`consumed_at` 表示通知已被业务推进消费，与 accepted 不同；`binding_generation` 用于拒绝旧绑定通知。发送前以及排队输入真正运行时，都需重新检查通知是否仍有效。保留单 pairing/profile dispatcher 的运行锁与 Core 的 claim 保护。
 
@@ -323,7 +328,7 @@ Core → 返回该执行的路由与授权结果
 | Confirm and Continue | iframe → Core | 是 |
 | Continue | iframe → Core | 是 |
 | Retry / Rewind | iframe → Core | 需要继续编排时唤醒 |
-| Stop | iframe → Core 立即生效 | 支持取消 API 的 Runtime Adapter 执行取消；Codex 暂不支持取消原生 turn |
+| Stop | iframe → Core 立即生效 | Codex 当前不支持中断 turn；Core 停止先行生效，DSH 保留取消能力 |
 | Resume | iframe → Core | 需要继续编排时唤醒 |
 
 ## 8. 建议代码结构
@@ -335,7 +340,7 @@ integrations/
 │   ├── dispatcher.ts     # HostAction 拉取、认领、回执
 │   ├── coordinator.ts    # 绑定恢复、等待、工具准入与执行收尾协调
 │   ├── runtime.ts        # Runtime 公共入口
-│   ├── transport.ts      # Core 通信，不加载宿主凭据
+│   ├── transport.ts      # Bridge 通信与单会话通知范围，不加载宿主凭据
 │   ├── panel-store.ts    # iframe 展示状态
 │   └── adapter.ts        # Adapter 接口
 │
@@ -344,9 +349,10 @@ integrations/
 │   ├── events.ts         # DSH 工具名和事件标准化
 │   └── ui-adapter.tsx    # DSH slots 和 iframe
 │
-└── <next-agent>-workflow/
-    ├── host-adapter.*
-    └── ui-adapter.*
+└── codex-workflow/
+    ├── src/main.ts       # 配对校验和共享 dispatcher 装配
+    ├── src/adapter.ts    # queue 唤醒与人工审核 prompt
+    └── src/runtime-lock.ts # 同一配对的 dispatcher 单实例锁
 ```
 
 ## 9. DSH 迁移原则
@@ -415,4 +421,6 @@ CLI 接入基础设施也需要同步调整：
 - CLI 提供 `EnsureForProvider`；旧 `Ensure` 仍创建兼容的 DSH 配对。Bridge 使用可信配对中的 provider，不接受请求体指定身份。
 - 新增 SDK 无关的 Fake Adapter 契约测试；这证明共享逻辑不依赖 DSH，但不能替代第二个真实宿主的端到端验收。
 - Codex 继续使用既有 STDIO MCP 安装入口，新增展示行为仅为启动后自动调用宿主浏览器工具；复用原有 WorkflowPanel 和 Core API。
-- Codex 当前没有接入共享 Runtime Adapter 的自动唤醒、精确 run 取消与 HostAction 回执能力。Stop 在 Core 生效，不保证正在执行的原生 Codex turn 立即停止。
+- Codex 的 `integrations/codex-workflow` 使用桌面自带 CLI 的 queue，复用共享 dispatcher、HostBridge 和单实例锁；MCP 启动时绑定。配置与测试入口见该目录 README。
+- Codex 集成要求显式提供桌面自带 CLI 路径和匹配的 profile 配对；不连接 App Server。Stop 只保证在 Core 生效，取消回执明确说明不支持中断。
+- Codex 尚无 DSH 的 pre-tool / pre-step 钩子和持久事件序号；不确定投递保持 `unknown`，不自动重发。审批不自动批准，不能宣称两个宿主已完全等价。

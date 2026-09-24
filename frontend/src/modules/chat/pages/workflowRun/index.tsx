@@ -79,7 +79,7 @@ export default function WorkflowRunPage({ embedded = false }: { embedded?: boole
   }, async command => {
     const current = lifetime.current;
     if (!current || current.key !== key) throw new DOMException('Run page closed', 'AbortError');
-    const response = await api.control(sessionId, command, { signal: current.controller.signal });
+    const response = await api.control(sessionId, command, { signal: current.controller.signal, silentError: true });
     if (response.data?.data?.receipt?.command_id !== command.command_id) throw new Error('Workflow command acknowledgement is unavailable');
   }), [api, sessionId, key, refresh]);
 
@@ -129,8 +129,8 @@ export default function WorkflowRunPage({ embedded = false }: { embedded?: boole
   }, [noticeKey]);
   const activities = useExecutionActivity(snapshot?.session);
   const control = snapshot?.control;
-  const liveDelivery = deliveryBanner(control?.delivery);
-  const infoBanner = overlayInfoBanner(noticeKey, control?.delivery);
+  const liveDelivery = deliveryBanner(control?.delivery, control?.binding);
+  const infoBanner = overlayInfoBanner(noticeKey, control?.delivery, control?.binding);
   const bannerFromNotice = Boolean(infoBanner && (!liveDelivery || noticeKey === REVIEW_CHANGED_NOTICE));
 
   return <main className={embedded ? 'workflow-run workflow-run--embedded' : 'workflow-run'}

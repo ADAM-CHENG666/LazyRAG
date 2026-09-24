@@ -540,3 +540,43 @@ func TestContinueAfterStopSchedulesExecution(t *testing.T) {
 		}
 	}
 }
+
+func TestContinueEditedCompletedRunCreatesFreshExecution(t *testing.T) {
+	db, _ := setupBatchTransitionSession(t)
+	if err := db.AutoMigrate(&orm.WorkflowReviewCheckpoint{}, &orm.WorkflowHostAction{}, &orm.WorkflowCommand{}, &orm.WorkflowRevisionEntry{}, &orm.WorkflowBlob{}, &orm.SubAgentTask{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&orm.WorkflowSession{}).Where("id = ?", "batch-session").Updates(map[string]any{
+		"control_protocol": controlpolicy.Protocol, "controller_host": "external-agent", "status": "completed",
+		"control_binding_json": `{"required":true,"edit_paused":true,"driver_session_id":"driver","connector_id":"connector","generation":1}`,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&orm.WorkflowSessionStep{ID: "stale-draft", SessionID: "batch-session", StepID: "branch_b", TaskID: "old-draft", Status: "succeeded", Validity: "stale", Attempt: 1}).Error; err != nil {
+		t.Fatal(err)
+	}
+	var session orm.WorkflowSession
+	if err := db.First(&session, "id = ?", "batch-session").Error; err != nil {
+		t.Fatal(err)
+	}
+	svc := WorkflowControlService{DB: db.DB}
+	command := WorkflowControlCommand{CommandID: "continue-edited-completed", Kind: "continue", StateVersion: session.StateVersion}
+	result, err := svc.Execute(t.Context(), "batch-user", session.ID, command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Receipt.ExecutionID == "" || result.Receipt.ActionID == "" {
+		t.Fatalf("no recovery: %+v", result)
+	}
+	var replacement orm.WorkflowSessionStep
+	if err := db.First(&replacement, "id = ?", result.Receipt.ExecutionID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if replacement.StepID != "branch_b" || replacement.Attempt != 2 || replacement.Validity != "effective" {
+		t.Fatalf("wrong recovery: %+v", replacement)
+	}
+	replay, err := svc.Execute(t.Context(), "batch-user", session.ID, command)
+	if err != nil || replay.Receipt != result.Receipt {
+		t.Fatalf("replay changed recovery: %+v %v", replay, err)
+	}
+}

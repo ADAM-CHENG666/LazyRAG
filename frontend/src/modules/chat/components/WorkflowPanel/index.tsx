@@ -61,7 +61,7 @@ import { SlideThumb } from './ppt/SlideThumb';
 import { WorkflowTabActions } from './actions/WorkflowTabActions';
 import { WorkflowPanelTabActiveContext, SlotEditingContext, type SlotFooterAction } from './slotEditingContext';
 import { findWriterArtifactStream } from './writerArtifactStream';
-import { resolveCompletedContinueStep, resolveWorkflowContinueAction } from './workflowContinue';
+import { resolveCompletedContinueStep, resolveExternalContinueAction, resolveWorkflowContinueAction } from './workflowContinue';
 import { resolvePendingApprovalStep } from './workflowApproval';
 import { moveSelectedCompositePages, sameCompositePageOrder } from './compositePageReorder';
 import { deliveryPending, type WorkflowActionIntent, type WorkflowControlView } from '@/modules/chat/utils/workflowControl';
@@ -1951,7 +1951,9 @@ export function WorkflowPanel({
     tabs[visibleActiveTabIdx],
   );
   const continueAction = resolveWorkflowContinueAction(session, displayStatus, tabs[visibleActiveTabIdx]);
-  const showContinue = Boolean(continueAction);
+  const showContinue = externalControl
+    ? Boolean(resolveExternalContinueAction(externalControl, completedContinueStepId))
+    : Boolean(continueAction);
   const showStepRollback =
     (session.status === 'completed' || session.status === 'failed')
     && Boolean(session.steps && session.steps.length > 0)
@@ -1998,7 +2000,7 @@ export function WorkflowPanel({
     if (!isContinuationCurrent()) return;
     if (controlAdapter) {
       const intent: WorkflowActionIntent = completedContinueStepId
-        ? { kind: 'rewind', stepId: completedContinueStepId }
+        ? { kind: 'continue', completedStepId: completedContinueStepId }
         : externalControl?.continuation === 'stopped'
           ? { kind: 'resume' }
           : { kind: 'continue' };
@@ -2450,7 +2452,7 @@ export function WorkflowPanel({
             </button>
           )}
           {showContinue && !approvalStepId && supportsExternal(
-            externalControl?.continuation === 'stopped' ? 'resume' : completedContinueStepId ? 'rewind' : 'continue',
+            externalControl ? resolveExternalContinueAction(externalControl, completedContinueStepId) ?? 'continue' : 'continue',
           ) && (
             <button
               type='button'

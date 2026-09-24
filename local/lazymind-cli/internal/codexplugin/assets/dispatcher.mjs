@@ -1,50 +1,11 @@
-import { createHash, randomUUID } from "node:crypto";
 import { open, readFile, stat, unlink } from "node:fs/promises";
+import { homedir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
+import { parseArgs, promisify } from "node:util";
+import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
+import { setTimeout as setTimeout$1 } from "node:timers/promises";
 
-//#region ../workflow-agent-core/src/protocol.ts
-function object(value) {
-	return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
-}
-function interaction(value, trustedOrigin) {
-	const result = object(object(value)?.structuredContent);
-	const fields = typeof result?.session_id === "string" ? result : object(result?.state);
-	if (!fields || typeof fields.session_id !== "string" || !fields.session_id || typeof fields.interaction_url !== "string") return null;
-	try {
-		const url = new URL(fields.interaction_url);
-		if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.hash || url.search) return null;
-		if (trustedOrigin && url.origin !== new URL(trustedOrigin).origin) return null;
-		if (url.pathname !== `/workflow-runs/${encodeURIComponent(fields.session_id)}`) return null;
-		return {
-			runId: fields.session_id,
-			url: url.href
-		};
-	} catch {
-		return null;
-	}
-}
-function readControl(value) {
-	const fields = object(object(value)?.structuredContent);
-	const control = object(fields?.control) ?? object(object(fields?.state)?.control);
-	const admission = object(control?.admission);
-	if (control?.protocol !== "workflow.control.v1" || typeof control.session_id !== "string" || !Number.isSafeInteger(control.state_version) || typeof control.continuation !== "string" || typeof admission?.can_begin !== "boolean") return null;
-	return control;
-}
-function presentationRun(meta) {
-	const value = object(object(meta)?.lazymind_workflow);
-	if (!value) return null;
-	const run = interaction({ structuredContent: {
-		session_id: value.runId,
-		interaction_url: value.url
-	} });
-	return run ? {
-		...run,
-		...typeof value.hostSessionId === "string" ? { hostSessionId: value.hostSessionId } : {},
-		...typeof value.operation === "string" ? { operation: value.operation } : {},
-		...typeof value.executionId === "string" ? { executionId: value.executionId } : {}
-	} : null;
-}
-
-//#endregion
 //#region ../workflow-agent-core/src/transport.ts
 var BridgeError = class extends Error {
 	constructor(code, message, status) {
@@ -110,18 +71,33 @@ var HostBridge = class {
 };
 
 //#endregion
-//#region src/bridge.ts
-/** The only credential loaded is LazyMind's scoped local pairing, never DSH's signing key. */
-async function loadPairing(path) {
-	if (!path) throw new Error("Reconnect DeepSeek Harness from LazyMind to configure the workflow bundle");
-	const info = await stat(path);
-	if (!info.isFile() || process.platform !== "win32" && (info.mode & 63) !== 0) throw new Error("Workflow pairing must be a private file");
-	const value = object(JSON.parse(await readFile(path, "utf8")));
-	if (!value || typeof value.connector_id !== "string" || typeof value.token !== "string" || value.token.length !== 64 || value.enabled !== true) throw new Error("Workflow pairing is unavailable; reconnect DeepSeek Harness from LazyMind");
-	return {
-		connector_id: value.connector_id,
-		token: value.token
-	};
+//#region ../workflow-agent-core/src/protocol.ts
+function object(value) {
+	return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
+}
+function interaction(value, trustedOrigin) {
+	const result = object(object(value)?.structuredContent);
+	const fields = typeof result?.session_id === "string" ? result : object(result?.state);
+	if (!fields || typeof fields.session_id !== "string" || !fields.session_id || typeof fields.interaction_url !== "string") return null;
+	try {
+		const url = new URL(fields.interaction_url);
+		if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.hash || url.search) return null;
+		if (trustedOrigin && url.origin !== new URL(trustedOrigin).origin) return null;
+		if (url.pathname !== `/workflow-runs/${encodeURIComponent(fields.session_id)}`) return null;
+		return {
+			runId: fields.session_id,
+			url: url.href
+		};
+	} catch {
+		return null;
+	}
+}
+function readControl(value) {
+	const fields = object(object(value)?.structuredContent);
+	const control = object(fields?.control) ?? object(object(fields?.state)?.control);
+	const admission = object(control?.admission);
+	if (control?.protocol !== "workflow.control.v1" || typeof control.session_id !== "string" || !Number.isSafeInteger(control.state_version) || typeof control.continuation !== "string" || typeof admission?.can_begin !== "boolean") return null;
+	return control;
 }
 
 //#endregion
@@ -567,7 +543,7 @@ function createDispatcher(runtime, coordinator, bridge, instanceId, signal) {
 	};
 }
 function delay(ms, signal) {
-	return new Promise((resolve, reject) => {
+	return new Promise((resolve$1, reject) => {
 		if (signal.aborted) {
 			reject(signal.reason);
 			return;
@@ -578,405 +554,16 @@ function delay(ms, signal) {
 		};
 		const timer = setTimeout(() => {
 			signal.removeEventListener("abort", abort);
-			resolve();
+			resolve$1();
 		}, ms);
 		signal.addEventListener("abort", abort, { once: true });
 	});
 }
 
 //#endregion
-//#region src/events.ts
-const OPERATIONS = new Set([
-	"list",
-	"get",
-	"input_import",
-	"input_get",
-	"start",
-	"state",
-	"session_list",
-	"session_stop",
-	"session_resume",
-	"step_begin",
-	"step_claim",
-	"step_resume",
-	"step_complete",
-	"artifact_publish",
-	"artifact_list",
-	"artifact_get"
-]);
-function workflowOperation(name, serverName) {
-	const prefix = `mcp__${serverName}__workflow_`;
-	if (!name.startsWith(prefix)) return null;
-	const operation = name.slice(prefix.length).replace(/_[0-9a-f]{12}$/, "");
-	return OPERATIONS.has(operation) ? operation : null;
-}
-function visitTexts(value, into) {
-	const item = object(value);
-	if (!item) return;
-	if (typeof item.text === "string") into.push(item.text);
-	if (Array.isArray(item.content)) for (const child of item.content) visitTexts(child, into);
-}
-function runFromToolText(text) {
-	if (!(text.includes("\"interaction_url\"") && text.includes("\"session_id\"")) && text.length > 8192 || text.length > 512 * 1024) return null;
-	try {
-		const parsed = JSON.parse(text);
-		return presentationRun(parsed) ?? interaction({ structuredContent: parsed }) ?? interaction({ structuredContent: object(parsed)?.state ?? object(parsed)?.result });
-	} catch {
-		return null;
-	}
-}
-/** DSH web logs MCP JSON in tool-result message text. Meta is optional and often absent. */
-function eventRun(event, serverName) {
-	const value = object(event);
-	const data = object(value?.data);
-	if (value?.type === "tool/result") {
-		const fromMeta = presentationRun(data?.meta);
-		if (fromMeta) return fromMeta;
-		const texts = [];
-		visitTexts(object(data?.message), texts);
-		if (Array.isArray(data?.content)) for (const child of data.content) visitTexts(child, texts);
-		for (const text of texts.reverse()) {
-			const run = runFromToolText(text);
-			if (run) return run;
-		}
-		return null;
-	}
-	if (value?.type !== "tool/ptc-dispatch" || data?.isError !== false || typeof data.name !== "string" || ![
-		"start",
-		"state",
-		"step_begin",
-		"step_claim",
-		"step_resume",
-		"step_complete"
-	].includes(workflowOperation(data.name, serverName) ?? "") || !Array.isArray(data.content)) return null;
-	for (const raw of [...data.content].reverse()) {
-		const content = object(raw);
-		if (typeof content?.text !== "string") continue;
-		const run = runFromToolText(content.text);
-		if (run) return run;
-	}
-	return null;
-}
-
-//#endregion
-//#region src/host-adapter.ts
-/** DSH SDK translation only. Workflow admission and delivery decisions live in the shared runtime. */
-function dshRuntime(ctx, serverName) {
-	let goals;
-	ctx.inject(["goals"], (goalCtx) => {
-		goals = goalCtx.goals;
-		goalCtx.effect(() => () => {
-			goals = void 0;
-		});
-	});
-	function goalReason(runId, revision, stopped = false) {
-		const run = createHash("sha256").update(runId).digest("hex").slice(0, 16);
-		return `lazymind-${stopped ? "stopped" : "review"}-${run}-r${revision}`;
-	}
-	function inputSeq(events, requestId) {
-		for (const event of events) {
-			if (event.type !== "user/message") continue;
-			if (object(object(object(event.data)?.message)?.source ?? object(event.data)?.source)?.rpcId === requestId) return event.seq;
-		}
-		return 0;
-	}
-	async function reconcile(sessionId, actionId, caller) {
-		const controller = new AbortController();
-		try {
-			const frames = ctx.sessionController.follow({
-				address: {
-					kind: "session",
-					sessionId
-				},
-				maxMessages: 100
-			}, AbortSignal.any([caller, controller.signal]));
-			for await (const frame of frames) {
-				if (frame.type !== "snapshot") continue;
-				const scan = (records$1) => inputSeq(records$1.flatMap((record) => record.type === "event" ? [record.event] : []), actionId);
-				let found = scan(frame.records);
-				let records = frame.records;
-				let more = frame.hasMore;
-				while (!found && more) {
-					const seqs = records.map((record) => record.event.seq);
-					if (!seqs.length) break;
-					const page = await ctx.sessionController.page({
-						address: {
-							kind: "session",
-							sessionId
-						},
-						throughSeq: frame.cursor,
-						beforeSeq: Math.min(...seqs),
-						maxMessages: 100
-					}, AbortSignal.any([caller, controller.signal]));
-					records = page.records;
-					found = scan(records);
-					more = page.hasMore;
-				}
-				return found;
-			}
-			return 0;
-		} finally {
-			controller.abort();
-		}
-	}
-	return {
-		id: (agent) => agent.session.id,
-		parent: (agent) => ctx.agents.list().find((candidate) => candidate !== agent && ctx.agents.isOwnedBy(agent.session.id, candidate)),
-		isLive: (agent) => ctx.agents.get(agent.session.id) === agent,
-		isRunning: (agent) => agent.status === "running",
-		history: (agent) => [...agent.session.ownEvents()].map((event) => ({
-			seq: event.seq,
-			time: event.time,
-			user: event.type === "user/message",
-			run: eventRun(event, serverName)
-		})),
-		canReturnResult: (agent) => !!ctx.tools.get("structured_output", agent),
-		goal: (agent) => goals?.get(agent),
-		suspendGoal(agent, input) {
-			const goal = goals?.get(agent);
-			if (goals && goal?.phase === "active" && goal.activation === "armed" && (!input.goalId || input.goalId === goal.id)) goals.block(agent, goal, {
-				code: goalReason(input.runId, goal.revision + 1, input.continuation === "stopped"),
-				message: input.continuation === "awaiting_executor" ? "LazyMind is executing this workflow step." : "This LazyMind workflow needs user action before automatic work can continue."
-			});
-		},
-		resumeGoal(agent, runId) {
-			const goal = goals?.get(agent);
-			if (goals && goal?.phase === "blocked" && [goalReason(runId, goal.revision), goalReason(runId, goal.revision, true)].includes(goal.blockedReason?.code ?? "")) goals.resume(agent, goal);
-		},
-		async resolve(sessionId) {
-			const result = await ctx.sessionController.resolveAgent(sessionId);
-			return "error" in result ? { error: result.error.message } : { agent: result.agent };
-		},
-		async prompt(agent, input, signal) {
-			await ctx.sessionController.prompt({
-				sessionId: agent.session.id,
-				requestId: input.actionId,
-				mode: "queue",
-				content: [{
-					type: "text",
-					text: input.message
-				}]
-			}, signal);
-			return inputSeq(agent.session.snapshotEvents(), input.actionId);
-		},
-		cancel: (agent) => {
-			ctx.sessionController.cancel({ sessionId: agent.session.id });
-		},
-		eventSeq: (agent) => Math.max(0, agent.session.seq - 1),
-		reconcile,
-		warn: (message) => ctx.logger.warn(message)
-	};
-}
-
-//#endregion
-//#region src/tool.ts
-/** Preserve the MCP definition's output, cancellation and execution-local finalizer. */
-function workflowTool(original, hooks) {
-	return {
-		...original,
-		isConcurrencySafe: () => false,
-		presentCall(args) {
-			const fields = object(args);
-			const rawInput = fields ? Object.fromEntries([
-				"workflow_id",
-				"session_id",
-				"step_id",
-				"execution_id"
-			].filter((key) => typeof fields[key] === "string").map((key) => [key, fields[key]])) : void 0;
-			return {
-				card: "generic",
-				title: `LazyMind Workflow: ${(hooks.operation ?? "operation").replaceAll("_", " ")}`,
-				rawInput
-			};
-		},
-		presentResult(args, result) {
-			const meta = result.meta;
-			return original.presentResult?.(args, {
-				...result,
-				meta: meta && typeof meta === "object" && !Array.isArray(meta) && "original" in meta ? meta.original : result.meta
-			});
-		},
-		output: {
-			...original.output,
-			presentationMeta(args, value) {
-				const previous = original.output.presentationMeta?.(args, value);
-				const control = readControl(value);
-				const run = interaction(value, hooks.trustedOrigin) ?? (control && hooks.trustedOrigin ? {
-					runId: control.session_id,
-					url: new URL(`/workflow-runs/${encodeURIComponent(control.session_id)}`, hooks.trustedOrigin).href
-				} : null);
-				const fields = object(object(value)?.structuredContent);
-				const executionId = fields?.execution_id ?? object(fields?.execution)?.execution_id;
-				const hostSessionId = hooks.hostSessionId;
-				return run ? {
-					lazymind_workflow: {
-						...run,
-						...hostSessionId ? { hostSessionId } : {},
-						...hooks.operation ? { operation: hooks.operation } : {},
-						...typeof executionId === "string" ? { executionId } : {}
-					},
-					original: previous ?? null
-				} : previous ?? null;
-			}
-		},
-		async execute(args, exec) {
-			const value = await original.execute(args, exec);
-			const control = hooks.afterResult ? await hooks.afterResult(value, exec) : readControl(value);
-			if (hooks.shouldConclude ? hooks.shouldConclude(control, exec) : control?.continuation === "awaiting_user") exec.concludeTurn();
-			const record = object(value);
-			const fields = object(record?.structuredContent);
-			const earlier = readControl(value);
-			if (control && fields && record && (earlier?.state_version !== control.state_version || earlier?.continuation !== control.continuation)) return {
-				...record,
-				structuredContent: {
-					...fields,
-					control
-				},
-				...Array.isArray(record.content) ? { content: [...record.content, {
-					type: "text",
-					text: JSON.stringify({ control })
-				}] } : {}
-			};
-			return value;
-		}
-	};
-}
-
-//#endregion
-//#region src/host.ts
-/** Wire DSH public hooks to the shared coordinator. MCP execution remains in workflowTool. */
-function installHost(ctx, bridge, config, instanceId) {
-	const lifetime = new AbortController();
-	const runtime = dshRuntime(ctx, config.serverName);
-	const coordinator = createCoordinator(runtime, bridge, config.webUrl, lifetime.signal);
-	const registrations = /* @__PURE__ */ new Map();
-	const tracked = /* @__PURE__ */ new Set();
-	const own = (promise) => {
-		tracked.add(promise);
-		promise.then(() => tracked.delete(promise), () => tracked.delete(promise));
-		return promise;
-	};
-	const call = (exec) => ({
-		agent: exec.agent,
-		operation: workflowOperation(exec.name, config.serverName),
-		arguments: "arguments" in exec ? exec.arguments : void 0,
-		returnsResult: exec.name === "structured_output",
-		signal: exec.signal,
-		callId: exec.callId,
-		nested: !!exec.parent
-	});
-	function wrap(agent, registration) {
-		const context = registration.context;
-		if (!context) return;
-		const live = /* @__PURE__ */ new Set();
-		for (const schema of ctx.tools.schemas()) {
-			const operation = workflowOperation(schema.name, config.serverName);
-			if (operation === null) continue;
-			live.add(schema.name);
-			const original = ctx.tools.get(schema.name);
-			const previous = registration.wrappers.get(schema.name);
-			if (!original || previous?.original === original) continue;
-			previous?.dispose();
-			const definition = workflowTool(original, {
-				trustedOrigin: config.webUrl,
-				hostSessionId: runtime.id(coordinator.driver(agent)),
-				operation,
-				afterResult: (value, exec) => own(coordinator.afterResult(value, call(exec))),
-				shouldConclude: (control) => coordinator.shouldConclude(agent, control)
-			});
-			registration.wrappers.set(schema.name, {
-				original,
-				dispose: context.tools.register(definition)
-			});
-		}
-		for (const [name, value] of registration.wrappers) if (!live.has(name)) {
-			value.dispose();
-			registration.wrappers.delete(name);
-		}
-	}
-	function ensure(agent) {
-		const existing = registrations.get(agent);
-		if (existing) return existing;
-		coordinator.ensure(agent);
-		const entry = {
-			ready: Promise.resolve(),
-			dispose: async () => {},
-			disposeGuard: () => {},
-			wrappers: /* @__PURE__ */ new Map()
-		};
-		registrations.set(agent, entry);
-		const registration = agent.ctx.inject(["tools"], (injected) => {
-			entry.context = injected;
-			entry.disposeGuard = injected.tools.guard((exec) => coordinator.denial(exec.agent ?? agent, call(exec)));
-			wrap(agent, entry);
-		});
-		entry.ready = registration.await();
-		entry.dispose = () => registration.dispose();
-		return entry;
-	}
-	ctx.on("agent/pre-step", (payload, next) => own((async () => {
-		const registration = ensure(payload.agent);
-		await registration.ready;
-		wrap(payload.agent, registration);
-		return await coordinator.beforeTurn({
-			...payload,
-			messages: payload.messages.map((message) => {
-				const source = object(object(message)?.source);
-				return {
-					user: source?.kind === "user",
-					requestId: typeof source?.rpcId === "string" ? source.rpcId : void 0
-				};
-			})
-		}) ? next() : { kind: "reject" };
-	})()));
-	ctx.on("tools/pre-execute", (exec, next) => own((async () => {
-		if (exec.agent) await ensure(exec.agent).ready;
-		const reason = await coordinator.beforeTool(call(exec));
-		return reason ? {
-			kind: "deny",
-			reason
-		} : next();
-	})()));
-	ctx.on("tools/ptc-dispatch-log", async (dispatch, next) => {
-		const content = await next();
-		const run = coordinator.takeNestedLink(dispatch.subCallId);
-		return run ? [...content, {
-			type: "text",
-			text: JSON.stringify({ lazymind_workflow: run })
-		}] : content;
-	});
-	ctx.on("agent/status", ({ agent, status }) => {
-		if (status === "idle") coordinator.idle(agent);
-	});
-	ctx.on("agent/disposed", ({ agent }) => {
-		const entry = registrations.get(agent);
-		if (entry) {
-			entry.disposeGuard();
-			for (const wrapper of entry.wrappers.values()) wrapper.dispose();
-			registrations.delete(agent);
-			own(entry.dispose());
-		}
-		coordinator.forget(agent);
-	});
-	for (const agent of ctx.agents.list()) ensure(agent);
-	const polling = createDispatcher(runtime, coordinator, bridge, instanceId, lifetime.signal).poll();
-	return async () => {
-		lifetime.abort();
-		await polling;
-		await Promise.allSettled([...tracked]);
-		for (const entry of registrations.values()) {
-			entry.disposeGuard();
-			for (const wrapper of entry.wrappers.values()) wrapper.dispose();
-			await entry.dispose();
-		}
-		registrations.clear();
-		coordinator.dispose();
-	};
-}
-
-//#endregion
 //#region src/runtime-lock.ts
-/** One cooperating dispatcher per pairing/profile, including across DSH processes. */
+var DispatcherBusy = class extends Error {};
+/** One cooperating dispatcher per Codex profile pairing. */
 async function dispatcherLock(pairingFile, instanceId) {
 	const path = `${pairingFile}.runtime.lock`;
 	for (let attempt = 0; attempt < 2; attempt++) try {
@@ -999,7 +586,7 @@ async function dispatcherLock(pairingFile, instanceId) {
 	} catch (error) {
 		if (error.code !== "EEXIST") throw error;
 		const previous = JSON.parse(await readFile(path, "utf8"));
-		if (!Number.isSafeInteger(previous.pid) || previous.pid < 1) throw new Error("Invalid workflow dispatcher lock; repair this connection explicitly");
+		if (!Number.isSafeInteger(previous.pid) || previous.pid < 1) throw new Error("Invalid Codex dispatcher lock; repair this connection explicitly");
 		try {
 			process.kill(previous.pid, 0);
 		} catch (error$1) {
@@ -1009,38 +596,153 @@ async function dispatcherLock(pairingFile, instanceId) {
 			}
 			throw error$1;
 		}
-		throw new Error("This DSH profile already has a workflow dispatcher; close its previous DSH process");
+		throw new DispatcherBusy("This Codex profile pairing already has a workflow dispatcher");
 	}
-	throw new Error("Could not acquire the workflow dispatcher lock");
+	throw new Error("Could not acquire the Codex workflow dispatcher lock");
 }
 
 //#endregion
-//#region src/index.ts
-const inject = [
-	"tools",
-	"agents",
-	"sessionController"
-];
-/** Install only public DSH extensions. The pairing secret stays in a private host file. */
-async function apply(ctx, config) {
-	if (!config.webUrl || !config.serverName) throw new Error("Reconnect DSH from LazyMind to configure the workflow bundle");
-	const pairing = await loadPairing(config.pairingFile);
-	const instance = randomUUID();
-	const release = await dispatcherLock(config.pairingFile, instance);
+//#region src/adapter.ts
+const runFile$1 = promisify(execFile);
+const threadPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+const queue = async (binary, args, signal, codexHome) => {
+	await runFile$1(binary, args, {
+		signal,
+		timeout: 15e3,
+		maxBuffer: 1024 * 1024,
+		env: {
+			...process.env,
+			CODEX_HOME: codexHome
+		}
+	});
+};
+/** Admission only: no native turn inspection, cancellation, or uncertain retries. */
+var CodexAdapter = class {
+	continuationMode = "queue";
+	supportsCancel = false;
+	constructor(binary, codexHome, run = queue) {
+		this.binary = binary;
+		this.codexHome = codexHome;
+		this.run = run;
+	}
+	id(threadId) {
+		return threadId;
+	}
+	warn(message) {
+		console.warn(message);
+	}
+	async resolve(threadId) {
+		return threadPattern.test(threadId) ? { agent: threadId } : { error: "A Codex thread UUID is required" };
+	}
+	async prompt(threadId, input, signal) {
+		if ("error" in await this.resolve(threadId)) throw new Error("A Codex thread UUID is required");
+		if (signal.aborted) throw new AdmissionRejected("Queue delivery was aborted before launch");
+		const message = `[LazyMind action_id=${input.actionId}]\n${input.message}\nThis queued notification may be delayed. Read workflow.state before taking any action; current Core state and authorization override this notification. When control.continuation is awaiting_user, report that review is needed and END this turn. Do not approve the review yourself, begin another step, or poll while waiting. Also end this turn for awaiting_executor, stopped, completed, or binding_required. Wait for a new notification or explicit user input.`;
+		try {
+			await this.run(this.binary, [
+				"queue",
+				"--thread",
+				threadId,
+				"--message",
+				message
+			], signal, this.codexHome);
+		} catch (error) {
+			if ([
+				"ENOENT",
+				"EACCES",
+				"ENOEXEC"
+			].includes(error.code ?? "")) throw new AdmissionRejected("Codex queue executable could not be launched");
+			throw new Error("Codex queue receipt is uncertain; do not automatically resend");
+		}
+		return 0;
+	}
+	cancel() {
+		throw new Error("Codex queue does not support turn interruption");
+	}
+};
+
+//#endregion
+//#region src/main.ts
+const runFile = promisify(execFile);
+async function main() {
+	const { values } = parseArgs({ options: {
+		"managed": {
+			type: "boolean",
+			default: false
+		},
+		"parent-pid": { type: "string" },
+		"codex-bin": { type: "string" },
+		"codex-home": { type: "string" },
+		"pairing-file": { type: "string" },
+		"lazymind-cli": {
+			type: "string",
+			default: "lazymind"
+		},
+		"bridge-url": {
+			type: "string",
+			default: "http://127.0.0.1:19091"
+		}
+	} });
+	const binary = values["codex-bin"];
+	if (!binary || !isAbsolute(binary)) throw new Error("--codex-bin must be the absolute path to the desktop bundled Codex executable");
+	const profile = resolve(values["codex-home"] ?? process.env.CODEX_HOME ?? join(homedir(), ".codex"));
+	let path = values["pairing-file"];
+	if (!path) {
+		const { stdout } = await runFile(values["lazymind-cli"], [
+			"internal",
+			"codex-workflow-pair",
+			"--codex-home",
+			profile
+		]);
+		path = JSON.parse(stdout).pairing_file;
+	}
+	if (!path) throw new Error("LazyMind did not return a pairing file");
+	const info = await stat(path);
+	if (!info.isFile() || (info.mode & 63) !== 0) throw new Error("Pairing must be a private file (0600)");
+	const pairing = JSON.parse(await readFile(path, "utf8"));
+	if (pairing.provider !== "codex" || pairing.enabled !== true || pairing.profile !== profile || !/^host-[a-f0-9]{32}$/.test(pairing.connector_id) || !/^[a-f0-9]{64}$/.test(pairing.token)) throw new Error("Pairing does not match this Codex profile");
+	const lifetime = new AbortController();
+	const stop = () => lifetime.abort();
+	process.once("SIGINT", stop);
+	process.once("SIGTERM", stop);
+	const parentPID = values["parent-pid"] ? Number(values["parent-pid"]) : void 0;
+	if (parentPID !== void 0 && (!Number.isSafeInteger(parentPID) || parentPID < 1)) throw new Error("Invalid parent PID");
+	const parentWatch = parentPID === void 0 ? void 0 : setInterval(() => {
+		try {
+			process.kill(parentPID, 0);
+		} catch (error) {
+			if (error.code === "ESRCH") lifetime.abort();
+		}
+	}, 1e3);
+	parentWatch?.unref();
+	const instanceId = randomUUID();
+	let unlock;
 	try {
-		const dispose = installHost(ctx, new HostBridge(config.bridgeUrl, pairing), config, instance);
-		ctx.effect(() => async () => {
-			try {
-				await dispose();
-			} finally {
-				await release();
-			}
-		});
-	} catch (error) {
-		await release();
-		throw error;
+		while (!lifetime.signal.aborted) try {
+			unlock = await dispatcherLock(path, instanceId);
+			break;
+		} catch (error) {
+			if (!values.managed || !(error instanceof DispatcherBusy)) throw error;
+			await setTimeout$1(1e3, void 0, { signal: lifetime.signal });
+		}
+		lifetime.signal.throwIfAborted();
+		const bridge = new HostBridge(values["bridge-url"], pairing);
+		const adapter = new CodexAdapter(binary, profile);
+		const coordinator = createCoordinator(adapter, bridge, "", lifetime.signal);
+		console.log(`Codex Workflow queue dispatcher ready. MCP pairing file: ${path}. Native turn interruption is unavailable.`);
+		await createDispatcher(adapter, coordinator, bridge, instanceId, lifetime.signal).poll();
+	} finally {
+		lifetime.abort();
+		if (parentWatch) clearInterval(parentWatch);
+		if (unlock) await unlock();
+		process.removeListener("SIGINT", stop);
+		process.removeListener("SIGTERM", stop);
 	}
 }
+main().catch((error) => {
+	console.error(String(error));
+	process.exitCode = 1;
+});
 
 //#endregion
-export { apply, inject };
+export {  };

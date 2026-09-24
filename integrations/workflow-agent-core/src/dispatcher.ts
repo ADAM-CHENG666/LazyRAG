@@ -1,4 +1,4 @@
-import type { RuntimeAdapter } from './adapter'
+import { AdmissionRejected, type RuntimeAdapter } from './adapter'
 import type { Coordinator } from './coordinator'
 import { BridgeError, type HostTransport, type HostAction } from './transport'
 
@@ -8,6 +8,7 @@ export function createDispatcher<A>(runtime: RuntimeAdapter<A>, coordinator: Coo
   const { ensure, publish, suspendGoal, resumeGoal } = coordinator
   async function deliver(action: HostAction) {
     if (action.kind === 'cancel' && action.status !== 'pending') {
+      if (runtime.supportsCancel === false) return
       const current = await bridge.action(action.id, signal)
       if (current.control.binding?.generation !== action.binding_generation || current.control.continuation !== 'stopped') return
       // Cancellation is idempotent. After restart reconcile against the actual driver,
@@ -47,6 +48,11 @@ export function createDispatcher<A>(runtime: RuntimeAdapter<A>, coordinator: Coo
       await bridge.settle(action.id, instanceId, claim.dispatch_token, 'failed', 0, 'Workflow control changed before host admission', signal)
       return
     }
+    if (action.kind === 'cancel' && runtime.supportsCancel === false) {
+      await bridge.settle(action.id, instanceId, claim.dispatch_token, 'failed', 0,
+        'This host does not support interrupting the current turn; Workflow is stopped in Core.', signal)
+      return
+    }
     let seq = 0
     try {
       if (action.kind === 'cancel') {
@@ -55,7 +61,7 @@ export function createDispatcher<A>(runtime: RuntimeAdapter<A>, coordinator: Coo
       } else {
         // An explicit panel continuation may replace this workflow's pending
         // question/planning turn, while preserving unrelated work and granted executions.
-        if (!action.execution_id && scope.runId === action.session_id && scope.activeOwned && scope.grants.size === 0) {
+        if (runtime.continuationMode !== 'queue' && !action.execution_id && scope.runId === action.session_id && scope.activeOwned && scope.grants.size === 0) {
           await runtime.cancel(resolved.agent)
         }
         // A queued input gains scope only in pre-step, when that exact input runs.
@@ -68,7 +74,8 @@ export function createDispatcher<A>(runtime: RuntimeAdapter<A>, coordinator: Coo
       await bridge.settle(action.id, instanceId, claim.dispatch_token, 'accepted', seq, '', signal)
     } catch (error) {
       // Once a host call begins, failure cannot prove that the prompt was not admitted.
-      await bridge.settle(action.id, instanceId, claim.dispatch_token, 'unknown', 0, String(error), signal)
+      await bridge.settle(action.id, instanceId, claim.dispatch_token,
+        error instanceof AdmissionRejected ? 'failed' : 'unknown', 0, String(error), signal)
     }
   }
 

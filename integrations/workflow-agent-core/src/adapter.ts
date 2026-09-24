@@ -1,7 +1,13 @@
 import type { RunLink } from './protocol'
 
+/** Use only when the host definitely did not receive the input. */
+export class AdmissionRejected extends Error {}
+
 /** A is an opaque host agent handle. Only delivery is required of every host. */
 export interface RuntimeAdapter<A> {
+  /** Queue-only hosts cannot interrupt the current turn before continuation. */
+  readonly continuationMode?: 'queue'
+  readonly supportsCancel?: false
   id(agent: A): string
   /** Optional observation capabilities used by hosts with turn/tool hooks. */
   parent?(agent: A): A | undefined

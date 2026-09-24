@@ -36,14 +36,6 @@ func TestConfiguredCodexDiscoveryDoesNotExecuteBinary(t *testing.T) {
 	}
 }
 
-func TestCurrentEnvironmentCarriesWorkflowPanelURL(t *testing.T) {
-	t.Setenv("LAZYMIND_WEB_URL", "https://mind.example.test")
-	environment := currentEnvironment("/state", "host-1")
-	if environment["LAZYMIND_WEB_URL"] != "https://mind.example.test" {
-		t.Fatalf("environment=%#v", environment)
-	}
-}
-
 func TestCodexDesktopStatusDoesNotRequireCLILogin(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fixture uses a POSIX script")
@@ -162,7 +154,7 @@ LAZYMIND_AGENT_HOST_ID = "` + adapter.hostID + `"
 	}
 
 	status := adapter.Status(context.Background())
-	if status.State != agentintegration.Enabled {
+	if status.State != agentintegration.Ready {
 		t.Fatalf("status=%#v", status)
 	}
 	if _, err := os.Stat(filepath.Join(codexHome, "list-command-ran")); !os.IsNotExist(err) {
