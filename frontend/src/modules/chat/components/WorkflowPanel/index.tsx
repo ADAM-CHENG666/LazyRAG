@@ -833,7 +833,7 @@ function CompositeSlotGrid({
     resolveVisibleSlotIds(tab, session),
   );
   const hideEmptyCells = Boolean(tab.composite_behavior?.hide_empty_columns);
-  const hideImageMutationActions = tab.id === 'result';
+  const hideImageMutationActions = ['result', 'generate_image', 'enhance_image'].includes(tab.id);
 
   // Compute total weight for flex proportions.
   const totalWeight = columns.reduce((s, c) => s + c.weight, 0) || 1;
@@ -2073,7 +2073,7 @@ export function WorkflowPanel({
   const continueLabel = approvalStepId
     ? t('chat.workflowContinueExecution')
     : continueAction?.kind === 'resume'
-      ? t('chat.workflowResumeExecution')
+      ? t('chat.workflowContinue')
     : displayStatus === 'waiting'
       ? t('chat.workflowSaveAndContinue')
     : t('chat.workflowContinue');
@@ -2431,7 +2431,7 @@ export function WorkflowPanel({
               {t('chat.workflowStop')}
             </button>
           )}
-          {(displayStatus === 'failed' || displayStatus === 'stopped') && supportsExternal('retry') && (
+          {displayStatus === 'failed' && supportsExternal('retry') && (
             <button
               type='button'
               className='workflow-panel__action-btn workflow-panel__action-btn--secondary'
