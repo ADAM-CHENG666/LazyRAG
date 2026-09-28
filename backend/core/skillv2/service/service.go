@@ -1885,6 +1885,7 @@ func (s *SkillService) summaryFor(ctx context.Context, row skillRow) (SkillSumma
 		Name:                  row.SkillName,
 		SkillName:             row.SkillName,
 		Category:              row.Category,
+		SourceRefType:         rowSourceRefType(ctx, s, row),
 		Description:           row.Description,
 		Tags:                  tags,
 		Field:                 row.Field, Aliases: aliases, Keywords: keywords, OriginalRevisionID: valueOrEmpty(row.OriginalRevisionID),
@@ -1898,6 +1899,18 @@ func (s *SkillService) summaryFor(ctx context.Context, row skillRow) (SkillSumma
 		TrashExpiresAt: row.TrashExpiresAt,
 		DeletedBy:      valueOrEmpty(row.DeletedBy),
 	}, nil
+}
+
+func rowSourceRefType(ctx context.Context, s *SkillService, row skillRow) string {
+	if row.HeadRevisionID == nil || strings.TrimSpace(*row.HeadRevisionID) == "" {
+		return ""
+	}
+	var revision skillRevisionRow
+	err := s.db.WithContext(ctx).Select("source_ref_type").Where("id = ?", *row.HeadRevisionID).Take(&revision).Error
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(revision.SourceRefType)
 }
 
 func markPendingSkillDraftAuto(ctx context.Context, tx *gorm.DB, skillID string, now time.Time) error {

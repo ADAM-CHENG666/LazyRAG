@@ -1749,6 +1749,10 @@ func (e skillImportURLValidationError) Error() string {
 }
 
 func createSkillSourceFromRequest(ctx context.Context, name, category, description, content string, children []legacyChildSkillInput, sourceReq skillSourceRequest) (skillservice.SourceInput, func(), error) {
+	if sourceReq.isExternalImport() {
+		source, err := sourceReq.toServiceSource(ctx)
+		return source, nil, err
+	}
 	if strings.TrimSpace(content) == "" && len(children) == 0 {
 		source, err := sourceReq.toServiceSource(ctx)
 		return source, nil, err
@@ -2294,6 +2298,7 @@ func skillSummaryDTO(item skillservice.SkillSummary) map[string]any {
 		"name":                     firstNonEmpty(item.Name, item.SkillName),
 		"skill_name":               firstNonEmpty(item.SkillName, item.Name),
 		"category":                 item.Category,
+		"source_ref_type":          item.SourceRefType,
 		"origin_builtin_skill_uid": item.OriginBuiltinSkillUID,
 		"description":              item.Description,
 		"tags":                     item.Tags,
