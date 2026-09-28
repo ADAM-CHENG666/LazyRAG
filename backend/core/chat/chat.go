@@ -115,6 +115,7 @@ type ChatRuntimeOptions struct {
 	OCRConfig                     map[string]any    `json:"ocr_config,omitempty"`
 	ToolConfig                    map[string]any    `json:"tool_config,omitempty"`
 	MCPConfig                     []any             `json:"mcp_config,omitempty"`
+	MCPCapabilities               []any             `json:"mcp_capabilities,omitempty"`
 	SystemMCPConfig               []any             `json:"system_mcp_config,omitempty"`
 	ContextUsagePreview           bool              `json:"context_usage_preview,omitempty"`
 	ContextPromptExport           bool              `json:"context_prompt_export,omitempty"`
@@ -167,6 +168,7 @@ type LazyChatData struct {
 	WorkflowPreflightUpdated *WorkflowPreflightUpdatedEvent `json:"workflow_preflight_updated,omitempty"`
 	ModelContextUpdated      *ModelContextUpdatedEvent      `json:"model_context_updated,omitempty"`
 	CapabilityDependency     map[string]any                 `json:"capability_dependency,omitempty"`
+	ToolConfiguration        map[string]any                 `json:"tool_configuration,omitempty"`
 	Heartbeat                bool                           `json:"heartbeat,omitempty"`
 	ToolCallTurns            int64                          `json:"tool_call_turns"`
 	RuntimeEvent             *ChatRuntimeEvent              `json:"runtime_event,omitempty"`
@@ -442,6 +444,7 @@ type UpstreamStreamChunk struct {
 	WorkflowPreflightUpdated *WorkflowPreflightUpdatedEvent `json:"workflow_preflight_updated,omitempty"`
 	ModelContextUpdated      *ModelContextUpdatedEvent      `json:"model_context_updated,omitempty"`
 	CapabilityDependency     map[string]any                 `json:"capability_dependency,omitempty"`
+	ToolConfiguration        map[string]any                 `json:"tool_configuration,omitempty"`
 	Heartbeat                bool                           `json:"heartbeat,omitempty"`
 	ToolCallTurns            int64                          `json:"tool_call_turns"`
 	ExternalEventSequence    int64                          `json:"external_event_sequence,omitempty"`
@@ -635,6 +638,9 @@ func buildLazyChatRequest(body map[string]any) *LazyChatRequest {
 		if len(tc) > 0 {
 			req.Runtime.ToolConfig = tc
 		}
+	}
+	if capabilities, ok := body["mcp_capabilities"].([]any); ok {
+		req.Runtime.MCPCapabilities = capabilities
 	}
 	if mcpConfig, ok := body["mcp_config"].([]any); ok {
 		req.Runtime.MCPConfig = mcpConfig
@@ -1096,6 +1102,7 @@ func upstreamStreamChunkFromData(data LazyChatData) UpstreamStreamChunk {
 		WorkflowPreflightUpdated: data.WorkflowPreflightUpdated,
 		ModelContextUpdated:      data.ModelContextUpdated,
 		CapabilityDependency:     data.CapabilityDependency,
+		ToolConfiguration:        data.ToolConfiguration,
 		Heartbeat:                data.Heartbeat,
 		ToolCallTurns:            data.ToolCallTurns,
 		RuntimeEvent:             data.RuntimeEvent,

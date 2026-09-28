@@ -433,3 +433,32 @@ func normalizeCatalogMessage(message string) string {
 	message = strings.TrimSpace(strings.TrimSuffix(message, ":"))
 	return strings.ToLower(message)
 }
+
+func TestResolveToolConfigurationErrors(t *testing.T) {
+	for _, sample := range []struct {
+		message string
+		status  int
+		code    int
+	}{
+		{"configuration unavailable", 503, 2001994},
+		{"cannot prepare configuration", 400, 2003140},
+		{"too many actions", 400, 2003136},
+		{"acknowledgement failed", 500, 2003137},
+		{"unknown service", 400, 2003138},
+		{"configuration changed concurrently; retry", 409, 2003139},
+		{"resolve notion connection c1: permission denied", 502, 2000110},
+		{"resolve notion connection c1: empty access token", 502, 2000110},
+		{"read notion connection c1 token: connection refused", 502, 2000110},
+		{"read notion connection c1: empty access token", 502, 2000110},
+	} {
+		t.Run(sample.message, func(t *testing.T) {
+			appErr := ResolveAppError(sample.message, sample.status)
+			if appErr.Code != sample.code || appErr.HTTPStatus != sample.status {
+				t.Fatalf("resolved error = %#v, want code %d and HTTP status %d", appErr, sample.code, sample.status)
+			}
+			if sample.code == 2000110 && appErr.Message != "Upstream service error" {
+				t.Fatalf("connection error exposed internal details: %q", appErr.Message)
+			}
+		})
+	}
+}
