@@ -108,20 +108,25 @@ async function fixture(seedPTC = false, native = false, laterManualInput = false
   const execute = (name: string, agent = root, args: unknown = {}, parent?: ToolExecutionInput['parent']) => ctx.tools.execute({
     callId: `call-${++call}` as ToolExecutionInput['callId'], name: publicName(name), agent, arguments: args, parent, signal: new AbortController().signal,
   })
-  return { ctx, root, child, unrelated, bridge, shell, execute, definition }
+  const turn = (agent = root) => ctx.waterfall(scopeTarget(agent, agent), 'agent/pre-step', {
+    agent, turn: 2, step: 0, messages: [], signal: new AbortController().signal,
+  }, async () => ({ kind: 'enter' as const, messages: [] }))
+  return { turn, ctx, root, child, unrelated, bridge, shell, execute, definition }
 }
 
 describe('workflow host isolation through DSH public scopes', () => {
-  it('ends human submission and blocks the next tool in the same batch without blocking other sessions', async () => {
+  it('concludes human submission and gates the next automatic step without guarding tools', async () => {
     const f = await fixture()
     await f.execute('mcp__lazymind__workflow_start')
     await f.execute('mcp__lazymind__workflow_step_begin', f.root, { session_id: 'run-1' })
     const result = await f.execute('mcp__lazymind__workflow_step_complete', f.root, { session_id: 'run-1', execution_id: 'attempt-1' })
     expect(result).toMatchObject({ isError: false, concludesTurn: true })
-    expect((await f.execute('shell')).isError).toBe(true)
-    expect(f.shell).not.toHaveBeenCalled()
+    expect((await f.turn()).kind).toBe('reject')
+    expect((await f.turn(f.unrelated)).kind).toBe('enter')
+    // Direct tool calls reach their implementation; Core owns Workflow request validation.
+    expect((await f.execute('shell')).isError).toBe(false)
     expect((await f.execute('shell', f.unrelated)).isError).toBe(false)
-    expect(f.shell).toHaveBeenCalledOnce()
+    expect(f.shell).toHaveBeenCalledTimes(2)
   })
 
   it('lets a child report its required structured output while its parent remains paused', async () => {
@@ -131,9 +136,9 @@ describe('workflow host isolation through DSH public scopes', () => {
     const submitted = await f.execute('mcp__lazymind__workflow_step_complete', f.child, { session_id: 'run-1', execution_id: 'attempt-1' })
     expect(submitted.isError).toBe(false)
     expect(submitted).not.toHaveProperty('concludesTurn')
-    expect((await f.execute('shell', f.child)).isError).toBe(true)
+    expect((await f.turn(f.child)).kind).toBe('enter')
     expect(await f.execute('structured_output', f.child)).toMatchObject({ isError: false, concludesTurn: true })
-    expect((await f.execute('mcp__lazymind__workflow_step_begin', f.root, { session_id: 'run-1' })).isError).toBe(true)
+    expect((await f.turn()).kind).toBe('reject')
   })
 
   it('accepts an unrelated explicit user turn while the workflow remains guarded', async () => {
@@ -147,7 +152,9 @@ describe('workflow host isolation through DSH public scopes', () => {
     }, async () => ({ kind: 'enter' as const, messages }))
     expect(decision.kind).toBe('enter')
     expect((await f.execute('shell', f.root)).isError).toBe(false)
-    expect((await f.execute('mcp__lazymind__workflow_step_begin', f.root, { session_id: 'run-1' })).isError).toBe(true)
+    vi.mocked(f.bridge.state).mockClear()
+    expect((await f.execute('mcp__lazymind__workflow_step_begin', f.root, { session_id: 'run-1' })).isError).toBe(false)
+    expect(f.bridge.state).not.toHaveBeenCalled()
   })
 })
 
@@ -158,7 +165,7 @@ it('restores a review barrier from a standard PTC event before an automatic step
     agent: f.root, turn: 2, step: 0, messages: [], signal: new AbortController().signal,
   }, async () => ({kind: 'enter' as const, messages: []}))
   expect(decision.kind).toBe('reject')
-  expect((await f.execute('shell')).isError).toBe(true)
+  expect((await f.turn()).kind).toBe('reject')
 })
 
 
@@ -168,7 +175,7 @@ it('concludes a created workflow when synchronous binding is unavailable', async
   vi.mocked(f.bridge.state).mockResolvedValue({protocol: 'workflow.control.v1', session_id: 'run-1', state_version: 1, continuation: 'binding_required', admission: {can_begin: false}, binding: {generation: 0, bound: false}})
   const result = await f.execute('mcp__lazymind__workflow_start')
   expect(result).toMatchObject({isError: false, concludesTurn: true})
-  expect((await f.execute('shell')).isError).toBe(true)
+  expect((await f.turn()).kind).toBe('reject')
 })
 
 it('lets a child return its committed result even when the subsequent Bridge read is unavailable', async () => {
@@ -176,20 +183,18 @@ it('lets a child return its committed result even when the subsequent Bridge rea
   await f.execute('mcp__lazymind__workflow_start')
   await f.execute('mcp__lazymind__workflow_step_begin', f.child, {session_id: 'run-1'})
   const read = vi.mocked(f.bridge.state)
-  // Pre-execute read succeeds; only the committed result's synchronization fails.
-  const current = await f.bridge.state('run-1', new AbortController().signal)
-  read.mockResolvedValueOnce(current).mockRejectedValue(new Error('bridge offline'))
+  read.mockRejectedValue(new Error('bridge offline'))
   const submitted=await f.execute('mcp__lazymind__workflow_step_complete',f.child,{session_id:'run-1',execution_id:'attempt-1'})
   expect(submitted.isError).toBe(false)
   expect((await f.execute('structured_output', f.child)).isError).toBe(false)
 })
 
 
-it('yields native tool steps without granting DSH permission to imitate their tools', async () => {
+it('yields automatic execution while Core runs a native step', async () => {
   const f = await fixture(false, true)
   await f.execute('mcp__lazymind__workflow_start')
   expect(await f.execute('mcp__lazymind__workflow_step_begin', f.root, { session_id: 'run-1' })).toMatchObject({ isError: false, concludesTurn: true })
-  expect((await f.execute('shell')).isError).toBe(true)
+  expect((await f.turn()).kind).toBe('reject')
   expect(f.shell).not.toHaveBeenCalled()
   expect((await f.execute('shell', f.unrelated)).isError).toBe(false)
 })
@@ -227,11 +232,7 @@ it.each([
   vi.mocked(f.bridge.actions).mockResolvedValueOnce({ actions: [action] })
   await vi.waitFor(() => expect(prompt).toHaveBeenCalledOnce(), { timeout: 2500 })
   expect(prompt.mock.calls[0][0].content[0].text).toContain('requires review AFTER execution')
-  if (granted || manual) expect(cancel).not.toHaveBeenCalled()
-  else {
-    expect(cancel).toHaveBeenCalledWith({ sessionId: f.root.session.id })
-    expect(cancel.mock.invocationCallOrder[0]).toBeLessThan(prompt.mock.invocationCallOrder[0])
-  }
+  expect(cancel).not.toHaveBeenCalled()
 })
 
 
@@ -247,7 +248,8 @@ it('publishes during an active grant without completing it, including review dra
     continuation: 'draining', admission: { can_begin: false }, active_execution_ids: ['attempt-1'], active_executions: 1 })
   await f.execute('mcp__lazymind__workflow_state', f.root)
   expect((await f.execute('mcp__lazymind__workflow_artifact_publish', f.root, args)).isError).toBe(false)
-  expect((await f.execute('mcp__lazymind__workflow_artifact_publish', f.root, { ...args, execution_id: 'other' })).isError).toBe(true)
+  // The host passes arguments through; execution-handle validation belongs to Core.
+  expect((await f.execute('mcp__lazymind__workflow_artifact_publish', f.root, { ...args, execution_id: 'other' })).isError).toBe(false)
 })
 
 

@@ -92,12 +92,13 @@ describe('Codex queue delivery', () => {
       expect(f.action().status).toBe(status)
     }
   })
-  it('rejects names and ignores actions invalidated before admission', async () => {
+  it('rejects names and delivers wakes without a second execution check', async () => {
     const f = fixture()
     expect(await f.adapter.resolve('task title')).toHaveProperty('error')
     vi.mocked(f.bridge.action).mockResolvedValue({ action: { ...f.action(), status: 'dispatching', consumed_at: 'now' }, control: f.control() })
     await f.dispatcher().deliver(f.action())
-    expect(f.run).not.toHaveBeenCalled()
+    expect(f.run).toHaveBeenCalledOnce()
+    expect(f.bridge.action).not.toHaveBeenCalled()
   })
   it('does not queue when Core rejects a claim', async () => {
     const f = fixture()
