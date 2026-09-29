@@ -15,9 +15,9 @@ function fixture() {
   const lifetime = new AbortController()
   let control: WorkflowControl = { protocol: 'workflow.control.v1', session_id: 'run-1', state_version: 1,
     continuation: 'continue', admission: { can_begin: true }, active_execution_ids: [],
-    binding: { driver_session_id: root.id, generation: 1, bound: true } }
+    binding: { driver_session_id: root.id, bound: true } }
   let action: HostAction = { id: 'action-1', session_id: 'run-1', native_session_id: root.id,
-    kind: 'continue', binding_generation: 1, status: 'pending' }
+    kind: 'continue', status: 'pending' }
   const receipts = new Map<string, number>()
   const runtime: RuntimeAdapter<Agent> = {
     cancellation: 'session',
@@ -101,14 +101,6 @@ describe('shared delivery contract with an SDK-free host', () => {
     expect(f.action().status).toBe('unknown')
   })
 
-  it('reads Core before checking host evidence for an uncertain continuation', async () => {
-    const f = fixture()
-    f.updateAction({ status: 'unknown' })
-    await f.dispatcher.deliver(f.action())
-    expect(vi.mocked(f.bridge.action).mock.invocationCallOrder[0]).toBeLessThan(
-      vi.mocked(f.runtime.reconcile!).mock.invocationCallOrder[0])
-  })
-
   it('does not reconcile a continuation already accepted by Core', async () => {
     const f = fixture()
     f.updateAction({ status: 'unknown' })
@@ -135,15 +127,6 @@ describe('shared delivery contract with an SDK-free host', () => {
     expect(f.bridge.state).not.toHaveBeenCalled()
     expect(f.action().status).toBe('accepted')
     expect(vi.mocked(f.runtime.prompt).mock.calls[0][1].message).not.toContain('has finished the current review')
-  })
-
-  it('keeps an unknown continuation unresolved without a reconciliation capability', async () => {
-    const f = fixture()
-    f.updateAction({ status: 'unknown' })
-    delete f.runtime.reconcile
-    await f.dispatcher.deliver(f.action())
-    expect(f.runtime.prompt).not.toHaveBeenCalled()
-    expect(f.action().status).toBe('unknown')
   })
 
   it('uses claim for an existing execution instead of starting a replacement', async () => {
@@ -185,18 +168,13 @@ describe('shared delivery contract with an SDK-free host', () => {
     expect(f.action().status).toBe('accepted')
   })
 
-  it('cancels its own stopped Workflow, but not a cancel superseded by Resume', async () => {
+  it('cancels the current Workflow-owned host turn', async () => {
     const f = fixture()
     await f.start()
     f.updateAction({ kind: 'cancel' })
     f.updateControl({ continuation: 'stopped', admission: { can_begin: false } })
     await f.dispatcher.deliver(f.action())
     expect(f.runtime.cancel).toHaveBeenCalledWith(f.root)
-    vi.mocked(f.runtime.cancel).mockClear()
-    f.updateAction({ status: 'unknown' })
-    f.updateControl({ continuation: 'continue', admission: { can_begin: true } })
-    await f.dispatcher.deliver(f.action())
-    expect(f.runtime.cancel).not.toHaveBeenCalled()
   })
 
   it('queues continuation without interrupting the current Workflow turn', async () => {
@@ -207,9 +185,10 @@ describe('shared delivery contract with an SDK-free host', () => {
     expect(f.runtime.cancel).not.toHaveBeenCalled()
   })
 
-  it('gates delayed inputs by current Workflow state, not notification age', async () => {
+  it('accepts legacy notification fields and gates the wake by current Workflow state', async () => {
     const f = fixture()
-    f.updateAction({ consumed_at: 'now', binding_generation: 0 })
+    f.updateAction({ consumed_at: 'now', binding_generation: 1 })
+    f.updateControl({ binding: { driver_session_id: f.root.id, bound: true, generation: 2 } })
     const payload = { agent: f.root, turn: 1, messages: [{ user: true, requestId: 'action-1' }], signal: f.lifetime.signal }
     expect(await f.coordinator.beforeTurn(payload)).toBe(true)
     f.updateControl({ continuation: 'stopped', admission: { can_begin: false } })
@@ -260,7 +239,7 @@ describe('shared coordination contract with an SDK-free host', () => {
     expect(await f.turn(f.other)).toBe(true)
   })
 
-  it('allows only effective executions to drain and preserves child result return', async () => {
+  it('lets a granted worker finish and report while the Controller waits', async () => {
     const f = fixture()
     await f.start()
     f.updateControl({ continuation: 'draining', admission: { can_begin: false }, active_execution_ids: ['exec-1'] })

@@ -140,40 +140,6 @@ func TestStopFencesOldWritesAndResumePreservesReview(t *testing.T) {
 	}
 }
 
-func TestCodexStopRemainsSuccessfulAfterUnsupportedCancellation(t *testing.T) {
-	svc, _ := hostControlFixture(t)
-	ctx := context.Background()
-	if err := svc.DB.Model(&orm.WorkflowSession{}).Where("id = ?", "run").Update("control_binding_json",
-		`{"required":true,"provider":"codex","connector_id":"connector","driver_session_id":"driver","generation":1}`).Error; err != nil {
-		t.Fatal(err)
-	}
-	// A stale panel version must not prevent revoking execution authority.
-	command := WorkflowControlCommand{CommandID: "codex-stop", Kind: "stop", StateVersion: -1}
-	stopped, err := svc.Execute(ctx, "owner", "run", command)
-	if err != nil || stopped.Control.Continuation != "stopped" {
-		t.Fatalf("stop: %+v %v", stopped, err)
-	}
-	// Model the dispatcher receipt without invoking a real Codex task.
-	if err := svc.DB.Model(&orm.WorkflowHostAction{}).Where("id = ?", stopped.Receipt.ActionID).
-		Updates(map[string]any{"status": "failed", "last_error": "This host does not support interrupting the current turn; Workflow is stopped in Core."}).Error; err != nil {
-		t.Fatal(err)
-	}
-	refreshed := currentControl(t, svc.DB)
-	if refreshed.Continuation != "stopped" || refreshed.Delivery == nil || refreshed.Delivery.Status != "failed" {
-		t.Fatalf("host cancellation failure changed the stopped snapshot: %+v", refreshed)
-	}
-	// Retrying an uncertain response reuses the receipt after host settlement.
-	replayed, err := svc.Execute(ctx, "owner", "run", command)
-	if err != nil || replayed.Receipt != stopped.Receipt || replayed.Control.Continuation != "stopped" {
-		t.Fatalf("replayed stop: %+v %v", replayed, err)
-	}
-	command.CommandID = "codex-stop-again"
-	repeated, err := svc.Execute(ctx, "owner", "run", command)
-	if err != nil || repeated.Control.Continuation != "stopped" {
-		t.Fatalf("repeated stop: %+v %v", repeated, err)
-	}
-}
-
 func TestControlledRetryCreatesOneReplacementForCancelledAttempt(t *testing.T) {
 	db, _ := setupBatchTransitionSession(t)
 	if err := db.AutoMigrate(&orm.WorkflowReviewCheckpoint{}, &orm.WorkflowHostAction{}, &orm.WorkflowCommand{}, &orm.WorkflowRevisionEntry{}, &orm.WorkflowBlob{}); err != nil {
@@ -423,7 +389,7 @@ func TestRewindCancelsOnlyDependentActiveExecutions(t *testing.T) {
 					t.Fatal(err)
 				}
 				if err := db.Model(&orm.WorkflowSession{}).Where("id = ?", "batch-session").Updates(map[string]any{
-					"control_protocol": controlpolicy.Protocol, "control_binding_json": `{"connector_id":"connector","driver_session_id":"driver","generation":1}`, "origin_host": "external-agent", "controller_host": "external-agent", "status": "active",
+					"control_protocol": controlpolicy.Protocol, "control_binding_json": `{"connector_id":"connector","driver_session_id":"driver"}`, "origin_host": "external-agent", "controller_host": "external-agent", "status": "active",
 				}).Error; err != nil {
 					t.Fatal(err)
 				}
@@ -588,7 +554,7 @@ func TestContinueEditedCompletedRunCreatesFreshExecution(t *testing.T) {
 	}
 	if err := db.Model(&orm.WorkflowSession{}).Where("id = ?", "batch-session").Updates(map[string]any{
 		"control_protocol": controlpolicy.Protocol, "controller_host": "external-agent", "status": "completed",
-		"control_binding_json": `{"required":true,"edit_paused":true,"driver_session_id":"driver","connector_id":"connector","generation":1}`,
+		"control_binding_json": `{"required":true,"edit_paused":true,"driver_session_id":"driver","connector_id":"connector"}`,
 	}).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -707,13 +673,15 @@ func TestLateReceiptSurvivesStopAndDoesNotBlockNewContinuation(t *testing.T) {
 	}
 }
 
-func TestUnsupportedCancellationDoesNotRequireDispatcherForResume(t *testing.T) {
+func TestUnsupportedCancellationPreservesStopAndAllowsResume(t *testing.T) {
 	svc, id := hostControlFixture(t)
 	ctx := context.Background()
 	if _, err := svc.Bind(ctx, "owner", "run", WorkflowHostBindingRequest{ConnectorID: id.ConnectorID, Credential: id.Credential, Provider: "deepseek-harness", DriverSessionID: "driver", Cancellation: "none"}); err != nil {
 		t.Fatal(err)
 	}
-	stopped, err := svc.Execute(ctx, "owner", "run", WorkflowControlCommand{CommandID: "stop", Kind: "stop"})
+	// Stop revokes authority even when the panel has an old state version.
+	command := WorkflowControlCommand{CommandID: "stop", Kind: "stop", StateVersion: -1}
+	stopped, err := svc.Execute(ctx, "owner", "run", command)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -721,6 +689,19 @@ func TestUnsupportedCancellationDoesNotRequireDispatcherForResume(t *testing.T) 
 	if err != nil || action.Action.Status != "failed" || action.Action.LastError == "" {
 		t.Fatalf("unsupported cancel must not report success: %+v %v", action, err)
 	}
+	if stopped.Control.Continuation != "stopped" || stopped.Control.Delivery == nil || stopped.Control.Delivery.Status != "failed" {
+		t.Fatalf("unsupported host cancellation changed Core Stop: %+v", stopped.Control)
+	}
+	replayed, err := svc.Execute(ctx, "owner", "run", command)
+	if err != nil || replayed.Receipt != stopped.Receipt {
+		t.Fatalf("Stop replay lost its receipt: %+v %v", replayed, err)
+	}
+	command.CommandID = "stop-again"
+	repeated, err := svc.Execute(ctx, "owner", "run", command)
+	if err != nil || repeated.Control.Continuation != "stopped" {
+		t.Fatalf("repeated Stop: %+v %v", repeated, err)
+	}
+	// Unsupported cancellation needs no dispatcher receipt before Resume.
 	if err := controlstore.Transaction(ctx, svc.DB, "run", func(tx *gorm.DB, session *orm.WorkflowSession) error {
 		_, _, err := controlstore.ApplyLifecycle(tx, session, "resume", false)
 		return err
