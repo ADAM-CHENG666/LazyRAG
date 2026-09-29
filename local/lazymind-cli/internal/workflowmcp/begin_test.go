@@ -3,9 +3,9 @@ package workflowmcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"lazymind/agentconnector/internal/coreapi"
@@ -28,7 +28,7 @@ func TestBeginLeavesStepAdmissionToCore(t *testing.T) {
 				t.Errorf("wrong request: %v", input)
 			}
 			w.WriteHeader(http.StatusConflict)
-			_, _ = w.Write([]byte(`{"code":"WORKFLOW_ADMISSION_DENIED","error":"Core rejected step"}`))
+			_, _ = w.Write([]byte(`{"ok":false,"error":{"code":"WORKFLOW_ADMISSION_DENIED","message":"Core rejected step"}}`))
 		default:
 			t.Errorf("unexpected request: %s", r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -42,7 +42,8 @@ func TestBeginLeavesStepAdmissionToCore(t *testing.T) {
 	api, _ := coreapi.New(store)
 	client := &Client{api: api}
 	_, err := client.Begin(context.Background(), BeginInput{SessionID: "run", StepID: "step", CommandID: "begin"})
-	if !submitted || err == nil || strings.Contains(err.Error(), "not ready") {
+	var rejected *coreapi.Error
+	if !submitted || !errors.As(err, &rejected) || rejected.StatusCode != http.StatusConflict || rejected.Code != "WORKFLOW_ADMISSION_DENIED" || rejected.Message != "Core rejected step" {
 		t.Fatalf("MCP must forward to Core and preserve rejection: submitted=%v err=%v", submitted, err)
 	}
 }
