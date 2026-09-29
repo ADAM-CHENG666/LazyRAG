@@ -6,7 +6,12 @@ func manualOpenAPISpec() map[string]any {
 		schemas[name] = schema
 	}
 	for path, operations := range notificationPaths() {
-		paths[path] = operations
+		if paths[path] == nil {
+			paths[path] = map[string]any{}
+		}
+		for method, operation := range operations.(map[string]any) {
+			paths[path].(map[string]any)[method] = operation
+		}
 	}
 	ordinarySchemas, ordinaryPaths := ordinaryTaskOpenAPI()
 	for name, schema := range ordinarySchemas {
@@ -53,6 +58,8 @@ func manualOpenAPISpec() map[string]any {
 
 func manualSchemas() map[string]any {
 	return map[string]any{
+		"AutomationGroupCreateRequest": objReq([]string{"name"}, prop("name", strSchema()), prop("remark", strSchema()), prop("timezone", strSchema())),
+		"ScheduleMoveRequest":          obj(prop("group_id", nullableSchema(strSchema())), prop("position", intSchema())),
 		"ChatExport": objReq([]string{"index", "title", "filename", "content_type", "start", "end", "export_id"},
 			prop("index", intSchema()), prop("title", strSchema()), prop("filename", strSchema()),
 			prop("content_type", enumStringSchema("text/markdown")), prop("start", intSchema()), prop("end", intSchema()), prop("export_id", strSchema())),
@@ -79,7 +86,7 @@ func manualSchemas() map[string]any {
 				prop("permission_mode", enumStringSchema("always_ask", "ask_as_needed", "allow_all")), prop("permission_version", int64Schema())))),
 		"LocalWorkspacePermissionResponse": objReq([]string{"code", "message", "data"}, prop("code", intSchema()), prop("message", strSchema()),
 			prop("data", objReq([]string{"permission_mode", "permission_version", "effective_at"},
-				prop("permission_mode", enumStringSchema("always_ask", "ask_as_needed", "allow_all")), prop("permission_version", int64Schema()), prop("effective_at", enumStringSchema("next_request"))))),
+				prop("permission_mode", enumStringSchema("always_ask", "ask_as_needed", "allow_all")), prop("permission_version", int64Schema()), prop("user_permission_version", int64Schema()), prop("effective_at", enumStringSchema("next_request"))))),
 		"LocalWorkspaceRevokeResponse": objReq([]string{"code", "message", "data"}, prop("code", intSchema()), prop("message", strSchema()),
 			prop("data", objReq([]string{"workspace_id", "status", "version", "affected_task_count", "stop_requested", "stop_failed_count"},
 				prop("workspace_id", strSchema()), prop("status", enumStringSchema("revoked")), prop("version", int64Schema()),
@@ -880,7 +887,7 @@ func manualPaths() map[string]any {
 		"/local-workspaces":                                     map[string]any{"get": op("List local workspaces", nil, nil, response(200, "Workspace list", refSchema("LocalWorkspaceListResponse")))},
 		"/local-workspaces/{workspace_id}:revoke":               map[string]any{"post": op("Revoke local workspace", []map[string]any{param("path", "workspace_id", true, strSchema())}, jsonBody(objReq([]string{"version"}, prop("version", int64Schema())), true), response(200, "Workspace revoked", refSchema("LocalWorkspaceRevokeResponse")))},
 		"/conversations/{conversation_id}:workspace":            map[string]any{"get": op("Get conversation workspace binding", []map[string]any{param("path", "conversation_id", true, strSchema())}, nil, response(200, "Workspace binding", refSchema("LocalWorkspaceBindingResponse")))},
-		"/conversations/{conversation_id}:workspace-permission": map[string]any{"put": op("Update workspace permission", []map[string]any{param("path", "conversation_id", true, strSchema())}, jsonBody(objReq([]string{"permission_mode", "version"}, prop("permission_mode", enumStringSchema("always_ask", "ask_as_needed", "allow_all")), prop("version", int64Schema())), true), response(200, "Permission applies to next request", refSchema("LocalWorkspacePermissionResponse")))},
+		"/conversations/{conversation_id}:workspace-permission": map[string]any{"put": op("Update conversation permission and user default, with or without a workspace", []map[string]any{param("path", "conversation_id", true, strSchema())}, jsonBody(objReq([]string{"permission_mode", "version"}, prop("permission_mode", enumStringSchema("always_ask", "ask_as_needed", "allow_all")), prop("version", int64Schema()), prop("user_permission_version", int64Schema())), true), response(200, "Permission applies to next request", refSchema("LocalWorkspacePermissionResponse")))},
 		"/dataset/algos":                                        map[string]any{"get": op("Dataset algorithm list", nil, nil, response(200, "Algorithm list", refSchema("ListAlgosResponse")))},
 		"/dataset/tags":                                         map[string]any{"get": op("Dataset tags", queryParams(param("name", "order_by", false, strSchema()), param("query", "keyword", false, strSchema())), nil, response(200, "Dataset tags", refSchema("AllDatasetTagsResponse")))},
 		"/datasets": map[string]any{
@@ -1062,6 +1069,17 @@ func manualPaths() map[string]any {
 		)},
 		"/workflow-drafts/{draft_id}:purge": map[string]any{"delete": op(
 			"Permanently delete a workflow draft", queryParams(param("path", "draft_id", true, strSchema())), nil, response(200, "Workflow permanently deleted", refSchema("CoreEmptyResponse")),
+		)},
+		"/schedules": map[string]any{"get": op(
+			"List schedules", queryParams(param("query", "include_disabled", false, boolSchema())), nil,
+			map[string]any{"description": "Schedules"},
+		)},
+		"/automation-groups": map[string]any{"post": op(
+			"Create an automation group", nil, jsonBody(refSchema("AutomationGroupCreateRequest"), true), map[string]any{"description": "Automation group"},
+		)},
+		"/schedules/{schedule_id}:move": map[string]any{"post": op(
+			"Move a schedule to an automation group", queryParams(param("path", "schedule_id", true, strSchema())),
+			jsonBody(refSchema("ScheduleMoveRequest"), true), map[string]any{"description": "Schedule moved"},
 		)},
 		"/task-center/tasks": map[string]any{"get": op(
 			"List task-center tasks", queryParams(

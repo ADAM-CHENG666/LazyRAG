@@ -58,6 +58,7 @@ import type { OrdinaryCollection, OrdinaryRunView } from "@/modules/chat/types/o
 import "./index.scss";
 
 interface Props {
+  hideFinalArtifacts?: boolean;
   sessionId: string;
   onClose?: () => void;
   showHeader?: boolean;
@@ -303,7 +304,7 @@ function WritingSubtaskList({ subtasks }: { subtasks?: WritingSubtask[] }) {
             <span className="writing-subtask-copy">
               <span className="writing-subtask-heading">
                 <strong>{item.node_title || item.node_id}</strong>
-                <span>{t(`chat.writerIR.subtaskTypes.${item.subtask_type}`)}</span>
+                <span>{t(`chat.writerIR.subtaskTypes.${item.subtask_type === "extract" ? "reason" : item.subtask_type}`)}</span>
                 <span>{t(`taskCenter.writingSubtaskStatus_${item.status}`)}</span>
               </span>
               <span>{item.question}</span>
@@ -1014,6 +1015,7 @@ function defaultOrdinaryExpandedId(items: OrdinaryTaskItem[]): string | null {
 }
 
 function OrdinaryTaskCenter({
+  hideFinalArtifacts = false,
   timeline,
   onClose,
   showHeader,
@@ -1023,6 +1025,7 @@ function OrdinaryTaskCenter({
   onReloadArtifacts,
   runs,
 }: {
+  hideFinalArtifacts?: boolean;
   runs: OrdinaryRunView[];
   timeline: OrdinaryTaskTimeline;
   onClose?: () => void;
@@ -1190,7 +1193,7 @@ function OrdinaryTaskCenter({
               );
             })}
           </ol>
-          <TaskArtifactList artifacts={finalArtifacts} final onReload={onReloadArtifacts} />
+          {!hideFinalArtifacts && <TaskArtifactList artifacts={finalArtifacts} final onReload={onReloadArtifacts} />}
         </>
       )}
     </div>
@@ -1270,6 +1273,7 @@ const TaskCenter = (props: Props) => {
   if (!developerMode) {
     return (
       <OrdinaryTaskCenter
+        hideFinalArtifacts={props.hideFinalArtifacts}
         key={sessionId}
         runs={[...(runs ?? []), ...(workflowSession?.ordinary_runs ?? [])]}
         timeline={ordinaryTimeline}

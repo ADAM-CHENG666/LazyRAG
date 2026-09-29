@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"strconv"
 	"testing"
 )
@@ -15,6 +16,8 @@ func TestServiceRuntimeEnvDisablesPythonBytecodeWrites(t *testing.T) {
 
 	assertEnvContains(t, serviceRuntimeEnv(paths), "PYTHONDONTWRITEBYTECODE=1")
 	assertEnvContains(t, runtimeCommandEnv(paths, cfg), "PYTHONDONTWRITEBYTECODE=1")
+	assertEnvContains(t, serviceRuntimeEnv(paths), "NUMBA_CACHE_DIR="+filepath.Join(paths.XDGCacheDir, "numba"))
+	assertEnvContains(t, runtimeCommandEnv(paths, cfg), "NUMBA_CACHE_DIR="+filepath.Join(paths.XDGCacheDir, "numba"))
 	assertEnvContains(
 		t,
 		localRuntimeEnv(cfg),
@@ -41,6 +44,27 @@ func TestRuntimeEnvCarriesLocalAutoLoginLANFlag(t *testing.T) {
 	t.Setenv(localAutoLoginAllowLANEnvVar, "true")
 	assertEnvContains(t, localRuntimeEnv(cfg), localAutoLoginAllowLANEnvVar+"=true")
 	assertEnvContains(t, runtimeCommandEnv(paths, cfg), localAutoLoginAllowLANEnvVar+"=true")
+}
+
+func TestRuntimeProcessEnvironmentCarriesObsidianPathsToChat(t *testing.T) {
+	cfg := RuntimeConfig{Profile: "local"}
+	paths := RuntimePaths{}
+	t.Setenv("LAZYLLM_OBSIDIAN_VAULT_PATH", "/tmp/obsidian-vault")
+	t.Setenv("LAZYLLM_OBSIDIAN_HOST_ROOT", "/tmp/obsidian-root")
+
+	base := runtimeCommandEnv(paths, cfg)
+	plan := buildRuntimeProcessPlan(cfg)
+	chatEnv := runtimeProcessEnvironment(base, cfg, plan, chatProcessName)
+	assertEnvContains(t, chatEnv, "LAZYLLM_OBSIDIAN_VAULT_PATH=/tmp/obsidian-vault")
+	assertEnvContains(t, chatEnv, "LAZYLLM_OBSIDIAN_HOST_ROOT=/tmp/obsidian-root")
+
+	authEnv := runtimeProcessEnvironment(base, cfg, plan, authServiceProcessName)
+	assertEnvMissing(t, authEnv, "LAZYLLM_OBSIDIAN_VAULT_PATH")
+	assertEnvMissing(t, authEnv, "LAZYLLM_OBSIDIAN_HOST_ROOT")
+
+	algoEnv := runtimeProcessEnvironment(base, cfg, plan, algoProcessName)
+	assertEnvMissing(t, algoEnv, "LAZYLLM_OBSIDIAN_VAULT_PATH")
+	assertEnvMissing(t, algoEnv, "LAZYLLM_OBSIDIAN_HOST_ROOT")
 }
 
 func TestInstallerWarmupUsesPerProcessCapabilities(t *testing.T) {

@@ -22,6 +22,7 @@ import (
 	"lazymind/core/cloudresource"
 	"lazymind/core/cloudsession"
 	"lazymind/core/cloudusage"
+	"lazymind/core/common"
 	"lazymind/core/conversationgroup"
 	"lazymind/core/credentialvault"
 	"lazymind/core/currentmemory"
@@ -42,6 +43,7 @@ import (
 	"lazymind/core/modelconfig"
 	"lazymind/core/modelprovider"
 	coreproviderconnection "lazymind/core/providerconnection"
+	"lazymind/core/realtime"
 	"lazymind/core/remotefs"
 	"lazymind/core/resourceupdate"
 	"lazymind/core/scheduler"
@@ -102,6 +104,10 @@ func handleAgentThreadAPI(r *mux.Router, method, path string, perms []string, h 
 
 // registerAllRoutes text OpenAPI text（text Job），text handleAPI textPermissiontext（text extract_api_permissions.py text Kong RBAC）。
 func registerAllRoutes(r *mux.Router) {
+	// Browser WebSockets cannot set Authorization on the upgrade request.
+	// Each multiplexed operation is authorized against its original API path.
+	r.Handle("/realtime/connect", realtime.Handler{Routes: r, Authorize: realtime.Authorize(common.AuthServiceBaseURL())}).Methods(http.MethodGet)
+	r.HandleFunc("/showcase-assets/{asset:.*}", showcase.ServeAsset).Methods(http.MethodGet, http.MethodHead)
 	handleAPI(r, "GET", "/local-workspaces", []string{"qa.read"}, localworkspace.List)
 	handleAPI(r, "POST", "/local-workspaces/{workspace_id}:revoke", []string{"qa.write"}, localworkspace.Revoke)
 	handleAPI(r, "GET", "/conversations/{conversation_id}:workspace", []string{"qa.read"}, localworkspace.ConversationBinding)
@@ -269,12 +275,13 @@ func registerAllRoutes(r *mux.Router) {
 	handleAPI(r, "GET", "/datasets", []string{"document.read"}, doc.ListDatasets)
 	handleAPI(r, "POST", "/internal/datasets/usage:batch", nil, doc.InternalBatchDatasetUsage)
 	handleAPI(r, "POST", "/datasets", []string{"document.write"}, doc.CreateDataset)
-	handleAPI(r, "POST", "/datasets/processing/preflight", []string{"document.write"}, doc.ProcessingPreflight)
+	handleAPI(r, "POST", "/datasets/processing/preflight", []string{"document.write"}, systemdeps.RequireRAG(doc.ProcessingPreflight))
 	handleAPI(r, "GET", "/datasets/{dataset}", []string{"document.read"}, doc.GetDataset)
 	handleAPI(r, "DELETE", "/datasets/{dataset}", []string{"document.write"}, doc.DeleteDataset)
 	handleAPI(r, "PATCH", "/datasets/{dataset}", []string{"document.write"}, doc.UpdateDataset)
-	handleAPI(r, "PATCH", "/datasets/{dataset}/processing-level", []string{"document.write"}, doc.UpdateProcessingLevel)
+	handleAPI(r, "PATCH", "/datasets/{dataset}/processing-level", []string{"document.write"}, systemdeps.RequireRAG(doc.UpdateProcessingLevel))
 	handleAPI(r, "POST", "/datasets/{dataset}/documents/{document}:ensure-parsed", []string{"document.read"}, doc.EnsureParsed)
+	handleAPI(r, "GET", "/datasets/{dataset}/documents/{document}:read", []string{"document.read"}, doc.ReadDocument)
 	handleAPI(r, "GET", "/datasets/{dataset}/processing-status", []string{"document.read"}, doc.GetProcessingStatus)
 
 	// ----- Academic references and paper imports -----
@@ -292,6 +299,9 @@ func registerAllRoutes(r *mux.Router) {
 	handleAPI(r, "POST", "/datasets/{dataset}:unsetDefault", []string{"document.write"}, doc.UnsetDefault)
 	handleAPI(r, "GET", "/data-sources/local-fs-chat-setting", []string{"document.read"}, datasource.GetLocalFSChatSetting)
 	handleAPI(r, "PUT", "/data-sources/local-fs-chat-setting", []string{"document.write"}, datasource.SetLocalFSChatSetting)
+	handleAPI(r, "GET", "/system-dependencies/pdf-font", []string{"document.read"}, systemdeps.GetPDFFont)
+	handleAPI(r, "GET", "/system-dependencies/python", []string{"document.read"}, systemdeps.GetPythonComponents)
+	handleAPI(r, "POST", "/system-dependencies/python:install", []string{"document.write"}, systemdeps.InstallPythonComponent)
 	handleAPI(r, "GET", "/system-dependencies/ffmpeg", []string{"document.read"}, systemdeps.GetFFmpegDependency)
 	handleAPI(r, "PUT", "/system-dependencies/ffmpeg", []string{"document.write"}, systemdeps.UpdateFFmpegDependency)
 	handleAPI(r, "POST", "/system-dependencies/ffmpeg:check", []string{"document.read"}, systemdeps.CheckFFmpegDependency)
@@ -333,19 +343,22 @@ func registerAllRoutes(r *mux.Router) {
 
 	// ----- DocumentService -----
 	handleAPI(r, "GET", "/datasets/{dataset}/documents", []string{"document.read"}, doc.ListDocuments)
-	handleAPI(r, "POST", "/datasets/{dataset}/documents", []string{"document.write"}, doc.CreateDocument)
+	handleAPI(r, "POST", "/datasets/{dataset}/documents", []string{"document.write"}, systemdeps.RequireRAG(doc.CreateDocument))
 	// :content/:download text {document} text，text /documents/xxx:content text {document} text。
-	handleAPI(r, "GET", "/datasets/{dataset}/documents/{document}:content", []string{"document.read"}, doc.GetDocumentContent)
+	handleAPI(r, "GET", "/datasets/{dataset}/documents/{document}:content", []string{"document.read"}, systemdeps.RequireRAG(doc.GetDocumentContent))
 	handleAPI(r, "GET", "/datasets/{dataset}/documents/{document}:download", []string{"document.read"}, doc.DownloadDocument)
 	handleAPI(r, "GET", "/datasets/{dataset}/documents/{document}", []string{"document.read"}, doc.GetDocument)
 	handleAPI(r, "GET", "/datasets/{dataset}/documents/{document}/pdf-capabilities", []string{"document.read"}, doc.GetPDFCapabilities)
-	handleAPI(r, "POST", "/datasets/{dataset}/documents/{document}/pdf-artifacts/searchable", []string{"document.write"}, doc.CreateSearchablePDFJob)
-	handleAPI(r, "POST", "/datasets/{dataset}/documents/{document}/pdf-translations", []string{"document.write"}, doc.CreateTranslationPDFJob)
+	handleAPI(r, "POST", "/datasets/{dataset}/documents/{document}/pdf-artifacts/searchable", []string{"document.write"}, systemdeps.RequireRAG(doc.CreateSearchablePDFJob))
+	handleAPI(r, "POST", "/datasets/{dataset}/documents/{document}/pdf-translations", []string{"document.write"}, systemdeps.RequireRAG(doc.CreateTranslationPDFJob))
 	handleAPI(r, "GET", "/datasets/{dataset}/documents/{document}/pdf-translations", []string{"document.read"}, doc.ListPDFTranslations)
 	handleAPI(r, "PATCH", "/datasets/{dataset}/documents/{document}/pdf-render-jobs/{job}", []string{"document.write"}, doc.UpdatePDFRenderJob)
 	handleAPI(r, "POST", "/datasets/{dataset}/documents/{document}/pdf-render-jobs/{job}:complete", []string{"document.write"}, doc.CompletePDFRenderJob)
 	handleAPI(r, "GET", "/datasets/{dataset}/documents/{document}/pdf-artifacts/{artifact}:content", []string{"document.read"}, doc.GetPDFArtifact)
 	handleAPI(r, "GET", "/datasets/{dataset}/documents/{document}/pdf-artifacts/{artifact}:layout", []string{"document.read"}, doc.GetPDFArtifactLayout)
+	handleAPI(r, "GET", "/datasets/{dataset}/documents/{document}/pdf-artifacts/{artifact}:draft", []string{"document.read"}, doc.GetPDFTranslationDraft)
+	handleAPI(r, "POST", "/datasets/{dataset}/documents/{document}/pdf-artifacts/{artifact}:retranslate", []string{"document.write"}, doc.RetranslatePDFDraftBlock)
+	handleAPI(r, "POST", "/datasets/{dataset}/documents/{document}/pdf-artifacts/{artifact}:revise", []string{"document.write"}, doc.RevisePDFTranslation)
 	handleAPI(r, "DELETE", "/datasets/{dataset}/documents/{document}/pdf-artifacts/{artifact}", []string{"document.write"}, doc.DeletePDFArtifact)
 	handleAPI(r, "DELETE", "/datasets/{dataset}/documents/{document}", []string{"document.write"}, doc.DeleteDocument)
 	handleAPI(r, "PATCH", "/datasets/{dataset}/documents/{document}", []string{"document.write"}, doc.UpdateDocument)
@@ -358,9 +371,9 @@ func registerAllRoutes(r *mux.Router) {
 	handleAPI(r, "GET", "/document/creators", []string{"document.read"}, doc.AllDocumentCreators)
 	handleAPI(r, "GET", "/document/tags", []string{"document.read"}, doc.AllDocumentTags)
 	// ----- text -----
-	handleAPI(r, "GET", "/datasets/{dataset}/documents/{document}/segments", []string{"document.read"}, doc.ListSegments)
-	handleAPI(r, "GET", "/datasets/{dataset}/documents/{document}/segments/{segment}", []string{"document.read"}, doc.GetSegment)
-	handleAPI(r, "POST", "/datasets/{dataset}/documents/{document}/segments:search", []string{"document.read"}, doc.SearchSegments)
+	handleAPI(r, "GET", "/datasets/{dataset}/documents/{document}/segments", []string{"document.read"}, systemdeps.RequireRAG(doc.ListSegments))
+	handleAPI(r, "GET", "/datasets/{dataset}/documents/{document}/segments/{segment}", []string{"document.read"}, systemdeps.RequireRAG(doc.GetSegment))
+	handleAPI(r, "POST", "/datasets/{dataset}/documents/{document}/segments:search", []string{"document.read"}, systemdeps.RequireRAG(doc.SearchSegments))
 
 	// ----- DatasetMembertext -----
 	handleAPI(r, "GET", "/datasets/{dataset}/members", []string{"document.read"}, doc.ListDatasetMembers)
@@ -409,6 +422,8 @@ func registerAllRoutes(r *mux.Router) {
 	// ----- text -----
 	handleAPI(r, "POST", "/chat", []string{"qa.write"}, chat.Chat)
 	handleAPI(r, "GET", "/tools", []string{"qa.read"}, chat.ListTools)
+	handleAPI(r, "POST", "/internal/conversations/{conversation_id}/tool-configuration-actions", nil, chat.InternalToolConfiguration)
+	handleAPI(r, "GET", "/conversations/{conversation_id}/tool-configuration-actions", []string{"qa.read"}, chat.ListToolConfigurations)
 	handleAPI(r, "POST", "/tools/{tool_name}:disable", []string{"qa.read"}, chat.DisableTool)
 	handleAPI(r, "POST", "/tools/{tool_name}:enable", []string{"qa.read"}, chat.EnableTool)
 
@@ -601,6 +616,10 @@ func registerAllRoutes(r *mux.Router) {
 	// ----- User Chat Settings (quick-question/new-task defaults) -----
 	handleAPI(r, "GET", "/user/chat-settings", []string{"qa.read"}, chat.GetChatSettings)
 	handleAPI(r, "PATCH", "/user/chat-settings", []string{"qa.write"}, chat.PatchChatSettings)
+	handleAPI(r, "GET", "/user/env-vars", []string{"qa.read"}, chat.ListUserEnvironmentVariables)
+	handleAPI(r, "POST", "/user/env-vars", []string{"qa.write"}, chat.CreateUserEnvironmentVariable)
+	handleAPI(r, "PATCH", "/user/env-vars/{id}", []string{"qa.write"}, chat.PatchUserEnvironmentVariable)
+	handleAPI(r, "DELETE", "/user/env-vars/{id}", []string{"qa.write"}, chat.DeleteUserEnvironmentVariable)
 	// Legal consent is a login prerequisite and must not depend on optional QA permissions.
 	// The handlers still require the gateway-injected X-User-Id identity.
 	handleAPI(r, "GET", "/user/ui-preferences", []string{}, userprefs.GetUIPreferences)
@@ -767,6 +786,7 @@ func registerAllRoutes(r *mux.Router) {
 	handleAPI(r, "POST", "/skill-recordings", []string{"qa.write"}, skillv2handler.SubmitSkillRecording)
 	handleAPI(r, "POST", "/skill-recordings/decision", []string{"qa.write"}, skillv2handler.DecideSkillRecording)
 	handleAPI(r, "POST", "/skill_organize", []string{"qa.write"}, skillv2handler.SubmitSkillOrganize)
+	handleAPI(r, "POST", "/skill_organize:cancel", []string{"qa.write"}, skillv2handler.CancelSkillOrganize)
 	handleAPI(r, "GET", "/skills/maintenance-task", []string{"qa.read"}, skillv2handler.MaintenanceTaskStatus)
 	handleAPI(r, "GET", "/skills/tags", []string{"qa.read"}, skillv2handler.ListTags)
 	handleAPI(r, "GET", "/skills/categories", []string{"qa.read"}, skillv2handler.ListCategories)
@@ -836,9 +856,9 @@ func registerAllRoutes(r *mux.Router) {
 	handleAPI(r, "GET", "/knowledge-market", []string{"qa.read"}, knowledge_market.MarketList)
 	handleAPI(r, "GET", "/knowledge-market/domains", []string{"qa.read"}, knowledge_market.MarketDomains)
 	handleAPI(r, "GET", "/knowledge-market/items/{market_item_id}", []string{"qa.read"}, knowledge_market.MarketGet)
-	handleAPI(r, "POST", "/knowledge-market/items/{market_item_id}:install", []string{"qa.write"}, knowledge_market.MarketInstall)
-	handleAPI(r, "POST", "/knowledge-market/items/{market_item_id}:update", []string{"qa.write"}, knowledge_market.MarketUpdate)
-	handleAPI(r, "POST", "/knowledge-market:update-all", []string{"qa.write"}, knowledge_market.MarketUpdateAll)
+	handleAPI(r, "POST", "/knowledge-market/items/{market_item_id}:install", []string{"qa.write"}, systemdeps.RequireRAG(knowledge_market.MarketInstall))
+	handleAPI(r, "POST", "/knowledge-market/items/{market_item_id}:update", []string{"qa.write"}, systemdeps.RequireRAG(knowledge_market.MarketUpdate))
+	handleAPI(r, "POST", "/knowledge-market:update-all", []string{"qa.write"}, systemdeps.RequireRAG(knowledge_market.MarketUpdateAll))
 	handleAPI(r, "GET", "/knowledge-market/tasks", []string{"qa.read"}, knowledge_market.MarketListInstallTasks)
 	handleAPI(r, "GET", "/knowledge-market/tasks/{job_id}", []string{"qa.read"}, knowledge_market.MarketGetInstallTask)
 	handleAPI(r, "DELETE", "/knowledge-market/tasks/{job_id}", []string{"qa.write"}, knowledge_market.MarketDeleteTask)
@@ -890,6 +910,7 @@ func registerAllRoutes(r *mux.Router) {
 	handleAPI(r, "POST", "/conversations:setChatHistory", []string{"qa.write"}, chat.SetChatHistory)
 	handleAPI(r, "POST", "/conversations:feedBackChatHistory", []string{"qa.write"}, chat.FeedBackChatHistory)
 	handleAPI(r, "PATCH", "/conversations/{name}:ask-answers", []string{"qa.write"}, chat.SaveAskAnswers)
+	handleAPI(r, "POST", "/conversations/{name}:env-input", []string{"qa.write"}, chat.SubmitEnvironmentInput)
 	handleAPI(r, "PATCH", "/conversations:editable-block", []string{"qa.write"}, chat.PatchEditableBlock)
 
 	handleAPI(r, "GET", "/conversation:switchStatus", []string{"qa.read"}, chat.GetMultiAnswersSwitchStatus)

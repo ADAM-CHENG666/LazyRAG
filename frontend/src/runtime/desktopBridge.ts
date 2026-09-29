@@ -69,6 +69,14 @@ export interface DesktopLocalFolderAuthorizationResult
   addedRoots: string[];
 }
 
+export interface DesktopObsidianConfig {
+  configured: boolean;
+  available: boolean;
+  root?: string;
+  updatedAt?: string;
+  canceled?: boolean;
+}
+
 export type DesktopAgent = "codex" | "cursor" | "workbuddy" | "raccoon" | "traework" | "deepseek-harness";
 
 export type DesktopAgentIntegrationState =
@@ -193,7 +201,7 @@ interface LazyMindDesktopBridge {
   agentExecutableClear?: (target: DesktopAgentBindingTarget) => Promise<unknown> | unknown;
   assistantSessionSet?: (session: LocalAssistantSession) => Promise<unknown> | unknown;
   assistantSessionClear?: () => Promise<unknown> | unknown;
-  restartRuntime?: () => Promise<unknown> | unknown;
+  restartRuntime?: (options?: { reload?: boolean }) => Promise<unknown> | unknown;
   resetRuntime?: (scope?: "kb" | "all") => Promise<unknown> | unknown;
   localFolderAccessStatus?: () => Promise<DesktopLocalFolderAccessState> | DesktopLocalFolderAccessState;
   chooseLocalDiscoveryRoots?: () => Promise<DesktopLocalFolderAccessState> | DesktopLocalFolderAccessState;
@@ -203,6 +211,9 @@ interface LazyMindDesktopBridge {
   selectLocalWorkspace?: () => Promise<DesktopWorkspaceSelection> | DesktopWorkspaceSelection;
   reauthorizeLocalWorkspace?: (workspaceId: string) => Promise<DesktopWorkspaceSelection> | DesktopWorkspaceSelection;
   authorizeLocalWorkspace?: (selectionToken: string) => Promise<DesktopWorkspaceGrant> | DesktopWorkspaceGrant;
+  obsidianConfigStatus?: () => Promise<DesktopObsidianConfig> | DesktopObsidianConfig;
+  selectObsidianRoot?: () => Promise<DesktopObsidianConfig> | DesktopObsidianConfig;
+  clearObsidianRoot?: () => Promise<DesktopObsidianConfig> | DesktopObsidianConfig;
   selectExecutable?: (target?: DesktopAgentBindingTarget) => Promise<string | null> | string | null;
   exportDiagnostics?: () => Promise<string> | string;
   openCloudLogin?: (url: string) => Promise<unknown> | unknown;
@@ -597,8 +608,15 @@ async function callLocalAssistantBridge(
   }
 }
 
-export function restartRuntime(): Promise<DesktopBridgeResult> {
-  return callDesktopBridge("restartRuntime");
+export async function restartRuntime(options?: { reload?: boolean }): Promise<DesktopBridgeResult> {
+  const bridge = getDesktopBridge();
+  if (!bridge?.restartRuntime) return { ok: false, reason: "unavailable" };
+  try {
+    await bridge.restartRuntime(options);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, reason: "failed", error };
+  }
 }
 
 export function resetRuntime(scope?: "kb" | "all"): Promise<DesktopBridgeResult> {
@@ -639,6 +657,30 @@ export function authorizeLocalWorkspace(selectionToken: string): Promise<Desktop
   return bridge?.authorizeLocalWorkspace
     ? Promise.resolve(bridge.authorizeLocalWorkspace(selectionToken))
     : Promise.resolve(null);
+}
+
+export function obsidianConfigStatus(): Promise<DesktopObsidianConfig | null> {
+  const bridge = getDesktopBridge();
+  if (!bridge?.obsidianConfigStatus) {
+    return Promise.resolve(null);
+  }
+  return Promise.resolve(bridge.obsidianConfigStatus());
+}
+
+export function selectObsidianRoot(): Promise<DesktopObsidianConfig | null> {
+  const bridge = getDesktopBridge();
+  if (!bridge?.selectObsidianRoot) {
+    return Promise.resolve(null);
+  }
+  return Promise.resolve(bridge.selectObsidianRoot());
+}
+
+export function clearObsidianRoot(): Promise<DesktopObsidianConfig | null> {
+  const bridge = getDesktopBridge();
+  if (!bridge?.clearObsidianRoot) {
+    return Promise.resolve(null);
+  }
+  return Promise.resolve(bridge.clearObsidianRoot());
 }
 
 export function localFolderAccessStatus(): Promise<DesktopLocalFolderAccessState | null> {

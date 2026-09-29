@@ -18,6 +18,27 @@ vi.mock("@/modules/chat/store/taskCenter", () => ({
 }));
 
 describe("MailDraftCard", () => {
+  it.each([
+    ["draft", "chat.mailDraft.confirmSend"],
+    ["failed", "chat.mailDraft.resend"],
+    ["delivery_unknown", "chat.mailDraft.resendAnyway"],
+  ])("keeps %s sending behind an explicit confirmation", (status, action) => {
+    const onConfirm = vi.fn();
+    render(<MemoryRouter><MailDraftCard draft={{ draft_id: "draft-state", revision: 3,
+      to: ["team@example.com"], subject: "Review", status }} onConfirm={onConfirm} /></MemoryRouter>);
+    expect(onConfirm).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByRole("textbox", { name: "chat.mailDraft.subject" }), { target: { value: "Updated review" } });
+    fireEvent.click(screen.getByRole("button", { name: action }));
+    expect(onConfirm).toHaveBeenCalledWith("draft-state", 3, expect.objectContaining({ subject: "Updated review" }));
+  });
+
+  it("renders a sent message as read-only without a send action", () => {
+    render(<MemoryRouter><MailDraftCard draft={{ draft_id: "sent", to: ["team@example.com"],
+      subject: "Delivered", status: "sent" }} onConfirm={vi.fn()} /></MemoryRouter>);
+    expect(screen.getByText("Delivered")).toBeVisible();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "chat.mailDraft.confirmSend" })).not.toBeInTheDocument();
+  });
   it("lets the user add and remove attachments before confirm", async () => {
     const onConfirm = vi.fn();
     const { container } = render(
@@ -76,5 +97,52 @@ describe("MailDraftCard", () => {
     await vi.waitFor(() => expect(onConfirm).toHaveBeenCalled());
     expect(onConfirm.mock.calls[0][2].attachment_paths).toEqual(["report.pdf"]);
     expect(onConfirm.mock.calls[0][2].attachments).toEqual([]);
+  });
+
+  it("accepts string recipients without crashing", () => {
+    render(
+      <MemoryRouter>
+        <MailDraftCard
+          draft={{
+            draft_id: "draft_str",
+            revision: 1,
+            to: "a@b.com, c@d.com" as unknown as string[],
+            cc: "e@f.com" as unknown as string[],
+            subject: "hi",
+            body: "body",
+            attachments: "notes.txt" as unknown as string[],
+            status: "draft",
+          }}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByDisplayValue("a@b.com, c@d.com")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("e@f.com")).toBeInTheDocument();
+    expect(screen.getByText("notes.txt")).toBeInTheDocument();
+  });
+
+  it("prefills recipients in a full-width field and ignores enter selection", () => {
+    const { container } = render(
+      <MemoryRouter>
+        <MailDraftCard
+          draft={{
+            draft_id: "draft_to",
+            revision: 1,
+            to: ["firmach@163.com", "a@b.com"],
+            cc: [],
+            subject: "hi",
+            body: "body",
+            status: "draft",
+          }}
+          onConfirm={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    const recipient = screen.getByDisplayValue("firmach@163.com, a@b.com");
+    expect(container.querySelector(".mail-draft-address")).toBeTruthy();
+    fireEvent.keyDown(recipient, { key: "Enter" });
+    expect(screen.getByDisplayValue("firmach@163.com, a@b.com")).toBeInTheDocument();
   });
 });

@@ -47,10 +47,13 @@ import (
 	"lazymind/core/recovery"
 	"lazymind/core/resourceupdate"
 	"lazymind/core/scheduler"
+	"lazymind/core/showcase"
 	"lazymind/core/state"
 	"lazymind/core/store"
 	"lazymind/core/subagent"
+	"lazymind/core/systemdeps"
 	"lazymind/core/taskcenter"
+	"lazymind/core/userenv"
 	"lazymind/core/workflow"
 	workflowexecutor "lazymind/core/workflow/executor"
 	workflowstore "lazymind/core/workflow/store"
@@ -775,6 +778,7 @@ func run(ctx context.Context) error {
 		log.Logger.Fatal().Msg("initialize local credential key manager failed")
 	}
 	modelprovider.SetCredentialKeyManager(credentialKeys)
+	userenv.SetCredentialKeyManager(credentialKeys)
 	if err := migrate.RunUp(); err != nil {
 		return &startupError{msg: "run SQL migrations", err: err}
 	}
@@ -886,10 +890,17 @@ func run(ctx context.Context) error {
 	if !startBackgroundJobs {
 		log.Logger.Info().Msg("core background jobs are disabled")
 	} else {
+		// History samples have already been downloaded and imported above.
+		backgroundDone = append(backgroundDone, showcase.StartAssetPrefetch(runtimeCtx))
 		asyncConfig := evalset.LoadAsyncJobRuntimeConfigFromEnv()
+		excludedJobs := append([]string(nil), chat.ConversationTitleJobTypes...)
+		if !systemdeps.PythonComponentActive("rag") {
+			excludedJobs = append(excludedJobs, doc.MarketInstallJobType, doc.MarketUpdateJobType,
+				doc.MarketUpdateAllJobType, "document_pdf_translation")
+		}
 		runner = asyncjob.Start(runtimeCtx, store.DB(), asyncjob.Options{
 			Concurrency:     asyncConfig.Concurrency,
-			ExcludeJobTypes: chat.ConversationTitleJobTypes,
+			ExcludeJobTypes: excludedJobs,
 			PollInterval:    asyncConfig.PollInterval,
 			LockTTL:         asyncConfig.LockTTL,
 		})
@@ -921,6 +932,7 @@ func run(ctx context.Context) error {
 
 	// Register plugin lifecycle hooks into the subagent EventHooks.
 	workflow.RegisterSubAgentHooks()
+	chat.RegisterTaskCenterEnvCleanup()
 	// Wire the conversation SSE hook so plugin events reach the frontend via the
 	// conversation-level events channel (history-independent real-time push).
 	subagent.EventHooks.RegisterConversationEventHook(

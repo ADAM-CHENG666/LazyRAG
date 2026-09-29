@@ -25,6 +25,8 @@ import LocalWorkspaceControl from "./LocalWorkspaceControl";
 const mocks = vi.hoisted(() => ({
   authorizeWorkspace: vi.fn(),
   getConversationWorkspace: vi.fn(),
+  getUserPermissionPreference: vi.fn(),
+  saveUserPermissionPreference: vi.fn(),
   getRuntimeMode: vi.fn(),
   listWorkspaces: vi.fn(),
   prepareWorkspaceReauthorization: vi.fn(),
@@ -46,7 +48,12 @@ vi.mock("@/components/request", () => ({ BASE_URL: "", axiosInstance: { get: vi.
 vi.mock("@/modules/chat/utils/localWorkspace", async () => ({
   ...await vi.importActual<typeof import("@/modules/chat/utils/localWorkspace")>("@/modules/chat/utils/localWorkspace"),
   authorizeWorkspace: mocks.authorizeWorkspace,
-  getConversationWorkspace: mocks.getConversationWorkspace,
+  getConversationWorkspace: async (id: string) => {
+    const workspace = await mocks.getConversationWorkspace(id);
+    return { workspace, permission_mode: workspace?.permission_mode ?? "always_ask", permission_version: workspace?.permission_version ?? 1 };
+  },
+  getUserPermissionPreference: mocks.getUserPermissionPreference,
+  saveUserPermissionPreference: mocks.saveUserPermissionPreference,
   listWorkspaces: mocks.listWorkspaces,
   prepareWorkspaceReauthorization: mocks.prepareWorkspaceReauthorization,
   revokeWorkspace: mocks.revokeWorkspace,
@@ -145,6 +152,8 @@ describe("LocalWorkspaceControl task binding and request lifetime", () => {
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
     mocks.getRuntimeMode.mockReturnValue("local");
     mocks.listWorkspaces.mockResolvedValue([]);
+    mocks.getUserPermissionPreference.mockResolvedValue({ default_permission_mode: "ask_as_needed", permission_version: 1 });
+    mocks.saveUserPermissionPreference.mockImplementation(async (mode: string) => ({ default_permission_mode: mode, permission_version: 2 }));
     mocks.getConversationWorkspace.mockResolvedValue(undefined);
     mocks.selectWorkspaceCandidate.mockResolvedValue({ canceled: true });
     mocks.authorizeWorkspace.mockResolvedValue(alpha);
@@ -161,6 +170,56 @@ describe("LocalWorkspaceControl task binding and request lifetime", () => {
     vi.useRealTimers();
   });
   afterAll(() => vi.restoreAllMocks());
+
+  it("inherits full trust without a workspace or another confirmation", async () => {
+    mocks.getUserPermissionPreference.mockResolvedValue({ default_permission_mode: "allow_all", permission_version: 8 });
+    const onChange = vi.fn();
+    const view = render(<LocalWorkspaceControl configResetKey={1} onChange={onChange} />);
+    await waitFor(() => expect(onChange).toHaveBeenLastCalledWith(undefined, "allow_all"));
+    expect(screen.getByRole("combobox")).toBeEnabled();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    view.rerender(<LocalWorkspaceControl configResetKey={2} onChange={onChange} />);
+    await waitFor(() => expect(mocks.getUserPermissionPreference).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByRole("combobox")).toBeEnabled());
+    expect(onChange).toHaveBeenLastCalledWith(undefined, "allow_all");
+    expect(mocks.saveUserPermissionPreference).not.toHaveBeenCalled();
+  });
+
+  it("restores the last workspace with the saved user permission", async () => {
+    localStorage.setItem("chat:last-workspace:local:owner", alpha.workspace_id);
+    mocks.listWorkspaces.mockResolvedValue([alpha]);
+    mocks.getUserPermissionPreference.mockResolvedValue({ default_permission_mode: "allow_all", permission_version: 8 });
+    const onChange = vi.fn();
+    render(<LocalWorkspaceControl onChange={onChange} />);
+    await waitFor(() => expect(onChange).toHaveBeenLastCalledWith(alpha.workspace_id, "allow_all"));
+    expect(screen.getByRole("button", { name: /Alpha/ })).toBeInTheDocument();
+  });
+
+  it("saves unbound conversation permission and the user default together", async () => {
+    mocks.getUserPermissionPreference.mockResolvedValue({ default_permission_mode: "always_ask", permission_version: 5 });
+    mocks.updateWorkspacePermission.mockResolvedValue({ permission_mode: "ask_as_needed", permission_version: 2, user_permission_version: 6 });
+    const onChange = vi.fn();
+    render(<LocalWorkspaceControl conversationId="unbound" onChange={onChange} />);
+    await waitFor(() => expect(screen.getByRole("combobox")).toBeEnabled());
+    fireEvent.mouseDown(screen.getByRole("combobox"));
+    fireEvent.click(await screen.findByText("chat.workspace.askAsNeeded"));
+    await waitFor(() => expect(mocks.updateWorkspacePermission).toHaveBeenCalledWith("unbound", "ask_as_needed", 1, 5));
+    await waitFor(() => expect(onChange).toHaveBeenLastCalledWith(undefined, "ask_as_needed"));
+  });
+
+  it("persists draft permission and does not accept a failed save", async () => {
+    mocks.getUserPermissionPreference.mockResolvedValue({ default_permission_mode: "always_ask", permission_version: 2 });
+    mocks.saveUserPermissionPreference.mockRejectedValueOnce(new Error("offline"));
+    const onChange = vi.fn();
+    render(<LocalWorkspaceControl onChange={onChange} />);
+    await waitFor(() => expect(screen.getByRole("combobox")).toBeEnabled());
+    fireEvent.mouseDown(screen.getByRole("combobox"));
+    fireEvent.click(await screen.findByText("chat.workspace.askAsNeeded"));
+    await waitFor(() => expect(mocks.saveUserPermissionPreference).toHaveBeenCalledWith("ask_as_needed", 2));
+    await waitFor(() => expect(message.error).toHaveBeenCalled());
+    expect(message.success).not.toHaveBeenCalled();
+    expect(onChange).not.toHaveBeenCalledWith(undefined, "ask_as_needed");
+  });
 
   it("restores the last workspace in a reused draft", async () => {
     mocks.listWorkspaces.mockResolvedValue([alpha]);
@@ -228,7 +287,7 @@ describe("LocalWorkspaceControl task binding and request lifetime", () => {
     render(<LocalWorkspaceControl conversationId="conv-alpha" onChange={onChange} />);
 
     await waitFor(() => expect(screen.getByRole("combobox")).toBeEnabled());
-    expect(screen.queryByText(alpha.display_name)).not.toBeInTheDocument();
+    expect(screen.getByText(alpha.display_name)).toBeInTheDocument();
     expect(screen.queryByText(alpha.path)).not.toBeInTheDocument();
     expect(mocks.selectWorkspaceCandidate).not.toHaveBeenCalled();
   });
@@ -260,7 +319,7 @@ describe("LocalWorkspaceControl task binding and request lifetime", () => {
     );
 
     expect(screen.queryAllByText(alpha.path)).toHaveLength(0);
-    expect(onChange).toHaveBeenCalledWith(undefined, "ask_as_needed");
+    expect(onChange).toHaveBeenCalledWith(undefined, "always_ask");
   });
 
   it("ignores a binding lookup that finishes after a newer conversation", async () => {
@@ -307,7 +366,7 @@ describe("LocalWorkspaceControl task binding and request lifetime", () => {
     );
 
     expect(screen.queryByText("/workspace/old")).not.toBeInTheDocument();
-    expect(onChange).not.toHaveBeenCalled();
+    expect(onChange.mock.calls.every(([id]) => id === undefined)).toBe(true);
   });
 
   it("does not apply a completed authorization to a newer conversation", async () => {
@@ -334,7 +393,7 @@ describe("LocalWorkspaceControl task binding and request lifetime", () => {
     await act(async () => authorization.resolve(alpha));
 
     expect(screen.queryAllByText(alpha.path)).toHaveLength(0);
-    expect(onChange).not.toHaveBeenCalled();
+    expect(onChange.mock.calls.every(([id]) => id === undefined)).toBe(true);
   });
 
   it("keeps selection unchanged when the native picker is canceled", async () => {
@@ -346,7 +405,26 @@ describe("LocalWorkspaceControl task binding and request lifetime", () => {
 
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(mocks.authorizeWorkspace).not.toHaveBeenCalled();
-    expect(onChange).not.toHaveBeenCalled();
+    expect(onChange.mock.calls.every(([id]) => id === undefined)).toBe(true);
+  });
+
+  it("selects an already authorized folder without asking for first-use authorization again", async () => {
+    mocks.listWorkspaces.mockResolvedValue([alpha]);
+    mocks.selectWorkspaceCandidate.mockResolvedValue({
+      canceled: false,
+      selection_token: "repeat-selection",
+      display_name: alpha.display_name,
+      path: alpha.path,
+    });
+    const onChange = vi.fn();
+    render(<LocalWorkspaceControl onChange={onChange} />);
+
+    await waitFor(() => expect(mocks.listWorkspaces).toHaveBeenCalled());
+    await openWorkspacePicker();
+
+    await waitFor(() => expect(onChange).toHaveBeenLastCalledWith(alpha.workspace_id, "ask_as_needed"));
+    expect(screen.queryByText("chat.workspace.authorizeTitle")).not.toBeInTheDocument();
+    expect(mocks.authorizeWorkspace).not.toHaveBeenCalled();
   });
 
   it("uses one workspace menu and keeps the permission mode beside it", async () => {
@@ -356,7 +434,7 @@ describe("LocalWorkspaceControl task binding and request lifetime", () => {
     expect(await screen.findByRole("button", { name: /chat\.workspace\.select/ })).toBeInTheDocument();
     expect(screen.queryByText("chat.workspace.recent")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "chat.workspace.manage" })).not.toBeInTheDocument();
-    expect(screen.getByText("chat.workspace.everyAsk")).toBeInTheDocument();
+    expect(await screen.findByText("chat.workspace.askAsNeeded")).toBeInTheDocument();
   });
 
   it("keeps a same-draft workspace list when the native picker is canceled", async () => {
@@ -403,7 +481,7 @@ describe("LocalWorkspaceControl task binding and request lifetime", () => {
 
     await waitFor(() => expect(dialog).toHaveClass("ant-zoom-leave"));
     expect(mocks.authorizeWorkspace).not.toHaveBeenCalled();
-    expect(onChange).not.toHaveBeenCalled();
+    expect(onChange.mock.calls.every(([id]) => id === undefined)).toBe(true);
   });
 
   it("submits only the selection token when authorization is confirmed", async () => {
@@ -458,6 +536,7 @@ describe("LocalWorkspaceControl task binding and request lifetime", () => {
         "conv-alpha",
         "always_ask",
         alpha.permission_version,
+        1,
       );
     });
   });
@@ -519,16 +598,39 @@ describe("LocalWorkspaceControl task binding and request lifetime", () => {
     expect(mocks.updateWorkspacePermission).not.toHaveBeenCalled();
   });
 
-  it("searches active and inactive grants from the access manager", async () => {
-    mocks.listWorkspaces.mockResolvedValueOnce([]).mockResolvedValueOnce([alpha, { ...beta, status: "revoked" }]).mockResolvedValue([]);
+  it("searches manageable grants without showing revoked workspaces", async () => {
+    const revoked = { ...alpha, workspace_id: "revoked-workspace", path: "/revoked-workspace", status: "revoked" as const };
+    mocks.listWorkspaces.mockResolvedValueOnce([]).mockResolvedValueOnce([alpha, { ...beta, status: "path_unavailable" }, revoked]).mockResolvedValue([]);
     render(<LocalWorkspaceControl onChange={vi.fn()} />);
     await openWorkspaceManager();
     expect(await screen.findByText(beta.path)).toBeInTheDocument();
+    expect(screen.queryByText(revoked.path)).not.toBeInTheDocument();
 
     const search = screen.getByPlaceholderText("chat.workspace.search");
     fireEvent.change(search, { target: { value: "beta" } });
     fireEvent.keyDown(search, { key: "Enter", code: "Enter" });
-    await waitFor(() => expect(mocks.listWorkspaces).toHaveBeenLastCalledWith({ query: "beta", includeInactive: true }));
+    await waitFor(() => expect(mocks.listWorkspaces).toHaveBeenLastCalledWith({ query: "beta", includeInactive: true, excludeRevoked: true }));
+  });
+
+  it("removes a revoked workspace from authorization management immediately", async () => {
+    mocks.listWorkspaces.mockResolvedValue([alpha]);
+    mocks.revokeWorkspace.mockResolvedValue({ version: alpha.version + 1, stop_failed_count: 0 });
+    let confirm: (() => Promise<void>) | undefined;
+    vi.spyOn(Modal, "confirm").mockImplementation(((config: { onOk?: () => Promise<void> }) => {
+      confirm = config.onOk;
+      return { destroy: vi.fn(), update: vi.fn() };
+    }) as typeof Modal.confirm);
+    render(<LocalWorkspaceControl onChange={vi.fn()} />);
+    await openWorkspaceManager();
+    const manager = (await screen.findByText("chat.workspace.manageTitle")).closest<HTMLElement>("[role=dialog]");
+    if (!manager) throw new Error("workspace access dialog missing");
+    expect(await within(manager).findByText(alpha.path)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "chat.workspace.revoke" }));
+
+    await act(async () => { await confirm?.(); });
+
+    expect(mocks.revokeWorkspace).toHaveBeenCalledWith(alpha.workspace_id, alpha.version);
+    expect(within(manager).queryByText(alpha.path)).not.toBeInTheDocument();
   });
 
   it("closes access management and ignores its pending list when the conversation changes", async () => {
@@ -553,8 +655,8 @@ describe("LocalWorkspaceControl task binding and request lifetime", () => {
   });
 
   it("reauthorizes an inactive grant without binding it to the draft", async () => {
-    const revoked = { ...alpha, status: "revoked" as const };
-    mocks.listWorkspaces.mockResolvedValueOnce([]).mockResolvedValueOnce([revoked]);
+    const unavailable = { ...alpha, status: "path_unavailable" as const };
+    mocks.listWorkspaces.mockResolvedValueOnce([]).mockResolvedValueOnce([unavailable]);
     mocks.prepareWorkspaceReauthorization.mockResolvedValue({ canceled: false, selection_token: "renew", display_name: "Alpha", path: alpha.path });
     const onChange = vi.fn();
     render(<LocalWorkspaceControl onChange={onChange} />);
@@ -563,7 +665,7 @@ describe("LocalWorkspaceControl task binding and request lifetime", () => {
     expect(await screen.findByText("chat.workspace.authorizeTitle")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "chat.workspace.authorize" }));
     await waitFor(() => expect(mocks.authorizeWorkspace).toHaveBeenCalledWith("local", "renew"));
-    expect(onChange).not.toHaveBeenCalled();
+    expect(onChange.mock.calls.every(([id]) => id === undefined)).toBe(true);
   });
 
   it("restores the welcome composer selection without overriding later choices", async () => {
@@ -644,7 +746,7 @@ describe("LocalWorkspaceControl task binding and request lifetime", () => {
     const command = await screen.findByText("echo approved");
     const dialog = command.closest<HTMLElement>("[role=region]");
     if (!dialog) throw new Error("approval card missing");
-    fireEvent.click(within(dialog).getByRole("button", { name: "chat.workspace.approval.allowFuture" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "chat.workspace.approval.allowFutureShell" }));
     await waitFor(() => expect(vi.mocked(axiosInstance.post)).toHaveBeenCalledWith(
       "/api/core/conversations/conv-alpha/workspace-approvals/shell-1:decide", { action: "allow_future" },
     ));
@@ -734,7 +836,7 @@ describe("LocalWorkspaceControl task binding and request lifetime", () => {
 
     await waitFor(() => expect(mocks.updateWorkspacePermission).toHaveBeenCalled());
     expect(await screen.findByRole("button", { name: "chat.workspace.retry" })).toBeInTheDocument();
-    expect(screen.getByRole("combobox")).toBeEnabled();
+    expect(screen.getByRole("combobox")).toBeDisabled();
     expect(onChange).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "chat.workspace.retry" }));

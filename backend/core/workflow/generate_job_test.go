@@ -9,6 +9,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"lazymind/core/algo"
 	"lazymind/core/asyncjob"
 	"lazymind/core/common/orm"
 	"lazymind/core/workflow/graphengine"
@@ -24,6 +25,65 @@ steps: []
 `)
 	if err == nil {
 		t.Fatal("expected placeholder skeleton to be rejected")
+	}
+}
+
+func TestMergeWorkflowRepairResponsePreservesBaseForEmptyFields(t *testing.T) {
+	base := workflowRepairSnapshot{
+		WorkflowYAML: "id: original\n",
+		StateYAML:    "steps: original\n",
+		ScenarioMD:   "# Original\n",
+		Scripts:      map[string]string{"scripts/run.py": "print('old')\n"},
+	}
+	merged := mergeWorkflowRepairResponse(base, &algo.RepairStateMachineResponse{
+		WorkflowYAML: "id: repaired\n",
+		StateYAML:    "",
+		ScenarioMD:   "   ",
+		Scripts:      nil,
+	})
+
+	if merged.WorkflowYAML != "id: repaired\n" {
+		t.Fatalf("workflow_yaml = %q", merged.WorkflowYAML)
+	}
+	if merged.StateYAML != base.StateYAML {
+		t.Fatalf("state_yaml = %q, want base", merged.StateYAML)
+	}
+	if merged.ScenarioMD != base.ScenarioMD {
+		t.Fatalf("scenario_md = %q, want base", merged.ScenarioMD)
+	}
+	if merged.Scripts["scripts/run.py"] != "print('old')\n" {
+		t.Fatalf("scripts were not preserved: %#v", merged.Scripts)
+	}
+
+	merged = mergeWorkflowRepairResponse(base, &algo.RepairStateMachineResponse{
+		Scripts: map[string]string{},
+	})
+	if merged.Scripts["scripts/run.py"] != "print('old')\n" {
+		t.Fatalf("empty scripts map should preserve base scripts: %#v", merged.Scripts)
+	}
+}
+
+func TestMergeWorkflowRepairResponseMergesReturnedScripts(t *testing.T) {
+	base := workflowRepairSnapshot{
+		WorkflowYAML: "id: original\n",
+		StateYAML:    "steps: original\n",
+		ScenarioMD:   "# Original\n",
+		Scripts: map[string]string{
+			"scripts/run.py":    "print('old')\n",
+			"scripts/helper.py": "VALUE = 1\n",
+		},
+	}
+	merged := mergeWorkflowRepairResponse(base, &algo.RepairStateMachineResponse{
+		Scripts: map[string]string{"scripts/run.py": "print('new')\n"},
+	})
+
+	if len(merged.Scripts) != 2 ||
+		merged.Scripts["scripts/run.py"] != "print('new')\n" ||
+		merged.Scripts["scripts/helper.py"] != "VALUE = 1\n" {
+		t.Fatalf("scripts = %#v, want path-level merge", merged.Scripts)
+	}
+	if base.Scripts["scripts/run.py"] != "print('old')\n" {
+		t.Fatalf("base scripts were mutated: %#v", base.Scripts)
 	}
 }
 
@@ -858,6 +918,125 @@ func TestSaveGeneratedDraftUpdatesDoesNotWriteCanceledJob(t *testing.T) {
 	}
 	if updated.GenerateStatus != generateStatusBriefDone {
 		t.Fatalf("draft status changed after canceled save: %q", updated.GenerateStatus)
+	}
+}
+
+func TestEnsureGeneratedWorkflowIDAvailableAddsSuffixForExistingWorkflowIDs(t *testing.T) {
+	db := newHandlerTestDB(t)
+	now := time.Now().UTC()
+	existingDraft := orm.WorkflowDraft{
+		ID: "11111111-1111-4111-8111-111111111111", Name: "Existing Draft",
+		CreatedBy: "user-1", WorkflowID: "skillhub_skill_discovery", CreatedAt: now, UpdatedAt: now,
+	}
+	targetDraft := orm.WorkflowDraft{
+		ID: "22222222-2222-4222-8222-222222222222", Name: "Generated Draft",
+		CreatedBy: "user-1", CreatedAt: now, UpdatedAt: now,
+	}
+	published := orm.WorkflowResource{
+		ID: "33333333-3333-4333-8333-333333333333", WorkflowRef: "user:user-1:skillhub_skill_discovery-2",
+		WorkflowID: "skillhub_skill_discovery-2", OwnerUserID: "user-1", OwnerScope: "user",
+		RelativeRoot: "workflows/user/skillhub_skill_discovery-2", Name: "Published Workflow",
+		Status: "active", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.Create(&existingDraft).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&targetDraft).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&published).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	workflowYAML := `id: skillhub_skill_discovery
+name: Model Generated Name
+slots:
+  - id: input
+    external: true
+steps:
+  - id: answer
+`
+	got := ensureGeneratedWorkflowIDAvailable(context.Background(), db.DB, targetDraft, workflowYAML)
+	if id := extractWorkflowID(got); id != "skillhub_skill_discovery-3" {
+		t.Fatalf("workflow id=%q, want suffixed id; yaml=\n%s", id, got)
+	}
+	if !strings.Contains(got, "name: Model Generated Name") {
+		t.Fatalf("workflow name should be preserved, yaml=\n%s", got)
+	}
+}
+
+func TestEnsureGeneratedWorkflowIDAvailableKeepsCurrentPublishedWorkflowID(t *testing.T) {
+	db := newHandlerTestDB(t)
+	now := time.Now().UTC()
+	targetDraft := orm.WorkflowDraft{
+		ID: "22222222-2222-4222-8222-222222222222", Name: "Published Draft",
+		CreatedBy: "user-1", WorkflowID: "published_workflow", CreatedAt: now, UpdatedAt: now,
+	}
+	published := orm.WorkflowResource{
+		ID: "33333333-3333-4333-8333-333333333333", WorkflowRef: "user:user-1:published_workflow",
+		WorkflowID: "published_workflow", OwnerUserID: "user-1", OwnerScope: "user",
+		SourceDraftID: targetDraft.ID, RelativeRoot: "workflows/user/published_workflow", Name: "Published Workflow",
+		Status: "active", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.Create(&targetDraft).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&published).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	workflowYAML := "id: published_workflow\nname: Published\nslots: []\nsteps: []\n"
+	got := ensureGeneratedWorkflowIDAvailable(context.Background(), db.DB, targetDraft, workflowYAML)
+	if id := extractWorkflowID(got); id != "published_workflow" {
+		t.Fatalf("workflow id=%q, want current published id", id)
+	}
+}
+
+func TestSaveSkeletonConflictMarksDraftFailedOnFinalAttempt(t *testing.T) {
+	db := newHandlerTestDB(t)
+	now := time.Now().UTC()
+	existingDraft := orm.WorkflowDraft{
+		ID: "11111111-1111-4111-8111-111111111111", Name: "Existing Draft",
+		CreatedBy: "user-1", WorkflowID: "duplicate_workflow", CreatedAt: now, UpdatedAt: now,
+	}
+	targetDraft := orm.WorkflowDraft{
+		ID: "22222222-2222-4222-8222-222222222222", Name: "Target Draft",
+		CreatedBy: "user-1", GenerateStatus: generateStatusBriefDone, DesignBriefContent: "brief",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	jobRow := orm.AsyncJob{
+		ID: "job-save-conflict", JobType: workflowDraftGenerateJobType, Status: string(asyncjob.StatusRunning),
+		ResourceType: "workflow_draft", ResourceID: targetDraft.ID, AttemptCount: 3, MaxAttempts: 3,
+		NextRunAt: now, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.Create(&existingDraft).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&targetDraft).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&jobRow).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	updates := map[string]any{"generate_status": generateStatusSkeletonDone, "updated_at": now}
+	setWorkflowYAMLUpdate(updates, "id: duplicate_workflow\nname: Duplicate\nslots: []\nsteps: []\n")
+	err := saveGeneratedDraftUpdates(context.Background(), db.DB, targetDraft.ID, asyncjob.Job{ID: jobRow.ID}, updates)
+	if err == nil {
+		t.Fatal("expected unique workflow id save to fail")
+	}
+	if markErr := markGenerateFailedForAttempt(db.DB, targetDraft.ID, asyncjob.Job{ID: jobRow.ID}, "save skeleton: "+err.Error()); markErr != nil {
+		t.Fatal(markErr)
+	}
+	var updated orm.WorkflowDraft
+	if err := db.Where("id=?", targetDraft.ID).First(&updated).Error; err != nil {
+		t.Fatal(err)
+	}
+	if updated.GenerateStatus != generateStatusFailed {
+		t.Fatalf("status=%q, want failed", updated.GenerateStatus)
+	}
+	if !strings.Contains(updated.GenerateError, "save skeleton") {
+		t.Fatalf("generate error should explain save failure: %q", updated.GenerateError)
 	}
 }
 

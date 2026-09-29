@@ -214,6 +214,7 @@ type RuntimePaths struct {
 	MilvusLiteDBPath         string
 	LocalProxyBin            string
 	CaddyBin                 string
+	PandocBin                string
 	LocalProxyConfig         string
 	LocalProxyStopScript     string
 	CaddyConfig              string
@@ -227,6 +228,7 @@ type RuntimePaths struct {
 	AlgorithmPIDDir          string
 	HistoryInjectionRoot     string
 	HistoryInjectionArchive  string
+	HistoryInjectionDownload *HistoryInjectionDownload
 	HistoryInjectionSHA256   string
 	TrustedLocalMode         bool
 }
@@ -317,6 +319,7 @@ type VectorStoreConfig struct {
 }
 
 type AlgorithmConfig struct {
+	RAGDisabled         bool
 	PostgresPort        int
 	DocPort             int
 	ProcessorPort       int
@@ -378,11 +381,12 @@ func firstAvailableLocalPort(start int, attempts int) int {
 }
 
 type localPortAllocator struct {
-	used        map[int]struct{}
-	resolutions []PortResolution
-	err         error
-	errContext  bool
-	available   func(address string, port int) bool
+	used           map[int]struct{}
+	resolutions    []PortResolution
+	err            error
+	errContext     bool
+	available      func(address string, port int) bool
+	skipPortChecks bool
 }
 
 func newLocalPortAllocator() *localPortAllocator {
@@ -526,12 +530,18 @@ func (a *localPortAllocator) portAvailable(port int) bool {
 	if _, ok := a.used[port]; ok {
 		return false
 	}
+	if a.skipPortChecks {
+		return true
+	}
 	return localPortAvailable(port)
 }
 
 func (a *localPortAllocator) portAvailableOn(address string, port int) bool {
 	if _, ok := a.used[port]; ok {
 		return false
+	}
+	if a.skipPortChecks {
+		return true
 	}
 	return a.available(address, port)
 }
@@ -798,6 +808,10 @@ func NewRuntimeConfig(profile, repoRootHint string) (RuntimeConfig, RuntimePaths
 }
 
 func NewRuntimeConfigWithOptions(opts RuntimeConfigOptions) (RuntimeConfig, RuntimePaths, error) {
+	return newRuntimeConfigWithOptions(opts, false)
+}
+
+func newRuntimeConfigWithOptions(opts RuntimeConfigOptions, skipPortChecks bool) (RuntimeConfig, RuntimePaths, error) {
 	profile, err := normalizeRuntimeProfile(firstNonEmpty(opts.Profile, os.Getenv(runtimeProfileEnvVar), "local"))
 	if err != nil {
 		return RuntimeConfig{}, RuntimePaths{}, err
@@ -925,6 +939,7 @@ func NewRuntimeConfigWithOptions(opts RuntimeConfigOptions) (RuntimeConfig, Runt
 		}
 	}
 	ports := newLocalPortAllocator()
+	ports.skipPortChecks = skipPortChecks
 	networkProfile, err := localNetworkProfile()
 	if err != nil {
 		return RuntimeConfig{}, RuntimePaths{}, err
@@ -996,6 +1011,16 @@ func NewRuntimeConfigWithOptions(opts RuntimeConfigOptions) (RuntimeConfig, Runt
 	milvusLiteDBPath := filepath.Clean(milvusDataDir)
 	watchHostDir := defaultFileWatcherWatchHostDir(pathLayout.LocalImportRoot)
 	allowedRoots := fileWatcherAllowedRoots(watchHostDir)
+	componentCatalog, err := loadPythonComponentCatalog(p)
+	if err != nil {
+		return RuntimeConfig{}, p, err
+	}
+	ragDisabled := profile == "desktop" && componentCatalog != nil &&
+		installedPythonComponentPath(p, componentCatalog.Components["rag"]) == ""
+	modeProfile := localRuntimeModeProfile(milvusPort, milvusLiteDBPath)
+	if ragDisabled {
+		modeProfile.VectorStore.ManagedProcess = false
+	}
 	return RuntimeConfig{
 		Profile:            profile,
 		MaintenanceMode:    maintenanceMode,
@@ -1004,7 +1029,7 @@ func NewRuntimeConfigWithOptions(opts RuntimeConfigOptions) (RuntimeConfig, Runt
 		BuildRoot:          p.BuildRoot,
 		ResourcesRoot:      p.ResourcesRoot,
 		RuntimeRoot:        runtimeRoot,
-		ModeProfile:        localRuntimeModeProfile(milvusPort, milvusLiteDBPath),
+		ModeProfile:        modeProfile,
 		ProcessComposePort: processComposePort,
 		SQLiteServerPort:   sqliteServerPort,
 		FrontendPort:       frontendPort,
@@ -1021,6 +1046,7 @@ func NewRuntimeConfigWithOptions(opts RuntimeConfigOptions) (RuntimeConfig, Runt
 			EvoHostPort:     evoPort,
 		},
 		Algorithm: AlgorithmConfig{
+			RAGDisabled:         ragDisabled,
 			PostgresPort:        postgresPort,
 			DocPort:             docPort,
 			ProcessorPort:       processorPort,
@@ -1092,6 +1118,9 @@ func applyDesktopManifestPaths(paths *RuntimePaths) error {
 	if value := joinResource(manifest.Binaries["caddy"]); value != "" {
 		paths.CaddyBin = value
 	}
+	if value := joinResource(manifest.Binaries["pandoc"]); value != "" {
+		paths.PandocBin = value
+	}
 	if value := joinResource(manifest.Paths.LocalProxyConfig); value != "" {
 		paths.LocalProxyConfig = value
 	}
@@ -1107,6 +1136,18 @@ func applyDesktopManifestPaths(paths *RuntimePaths) error {
 	if value := joinResource(manifest.Paths.AlgorithmVenv); value != "" {
 		paths.AlgorithmVenv = value
 		paths.AlgorithmPython = venvExecutable(value, "python")
+	}
+	if download := manifest.HistoryInjectionDownload; download != nil {
+		if manifest.Paths.HistoryInjectionArchive != "" {
+			return fmt.Errorf("history examples cannot be bundled and deferred at once")
+		}
+		if err := download.validate(); err != nil {
+			return err
+		}
+		paths.HistoryInjectionDownload = download
+		paths.HistoryInjectionSHA256 = download.SHA256
+		paths.HistoryInjectionArchive = filepath.Join(paths.RuntimeRoot, "cache", "history-injection", download.SHA256+".zip")
+		paths.HistoryInjectionRoot = filepath.Join(paths.DataDir, "history-injection")
 	}
 	if relativeArchive := strings.TrimSpace(manifest.Paths.HistoryInjectionArchive); relativeArchive != "" {
 		paths.HistoryInjectionArchive = joinResource(relativeArchive)

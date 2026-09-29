@@ -36,7 +36,9 @@ function createDesktopBridge(ipcRenderer) {
     agentExecutableClear: (target) => ipcRenderer.invoke("lazymind:agentExecutableClear", target),
     assistantSessionSet: (session) => ipcRenderer.invoke("lazymind:assistantSessionSet", session),
     assistantSessionClear: () => ipcRenderer.invoke("lazymind:assistantSessionClear"),
-    restartRuntime: () => ipcRenderer.invoke("lazymind:restartRuntime"),
+    restartRuntime: (options) => options === undefined
+      ? ipcRenderer.invoke("lazymind:restartRuntime")
+      : ipcRenderer.invoke("lazymind:restartRuntime", { reload: options?.reload !== false }),
     resetRuntime: (scope) => ipcRenderer.invoke("lazymind:resetRuntime", scope),
     localFolderAccessStatus: () => ipcRenderer.invoke("lazymind:localFolderAccessStatus"),
     chooseLocalDiscoveryRoots: () => ipcRenderer.invoke("lazymind:chooseLocalDiscoveryRoots"),
@@ -46,6 +48,9 @@ function createDesktopBridge(ipcRenderer) {
     selectLocalWorkspace: () => ipcRenderer.invoke("lazymind:selectLocalWorkspace"),
     reauthorizeLocalWorkspace: (workspaceId) => ipcRenderer.invoke("lazymind:reauthorizeLocalWorkspace", workspaceId),
     authorizeLocalWorkspace: (selectionToken) => ipcRenderer.invoke("lazymind:authorizeLocalWorkspace", selectionToken),
+    obsidianConfigStatus: () => ipcRenderer.invoke("lazymind:obsidianConfigStatus"),
+    selectObsidianRoot: () => ipcRenderer.invoke("lazymind:selectObsidianRoot"),
+    clearObsidianRoot: () => ipcRenderer.invoke("lazymind:clearObsidianRoot"),
     selectExecutable: (target) => ipcRenderer.invoke("lazymind:selectExecutable", target),
     exportDiagnostics: () => ipcRenderer.invoke("lazymind:exportDiagnostics"),
     showItemInFolder: (payload) => ipcRenderer.invoke("lazymind:showItemInFolder", payload),

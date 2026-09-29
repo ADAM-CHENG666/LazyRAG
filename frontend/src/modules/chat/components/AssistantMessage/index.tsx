@@ -1,7 +1,7 @@
-import { Button, Divider, Flex, message, Modal, Spin, Tooltip } from "antd";
+import { Button, Divider, Flex, message, Modal, Popover, Spin, Tooltip } from "antd";
 import { trim, debounce } from "lodash";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
-import type { KeyboardEvent, MouseEvent } from "react";
+import type { KeyboardEvent, MouseEvent, ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import "./index.scss";
@@ -37,8 +37,11 @@ import { WorkflowPanel } from "@/modules/chat/components/WorkflowPanel";
 import MultiAnswerDisplay, { type PreferenceType } from "../MultiAnswerDisplay";
 import FeedbackModal from "../FeedbackModal";
 import AskCard from "@/modules/chat/components/AskCard";
+import EnvInputCard from "@/modules/chat/components/EnvInputCard";
 import MailDraftCard from "@/modules/chat/components/MailDraftCard";
+import MessagePartBoundary from "@/modules/chat/components/MessagePartBoundary";
 import MailMailboxCard from "@/modules/chat/components/MailDraftCard/MailMailboxCard";
+import ToolConfigurationCard from "@/modules/chat/components/ToolConfigurationCard";
 import ToolLimitCard from "@/modules/chat/components/ToolLimitCard";
 import ChatExportActions from "../newChatContainer/components/ChatExportActions";
 import ArtifactDownloadButton from "@/modules/chat/components/ArtifactCollectorCard/ArtifactDownloadButton";
@@ -190,6 +193,59 @@ export function ChatSourcePanel({
     </aside>
   );
 }
+
+function ReferenceSourcesButton({ sources }: { sources?: ChatSourceCollection }) {
+  const { t } = useTranslation();
+  const [sourcesOpen, setSourcesOpen] = useState(false);
+    const displaySources = getReferenceSources(sources);
+    if (!displaySources.length) return null;
+    return (
+      <Popover
+        trigger="click"
+        placement="topLeft"
+        open={sourcesOpen}
+        onOpenChange={setSourcesOpen}
+        destroyOnHidden
+        overlayClassName="chat-sources-popover"
+        content={
+          <div role="dialog" aria-label={t("chat.references")} onKeyDown={event => {
+            if (event.key === "Escape") { event.stopPropagation(); setSourcesOpen(false); }
+          }}>
+            <div className="chat-source-panel-header">
+              <h2 className="chat-source-panel-title">{t("chat.references")}<span className="chat-source-panel-count">{displaySources.length}</span></h2>
+              <Button type="text" icon={<CloseOutlined />} aria-label={t("common.close")} onClick={() => setSourcesOpen(false)} />
+            </div>
+            <ChatSourcePanel sources={displaySources} embedded onClose={() => setSourcesOpen(false)} />
+          </div>
+        }
+      >
+        <Button
+          className="tool-btn source-btn"
+          aria-expanded={sourcesOpen}
+          aria-haspopup="dialog"
+          onKeyDown={(event: KeyboardEvent<HTMLButtonElement>) => { if (event.key === "Escape") setSourcesOpen(false); }}
+          aria-label={`${t("chat.references")} (${displaySources.length})`}
+        >
+          <span className="chat-source-button-icons" aria-hidden="true">
+            {displaySources.slice(0, 3).map((source, sourceIndex) => (
+              <SourceFavicon
+                source={source}
+                compact
+                key={getSourceDedupKey(source, sourceIndex)}
+              />
+            ))}
+          </span>
+          <span className="chat-source-button-label">
+            {t("chat.references")}
+          </span>
+          <span className="chat-source-button-count">
+            {displaySources.length}
+          </span>
+        </Button>
+      </Popover>
+    );
+  }
+
 
 async function copyTextToClipboard(text: string) {
   const normalizedText = text.trim();
@@ -444,6 +500,10 @@ function feedbackReducer(
   }
 }
 
+function MessagePart({ render }: { render: () => ReactNode }) {
+  return <>{render()}</>;
+}
+
 const AssistantMessage = (props: any) => {
   const { t } = useTranslation();
   const {
@@ -463,7 +523,6 @@ const AssistantMessage = (props: any) => {
     onCiteMessage,
     onOpenSideChat,
     hasLaterUserMessage,
-    onOpenSources,
   } = props;
   const selectionActionsRef = useRef<HTMLDivElement | null>(null);
   const citeSelectionTextRef = useRef("");
@@ -809,33 +868,7 @@ const AssistantMessage = (props: any) => {
   }
 
   function renderSourceButton(sources?: ChatSourceCollection) {
-    const displaySources = getReferenceSources(sources);
-    if (!displaySources.length) return null;
-    return (
-      <Tooltip title={`${t("chat.references")} (${displaySources.length})`}>
-        <Button
-          className="tool-btn source-btn"
-          onClick={() => onOpenSources?.(displaySources, String(item?.content || item?.delta || "").slice(0, 180))}
-          aria-label={`${t("chat.references")} (${displaySources.length})`}
-        >
-          <span className="chat-source-button-icons" aria-hidden="true">
-            {displaySources.slice(0, 3).map((source, sourceIndex) => (
-              <SourceFavicon
-                source={source}
-                compact
-                key={getSourceDedupKey(source, sourceIndex)}
-              />
-            ))}
-          </span>
-          <span className="chat-source-button-label">
-            {t("chat.references")}
-          </span>
-          <span className="chat-source-button-count">
-            {displaySources.length}
-          </span>
-        </Button>
-      </Tooltip>
-    );
+    return <ReferenceSourcesButton sources={sources} />;
   }
 
   function getCurrentFeedback(historyId?: string) {
@@ -1324,6 +1357,30 @@ const AssistantMessage = (props: any) => {
     // Render ask_pending card if present
     if (item.ask_pending) {
       const askPending = item.ask_pending;
+      if (askPending.env_input) {
+        return (
+          <EnvInputCard
+            key={askPending.ask_id}
+            conversationId={sessionId}
+            historyId={item.history_id}
+            askId={askPending.ask_id}
+            input={askPending.env_input}
+            result={item.env_input_result}
+            disabled={runActive || !!hasLaterUserMessage || index !== length - 1 ||
+              (!!item.ask_answered && !item.env_input_result)}
+            onComplete={async (receipt) => {
+              updateMessage({ ...item, ask_answered: true, env_input_result: receipt });
+              await props.sendMessage?.(
+                t(`settingsPage.envVars.inputContinuation.${
+                  receipt.status === "configured" && receipt.enabled === false ? "disabled" : receipt.status
+                }`, {
+                  name: receipt.name, scope: t(`settingsPage.envVars.scope.${receipt.scope}`),
+                }),
+              );
+            }}
+          />
+        );
+      }
       const showAskCard = shouldRenderAskPending(
         item.ask_answered,
         index === length - 1,
@@ -1345,9 +1402,9 @@ const AssistantMessage = (props: any) => {
           { mail_drafts: drafts },
           item.answered_mail_draft_ids,
         );
-        if (!remainingDrafts.length) return null;
+        if (remainingDrafts.length) {
         const mailReadOnly = mailDraftCardsReadOnly(
-          disabled,
+          props.disabled,
           item.ask_answered,
         );
         const markDraftAnswered = (confirmedId: string) => {
@@ -1416,8 +1473,10 @@ const AssistantMessage = (props: any) => {
             })}
           </div>
         );
+        }
       }
       if (!showAskCard) return null;
+      if (!askPending.user_env_delete && !askPending.questions?.length) return null;
       return (
         <AskCard
           key={askPending.ask_id}
@@ -1440,17 +1499,22 @@ const AssistantMessage = (props: any) => {
               );
             }
           }}
-          onSubmit={(payload) => {
+          onSubmit={async (payload) => {
             persistAskAnswersRef.current.cancel();
-            // Mark the card as answered in memory so it shows as disabled immediately.
+            const started = await props.sendMessage?.(payload.text, undefined, {
+              ask_answers_structured: payload.structured,
+            });
+            if (!started) return false;
+            // Deletion confirmations are consumed by Core; history remains authoritative.
+            if (askPending.user_env_delete) return true;
             updateMessage({
               ...item,
               ask_answered: true,
-              ask_saved_answers: undefined,
+              ask_saved_answers: Object.fromEntries(
+                payload.structured.questions.map((question, idx) => [idx, question.answer]),
+              ),
             });
-            props.sendMessage?.(payload.text, undefined, {
-              ask_answers_structured: payload.structured,
-            });
+            return true;
           }}
         />
       );
@@ -1524,6 +1588,8 @@ const AssistantMessage = (props: any) => {
       item.finish_reason ===
         ChatConversationsResponseFinishReasonEnum.FinishReasonStop);
 
+  const configurationTaskEnded = runCompleted || ["failed", "interrupted", "cancelled"].includes(item.run_status || "");
+
   const shouldUseMultiAnswerStyle =
     hasMultipleAnswers &&
     (item.selected_answer_index === undefined ||
@@ -1571,15 +1637,23 @@ const AssistantMessage = (props: any) => {
                 const answer = item.answers[answerIndex || 0];
                 const uniqueKey = answer?.history_id || `answer_${answerIndex}`;
 
-                return renderText(
-                  {
-                    ...item,
-                    delta: content,
-                    reasoning_content: reasoningContent,
-                    sources: answer?.sources || [],
-                    thinking_duration_s: answer?.thinking_duration_s,
-                  },
-                  uniqueKey,
+                return (
+                  <MessagePartBoundary fallback={<span>{t("chat.messageRenderFailed")}</span>}>
+                    <MessagePart
+                      render={() =>
+                        renderText(
+                          {
+                            ...item,
+                            delta: content,
+                            reasoning_content: reasoningContent,
+                            sources: answer?.sources || [],
+                            thinking_duration_s: answer?.thinking_duration_s,
+                          },
+                          uniqueKey,
+                        )
+                      }
+                    />
+                  </MessagePartBoundary>
                 );
               }}
               onSelectAnswer={onSelectAnswer}
@@ -1595,7 +1669,16 @@ const AssistantMessage = (props: any) => {
             />
             {renderForkAction()}
           </div>
-          {!item.fork_read_only && (item.ask_pending || index === length - 1) && renderBottom()}
+          {!item.fork_read_only && sessionId && item.history_id && <ToolConfigurationCard
+            conversationId={sessionId} historyId={item.history_id} active={!configurationTaskEnded && index === length - 1}
+            onContinue={configurationTaskEnded && index === length - 1 && props.sendMessage
+              ? () => props.sendMessage?.(t("toolConfiguration.continueMessage")) : undefined}
+          />}
+          {!item.fork_read_only && (item.ask_pending || index === length - 1) && (
+            <MessagePartBoundary fallback={<span>{t("chat.messageRenderFailed")}</span>}>
+              <MessagePart render={() => renderBottom()} />
+            </MessagePartBoundary>
+          )}
           {index === length - 1 && workflowSession && sessionId && (
             <WorkflowPanel
               key={sessionId}
@@ -1638,11 +1721,19 @@ const AssistantMessage = (props: any) => {
             onRetry={runRetryable ? regenerate : undefined}
             retryDisabled={regenerateDisabled}
           />
-          {shouldShowLoading
-            ? renderLoading()
-            : item.onboardingInfo
-              ? renderOnboardingInfo(item.onboardingInfo)
-              : renderText(item)}
+          {shouldShowLoading ? (
+            renderLoading()
+          ) : (
+            <MessagePartBoundary fallback={<span>{t("chat.messageRenderFailed")}</span>}>
+              <MessagePart
+                render={() =>
+                  item.onboardingInfo
+                    ? renderOnboardingInfo(item.onboardingInfo)
+                    : renderText(item)
+                }
+              />
+            </MessagePartBoundary>
+          )}
           {item.finish_reason ===
             ChatConversationsResponseFinishReasonEnum.FinishReasonUnknown &&
             renderError()}
@@ -1651,7 +1742,16 @@ const AssistantMessage = (props: any) => {
           {runCompleted && !item.onboardingInfo && renderFooter()}
           {item.fork_read_only && !item.delta && <span>{t("chat.fork.emptyTerminal")}</span>}
         </div>
-        {!item.fork_read_only && (item.ask_pending || index === length - 1) && renderBottom()}
+        {!item.fork_read_only && sessionId && item.history_id && <ToolConfigurationCard
+          conversationId={sessionId} historyId={item.history_id} active={!configurationTaskEnded && index === length - 1}
+          onContinue={configurationTaskEnded && index === length - 1 && props.sendMessage
+            ? () => props.sendMessage?.(t("toolConfiguration.continueMessage")) : undefined}
+        />}
+        {!item.fork_read_only && (item.ask_pending || index === length - 1) && (
+          <MessagePartBoundary fallback={<span>{t("chat.messageRenderFailed")}</span>}>
+            <MessagePart render={() => renderBottom()} />
+          </MessagePartBoundary>
+        )}
         {index === length - 1 && workflowSession && sessionId && (
           <WorkflowPanel
             key={sessionId}

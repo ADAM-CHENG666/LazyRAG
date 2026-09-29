@@ -74,6 +74,13 @@ const {
   resolveExistingDirectories,
   saveAccessState,
 } = require("./local-folder-access");
+const {
+  buildObsidianRuntimeEnv,
+  clearObsidianConfig,
+  isExistingDirectory,
+  loadObsidianConfig,
+  saveObsidianConfig,
+} = require("./obsidian-config");
 
 const { BrowserConnection } = require("./browser-connection");
 const { createBrowserAdapter, loadBrowserController, profilePartition } = require("./managed-browser");
@@ -111,7 +118,7 @@ const externalRuntimeURL = desktopDevURL
   )
   : "";
 const isExternalRuntimeDev = Boolean(desktopDevURL && externalRuntimeURL);
-const desktopTarget = isWindows ? "windows-x64" : "darwin-arm64";
+const desktopTarget = isWindows ? "windows-x64" : (process.arch === "x64" ? "darwin-x64" : "darwin-arm64");
 const ownerToken = randomUUID();
 const localWorkspaceCandidates = new Map();
 const internalServiceToken = randomBytes(32).toString("base64url");
@@ -133,6 +140,8 @@ const explicitRuntimeRoot = process.env.LAZYMIND_DESKTOP_RUNTIME_ROOT || "";
 const desktopLogsDir = app.getPath("logs");
 const desktopCredentialIdentityPath = path.join(app.getPath("userData"), "credential-device.json");
 const localFolderAccessStatePath = path.join(app.getPath("userData"), "local-folder-access.json");
+const obsidianConfigPath = path.join(app.getPath("userData"), "obsidian-config.json");
+const obsidianDisabledRoot = path.join(app.getPath("userData"), ".obsidian-unconfigured");
 const cursorWorkspaceStorageRoot = path.join(
   app.getPath("appData"),
   "Cursor",
@@ -191,6 +200,8 @@ let frontendOpeningAllowed = false;
 let tray;
 let rendererReadyWait;
 let runtimeProcess;
+let runtimeRestartPromise;
+let runtimeStopping = false;
 let agentHostProcess;
 let agentHostRestartTimer;
 let agentHostStableTimer;
@@ -281,11 +292,18 @@ const desktopNotifications = createDesktopNotifications({
   report: (code) => appendStartupLog("desktop", code),
 });
 
+// Renderer navigation and session IPC must agree on the exact origin;
+// localhost and 127.0.0.1 are different origins even on the same port.
+function desktopFrontendOrigin(frontendPort) {
+  const port = Number(frontendPort);
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? `http://localhost:${port}` : "";
+}
+
 function notificationFrontendOrigin() {
   if (isExternalRuntimeDev) {
     return new URL(desktopDevURL).origin;
   }
-  return `http://127.0.0.1:${Number(currentStatus?.config?.frontendPort)}`;
+  return desktopFrontendOrigin(currentStatus?.config?.frontendPort);
 }
 
 function loadEditablePptDependencyConfig() {
@@ -350,6 +368,7 @@ function sidecarArgs(command, extra = []) {
 
 function sidecarEnv() {
   const localFolderAccess = loadAccessState(localFolderAccessStatePath);
+  const obsidianConfig = loadObsidianConfig(obsidianConfigPath);
   const env = {
     ...process.env,
     LAZYMIND_RUNTIME_PROFILE: "desktop",
@@ -373,6 +392,10 @@ function sidecarEnv() {
     PYTHONDONTWRITEBYTECODE: "1",
     LAZYMIND_FILE_WATCHER_EXTRA_ALLOWED_ROOTS_JSON: JSON.stringify(localFolderAccess.allowedRoots),
   };
+  Object.assign(
+    env,
+    buildObsidianRuntimeEnv(obsidianConfig.root, obsidianDisabledRoot),
+  );
   env.LAZYMIND_MODEL_PROVIDER_SECRET_KEY ||= deriveDesktopCredentialKey(desktopCredentialIdentity, "model-provider");
   env.LAZYMIND_MCP_SECRET_KEY ||= deriveDesktopCredentialKey(desktopCredentialIdentity, "mcp");
   env.LAZYMIND_AUTH_CLOUD_SECRET_KEY ||= deriveDesktopCredentialKey(desktopCredentialIdentity, "cloud-oauth");
@@ -573,7 +596,15 @@ function captureSidecarChunk(source, chunk) {
         updateStartupState({
           status: "starting",
           phase: "Preparing sample conversations",
-          message: "Verifying and unpacking the bundled sample conversations...",
+          message: "Downloading if needed, verifying and unpacking sample conversations...",
+          progress: null,
+        });
+      }
+      if (event?.phase === "history-injection-payload" && event?.event === "phase.skipped") {
+        updateStartupState({
+          status: "starting",
+          phase: "Starting local services",
+          message: "Sample conversations are unavailable. They will be retried on the next launch.",
           progress: null,
         });
       }
@@ -663,7 +694,7 @@ function runSidecar(command, extra = [], options = {}) {
       windowsHide: isWindows,
     }, (error, stdout, stderr) => {
       if (error) {
-        error.message = `${error.message}\n${stderr || ""}`;
+        error.message = `${error.message}\n${stdout || ""}\n${stderr || ""}`;
         reject(error);
         return;
       }
@@ -807,7 +838,7 @@ function runConnectorJSON(args, timeout, input) {
 }
 
 function scheduleAgentHostRestart() {
-  if (isQuitting || isInstallerWarmup || agentHostRestartTimer) {
+  if (runtimeStopping || isQuitting || isInstallerWarmup || agentHostRestartTimer) {
     return;
   }
   const delay = Math.min(1000 * (2 ** Math.min(agentHostRestartAttempts, 5)), agentHostRestartMaxDelayMs);
@@ -821,7 +852,7 @@ function scheduleAgentHostRestart() {
 }
 
 function startAgentHost() {
-  if (agentHostProcess || isQuitting || isInstallerWarmup || !fs.existsSync(agentConnectorPath)) {
+  if (runtimeStopping || agentHostProcess || isQuitting || isInstallerWarmup || !fs.existsSync(agentConnectorPath)) {
     return;
   }
   clearTimeout(agentHostRestartTimer);
@@ -863,7 +894,7 @@ async function runInstallerWarmup() {
     fs.mkdirSync(desktopLogsDir, { recursive: true });
     fs.appendFileSync(warmupLogPath, `[${new Date().toISOString()}] ${message}\n`);
   };
-  log(`starting offline installer warmup with timeout ${timeoutSeconds}s`);
+  log(`starting installer warmup with timeout ${timeoutSeconds}s`);
   await runInstallerWarmupLifecycle({
     startRuntime: () => runSidecar("up", maintenanceArgs, {
       timeout: timeoutSeconds * 1000,
@@ -885,7 +916,7 @@ async function runInstallerWarmup() {
           callback({ cancel: true });
         }
       });
-      await warmupWindow.loadURL(`http://127.0.0.1:${status.config.frontendPort}`);
+      await warmupWindow.loadURL(desktopFrontendOrigin(status.config.frontendPort));
     },
     stopRuntime: () => runSidecar("down", maintenanceArgs, {
       env: { ...sidecarEnv(), LAZYMIND_LOCAL_DOWN_TIMEOUT: "120s" },
@@ -1079,6 +1110,7 @@ function detachRuntimeMonitor() {
   proc.stdout?.removeAllListeners("data");
   proc.stderr?.removeAllListeners("data");
   proc.removeAllListeners("exit");
+  proc.removeAllListeners("close");
   proc.removeAllListeners("error");
   proc.stdout?.destroy();
   proc.stderr?.destroy();
@@ -1125,6 +1157,7 @@ function spawnDetachedShutdownHelper(reason) {
 }
 
 async function readStatus(options = {}) {
+  if (runtimeStopping && currentStatus) return currentStatus;
   if (isExternalRuntimeDev) {
     currentStatus = desktopDevRuntimeStatus(externalRuntimeURL);
     return currentStatus;
@@ -1141,6 +1174,16 @@ function localFolderAccessSnapshot() {
     ...state,
     available: true,
     items: recommendationsForExactFolders(state.allowedRoots),
+  };
+}
+
+function obsidianConfigSnapshot() {
+  const config = loadObsidianConfig(obsidianConfigPath);
+  return {
+    configured: Boolean(config.root),
+    available: Boolean(config.root && isExistingDirectory(config.root)),
+    root: config.root || "",
+    updatedAt: config.updatedAt || "",
   };
 }
 
@@ -1220,11 +1263,53 @@ function resolveRequestedLocalFolder(folderPath, status, accessState) {
   return resolved;
 }
 
-async function restartRuntimeAfterFolderAccessChange() {
-  await runSidecar("down");
-  detachRuntimeMonitor();
-  startRuntime();
-  return waitForRuntimeReady();
+function restartRuntimeAfterFolderAccessChange({ reload = true } = {}) {
+  if (runtimeRestartPromise) return runtimeRestartPromise;
+  runtimeRestartPromise = (async () => {
+    runtimeStopping = true;
+    clearTimeout(agentHostRestartTimer);
+    clearTimeout(agentHostStableTimer);
+    agentHostRestartTimer = undefined;
+    agentHostStableTimer = undefined;
+    agentHostProcess?.kill();
+    appendStartupLog("desktop", "runtime restart: stopping services and auxiliary processes");
+    const monitor = runtimeProcess;
+    let monitorClosed = Promise.resolve();
+    if (monitor) {
+      monitorClosed = new Promise((resolve, reject) => {
+        let timeout;
+        const onClose = () => {
+          clearTimeout(timeout);
+          resolve();
+        };
+        timeout = setTimeout(() => {
+          monitor.removeListener("close", onClose);
+          reject(new Error("Timed out waiting for the previous desktop runtime monitor to exit"));
+        }, runtimeOwnershipHandoffTimeoutMs);
+        monitor.once("close", onClose);
+      });
+    }
+
+    try {
+      await Promise.all([runSidecar("down", [], { env: sidecarShutdownEnv() }), monitorClosed]);
+      detachRuntimeMonitor();
+      runtimeStopping = false;
+      startRuntime();
+      const status = await waitForRuntimeReady();
+      const window = activeWindow();
+      if (reload && window && !window.isDestroyed()) window.webContents.reload();
+      startAgentHost();
+      appendStartupLog("desktop", "runtime restart completed");
+      return status;
+    } catch (error) {
+      appendStartupLog("error", `runtime restart failed: ${serializeError(error)}`);
+      throw error;
+    } finally {
+      runtimeStopping = false;
+      runtimeRestartPromise = undefined;
+    }
+  })();
+  return runtimeRestartPromise;
 }
 
 function logStartupContext() {
@@ -1266,9 +1351,11 @@ function startRuntime() {
     detached: false,
     windowsHide: isWindows,
   });
+  const startedProcess = runtimeProcess;
   runtimeProcess.stdout?.on("data", (chunk) => captureSidecarChunk("sidecar.stdout", chunk));
   runtimeProcess.stderr?.on("data", (chunk) => captureSidecarChunk("sidecar.stderr", chunk));
   runtimeProcess.once("error", (error) => {
+    if (runtimeProcess !== startedProcess) return;
     runtimeProcessExit = { error: serializeError(error), detail: serializeError(error) };
     runtimeProcess = null;
     setStartupFailure(error, "Could not start desktop runtime sidecar");
@@ -1276,6 +1363,7 @@ function startRuntime() {
   // `close` fires after stdout/stderr are drained, so the final Go error cannot
   // race with ownership/status handling below.
   runtimeProcess.once("close", (code, signal) => {
+    if (runtimeProcess !== startedProcess) return;
     const detail = sidecarFailureDetail() || runtimeProcessExit?.detail || "";
     runtimeProcessExit = { code, signal, at: new Date().toISOString(), detail };
     appendStartupLog("sidecar", `local-runtime-manager exited with code ${code ?? "null"} signal ${signal ?? "null"}`);
@@ -1634,6 +1722,7 @@ function loadingHTML() {
     .dot { width: 7px; height: 7px; border-radius: 50%; background: #cbd5e1; flex: 0 0 auto; }
     .step.running .dot { background: #2563eb; }
     .step.ready .dot { background: #16a34a; }
+    .step.stale .dot { background: #eab308; }
     .step.failed .dot { background: #dc2626; }
     .step-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .log {
@@ -1734,7 +1823,8 @@ function loadingHTML() {
     }
     function serviceClass(status) {
       if (status === "running" || status === "ready") return "ready";
-      if (status === "failed" || status === "stale") return "failed";
+      if (status === "stale") return "stale";
+      if (status === "failed") return "failed";
       if (status === "starting") return "running";
       return "";
     }
@@ -1853,6 +1943,7 @@ function attachExternalNavigationHandler(window) {
     window.webContents,
     (url) => shell.openExternal(url),
     (error) => appendStartupLog("error", `failed to open external URL: ${serializeError(error)}`),
+    { webPreferences: { preload: path.join(__dirname, "preload.js") } },
   );
 }
 
@@ -2095,7 +2186,7 @@ function createHiddenRendererAttempt(frontendPort) {
   rendererReadyWait = readyWait;
   startupMetricsRecorder.mark("frontendLoadStarted");
   const ready = Promise.all([
-    window.loadURL(`http://127.0.0.1:${frontendPort}/agent/chat/home`),
+    window.loadURL(`${desktopFrontendOrigin(frontendPort)}/agent/chat/home`),
     readyWait.promise,
   ]);
   return {
@@ -2457,8 +2548,8 @@ ipcMain.on("lazymind:notificationSessionRestore", (event, value) => {
   event.returnValue = !isQuitting && isTrustedNotificationSender(event, mainWindow, notificationFrontendOrigin())
     ? notificationSession.restore(value) : null;
 });
-ipcMain.handle("lazymind:restartRuntime", async () => {
-  return restartRuntimeAfterFolderAccessChange();
+ipcMain.handle("lazymind:restartRuntime", async (_event, options) => {
+  return restartRuntimeAfterFolderAccessChange({ reload: options?.reload !== false });
 });
 ipcMain.handle("lazymind:resetRuntime", async (_event, scope = "kb") => {
   await runSidecar("reset", ["--scope", scope]);
@@ -2782,6 +2873,25 @@ ipcMain.handle("lazymind:authorizeLocalWorkspace", async (event, selectionToken)
     throw new Error("Desktop workspace authorization failed");
   }
   return responseBody.data;
+});
+ipcMain.handle("lazymind:obsidianConfigStatus", () => obsidianConfigSnapshot());
+ipcMain.handle("lazymind:selectObsidianRoot", async () => {
+  const result = await dialog.showOpenDialog(activeWindow(), {
+    title: "选择 Obsidian 扫描根目录",
+    properties: ["openDirectory"],
+  });
+  if (result.canceled || result.filePaths.length === 0) {
+    return { ...obsidianConfigSnapshot(), canceled: true };
+  }
+
+  const [root] = resolveExistingDirectories([result.filePaths[0]]);
+  saveObsidianConfig(obsidianConfigPath, root);
+  return { ...obsidianConfigSnapshot(), canceled: false };
+});
+ipcMain.handle("lazymind:clearObsidianRoot", async () => {
+  clearObsidianConfig(obsidianConfigPath);
+  await restartRuntimeAfterFolderAccessChange();
+  return obsidianConfigSnapshot();
 });
 ipcMain.handle("lazymind:selectExecutable", async (_event, target = "") => {
   const agentExecutable = agentBindingTargets.has(target);
