@@ -2124,6 +2124,12 @@ const enUS = {
 
   // Chat
   chat: {
+    sidebar: {
+      expand: "Expand", collapse: "Collapse",
+      overview: "Overview", sidechat: "Side chat", open: "Open side panel", close: "Collapse side panel",
+      switch: "Switch side panel", intent: "User intent", intentEmpty: "Intent from this conversation will appear here",
+      attachments: "Attachments", artifacts: "Artifacts", empty: "Nothing here yet",
+    },
     exportCurrentGeneration: "Current generation",
     exportPreviousGeneration: "Previous generation",
     exportUnknownGeneration: "Unknown generation",
@@ -8452,6 +8458,7 @@ const enUS = {
       E_MATERIAL_MULTIPLE_PRODUCERS: "Material {{material}} is produced by multiple steps",
       E_MATERIAL_SELF_OVERWRITE: "Step {{node}} cannot consume and produce material {{material}}",
       E_MATERIAL_PRODUCER_NOT_UPSTREAM: "Producer {{producer}} of material {{material}} must be upstream of step {{node}}",
+      E_RUNTIME_POST_CHECK_MATERIAL_NOT_PRODUCED: "Post-step check for step {{node}} references material {{material}}, which the step does not produce",
       E_STEP_ID_REQUIRED: "Step id is required",
       E_STEP_DUPLICATE: "Duplicate step id: {{node}}",
       E_STATE_STEP_MISSING: "Step {{node}} has no state configuration",
@@ -9348,6 +9355,10 @@ const enUS = {
     },
 
     skills: {
+      searchResources: "Search name or description",
+      resourceName: "Name",
+      resourceInfo: "Category / version",
+      resourceEnabled: "Enabled",
       title: "Skills & plugins",
       description: "Enable or disable personal skills and workflows for the current account independently.",
       mySkills: "My skills",

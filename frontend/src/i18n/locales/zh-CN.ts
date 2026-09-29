@@ -2074,6 +2074,12 @@ const zhCN = {
   },
 
   chat: {
+    sidebar: {
+      expand: "展开", collapse: "收起",
+      overview: "概览", sidechat: "侧面聊天", open: "展开侧面面板", close: "收起侧面面板",
+      switch: "切换侧面面板", intent: "用户意图", intentEmpty: "对话生成的用户意图会显示在这里",
+      attachments: "附件", artifacts: "产物", empty: "暂无内容",
+    },
     exportCurrentGeneration: "本次生成",
     exportPreviousGeneration: "历史生成",
     exportUnknownGeneration: "生成版本未知",
@@ -8202,6 +8208,7 @@ const zhCN = {
       E_MATERIAL_MULTIPLE_PRODUCERS: "素材“{{material}}”被多个步骤产出",
       E_MATERIAL_SELF_OVERWRITE: "步骤“{{node}}”不能同时消费并产出素材“{{material}}”",
       E_MATERIAL_PRODUCER_NOT_UPSTREAM: "素材“{{material}}”的产出步骤“{{producer}}”必须位于步骤“{{node}}”的上游",
+      E_RUNTIME_POST_CHECK_MATERIAL_NOT_PRODUCED: "步骤“{{node}}”的执行后检查引用了该步骤未产出的素材“{{material}}”",
       E_STEP_ID_REQUIRED: "步骤标识不能为空",
       E_STEP_DUPLICATE: "步骤标识“{{node}}”重复",
       E_STATE_STEP_MISSING: "步骤“{{node}}”缺少状态配置",
@@ -9095,6 +9102,10 @@ const zhCN = {
 
     skills: {
       title: "技能与插件",
+      searchResources: "搜索名称或描述",
+      resourceName: "名称",
+      resourceInfo: "分类 / 版本",
+      resourceEnabled: "启用",
       description: "分别启停当前账号的个人技能和工作流。",
       mySkills: "我的技能",
       myWorkflows: "我的工作流",
