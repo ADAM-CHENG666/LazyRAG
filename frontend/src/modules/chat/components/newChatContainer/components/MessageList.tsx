@@ -23,6 +23,7 @@ import {
 } from "@/modules/chat/constants/chat";
 import { IdentityAvatar } from "@/modules/identityAvatar";
 import type { ChatSource } from "@/modules/chat/utils/sourceAdapter";
+import { mailDraftsFromAskPending } from "@/modules/chat/utils/message";
 
 const MENTION_ICONS = {
   knowledge_base: <DatabaseOutlined />,
@@ -272,6 +273,29 @@ function UserCitationPreview({ citeMessages }: { citeMessages: string[] }) {
   );
 }
 
+function mailboxAddresses(value: unknown) {
+  const values = Array.isArray(value)
+    ? value
+    : typeof value === "string"
+      ? value.split(/[,;]/)
+      : [];
+  return values.map((item) => String(item).trim().toLowerCase()).filter(Boolean);
+}
+
+function mailboxDraftKey(draft: any) {
+  return JSON.stringify({
+    to: mailboxAddresses(draft?.to),
+    cc: mailboxAddresses(draft?.cc),
+    subject: String(draft?.subject || "").trim(),
+    body: String(draft?.body || ""),
+    inReplyTo: String(draft?.in_reply_to || "").trim(),
+    mailboxes: (Array.isArray(draft?.mailboxes) ? draft.mailboxes : [])
+      .map((item: any) => String(item?.email || "").trim().toLowerCase())
+      .filter(Boolean)
+      .sort(),
+  });
+}
+
 const MessageList: React.FC<MessageListProps> = ({
   onFork,
   forkPending,
@@ -305,6 +329,36 @@ const MessageList: React.FC<MessageListProps> = ({
 }) => {
   const { t } = useTranslation();
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const latestMailCards = useMemo(() => {
+    const latest = new Map<string, number>();
+    messageList.forEach((message, index) => {
+      if (message.role !== RoleTypes.ASSISTANT || message.archived_failure) return;
+      for (const draft of mailDraftsFromAskPending(message.ask_pending)) latest.set(String(draft.draft_id), index);
+    });
+    return latest;
+  }, [messageList]);
+  const latestMailboxCards = useMemo(() => {
+    const latest = new Map<string, string>();
+    messageList.forEach((message, index) => {
+      if (message.role !== RoleTypes.ASSISTANT || message.archived_failure) return;
+      for (const draft of mailDraftsFromAskPending(message.ask_pending)) {
+        if (String(draft.status || "") !== "needs_mailbox") continue;
+        latest.set(mailboxDraftKey(draft), `${index}:${String(draft.draft_id || "")}`);
+      }
+    });
+    return latest;
+  }, [messageList]);
+  const latestOrdinaryAsks = useMemo(() => {
+    const latest = new Map<string, number>();
+    messageList.forEach((message, index) => {
+      if (message.role !== RoleTypes.ASSISTANT || message.archived_failure) return;
+      const pending = message.ask_pending;
+      if (pending?.ask_id && (pending.mail_draft_only === false || !mailDraftsFromAskPending(pending).length)) {
+        latest.set(pending.ask_id, index);
+      }
+    });
+    return latest;
+  }, [messageList]);
   const editComposeRef = useRef(false);
 
   const contentRef = chatContentRef || scrollContainerRef;
@@ -566,6 +620,15 @@ const MessageList: React.FC<MessageListProps> = ({
                   }
                   sessionId={sessionId}
                   conversationFiles={conversationFiles}
+                  supersededAskPending={(latestOrdinaryAsks.get(pending?.ask_id) ?? index) > index}
+                  supersededMailDraftIds={mailDraftsFromAskPending(pending)
+                    .map((draft) => String(draft.draft_id))
+                    .filter((id) => (latestMailCards.get(id) ?? index) > index)}
+                  hiddenMailDraftIds={mailDraftsFromAskPending(pending)
+                    .filter((draft) => String(draft.status || "") === "needs_mailbox")
+                    .filter((draft) => latestMailboxCards.get(mailboxDraftKey(draft)) !==
+                      `${index}:${String(draft.draft_id || "")}`)
+                    .map((draft) => String(draft.draft_id || ""))}
                   onPreferenceSelect={onPreferenceSelect}
                   onCiteMessage={(text: string) =>
                     onCiteMessage?.(text, item.history_id || item.id)
