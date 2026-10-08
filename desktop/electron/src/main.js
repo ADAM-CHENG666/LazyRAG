@@ -292,11 +292,18 @@ const desktopNotifications = createDesktopNotifications({
   report: (code) => appendStartupLog("desktop", code),
 });
 
+// Renderer navigation and session IPC must agree on the exact origin;
+// localhost and 127.0.0.1 are different origins even on the same port.
+function desktopFrontendOrigin(frontendPort) {
+  const port = Number(frontendPort);
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? `http://localhost:${port}` : "";
+}
+
 function notificationFrontendOrigin() {
   if (isExternalRuntimeDev) {
     return new URL(desktopDevURL).origin;
   }
-  return `http://127.0.0.1:${Number(currentStatus?.config?.frontendPort)}`;
+  return desktopFrontendOrigin(currentStatus?.config?.frontendPort);
 }
 
 function loadEditablePptDependencyConfig() {
@@ -909,7 +916,7 @@ async function runInstallerWarmup() {
           callback({ cancel: true });
         }
       });
-      await warmupWindow.loadURL(`http://localhost:${status.config.frontendPort}`);
+      await warmupWindow.loadURL(desktopFrontendOrigin(status.config.frontendPort));
     },
     stopRuntime: () => runSidecar("down", maintenanceArgs, {
       env: { ...sidecarEnv(), LAZYMIND_LOCAL_DOWN_TIMEOUT: "120s" },
@@ -2179,7 +2186,7 @@ function createHiddenRendererAttempt(frontendPort) {
   rendererReadyWait = readyWait;
   startupMetricsRecorder.mark("frontendLoadStarted");
   const ready = Promise.all([
-    window.loadURL(`http://localhost:${frontendPort}/agent/chat/home`),
+    window.loadURL(`${desktopFrontendOrigin(frontendPort)}/agent/chat/home`),
     readyWait.promise,
   ]);
   return {
