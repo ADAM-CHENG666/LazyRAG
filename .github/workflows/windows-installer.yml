@@ -336,6 +336,7 @@ jobs:
             desktop/dist/python-components/windows-amd64/algorithm-requirements.lock
             desktop/dist/python-components/windows-amd64/milvus-windows-patch.json
             desktop/dist/python-components/windows-amd64/verification.json
+            desktop/dist/python-components/windows-amd64/run-*/**/*.log
           if-no-files-found: ignore
           retention-days: 14
 

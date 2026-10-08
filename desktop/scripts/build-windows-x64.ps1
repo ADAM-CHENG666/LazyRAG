@@ -558,7 +558,7 @@ function Build-Desktop([ValidateSet('zip', 'installer')][string]$PackageKind = '
     )
     Invoke-Native $algorithmPython @('-c', "import importlib.metadata as m; assert m.version('lazyllm') == '$lazyLLMVersion'")
     Invoke-Native $algorithmPython @('-B', '-m', 'unittest', 'discover', '-s', (Join-Path $repoRoot 'tests'), '-p', 'test_desktop_windows_milvus.py', '-v')
-    Write-Host '==> Applying the verified Windows Milvus manifest replacement fix'
+    Write-Host '==> Applying the verified Windows Milvus storage fixes'
     Invoke-Native $algorithmPython @((Join-Path $repoRoot 'desktop\scripts\patch-windows-milvus.py'), $runtimeRoot)
     Write-Host '==> Pruning bundled Python runtime'
     $pythonPruneArgs = @(
