@@ -47,6 +47,7 @@ def recording_payload():
 def test_recording_missing_vision_returns_card_reason(monkeypatch):
     from lazymind import vision_model as vm
     from lazymind.review.api.recording_skill_routes import recording_skill
+
     def unavailable():
         raise vm.VisionModelUnavailable('主模型图片能力检测暂未成功，请重试或配置视觉模型。')
     monkeypatch.setattr(vm, 'select_vision_model_role', unavailable)
