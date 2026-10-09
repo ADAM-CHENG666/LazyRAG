@@ -1,4 +1,6 @@
 """Real owner tools use the generic host-access approval/claim/complete path."""
+from pathlib import Path
+
 import lazyllm
 
 from lazymind.chat.engine.subagent.context import SubAgentContext
@@ -34,8 +36,11 @@ def test_real_artifact_read_uses_local_guard_without_core(workspace_runtime, tmp
     middleware, core, task, emitted = artifact_runtime(workspace_runtime, tmp_path, monkeypatch)
     result = middleware.execute_with_records(artifact_call(source))
     assert result.results[0]['ok'], result.results
-    assert (task / source.name).read_text() == 'external artifact'
     assert emitted and not core.events
+    saved = Path(emitted[0]['value']['path'])
+    assert saved.is_relative_to(task)
+    assert saved.name == source.name
+    assert saved.read_text() == 'external artifact'
 
 
 def test_denied_artifact_preserves_existing_target(workspace_runtime, tmp_path, monkeypatch):
