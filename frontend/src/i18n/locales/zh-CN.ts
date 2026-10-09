@@ -66,6 +66,7 @@ const zhCN = {
     "unsupported": "无法开始录屏。请使用支持屏幕共享的浏览器，通过 HTTPS 或 localhost 访问，或检查桌面端录屏权限后重试。",
     "failed": "操作失败，请重试。",
     "loadFailed": "无法加载录屏确认状态，请刷新后重试。",
+    "synthesizing": "正在汇总并生成技能…",
     "analyzing": "正在识别操作步骤、页面信息及输入输出…",
     "status": {
         "generating": "生成中",

@@ -67,6 +67,7 @@ const enUS = {
     "unsupported": "Unable to record. Use a browser with screen sharing over HTTPS or localhost, or check the desktop screen recording permission.",
     "failed": "The operation failed. Please retry.",
     "loadFailed": "Unable to load confirmation status. Refresh and try again.",
+    "synthesizing": "Generating the skill…",
     "analyzing": "Identifying steps, pages, inputs and outputs…",
     "status": {
         "generating": "Generating",
