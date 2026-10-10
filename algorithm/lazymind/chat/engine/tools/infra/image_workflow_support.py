@@ -69,11 +69,17 @@ _CJK_FONT_CANDIDATES = tuple(filter(None, (
     '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
     '/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc',
     '/usr/share/fonts/truetype/arphic/uming.ttc',
+    '/System/Library/Fonts/PingFang.ttc',
+    '/System/Library/Fonts/STHeiti Medium.ttc',
+    '/System/Library/Fonts/STHeiti Light.ttc',
+    '/System/Library/Fonts/Supplemental/Songti.ttc',
 )))
 _LATIN_FONT_CANDIDATES = tuple(filter(None, (
     os.getenv('LAZYMIND_MEME_FONT_PATH', ''),
     '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
     '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+    '/System/Library/Fonts/Supplemental/Arial Bold.ttf',
+    '/System/Library/Fonts/Supplemental/Arial.ttf',
 )))
 
 _IMAGE_ROUTE_TARGETS = {
