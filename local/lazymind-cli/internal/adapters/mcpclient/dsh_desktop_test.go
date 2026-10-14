@@ -2,16 +2,20 @@ package mcpclient
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
-	"gopkg.in/yaml.v3"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"lazymind/agentconnector/internal/agentexec"
 	"lazymind/agentconnector/internal/agentintegration"
@@ -34,13 +38,19 @@ func desktopAdapterFixture(t *testing.T) *Adapter {
 	t.Setenv("DSH_HOME", filepath.Join(root, "中文 DSH"))
 	t.Setenv("LAZYMIND_DSH_PROFILE", "../ignored-in-desktop-mode")
 	app := filepath.Join(root, "桌面 DSH.app")
-	cli := filepath.Join(app, "Contents", "Resources", "runtime", "cli", "bin", "dsh")
-	writeTestFile(t, cli, "#!/bin/sh\necho 0.2.0-rc.2\n")
+	resources := filepath.Join(app, "Contents", "Resources")
+	launcher, script := "dsh", "#!/bin/sh\necho 0.2.0-rc.2\n"
+	if runtime.GOOS == "windows" {
+		resources = filepath.Join(root, "桌面 DSH", "resources")
+		launcher, script = "dsh.cmd", "@echo off\r\necho 0.2.0-rc.2\r\n"
+	}
+	cli := filepath.Join(resources, "runtime", "cli", "bin", launcher)
+	writeTestFile(t, cli, script)
 	if err := os.Chmod(cli, 0700); err != nil {
 		t.Fatal(err)
 	}
-	writeTestFile(t, filepath.Join(app, "Contents", "Resources", "app.asar"), "fixture")
-	t.Setenv("LAZYMIND_DSH_DESKTOP_PATH", app)
+	writeTestFile(t, filepath.Join(resources, "app.asar"), "fixture")
+	t.Setenv("LAZYMIND_DSH_DESKTOP_PATH", cli)
 	writeTestFile(t, filepath.Join(dshHome(), "profiles", "desktop", "package.json"), desktopManifest)
 	a := testAdapter(DeepSeekHarness)
 	a.self = filepath.Join(root, "lazymind")
@@ -272,18 +282,30 @@ func TestDesktopDisconnectOccupiedProfileCanBeRetried(t *testing.T) {
 
 func TestDesktopPairingFailureDoesNotUndoOtherProfile(t *testing.T) {
 	a := desktopAdapterFixture(t)
-	dir := filepath.Join(a.home, "workflow-hosts")
+	store, err := credentials.NewStore(a.home, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := store.AccountScope()
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := filepath.Dir(a.forDSHProfile("web", "").dshConfigPath())
+	sum := sha256.Sum256([]byte(account + "\x00" + profile))
+	lockPath := filepath.Join(a.home, "workflow-hosts", "dsh-"+hex.EncodeToString(sum[:16])+".json.lock")
 	a.dshRunner = func(_ context.Context, name string, _ ...string) error {
 		installDSHFixture(t, name)
 		if name == "web" {
-			if err := os.Chmod(dir, 0500); err != nil {
+			// A directory at the lock-file path fails pairing on every platform,
+			// unlike POSIX permission bits, which Windows does not enforce.
+			if err := os.MkdirAll(lockPath, 0700); err != nil {
 				t.Fatal(err)
 			}
 		}
 		return nil
 	}
 	s := a.Connect(context.Background())
-	if err := os.Chmod(dir, 0700); err != nil {
+	if err := os.Remove(lockPath); err != nil {
 		t.Fatal(err)
 	}
 	if s.State != agentintegration.Failed || s.Profiles[0].State != agentintegration.Enabled {
