@@ -4,7 +4,8 @@ import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-tools/types'
 import type { ChatNode } from '@deepseek-ai/dsh-client-ui-chat/client'
-import { useEffect, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react'
+import { createPortal } from 'react-dom'
 import { eventRun, type RunLink } from '../protocol'
 import { runKey, windowStore } from './window-store'
 
@@ -59,10 +60,26 @@ export function apply(ctx: ClientContext, config: { serverName?: string } = {}):
     const state = useSyncExternalStore(windows.subscribe, windows.snapshot, windows.snapshot)
     const current = state.entries[session.sessionId]
     const frame = useRef<HTMLIFrameElement>(null)
+    const anchor = useRef<HTMLSpanElement>(null)
+    const [tail, setTail] = useState<HTMLDivElement | null>(null)
     const [expanded, setExpanded] = useState(false)
     const [collapsed, setCollapsed] = useState(false)
     const runId = current?.run.runId
     const origin = current ? new URL(current.run.url).origin : undefined
+    useLayoutEffect(() => {
+      // DSH rc.2 exposes the composer seat inside the shared conversation scroller.
+      // Keep our own portal host before that seat: messages grow before the panel,
+      // while the iframe stays mounted and never becomes part of the sticky input.
+      const seat = anchor.current?.closest('[data-composer-seat]')
+      const scroller = seat?.parentElement
+      if (!seat || !scroller?.matches('[data-conversation-scroll]')) return
+      const host = document.createElement('div')
+      host.dataset.lazymindWorkflowTail = ''
+      host.style.cssText = 'flex:none;min-width:0;width:100%;position:relative;'
+      scroller.insertBefore(host, seat)
+      setTail(host)
+      return () => { host.remove() }
+    }, [session.sessionId])
     useEffect(() => { setExpanded(false); setCollapsed(false) }, [runId, session.sessionId])
     useEffect(() => {
       const receive = (event: MessageEvent) => {
@@ -84,13 +101,14 @@ export function apply(ctx: ClientContext, config: { serverName?: string } = {}):
       if (origin) frame.current?.contentWindow?.postMessage({ type: 'lazymind.workflow.collapse', sessionId: runId, collapsed }, origin)
     }
     useEffect(syncExpansion, [expanded, collapsed, origin, runId])
-    if (!current) return null
+    if (!current) return <span ref={anchor} hidden />
     const url = new URL(`/workflow-runs/${encodeURIComponent(current.run.runId)}/embed`, origin)
     url.searchParams.set('hostOrigin', window.location.origin)
-    return <section aria-label="LazyMind Workflow" style={{
+    const panel = <section aria-label="LazyMind Workflow" style={{
       ...interactiveRegion,
-      height: collapsed && !expanded ? 66 : 'min(480px, 55dvh)', minHeight: 0, flexShrink: 0,
+      height: collapsed && !expanded ? 66 : 'min(900px, 75dvh)', minHeight: 0, flexShrink: 0,
       width: '100%', maxWidth: 'var(--dsh-chat-content-width, 920px)', alignSelf: 'center', boxSizing: 'border-box',
+      margin: expanded ? 0 : '12px auto',
       display: current.minimized ? 'none' : 'flex', flexDirection: 'column',
       ...(expanded ? { position: 'fixed', inset: 'var(--dsh-frame-overlay-top, 16px) 16px 16px', width: 'auto', maxWidth: 'none', alignSelf: 'stretch', height: 'auto', zIndex: 1000 } as const : {}),
       background: '#fff', borderRadius: 10, overflow: 'hidden',
@@ -98,6 +116,10 @@ export function apply(ctx: ClientContext, config: { serverName?: string } = {}):
       <iframe ref={frame} key={runKey(current.run)} title="LazyMind Workflow" src={url.href}
         onLoad={syncExpansion} style={{ ...interactiveRegion, width: '100%', height: '100%', flex: 1, minHeight: 0, border: 0 }} />
     </section>
+    // Preserve the panel's place in the transcript while the same iframe is expanded.
+    return <><span ref={anchor} hidden />{tail ? createPortal(
+      <div style={{ display: 'flow-root', height: expanded ? 'calc(min(900px, 75dvh) + 24px)' : undefined }}>{panel}</div>, tail,
+    ) : panel}</>
   }
   ctx.uiConversation.events.register(definition)
   ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({ name: 'conversation.chat.node', key: 'lazymind-workflow' }, Entry))

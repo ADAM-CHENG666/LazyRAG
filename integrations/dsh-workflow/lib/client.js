@@ -1,6 +1,7 @@
 window.__ModuleLoader__.load({ id: "@lazymind/dsh-workflow", factory: (require) => {
 var module = { exports: {} }; var exports = module.exports;
 let react = require("react");
+let react_dom = require("react-dom");
 let react_jsx_runtime = require("react/jsx-runtime");
 
 //#region ../workflow-agent-core/src/protocol.ts
@@ -262,10 +263,25 @@ function apply(ctx, config = {}) {
 	function WorkflowDock({ session }) {
 		const current = (0, react.useSyncExternalStore)(windows.subscribe, windows.snapshot, windows.snapshot).entries[session.sessionId];
 		const frame = (0, react.useRef)(null);
+		const anchor = (0, react.useRef)(null);
+		const [tail, setTail] = (0, react.useState)(null);
 		const [expanded, setExpanded] = (0, react.useState)(false);
 		const [collapsed, setCollapsed] = (0, react.useState)(false);
 		const runId = current?.run.runId;
 		const origin = current ? new URL(current.run.url).origin : void 0;
+		(0, react.useLayoutEffect)(() => {
+			const seat = anchor.current?.closest("[data-composer-seat]");
+			const scroller = seat?.parentElement;
+			if (!seat || !scroller?.matches("[data-conversation-scroll]")) return;
+			const host = document.createElement("div");
+			host.dataset.lazymindWorkflowTail = "";
+			host.style.cssText = "flex:none;min-width:0;width:100%;position:relative;";
+			scroller.insertBefore(host, seat);
+			setTail(host);
+			return () => {
+				host.remove();
+			};
+		}, [session.sessionId]);
 		(0, react.useEffect)(() => {
 			setExpanded(false);
 			setCollapsed(false);
@@ -307,20 +323,24 @@ function apply(ctx, config = {}) {
 			origin,
 			runId
 		]);
-		if (!current) return null;
+		if (!current) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+			ref: anchor,
+			hidden: true
+		});
 		const url = new URL(`/workflow-runs/${encodeURIComponent(current.run.runId)}/embed`, origin);
 		url.searchParams.set("hostOrigin", window.location.origin);
-		return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("section", {
+		const panel = /* @__PURE__ */ (0, react_jsx_runtime.jsx)("section", {
 			"aria-label": "LazyMind Workflow",
 			style: {
 				...interactiveRegion,
-				height: collapsed && !expanded ? 66 : "min(480px, 55dvh)",
+				height: collapsed && !expanded ? 66 : "min(900px, 75dvh)",
 				minHeight: 0,
 				flexShrink: 0,
 				width: "100%",
 				maxWidth: "var(--dsh-chat-content-width, 920px)",
 				alignSelf: "center",
 				boxSizing: "border-box",
+				margin: expanded ? 0 : "12px auto",
 				display: current.minimized ? "none" : "flex",
 				flexDirection: "column",
 				...expanded ? {
@@ -351,6 +371,16 @@ function apply(ctx, config = {}) {
 				}
 			}, runKey(current.run))
 		});
+		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+			ref: anchor,
+			hidden: true
+		}), tail ? (0, react_dom.createPortal)(/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+			style: {
+				display: "flow-root",
+				height: expanded ? "calc(min(900px, 75dvh) + 24px)" : void 0
+			},
+			children: panel
+		}), tail) : panel] });
 	}
 	ctx.uiConversation.events.register(definition);
 	ctx.slots.inject("conversation.chat.node", () => ctx.slots.register({
