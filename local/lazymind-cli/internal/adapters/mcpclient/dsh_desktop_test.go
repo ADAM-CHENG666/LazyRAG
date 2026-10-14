@@ -53,10 +53,19 @@ func desktopAdapterFixture(t *testing.T) *Adapter {
 	t.Setenv("LAZYMIND_DSH_DESKTOP_PATH", cli)
 	writeTestFile(t, filepath.Join(dshHome(), "profiles", "desktop", "package.json"), desktopManifest)
 	a := testAdapter(DeepSeekHarness)
-	a.self = filepath.Join(root, "lazymind")
-	writeTestFile(t, a.self, "#!/bin/sh\nexit 0\n")
+	selfName, selfScript := "lazymind", "#!/bin/sh\nexit 0\n"
+	if runtime.GOOS == "windows" {
+		selfName, selfScript = "lazymind.cmd", "@echo off\r\nexit /b 0\r\n"
+	}
+	a.self = filepath.Join(root, selfName)
+	writeTestFile(t, a.self, selfScript)
 	if err := os.Chmod(a.self, 0700); err != nil {
 		t.Fatal(err)
+	}
+	// Ownership checks resolve both executable paths, so the fixture must be
+	// discoverable by the current platform, not merely exist on disk.
+	if !agentexec.SameExecutable(a.self, a.self) {
+		t.Fatal("LazyMind fixture is not a resolvable executable")
 	}
 	a.home = filepath.Join(root, "LazyMind home")
 	a.bridge = dshTestProbe{}
