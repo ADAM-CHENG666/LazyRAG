@@ -17,6 +17,7 @@ if [[ "$(sysctl -in sysctl.proc_translated 2>/dev/null || true)" == 1 ]]; then
 fi
 BUILD_ROOT="${ROOT}/desktop/build/darwin-${TARGET_ARCH}"
 RUNTIME_ROOT="${BUILD_ROOT}/runtime"
+DESKTOP_LAUNCHER="${BUILD_ROOT}/lazymind-desktop-launcher"
 DIST_ROOT="${ROOT}/desktop/dist"
 APP_ICON="${ROOT}/desktop/electron/assets/LazyMind.icns"
 PACKAGE_KIND="${LAZYMIND_DESKTOP_PACKAGE_KIND:-zip}"
@@ -248,6 +249,7 @@ install_feishu_cli
 echo "==> Building Go desktop runtime binaries"
 (cd "${ROOT}/backend/feishu-credential-helper" && "${GO_BIN}" build ${GO_BUILD_FLAGS[@]+"${GO_BUILD_FLAGS[@]}"} -mod=readonly -o "${RUNTIME_ROOT}/bin/feishu-credential-helper" .)
 shasum -a 256 "${RUNTIME_ROOT}/bin/feishu-credential-helper" | awk '{print $1}' > "${RUNTIME_ROOT}/bin/feishu-credential-helper.sha256"
+(cd "${ROOT}/local/local-runtime-manager" && "${GO_BIN}" build "${GO_BUILD_FLAGS[@]}" -o "${DESKTOP_LAUNCHER}" ./cmd/desktop-launcher)
 (cd "${ROOT}/local/local-runtime-manager" && "${GO_BIN}" build "${GO_BUILD_FLAGS[@]}" -o "${RUNTIME_ROOT}/bin/local-runtime-manager" .)
 (cd "${ROOT}/local/lazymind-cli" && "${GO_BIN}" build "${GO_BUILD_FLAGS[@]}" -o "${RUNTIME_ROOT}/bin/lazymind" ./cmd/lazymind)
 (cd "${ROOT}/local/local-proxy" && "${GO_BIN}" build "${GO_BUILD_FLAGS[@]}" -o "${RUNTIME_ROOT}/bin/local-proxy" ./cmd/local-proxy)
@@ -434,6 +436,7 @@ fi
 remove_generated_path "${DIST_ROOT}/${MAC_OUT}/LazyMind.app"
 export LAZYMIND_DESKTOP_RUNTIME_STAGE="${RUNTIME_ROOT}"
 export LAZYMIND_DESKTOP_OUTPUT_DIR="${DIST_ROOT}"
+export LAZYMIND_DESKTOP_MAC_LAUNCHER="${DESKTOP_LAUNCHER}"
 export LAZYMIND_DESKTOP_PACKAGE_KIND
 export LAZYMIND_DESKTOP_SIGNING_MODE
 if [[ "${PACKAGE_KIND}" == "dmg" ]]; then

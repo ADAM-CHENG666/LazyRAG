@@ -254,12 +254,15 @@ jobs:
         run: |
           set -euo pipefail
           smoke_root="${RUNNER_TEMP}/lazymind-packaged-smoke"
-          LAZYMIND_DESKTOP_RUNTIME_ROOT="${smoke_root}" node desktop/scripts/packaged-app-smoke.mjs \
+          ELECTRON_RUN_AS_NODE=1 LAZYMIND_DESKTOP_RUNTIME_ROOT="${smoke_root}" node desktop/scripts/packaged-app-smoke.mjs \
             --app "${GITHUB_WORKSPACE}/desktop/dist/mac-arm64/LazyMind.app" \
             --runtime-root "${smoke_root}" \
             --platform darwin \
             --timeout-ms 300000 \
             --leave-running true
+          launcher_log="${HOME}/Library/Logs/LazyMind/desktop-launcher.log"
+          test -f "${launcher_log}"
+          grep -Fq "removed inherited ELECTRON_RUN_AS_NODE" "${launcher_log}"
 
       - name: Upload failed packaged conversion diagnostics
         if: failure() && steps.packaged_smoke.outcome == 'failure'

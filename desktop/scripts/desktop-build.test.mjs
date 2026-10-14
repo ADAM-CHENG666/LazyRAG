@@ -456,11 +456,62 @@ test("Windows NSIS installer uses electron-builder's default LZMA payload", () =
   assert.match(buildScript, /robocopy\.exe \$runtimeRoot \$packagedRuntimeRoot[^\n]+\| Out-Null/);
   assert.match(buildScript, /CompressionLevel\]::NoCompression/);
   assert.match(buildScript, /LAZYMIND_DESKTOP_RUNTIME_STAGE = New-DeferredPythonRuntimeStage/);
+  assert.match(buildScript, /LAZYMIND_DESKTOP_WINDOWS_LAUNCHER = \$desktopLauncherPath/);
+  assert.match(buildScript, /cmd\\desktop-launcher'\) -WindowsGUI/);
+  assert.match(buildScript, /win-unpacked\\LazyMindApp\.exe/);
   assert.match(buildScript, /'resume-installer' \{ Invoke-Doctor; Finalize-Desktop 'installer' \}/);
   assert.match(workflow, /Cache Electron and electron-builder downloads/);
   assert.match(workflow, /install_arguments: "\/S --full-install"/);
   assert.match(workflow, /Submodule checkout attempt \$attempt\/3 failed/);
   assert.match(workflow, /pnpm activation attempt \$attempt\/3 failed/);
+  assert.match(workflow, /\$env:ELECTRON_RUN_AS_NODE = "1"/);
+});
+
+test("Windows packages route public launches through the sanitized native launcher", () => {
+  const source = readFileSync(electronBuilderConfig, "utf8");
+
+  assert.match(source, /function installWindowsDesktopLauncher\(context\)/);
+  assert.match(source, /context\.electronPlatformName !== "win32"/);
+  assert.match(source, /fs\.renameSync\(publicExecutable, electronExecutable\)/);
+  assert.match(source, /fs\.copyFileSync\(windowsDesktopLauncher, publicExecutable, fs\.constants\.COPYFILE_EXCL\)/);
+  assert.match(source, /electronExecutable = path\.join\(context\.appOutDir, "LazyMindApp\.exe"\)/);
+  assert.match(source, /async function preparePackagedDesktop\(context\)[\s\S]*installWindowsDesktopLauncher\(context\)[\s\S]*await signAndStageEmbeddedRuntime\(context\)/);
+  assert.match(source, /afterPack:\s*preparePackagedDesktop/);
+});
+
+test("Windows afterPack preserves Electron internally and installs the public launcher", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "lazymind-launcher-pack-"));
+  try {
+    const runtime = path.join(root, "runtime");
+    const appOut = path.join(root, "win-unpacked");
+    const launcher = path.join(root, "launcher.exe");
+    mkdirSync(runtime, { recursive: true });
+    mkdirSync(appOut, { recursive: true });
+    writeFileSync(launcher, "launcher");
+    writeFileSync(path.join(appOut, "LazyMind.exe"), "electron");
+    execFileSync(process.execPath, [
+      "-e",
+      `const [configPath, appOut] = process.argv.slice(1);
+       const config = require(configPath);
+       config.afterPack({
+         electronPlatformName: "win32",
+         appOutDir: appOut,
+         packager: { appInfo: { productFilename: "LazyMind" } },
+       }).catch((error) => { console.error(error); process.exit(1); });`,
+      electronBuilderConfig,
+      appOut,
+    ], {
+      env: {
+        ...process.env,
+        LAZYMIND_DESKTOP_RUNTIME_STAGE: runtime,
+        LAZYMIND_DESKTOP_WINDOWS_LAUNCHER: launcher,
+      },
+    });
+    assert.equal(readFileSync(path.join(appOut, "LazyMind.exe"), "utf8"), "launcher");
+    assert.equal(readFileSync(path.join(appOut, "LazyMindApp.exe"), "utf8"), "electron");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("macOS distribution build signs packages while CI owns notarization sequencing", () => {
@@ -478,6 +529,8 @@ test("macOS distribution build signs packages while CI owns notarization sequenc
   assert.match(source, /SIGNING_MODE=.*adhoc/);
   assert.match(source, /LAZYMIND_TRUSTED_LOCAL_MODE/);
   assert.match(source, /--trusted-local-mode "\$\{TRUSTED_LOCAL_MODE\}"/);
+  assert.match(source, /cmd\/desktop-launcher/);
+  assert.match(source, /LAZYMIND_DESKTOP_MAC_LAUNCHER="\$\{DESKTOP_LAUNCHER\}"/);
   assert.doesNotMatch(source, /notarytool submit/);
   assert.match(source, /Authority=Developer ID Application:/);
   assert.match(source, /signature_info="\$\(codesign -dv --verbose=4/);
@@ -485,8 +538,15 @@ test("macOS distribution build signs packages while CI owns notarization sequenc
   assert.match(source, /verify_runtime_code_signatures "\$\{APP_PATH\}\/Contents\/Resources\/runtime"/);
   assert.match(packageJson.scripts["dist:mac:arm64"], /--publish never$/);
   assert.match(builderSource, /await splitPythonComponents\(runtimeRoot\);\s+if \(macSigningMode === "none"\) return/);
-  assert.match(builderSource, /await Promise\.all\(workers\);\s+await splitPythonComponents\(runtimeRoot\);\s+stageEmbeddedRuntime/);
-  assert.match(builderSource, /afterPack:\s*signAndStageEmbeddedRuntime/);
+  assert.match(builderSource, /await Promise\.all\(workers\);[\s\S]*await splitPythonComponents\(runtimeRoot\);\s+stageEmbeddedRuntime/);
+  assert.match(builderSource, /function installMacDesktopLauncher\(context\)/);
+  assert.match(builderSource, /electronExecutable = path\.join\(executableDirectory, "LazyMindApp"\)/);
+  assert.match(builderSource, /fs\.copyFileSync\(macDesktopLauncher, publicExecutable, fs\.constants\.COPYFILE_EXCL\)/);
+  assert.match(builderSource, /installMacDesktopLauncher\(context\)/);
+  assert.match(workflow, /ELECTRON_RUN_AS_NODE=1 LAZYMIND_DESKTOP_RUNTIME_ROOT/);
+  assert.match(workflow, /removed inherited ELECTRON_RUN_AS_NODE/);
+  assert.match(builderSource, /afterPack:\s*preparePackagedDesktop/);
+  assert.match(builderSource, /preparePackagedDesktop[\s\S]*await signAndStageEmbeddedRuntime\(context\)/);
   assert.match(builderSource, /afterSign:\s*restoreRuntimeAndFinalizeSignature/);
   assert.match(
     builderSource,
