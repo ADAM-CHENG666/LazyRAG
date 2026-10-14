@@ -99,6 +99,10 @@ export interface DesktopAgentAction {
 }
 
 export interface DesktopAgentIntegrationStatus {
+  issue?: { code: "unsupported_version" | "dependency_environment" | "operation_failed"; path?: string };
+	can_connect?: boolean;
+	can_disconnect?: boolean;
+	profiles?: Array<{ name: string; state: DesktopAgentIntegrationState; message?: string }>;
   agent: DesktopAgent;
   display_name: string;
   version?: string;
@@ -591,7 +595,7 @@ async function changeAgentExecutable(
 
 const STATUS_TIMEOUT_MS = 10_000;
 const ACTION_TIMEOUT_MS = 15_000;
-const INSTALL_TIMEOUT_MS = 120_000;
+const INSTALL_TIMEOUT_MS = 660_000;
 const BINDING_TIMEOUT_MS = 30_000;
 const LOGIN_TIMEOUT_MS = 125_000;
 

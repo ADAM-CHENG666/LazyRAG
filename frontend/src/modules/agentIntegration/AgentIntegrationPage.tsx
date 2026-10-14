@@ -275,12 +275,12 @@ export default function AgentIntegrationPage() {
     const result = await agentIntegrationAction(agent, nextAction);
     setAction("");
     if (!result.ok) {
-      setError(result.error instanceof Error ? result.error.message : result.error ? String(result.error) : result.reason);
+      setError(agent === "deepseek-harness" ? t("agentIntegration.dshErrors.operation_failed") : result.error instanceof Error ? result.error.message : result.error ? String(result.error) : result.reason);
       return;
     }
     setStatuses((current) => ({ ...current, [agent]: result.data }));
     setError("");
-    if (nextAction === "disconnect") {
+    if (nextAction === "disconnect" && !result.data.can_disconnect && !["enabled", "error", "conflict"].includes(result.data.state)) {
       message.success(t("agentIntegration.disconnectSuccess", { agent: result.data.display_name }));
     } else if (nextAction === "login") {
       const definition = AGENTS.find((item) => item.id === agent);
@@ -471,6 +471,22 @@ function executablePathPlaceholderKey(target: DesktopAgentBindingTarget | null):
     : "agentIntegration.executablePathPlaceholderWindowsDesktop";
 }
 
+function integrationErrorMessage(agent: DesktopAgent, status: DesktopAgentIntegrationStatus, t: TFunction): string {
+  if (agent !== "deepseek-harness") return status.message || "";
+  const code = status.issue?.code;
+  const key = code === "unsupported_version" || code === "dependency_environment" ? code : "operation_failed";
+  let text = t(`agentIntegration.dshErrors.${key}`);
+  if (key === "dependency_environment" && status.issue?.path) {
+    text += ` ${t("agentIntegration.dshErrors.location")}${status.issue.path}`;
+  }
+  const completed = status.profiles?.filter(profile => profile.state === "enabled")
+    .map(profile => profile.name === "desktop" ? "Desktop" : profile.name === "web" ? "Web" : "").filter(Boolean);
+  if (completed?.length && completed.length < (status.profiles?.length || 0)) {
+    text += ` ${t("agentIntegration.dshErrors.partial", { targets: completed.join(", ") })}`;
+  }
+  return text;
+}
+
 function AgentCard({
   agent,
   mcpStatus,
@@ -519,7 +535,7 @@ function AgentCard({
   const detectionComplete = mcpPrepared && (!executorSupported || executorPrepared);
   const mcpEnabled = mcpState === "enabled";
   const detected = mcpInstalled || mcpEnabled;
-  const mcpCanToggle = mcpState === "ready" || mcpEnabled;
+  const mcpCanToggle = mcpState === "ready" || mcpEnabled || Boolean(mcpStatus?.can_connect);
 
   return (
     <Card
@@ -667,7 +683,7 @@ function CollapsedDetectionSummary({
     }
   }
   if (mcpStatus?.message && ["error", "conflict"].includes(mcpStatus.state)) {
-    items.push({ id: "mcp-error", label: mcpStatus.message, ready: false });
+    items.push({ id: "mcp-error", label: integrationErrorMessage(agent.id, mcpStatus, t), ready: false });
   }
   if (!items.length) {
     items.push({ id: "pending", label: t("agentIntegration.waitingForDetection"), ready: false });
@@ -784,7 +800,7 @@ function AgentConfigurationFlow({
   const mcpRequirements = mcpStatus?.requirements || [];
   const mcpPrepared = mcpRequirements.length > 0 && mcpRequirements.every((item) => item.satisfied);
   const mcpEnabled = mcpState === "enabled";
-  const mcpCanToggle = mcpState === "ready" || mcpEnabled;
+  const mcpCanToggle = mcpState === "ready" || mcpEnabled || Boolean(mcpStatus?.can_connect);
   const mcpBindingConfigured = Boolean(agent.mcpBindingTarget && bindings[agent.mcpBindingTarget]);
   const mcpInstallationMissing = mcpRequirements.length > 0 && !mcpRequirements[0].satisfied;
 
@@ -1059,8 +1075,17 @@ function AgentConfigurationFlow({
         {mcpStatus?.message && ["error", "conflict"].includes(mcpState) && (
           <div className="agent-integration-stage-hint is-error" role="alert">
             <WarningOutlined />
-            {mcpStatus.message}
+            {integrationErrorMessage(agent.id, mcpStatus, t)}
           </div>
+        )}
+        {agent.id === "deepseek-harness" && mcpState !== "enabled" && (
+          <Space>
+            {mcpState === "error" && mcpStatus?.can_connect && (
+              <Button disabled={Boolean(busyAction)} onClick={() => void onMCPAction(agent.id, "connect")}>
+                {t("agentIntegration.retryConnection")}
+              </Button>
+            )}
+          </Space>
         )}
         {!mcpCanToggle && !executorPrepared && (
           <div className="agent-integration-stage-hint">

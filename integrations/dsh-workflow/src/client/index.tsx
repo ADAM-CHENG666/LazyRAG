@@ -4,13 +4,16 @@ import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-tools/types'
 import type { ChatNode } from '@deepseek-ai/dsh-client-ui-chat/client'
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react'
 import { eventRun, type RunLink } from '../protocol'
 import { runKey, windowStore } from './window-store'
 
 declare module '@deepseek-ai/dsh-client-ui-chat/client' {
   interface ChatNodeDataMap { 'lazymind-workflow': RunLink }
 }
+
+// Electron drag regions intercept native mouse clicks even above lower z-index content.
+const interactiveRegion = { WebkitAppRegion: 'no-drag' } as CSSProperties
 
 export const inject = ['uiConversation', 'slots']
 
@@ -85,14 +88,15 @@ export function apply(ctx: ClientContext, config: { serverName?: string } = {}):
     const url = new URL(`/workflow-runs/${encodeURIComponent(current.run.runId)}/embed`, origin)
     url.searchParams.set('hostOrigin', window.location.origin)
     return <section aria-label="LazyMind Workflow" style={{
+      ...interactiveRegion,
       height: collapsed && !expanded ? 66 : 'min(480px, 55dvh)', minHeight: 0, flexShrink: 0,
       width: '100%', maxWidth: 'var(--dsh-chat-content-width, 920px)', alignSelf: 'center', boxSizing: 'border-box',
       display: current.minimized ? 'none' : 'flex', flexDirection: 'column',
-      ...(expanded ? { position: 'fixed', inset: 16, width: 'auto', maxWidth: 'none', alignSelf: 'stretch', height: 'auto', zIndex: 1000 } as const : {}),
+      ...(expanded ? { position: 'fixed', inset: 'var(--dsh-frame-overlay-top, 16px) 16px 16px', width: 'auto', maxWidth: 'none', alignSelf: 'stretch', height: 'auto', zIndex: 1000 } as const : {}),
       background: '#fff', borderRadius: 10, overflow: 'hidden',
     }}>
       <iframe ref={frame} key={runKey(current.run)} title="LazyMind Workflow" src={url.href}
-        onLoad={syncExpansion} style={{ width: '100%', height: '100%', flex: 1, minHeight: 0, border: 0 }} />
+        onLoad={syncExpansion} style={{ ...interactiveRegion, width: '100%', height: '100%', flex: 1, minHeight: 0, border: 0 }} />
     </section>
   }
   ctx.uiConversation.events.register(definition)

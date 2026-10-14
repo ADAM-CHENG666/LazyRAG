@@ -10,6 +10,7 @@ import { WorkflowSessionApi } from '@/modules/chat/utils/request';
 import { CONTROL_NOTICE_TTL_MS, controlActions, controlNoticeKey, deliveryBanner, overlayInfoBanner, REVIEW_CHANGED_NOTICE, ReviewRefreshRequired, type WorkflowActionIntent } from '@/modules/chat/utils/workflowControl';
 import { loadWorkflowRunSnapshot, watchWorkflowRun, type WorkflowRunSnapshot } from './loadRun';
 import './index.scss';
+import { workflowHostOrigin } from './hostOrigin';
 
 /** Shared run workbench: user intent goes to Core, never to an interpreted chat prompt. */
 export default function WorkflowRunPage({ embedded = false }: { embedded?: boolean }) {
@@ -19,8 +20,7 @@ export default function WorkflowRunPage({ embedded = false }: { embedded?: boole
   const [hostCollapsed, setHostCollapsed] = useState(false);
   const hostOrigin = useMemo(() => {
     const value = new URLSearchParams(window.location.search).get('hostOrigin');
-    try { const url = new URL(value ?? ''); return ['http:', 'https:'].includes(url.protocol) ? url.origin : undefined; }
-    catch { return undefined; }
+    return workflowHostOrigin(value);
   }, []);
   const toggleHostExpand = useCallback(() => {
     if (hostOrigin) window.parent.postMessage({ type: 'lazymind.workflow.toggle-expand', sessionId }, hostOrigin);

@@ -192,6 +192,7 @@ function windowStore() {
 
 //#endregion
 //#region src/client/index.tsx
+const interactiveRegion = { WebkitAppRegion: "no-drag" };
 const inject = ["uiConversation", "slots"];
 function apply(ctx, config = {}) {
 	const windows = windowStore();
@@ -312,6 +313,7 @@ function apply(ctx, config = {}) {
 		return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("section", {
 			"aria-label": "LazyMind Workflow",
 			style: {
+				...interactiveRegion,
 				height: collapsed && !expanded ? 66 : "min(480px, 55dvh)",
 				minHeight: 0,
 				flexShrink: 0,
@@ -323,7 +325,7 @@ function apply(ctx, config = {}) {
 				flexDirection: "column",
 				...expanded ? {
 					position: "fixed",
-					inset: 16,
+					inset: "var(--dsh-frame-overlay-top, 16px) 16px 16px",
 					width: "auto",
 					maxWidth: "none",
 					alignSelf: "stretch",
@@ -340,6 +342,7 @@ function apply(ctx, config = {}) {
 				src: url.href,
 				onLoad: syncExpansion,
 				style: {
+					...interactiveRegion,
 					width: "100%",
 					height: "100%",
 					flex: 1,

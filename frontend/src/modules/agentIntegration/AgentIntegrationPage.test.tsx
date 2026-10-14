@@ -226,6 +226,48 @@ describe("AgentIntegrationPage", () => {
     mocks.setCapability.mockResolvedValue(undefined);
   });
 
+  it("offers retry for a partial DSH installation without a separate cleanup button", async () => {
+    const partial = {
+      agent: "deepseek-harness", display_name: "DeepSeek Harness", state: "error",
+      can_connect: true, can_disconnect: true, message: "web: installation failed",
+      profiles: [{ name: "desktop", state: "enabled" }, { name: "web", state: "error" }],
+      requirements: [{ id: "dsh_desktop", description: "DSH Desktop installed", satisfied: true }],
+    };
+    mocks.statuses.mockResolvedValue({ ok: true, data: { "deepseek-harness": partial } });
+    let finish!: (value: unknown) => void;
+    mocks.action.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    render(<AgentIntegrationPage />);
+    const panel = expandAgent("deepseek-harness");
+    const retry = await within(panel).findByRole("button", { name: "agentIntegration.retryConnection" });
+    expect(within(panel).queryByRole("button", { name: "agentIntegration.removePartialConnection" })).not.toBeInTheDocument();
+    expect(within(panel).getByRole("switch")).not.toBeChecked();
+    expect(within(panel).getByRole("switch")).toBeEnabled();
+    fireEvent.click(retry);
+    expect(mocks.action).toHaveBeenCalledWith("deepseek-harness", "connect");
+    expect(retry).toBeDisabled();
+    await act(async () => finish({ ok: true, data: { ...partial, state: "enabled", message: "" } }));
+    expect(within(panel).getByRole("switch")).toBeChecked();
+    expect(screen.queryByRole("button", { name: "agentIntegration.retryConnection" })).not.toBeInTheDocument();
+  });
+
+  it.each(["unsupported_version", "dependency_environment", "operation_failed"])("shows one concise DSH %s error and hides raw logs", async (code) => {
+    const status = { agent: "deepseek-harness", display_name: "DeepSeek Harness", state: "error",
+      issue: { code, path: "/Users/example/DSH 中文/profiles/web" },
+      message: "ERR_PNPM_UNEXPECTED_STORE raw stack output that must never appear",
+      can_connect: false, requirements: [{ id: "dsh_desktop", satisfied: true }] };
+    mocks.statuses.mockResolvedValue({ ok: true, data: { "deepseek-harness": status } });
+    render(<AgentIntegrationPage />);
+    const key = `agentIntegration.dshErrors.${code}`;
+    expect(await screen.findAllByText(new RegExp(key))).toHaveLength(1);
+    const panel = expandAgent("deepseek-harness");
+    expect(within(panel).getAllByText(new RegExp(key))).toHaveLength(1);
+    expect(within(panel).queryByText(/raw stack/)).not.toBeInTheDocument();
+    expect(within(panel).queryByRole("button", { name: "agentIntegration.retryConnection" })).not.toBeInTheDocument();
+    expect(within(panel).getByRole("switch")).toBeDisabled();
+    if (code === "dependency_environment") expect(within(panel).getByText(/DSH 中文/)).toBeInTheDocument();
+    else expect(within(panel).queryByText(/DSH 中文/)).not.toBeInTheDocument();
+  });
+
   it("hides per-capability configuration while retaining invocation history", async () => {
     render(<AgentIntegrationPage />);
     expect(screen.getByText("外部调用记录")).toBeInTheDocument();
