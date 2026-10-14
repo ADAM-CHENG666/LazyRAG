@@ -267,6 +267,7 @@ function apply(ctx, config = {}) {
 		const [tail, setTail] = (0, react.useState)(null);
 		const [expanded, setExpanded] = (0, react.useState)(false);
 		const [collapsed, setCollapsed] = (0, react.useState)(false);
+		const collapseAnchor = (0, react.useRef)(null);
 		const runId = current?.run.runId;
 		const origin = current ? new URL(current.run.url).origin : void 0;
 		(0, react.useLayoutEffect)(() => {
@@ -286,6 +287,19 @@ function apply(ctx, config = {}) {
 			setExpanded(false);
 			setCollapsed(false);
 		}, [runId, session.sessionId]);
+		(0, react.useLayoutEffect)(() => {
+			const saved = collapseAnchor.current;
+			collapseAnchor.current = null;
+			const panel$1 = frame.current?.parentElement;
+			if (!saved || !panel$1 || expanded || saved.runId !== runId || saved.sessionId !== session.sessionId || saved.scroller !== tail?.parentElement) return;
+			saved.scroller.scrollTop += panel$1.getBoundingClientRect().bottom - saved.bottom;
+		}, [
+			collapsed,
+			expanded,
+			runId,
+			session.sessionId,
+			tail
+		]);
 		(0, react.useEffect)(() => {
 			const receive = (event) => {
 				if (!origin || event.origin !== origin || event.source !== frame.current?.contentWindow || event.data?.sessionId !== runId) return;
@@ -293,7 +307,17 @@ function apply(ctx, config = {}) {
 					if (!value) setCollapsed(false);
 					return !value;
 				});
-				if (event.data.type === "lazymind.workflow.toggle-collapse") setCollapsed((value) => !value);
+				if (event.data.type === "lazymind.workflow.toggle-collapse") {
+					const panel$1 = frame.current?.parentElement;
+					const scroller = tail?.parentElement;
+					if (!expanded && panel$1 && scroller) collapseAnchor.current = {
+						bottom: panel$1.getBoundingClientRect().bottom,
+						scroller,
+						runId,
+						sessionId: session.sessionId
+					};
+					setCollapsed((value) => !value);
+				}
 			};
 			const keydown = (event) => {
 				if (event.key === "Escape") setExpanded(false);
@@ -304,7 +328,13 @@ function apply(ctx, config = {}) {
 				window.removeEventListener("message", receive);
 				window.removeEventListener("keydown", keydown);
 			};
-		}, [origin, runId]);
+		}, [
+			origin,
+			runId,
+			expanded,
+			tail,
+			session.sessionId
+		]);
 		const syncExpansion = () => {
 			if (origin) frame.current?.contentWindow?.postMessage({
 				type: "lazymind.workflow.expansion",

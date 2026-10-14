@@ -7,7 +7,7 @@ import { AgentAppsAuth } from '@/components/auth';
 import { WorkflowPanel } from '@/modules/chat/components/WorkflowPanel';
 import { useWorkflowStore } from '@/modules/chat/store/workflowPanel';
 import { WorkflowSessionApi } from '@/modules/chat/utils/request';
-import { CONTROL_NOTICE_TTL_MS, controlActions, controlNoticeKey, deliveryBanner, overlayInfoBanner, REVIEW_CHANGED_NOTICE, ReviewRefreshRequired, type WorkflowActionIntent } from '@/modules/chat/utils/workflowControl';
+import { controlActions, deliveryBanner, overlayInfoBanner, REVIEW_CHANGED_NOTICE, ReviewRefreshRequired, type WorkflowActionIntent } from '@/modules/chat/utils/workflowControl';
 import { loadWorkflowRunSnapshot, watchWorkflowRun, type WorkflowRunSnapshot } from './loadRun';
 import './index.scss';
 import { workflowHostOrigin } from './hostOrigin';
@@ -110,7 +110,6 @@ export default function WorkflowRunPage({ embedded = false }: { embedded?: boole
     setError(''); setNoticeKey('');
     try {
       await actions.execute(intent);
-      if (lifetime.current?.key === key && !lifetime.current.controller.signal.aborted) setNoticeKey(controlNoticeKey(intent.kind));
     } catch (reason) {
       if (lifetime.current?.key !== key || lifetime.current.controller.signal.aborted) return;
       if (reason instanceof ReviewRefreshRequired) setNoticeKey(REVIEW_CHANGED_NOTICE);
@@ -122,11 +121,6 @@ export default function WorkflowRunPage({ embedded = false }: { embedded?: boole
       void refresh().catch(() => {});
     }
   };
-  useEffect(() => {
-    if (!noticeKey || noticeKey === REVIEW_CHANGED_NOTICE) return;
-    const timer = window.setTimeout(() => setNoticeKey(''), CONTROL_NOTICE_TTL_MS);
-    return () => window.clearTimeout(timer);
-  }, [noticeKey]);
   const activities = useExecutionActivity(snapshot?.session);
   const control = snapshot?.control;
   const liveDelivery = deliveryBanner(control?.delivery, control?.binding);

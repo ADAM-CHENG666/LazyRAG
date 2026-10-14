@@ -64,6 +64,7 @@ export function apply(ctx: ClientContext, config: { serverName?: string } = {}):
     const [tail, setTail] = useState<HTMLDivElement | null>(null)
     const [expanded, setExpanded] = useState(false)
     const [collapsed, setCollapsed] = useState(false)
+    const collapseAnchor = useRef<{ bottom: number; scroller: HTMLElement; runId?: string; sessionId: string } | null>(null)
     const runId = current?.run.runId
     const origin = current ? new URL(current.run.url).origin : undefined
     useLayoutEffect(() => {
@@ -81,6 +82,16 @@ export function apply(ctx: ClientContext, config: { serverName?: string } = {}):
       return () => { host.remove() }
     }, [session.sessionId])
     useEffect(() => { setExpanded(false); setCollapsed(false) }, [runId, session.sessionId])
+    useLayoutEffect(() => {
+      const saved = collapseAnchor.current
+      collapseAnchor.current = null
+      const panel = frame.current?.parentElement
+      if (!saved || !panel || expanded || saved.runId !== runId || saved.sessionId !== session.sessionId
+        || saved.scroller !== tail?.parentElement) return
+      // Keep the panel's bottom at the same screen position as its height changes.
+      // Restoring a folded panel grows it upward instead of below the viewport.
+      saved.scroller.scrollTop += panel.getBoundingClientRect().bottom - saved.bottom
+    }, [collapsed, expanded, runId, session.sessionId, tail])
     useEffect(() => {
       const receive = (event: MessageEvent) => {
         if (!origin || event.origin !== origin || event.source !== frame.current?.contentWindow
@@ -89,13 +100,20 @@ export function apply(ctx: ClientContext, config: { serverName?: string } = {}):
           if (!value) setCollapsed(false)
           return !value
         })
-        if (event.data.type === 'lazymind.workflow.toggle-collapse') setCollapsed(value => !value)
+        if (event.data.type === 'lazymind.workflow.toggle-collapse') {
+          const panel = frame.current?.parentElement
+          const scroller = tail?.parentElement
+          if (!expanded && panel && scroller) collapseAnchor.current = {
+            bottom: panel.getBoundingClientRect().bottom, scroller, runId, sessionId: session.sessionId,
+          }
+          setCollapsed(value => !value)
+        }
       }
       const keydown = (event: KeyboardEvent) => { if (event.key === 'Escape') setExpanded(false) }
       window.addEventListener('message', receive)
       window.addEventListener('keydown', keydown)
       return () => { window.removeEventListener('message', receive); window.removeEventListener('keydown', keydown) }
-    }, [origin, runId])
+    }, [origin, runId, expanded, tail, session.sessionId])
     const syncExpansion = () => {
       if (origin) frame.current?.contentWindow?.postMessage({ type: 'lazymind.workflow.expansion', sessionId: runId, expanded }, origin)
       if (origin) frame.current?.contentWindow?.postMessage({ type: 'lazymind.workflow.collapse', sessionId: runId, collapsed }, origin)

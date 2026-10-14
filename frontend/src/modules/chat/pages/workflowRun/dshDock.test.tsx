@@ -78,10 +78,23 @@ it('scrolls at the transcript tail and retains the iframe through messages, expa
   expect(container.style.position).not.toBe('fixed');
   expect(container.style.maxWidth).toBe('var(--dsh-chat-content-width, 920px)');
   expect(screen.getByTitle('LazyMind Workflow')).toBe(frame);
+  const scroller = tail.parentElement!;
+  scroller.scrollTop = 1000;
+  // Model layout in the shared scroller; jsdom does not calculate element boxes.
+  container.getBoundingClientRect = () => ({
+    bottom: 1200 - scroller.scrollTop + (container.style.height === '66px' ? 66 : 700),
+  } as DOMRect);
+  const originalBottom = container.getBoundingClientRect().bottom;
   message('http://localhost:8090', frame.contentWindow, 'run-1', 'lazymind.workflow.toggle-collapse');
   expect(container.style.height).toBe('66px');
+  expect(container.getBoundingClientRect().bottom).toBe(originalBottom);
   message('http://localhost:8090', frame.contentWindow, 'run-1', 'lazymind.workflow.toggle-collapse');
   expect(container.style.height).toBe('min(900px, 75dvh)');
+  expect(scroller.scrollTop).toBe(1000);
+  expect(container.getBoundingClientRect().bottom).toBe(originalBottom);
+  scroller.scrollTop = 500;
+  view.rerender(<Conversation updated />);
+  expect(scroller.scrollTop).toBe(500);
   message('http://localhost:8090', frame.contentWindow);
   message('http://localhost:8090', frame.contentWindow);
   expect(container.style.position).not.toBe('fixed');
