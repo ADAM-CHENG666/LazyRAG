@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"testing"
 
+	"lazymind/agentconnector/internal/codexruntime"
 	"lazymind/agentconnector/internal/coreapi"
 	"lazymind/agentconnector/internal/credentials"
 	"lazymind/agentconnector/internal/workflowhost"
@@ -50,6 +51,29 @@ func TestCodexBindingUsesCurrentAccountAndProfilePairing(t *testing.T) {
 	if received["provider"] != "codex" || received["driver_session_id"] != "thread-1" || received["connector_id"] != pair.ConnectorID || received["credential"] != pair.Token {
 		t.Fatal("binding did not use paired identity")
 	}
+	if received["cancellation"] != "none" {
+		t.Fatal("legacy binding advertised native cancellation")
+	}
+	registration := filepath.Join(profile, codexruntime.RegistrationName)
+	shared, _ := json.Marshal(codexruntime.Registration{Version: 1, Profile: profile, Endpoint: "ws+unix://localhost/private/tmp/native.sock:/rpc"})
+	if err := os.WriteFile(registration, shared, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := bridge.bindCodexController(context.Background(), "run-1", "thread-1"); err != nil {
+		t.Fatal(err)
+	}
+	if received["cancellation"] != "session" {
+		t.Fatal("shared binding did not advertise native cancellation")
+	}
+	if err := os.WriteFile(registration, []byte(`{"version":0}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := bridge.bindCodexController(context.Background(), "run-1", "thread-1"); err == nil {
+		t.Fatal("invalid shared configuration fell back to queue")
+	}
+	if err := os.Remove(registration); err != nil {
+		t.Fatal(err)
+	}
 	if runtime.GOOS != "windows" {
 		path := filepath.Join(home, "workflow-hosts", pair.ConnectorID+".json")
 		if err := os.Chmod(path, 0644); err != nil {
@@ -78,7 +102,7 @@ func TestCodexBindingUsesCurrentAccountAndProfilePairing(t *testing.T) {
 	if err := bridge.bindCodexController(context.Background(), "run-1", "thread-1"); err == nil {
 		t.Fatal("accepted disabled pairing")
 	}
-	if calls != 1 {
+	if calls != 2 {
 		t.Fatalf("unexpected bind calls: %d", calls)
 	}
 }
