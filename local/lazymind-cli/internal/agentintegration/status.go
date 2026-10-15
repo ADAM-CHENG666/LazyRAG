@@ -30,6 +30,7 @@ type Issue struct {
 }
 
 type Status struct {
+	RetryAction   string          `json:"retry_action,omitempty"`
 	Issue         *Issue          `json:"issue,omitempty"`
 	CanConnect    bool            `json:"can_connect,omitempty"`
 	CanDisconnect bool            `json:"can_disconnect,omitempty"`

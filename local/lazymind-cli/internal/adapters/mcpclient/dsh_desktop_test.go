@@ -272,8 +272,12 @@ func TestDesktopDisconnectOccupiedProfileCanBeRetried(t *testing.T) {
 	before, _ := os.ReadFile(web.dshConfigPath())
 	writeTestFile(t, web.dshConfigPath()+".lock", "occupied")
 	s := a.Disconnect(context.Background())
-	if s.State != agentintegration.Failed || !s.CanDisconnect || s.Issue == nil || s.Issue.Code != "operation_failed" {
+	if s.State != agentintegration.Failed || !s.CanDisconnect || s.RetryAction != "disconnect" || s.Issue == nil || s.Issue.Code != "operation_failed" {
 		t.Fatalf("partial disconnect: %+v", s)
+	}
+	restarted := *a
+	if s := restarted.Status(context.Background()); s.RetryAction != "disconnect" || !s.CanDisconnect {
+		t.Fatalf("lost disconnect intent after refresh: %+v", s)
 	}
 	if a.forDSHProfile("desktop", "").dshWorkflowConfigured() {
 		t.Fatal("successful disconnect was not retained")
@@ -284,7 +288,7 @@ func TestDesktopDisconnectOccupiedProfileCanBeRetried(t *testing.T) {
 	if err := os.Remove(web.dshConfigPath() + ".lock"); err != nil {
 		t.Fatal(err)
 	}
-	if s := a.Disconnect(context.Background()); s.State != agentintegration.Ready || s.CanDisconnect {
+	if s := restarted.Disconnect(context.Background()); s.State != agentintegration.Ready || s.CanDisconnect || s.RetryAction != "" {
 		t.Fatalf("retry disconnect: %+v", s)
 	}
 }

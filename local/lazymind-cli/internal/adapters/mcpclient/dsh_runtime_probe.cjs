@@ -49,7 +49,7 @@ const canonical = path => { try { return realpathSync(path); } catch { return re
       if (existsSync(modulesPath)) {
         const modules = yaml.load(readFileSync(modulesPath, 'utf8'));
         if (typeof modules?.storeDir !== 'string') throw new Error('Dependency store record is unreadable');
-        const check = spawnSync(process.execPath, ['--expose-internals', join(resources, 'runtime/pnpm/bin/pnpm.mjs'), 'store', 'path'], {
+        const check = spawnSync(process.execPath, ['--expose-internals', resolveDSHPnpm(resources), 'store', 'path'], {
           cwd: dir, encoding: 'utf8', timeout: 5000,
           env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', DSH_DESKTOP_NODE_EXECUTABLE: process.execPath,
             PATH: join(resources, 'runtime/bin') + delimiter + (process.env.PATH || '') },

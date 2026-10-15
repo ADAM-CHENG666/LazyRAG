@@ -535,7 +535,8 @@ function AgentCard({
   const detectionComplete = mcpPrepared && (!executorSupported || executorPrepared);
   const mcpEnabled = mcpState === "enabled";
   const detected = mcpInstalled || mcpEnabled;
-  const mcpCanToggle = mcpState === "ready" || mcpEnabled || Boolean(mcpStatus?.can_connect);
+  const mcpChecked = mcpEnabled || Boolean(mcpStatus?.can_disconnect);
+  const mcpCanToggle = mcpState === "ready" || mcpChecked || Boolean(mcpStatus?.can_connect);
 
   return (
     <Card
@@ -564,7 +565,7 @@ function AgentCard({
             <CompactIntegrationControls
               agent={agent}
               mcpClientName={mcpClientName}
-              mcpEnabled={mcpEnabled}
+              mcpChecked={mcpChecked}
               mcpCanToggle={mcpCanToggle}
               executorEnabled={executorEnabled}
               executorPrepared={executorPrepared}
@@ -703,7 +704,7 @@ function CollapsedDetectionSummary({
 function CompactIntegrationControls({
   agent,
   mcpClientName,
-  mcpEnabled,
+  mcpChecked,
   mcpCanToggle,
   executorEnabled,
   executorPrepared,
@@ -714,7 +715,7 @@ function CompactIntegrationControls({
 }: {
   agent: AgentDefinition;
   mcpClientName: string;
-  mcpEnabled: boolean;
+  mcpChecked: boolean;
   mcpCanToggle: boolean;
   executorEnabled: boolean;
   executorPrepared: boolean;
@@ -727,9 +728,9 @@ function CompactIntegrationControls({
     id: "mcp",
     title: t("agentIntegration.mcpModeTitle", { agent: mcpClientName }),
     description: t("agentIntegration.mcpModeDescription", { agent: mcpClientName }),
-    checked: mcpEnabled,
-    disabled: !mcpEnabled && !mcpCanToggle,
-    loading: busyAction === `${agent.id}:${mcpEnabled ? "disconnect" : "connect"}`,
+    checked: mcpChecked,
+    disabled: !mcpChecked && !mcpCanToggle,
+    loading: busyAction === `${agent.id}:${mcpChecked ? "disconnect" : "connect"}`,
     onChange: (checked: boolean) => void onMCPAction(agent.id, checked ? "connect" : "disconnect"),
   }];
   if (agent.executorName) {
@@ -800,7 +801,9 @@ function AgentConfigurationFlow({
   const mcpRequirements = mcpStatus?.requirements || [];
   const mcpPrepared = mcpRequirements.length > 0 && mcpRequirements.every((item) => item.satisfied);
   const mcpEnabled = mcpState === "enabled";
-  const mcpCanToggle = mcpState === "ready" || mcpEnabled || Boolean(mcpStatus?.can_connect);
+  const mcpChecked = mcpEnabled || Boolean(mcpStatus?.can_disconnect);
+  const mcpCanToggle = mcpState === "ready" || mcpChecked || Boolean(mcpStatus?.can_connect);
+  const retryDisconnect = mcpStatus?.retry_action === "disconnect" && Boolean(mcpStatus?.can_disconnect);
   const mcpBindingConfigured = Boolean(agent.mcpBindingTarget && bindings[agent.mcpBindingTarget]);
   const mcpInstallationMissing = mcpRequirements.length > 0 && !mcpRequirements[0].satisfied;
 
@@ -1047,9 +1050,9 @@ function AgentConfigurationFlow({
             description={t("agentIntegration.mcpModeDescription", { agent: mcpClientName })}
             status={mcpCapabilityStatus(mcpState, t)}
             ready={mcpEnabled}
-            disabled={!mcpEnabled && !mcpCanToggle}
-            loading={busyAction === `${agent.id}:${mcpEnabled ? "disconnect" : "connect"}`}
-            checked={mcpEnabled}
+            disabled={!mcpCanToggle}
+            loading={busyAction === `${agent.id}:${mcpChecked ? "disconnect" : "connect"}`}
+            checked={mcpChecked}
             onChange={(checked) => void onMCPAction(agent.id, checked ? "connect" : "disconnect")}
           />
           {executorSupported && (
@@ -1080,9 +1083,9 @@ function AgentConfigurationFlow({
         )}
         {agent.id === "deepseek-harness" && mcpState !== "enabled" && (
           <Space>
-            {mcpState === "error" && mcpStatus?.can_connect && (
-              <Button disabled={Boolean(busyAction)} onClick={() => void onMCPAction(agent.id, "connect")}>
-                {t("agentIntegration.retryConnection")}
+            {mcpState === "error" && (retryDisconnect || mcpStatus?.can_connect) && (
+              <Button disabled={Boolean(busyAction)} onClick={() => void onMCPAction(agent.id, retryDisconnect ? "disconnect" : "connect")}>
+                {t(retryDisconnect ? "agentIntegration.retryDisconnection" : "agentIntegration.retryConnection")}
               </Button>
             )}
           </Space>

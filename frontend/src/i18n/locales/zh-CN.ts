@@ -9,6 +9,7 @@ const zhCN = {
     connected: "授权已完成，返回对话继续任务。",
     returnToChat: "返回原对话",
     retryConnection: "重试连接",
+    retryDisconnection: "重试关闭",
     connecting: "正在连接授权服务…",
 
     ready: "连接已就绪",

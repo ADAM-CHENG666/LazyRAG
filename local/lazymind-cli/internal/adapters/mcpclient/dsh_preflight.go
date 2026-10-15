@@ -18,6 +18,9 @@ import (
 //go:embed dsh_runtime_probe.cjs
 var dshRuntimeProbe string
 
+//go:embed dsh_runtime_paths.cjs
+var dshRuntimePaths string
+
 type dshRuntimeProfile struct {
 	Name       string `json:"name"`
 	MCPVersion string `json:"mcpVersion"`
@@ -44,7 +47,7 @@ func inspectDSHRuntime(ctx context.Context, cli string) (dshRuntimeInspection, e
 	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	spec := agentexec.StreamCommand{Binary: binary, Arguments: []string{"--expose-internals", "-e", dshRuntimeProbe, resources, dshHome()}, Environment: agentexec.SafeEnvironment("ELECTRON_RUN_AS_NODE=1", "DSH_HOME="+dshHome())}
+	spec := agentexec.StreamCommand{Binary: binary, Arguments: []string{"--expose-internals", "-e", dshRuntimePaths + "\n" + dshRuntimeProbe, resources, dshHome()}, Environment: agentexec.SafeEnvironment("ELECTRON_RUN_AS_NODE=1", "DSH_HOME="+dshHome())}
 	var output strings.Builder
 	err := spec.Run(ctx, func(line []byte) error { output.Write(line); return nil })
 	if err != nil {

@@ -52,8 +52,9 @@ func (a *Adapter) forDSHProfile(name, cli string) *Adapter {
 	return &copy
 }
 
-// Records contain diagnostics only. Readiness is always checked against disk.
+// Records preserve retry intent and diagnostics. Readiness is checked against disk.
 type dshInstallRecord struct {
+	Action   string            `json:"action,omitempty"`
 	Root     string            `json:"root"`
 	Profiles map[string]string `json:"profiles"`
 }
@@ -257,6 +258,9 @@ func (a *Adapter) dshDesktopStatus() (s agentintegration.Status) {
 			s.Message = "DSH connection is incomplete. Retry to finish Desktop and Web, or disconnect to remove managed settings."
 		}
 	}
+	if s.CanDisconnect && record.Action == "disconnect" && s.State != agentintegration.Enabled {
+		s.RetryAction = "disconnect"
+	}
 	return s
 }
 
@@ -434,6 +438,25 @@ func (a *Adapter) changeDSHDesktop(ctx context.Context, connect bool) agentinteg
 	if connect && (!s.CanConnect || s.State == agentintegration.Enabled) {
 		return s
 	}
+	r, err := a.dshRecord()
+	if err != nil {
+		return dshFailure(s, err)
+	}
+	r.Action = "connect"
+	s.RetryAction = ""
+	if !connect {
+		r.Action = "disconnect"
+		s.RetryAction = "disconnect"
+	}
+	// Keep retry direction across refreshes and process restarts, including
+	// failures before the first profile can be changed.
+	body, err := json.Marshal(r)
+	if err != nil {
+		return dshFailure(s, err)
+	}
+	if err := writeConfigFile(a.dshRecordPath(), body); err != nil {
+		return dshFailure(s, err)
+	}
 	cli, _ := agentexec.FindDSHDesktopCLI()
 	if running, err := agentexec.DSHDesktopRunning(ctx, cli); err != nil {
 		return dshFailure(s, fmt.Errorf("check running Desktop: %w", err))
@@ -444,10 +467,6 @@ func (a *Adapter) changeDSHDesktop(ctx context.Context, connect bool) agentinteg
 		if _, err := a.bridge.Probe(ctx); err != nil {
 			return dshFailure(s, fmt.Errorf("LazyMind MCP is unavailable: %w", err))
 		}
-	}
-	r, err := a.dshRecord()
-	if err != nil {
-		return dshFailure(s, err)
 	}
 	for _, p := range s.Profiles {
 		if connect && p.State == agentintegration.Enabled {

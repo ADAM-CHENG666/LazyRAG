@@ -57,6 +57,11 @@ func FindDSHDesktopCLI() (string, error) {
 			return path, nil
 		}
 	}
+	for _, candidate := range platformDSHDesktopCandidates() {
+		if path, err := ResolveDSHDesktopCLI(candidate); err == nil {
+			return path, nil
+		}
+	}
 	if runtime.GOOS == "darwin" {
 		home, _ := os.UserHomeDir()
 		for _, directory := range []string{"/Applications", filepath.Join(home, "Applications")} {

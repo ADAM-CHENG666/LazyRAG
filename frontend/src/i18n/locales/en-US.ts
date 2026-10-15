@@ -9,6 +9,7 @@ const enUS = {
     connected: "Authorization complete. Return to the conversation to continue.",
     returnToChat: "Return to conversation",
     retryConnection: "Retry connection",
+    retryDisconnection: "Retry disconnect",
     connecting: "Connecting to the authorization service…",
 
     ready: "Connection ready",

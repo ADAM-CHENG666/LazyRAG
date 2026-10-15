@@ -240,7 +240,7 @@ describe("AgentIntegrationPage", () => {
     const panel = expandAgent("deepseek-harness");
     const retry = await within(panel).findByRole("button", { name: "agentIntegration.retryConnection" });
     expect(within(panel).queryByRole("button", { name: "agentIntegration.removePartialConnection" })).not.toBeInTheDocument();
-    expect(within(panel).getByRole("switch")).not.toBeChecked();
+    expect(within(panel).getByRole("switch")).toBeChecked();
     expect(within(panel).getByRole("switch")).toBeEnabled();
     fireEvent.click(retry);
     expect(mocks.action).toHaveBeenCalledWith("deepseek-harness", "connect");
@@ -248,6 +248,39 @@ describe("AgentIntegrationPage", () => {
     await act(async () => finish({ ok: true, data: { ...partial, state: "enabled", message: "" } }));
     expect(within(panel).getByRole("switch")).toBeChecked();
     expect(screen.queryByRole("button", { name: "agentIntegration.retryConnection" })).not.toBeInTheDocument();
+  });
+
+  it.each(["switch", "retry", "refresh"])("continues a failed DSH disconnect via %s", async (method) => {
+    const enabled = {
+      agent: "deepseek-harness", display_name: "DeepSeek Harness", state: "enabled",
+      can_connect: true, can_disconnect: true,
+      requirements: [{ id: "dsh_desktop", description: "DSH installed", satisfied: true }],
+    };
+    const partial = { ...enabled, state: "error", retry_action: "disconnect", message: "close failed",
+      profiles: [{ name: "desktop", state: "ready" }, { name: "web", state: "error" }] };
+    mocks.statuses.mockResolvedValue({ ok: true, data: { "deepseek-harness": enabled } });
+    mocks.action.mockResolvedValueOnce({ ok: true, data: partial })
+      .mockResolvedValue({ ok: true, data: { ...enabled, state: "ready", can_disconnect: false } });
+    const view = render(<AgentIntegrationPage />);
+    let panel = expandAgent("deepseek-harness");
+    await waitFor(() => expect(within(panel).getByRole("switch")).toBeChecked());
+    fireEvent.click(within(panel).getByRole("switch"));
+    await within(panel).findByRole("button", { name: "agentIntegration.retryDisconnection" });
+    expect(mocks.action).toHaveBeenLastCalledWith("deepseek-harness", "disconnect");
+    if (method === "refresh") {
+      view.unmount();
+      mocks.statuses.mockResolvedValue({ ok: true, data: { "deepseek-harness": partial } });
+      render(<AgentIntegrationPage />);
+      panel = expandAgent("deepseek-harness");
+      await within(panel).findByRole("button", { name: "agentIntegration.retryDisconnection" });
+    }
+    expect(within(panel).getByRole("switch")).toBeChecked();
+    fireEvent.click(method === "switch" ? within(panel).getByRole("switch")
+      : within(panel).getByRole("button", { name: "agentIntegration.retryDisconnection" }));
+    await waitFor(() => expect(mocks.action).toHaveBeenCalledTimes(2));
+    expect(mocks.action).toHaveBeenLastCalledWith("deepseek-harness", "disconnect");
+    expect(mocks.action).not.toHaveBeenCalledWith("deepseek-harness", "connect");
+    await waitFor(() => expect(within(panel).getByRole("switch")).not.toBeChecked());
   });
 
   it.each(["unsupported_version", "dependency_environment", "operation_failed"])("shows one concise DSH %s error and hides raw logs", async (code) => {

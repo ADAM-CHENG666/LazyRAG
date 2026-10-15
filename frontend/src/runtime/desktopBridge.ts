@@ -102,6 +102,7 @@ export interface DesktopAgentIntegrationStatus {
   issue?: { code: "unsupported_version" | "dependency_environment" | "operation_failed"; path?: string };
 	can_connect?: boolean;
 	can_disconnect?: boolean;
+	retry_action?: "connect" | "disconnect";
 	profiles?: Array<{ name: string; state: DesktopAgentIntegrationState; message?: string }>;
   agent: DesktopAgent;
   display_name: string;
