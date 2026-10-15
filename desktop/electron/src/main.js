@@ -172,6 +172,8 @@ const runtimeOwnershipHandoffTimeoutMs = 30 * 1000;
 const agentHostRestartMaxDelayMs = 30 * 1000;
 const agentHostStableAfterMs = 60 * 1000;
 const agentConnectorActionTimeoutMs = 15 * 1000;
+const agentConnectorStatusTimeoutMs = 30 * 1000;
+const agentConnectorDisconnectTimeoutMs = 60 * 1000;
 const agentConnectorInstallTimeoutMs = 660 * 1000;
 const agentConnectorBindingTimeoutMs = 30 * 1000;
 const macInstallationWarmupMarker = macWarmupMarkerPath(app.getPath("userData"));
@@ -721,7 +723,9 @@ function runAgentConnector(agent, action) {
   const installWorkflow = agent === "deepseek-harness" && action === "connect";
   const run = () => runConnectorJSON(
     ["internal", "agent", agent, action],
-    installWorkflow ? agentConnectorInstallTimeoutMs : agentConnectorActionTimeoutMs,
+    installWorkflow ? agentConnectorInstallTimeoutMs
+      : agent === "deepseek-harness" && action === "disconnect" ? agentConnectorDisconnectTimeoutMs
+      : action === "status" ? agentConnectorStatusTimeoutMs : agentConnectorActionTimeoutMs,
   );
   if (installWorkflow) {
     const address = new URL(process.env.LAZYMIND_ASSISTANT_BRIDGE_URL || "http://127.0.0.1:19091").host;

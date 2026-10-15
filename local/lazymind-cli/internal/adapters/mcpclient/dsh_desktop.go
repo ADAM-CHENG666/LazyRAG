@@ -163,24 +163,43 @@ func (a *Adapter) checkDSHOwnership() error {
 	return nil
 }
 
-func (a *Adapter) dshDesktopStatus() (s agentintegration.Status) {
+type dshDesktopRuntime struct {
+	cli         string
+	cliErr      error
+	manifestErr error
+	inspection  dshRuntimeInspection
+	issue       *agentintegration.Issue
+}
+
+func (a *Adapter) inspectDSHDesktop(ctx context.Context) dshDesktopRuntime {
+	var result dshDesktopRuntime
+	result.cli, result.cliErr = agentexec.FindDSHDesktopCLI()
+	result.manifestErr = validDSHDesktopManifest()
+	if result.cliErr == nil && result.manifestErr == nil {
+		var err error
+		result.inspection, err = a.inspectDSH(ctx, result.cli)
+		result.issue = dshInspectionIssue(result.inspection, err, result.cli)
+	} else if result.cliErr == nil && pathExists(filepath.Join(dshHome(), "profiles", "desktop", "package.json")) {
+		result.issue = dshIssue("dependency_environment", filepath.Join(dshHome(), "profiles", "desktop"))
+	}
+	return result
+}
+
+func (a *Adapter) dshDesktopStatus(ctx context.Context) agentintegration.Status {
+	return a.dshDesktopStatusWithRuntime(a.inspectDSHDesktop(ctx))
+}
+
+// Re-read managed files on every call. A disconnect never changes dependencies,
+// so it can reuse its runtime inspection while checking fresh configuration.
+func (a *Adapter) dshDesktopStatusWithRuntime(runtime dshDesktopRuntime) (s agentintegration.Status) {
 	defer func() { sanitizeDSHStatus(&s) }()
 	s = agentintegration.Status{Agent: string(DeepSeekHarness), DisplayName: "DeepSeek Harness", State: agentintegration.Ready}
-	cli, cliErr := agentexec.FindDSHDesktopCLI()
-	manifestErr := validDSHDesktopManifest()
+	cli, cliErr, manifestErr := runtime.cli, runtime.cliErr, runtime.manifestErr
 	s.Requirements = []agentintegration.Requirement{
 		{ID: "dsh_desktop", Description: "Install DeepSeek Harness Desktop.", Satisfied: cliErr == nil},
 		{ID: "dsh_desktop_initialized", Description: "Start DSH Desktop once before connecting.", Satisfied: manifestErr == nil},
 	}
-	var inspection dshRuntimeInspection
-	var runtimeIssue *agentintegration.Issue
-	if cliErr == nil && manifestErr == nil {
-		var inspectErr error
-		inspection, inspectErr = a.inspectDSH(context.Background(), cli)
-		runtimeIssue = dshInspectionIssue(inspection, inspectErr, cli)
-	} else if cliErr == nil && pathExists(filepath.Join(dshHome(), "profiles", "desktop", "package.json")) {
-		runtimeIssue = dshIssue("dependency_environment", filepath.Join(dshHome(), "profiles", "desktop"))
-	}
+	inspection, runtimeIssue := runtime.inspection, runtime.issue
 	record, err := a.dshRecord()
 	if err != nil {
 		return agentintegration.Fail(s, err.Error())
@@ -311,18 +330,13 @@ func (a *Adapter) changeDSHProfile(ctx context.Context, connect bool) (err error
 	if err = os.MkdirAll(filepath.Dir(a.dshConfigPath()), 0700); err != nil {
 		return err
 	}
-	lockPath := a.dshConfigPath() + ".lock"
-	locked := false
+	var unlockPatch func()
 	publishing := false
 	var snapshots []dshFileSnapshot
 	lockPatch := func() error {
-		lock, e := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		var e error
+		unlockPatch, e = lockDSHPatch(ctx, a.dshConfigPath())
 		if e != nil {
-			return fmt.Errorf("DSH configuration write failed (%s): %w", lockPath, e)
-		}
-		locked = true
-		_, e = fmt.Fprintf(lock, "%d\n", os.Getpid())
-		if e = errors.Join(e, lock.Close()); e != nil {
 			return e
 		}
 		if e = a.checkDSHOwnership(); e != nil {
@@ -338,8 +352,8 @@ func (a *Adapter) changeDSHProfile(ctx context.Context, connect bool) (err error
 		return nil
 	}
 	defer func() {
-		if locked {
-			os.Remove(lockPath)
+		if unlockPatch != nil {
+			unlockPatch()
 		}
 	}()
 	if !connect {
@@ -413,9 +427,14 @@ func (a *Adapter) disconnectDSHDesktop(ctx context.Context) agentintegration.Sta
 }
 
 func (a *Adapter) changeDSHDesktop(ctx context.Context, connect bool) agentintegration.Status {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	timeout := 45 * time.Second // Leave room inside the host's 60-second disconnect budget.
+	if connect {
+		timeout = 10 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	s := a.dshDesktopStatus()
+	runtime := a.inspectDSHDesktop(ctx)
+	s := a.dshDesktopStatusWithRuntime(runtime)
 	if connect && (!s.CanConnect || s.State == agentintegration.Enabled) {
 		return s
 	}
@@ -434,7 +453,10 @@ func (a *Adapter) changeDSHDesktop(ctx context.Context, connect bool) agentinteg
 		return dshFailure(s, err)
 	}
 	// Recheck after acquiring the operation lock; a second click may have waited.
-	s = a.dshDesktopStatus()
+	if connect {
+		runtime = a.inspectDSHDesktop(ctx)
+	}
+	s = a.dshDesktopStatusWithRuntime(runtime)
 	if connect && (!s.CanConnect || s.State == agentintegration.Enabled) {
 		return s
 	}
@@ -488,8 +510,11 @@ func (a *Adapter) changeDSHDesktop(ctx context.Context, connect bool) agentinteg
 		}
 		body, _ := json.Marshal(r)
 		if err := writeConfigFile(a.dshRecordPath(), body); err != nil {
-			return dshFailure(a.dshDesktopStatus(), fmt.Errorf("save DSH installation result: %w", err))
+			return dshFailure(a.dshDesktopStatusWithRuntime(runtime), fmt.Errorf("save DSH installation result: %w", err))
 		}
 	}
-	return a.dshDesktopStatus()
+	if connect {
+		return a.dshDesktopStatus(ctx)
+	}
+	return a.dshDesktopStatusWithRuntime(runtime)
 }

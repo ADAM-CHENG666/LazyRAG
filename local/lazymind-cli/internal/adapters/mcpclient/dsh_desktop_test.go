@@ -104,7 +104,7 @@ func installDSHFixture(t *testing.T, name string) {
 
 func TestDesktopStatusIsReadOnlyAndRequiresValidInitialization(t *testing.T) {
 	a := desktopAdapterFixture(t)
-	if s := a.status(); s.State != agentintegration.Ready || !s.CanConnect {
+	if s := a.Status(context.Background()); s.State != agentintegration.Ready || !s.CanConnect {
 		t.Fatalf("desktop-only status: %+v", s)
 	}
 	if pathExists(filepath.Join(dshHome(), "profiles", "web")) || pathExists(a.dshRecordPath()) {
@@ -113,7 +113,7 @@ func TestDesktopStatusIsReadOnlyAndRequiresValidInitialization(t *testing.T) {
 	manifest := filepath.Join(dshHome(), "profiles", "desktop", "package.json")
 	for _, body := range []string{"", `{}`, `{broken`} {
 		writeTestFile(t, manifest, body)
-		if s := a.status(); s.State != agentintegration.Failed || s.CanConnect || s.Issue == nil || s.Issue.Code != "dependency_environment" {
+		if s := a.Status(context.Background()); s.State != agentintegration.Failed || s.CanConnect || s.Issue == nil || s.Issue.Code != "dependency_environment" {
 			t.Fatalf("bad manifest %q: %+v", body, s)
 		}
 	}
@@ -290,6 +290,89 @@ func TestDesktopDisconnectOccupiedProfileCanBeRetried(t *testing.T) {
 	}
 	if s := restarted.Disconnect(context.Background()); s.State != agentintegration.Ready || s.CanDisconnect || s.RetryAction != "" {
 		t.Fatalf("retry disconnect: %+v", s)
+	}
+}
+
+func TestDesktopDisconnectRecoversExitedPatchWriter(t *testing.T) {
+	a := desktopAdapterFixture(t)
+	a.dshRunner = func(_ context.Context, name string, _ ...string) error { installDSHFixture(t, name); return nil }
+	if s := a.Connect(context.Background()); s.State != agentintegration.Enabled {
+		t.Fatalf("connect: %+v", s)
+	}
+	web := a.forDSHProfile("web", "")
+	writeTestFile(t, web.dshConfigPath()+".lock", exitedDSHTestProcess(t))
+	if s := a.Disconnect(context.Background()); s.State != agentintegration.Ready || s.CanDisconnect {
+		t.Fatalf("disconnect after writer exit: %+v", s)
+	}
+	for _, name := range dshDesktopProfiles {
+		target := a.forDSHProfile(name, "")
+		doc, err := readYAMLDocument(target.dshConfigPath())
+		if err != nil || findDSHEntry(doc) != nil || pathExists(target.dshConfigPath()+".lock") {
+			t.Fatalf("profile %s was not cleaned: %v", name, err)
+		}
+	}
+}
+
+func TestDesktopDisconnectInspectsRuntimeOnceAndReadsFreshConfig(t *testing.T) {
+	a := desktopAdapterFixture(t)
+	a.dshRunner = func(_ context.Context, name string, _ ...string) error { installDSHFixture(t, name); return nil }
+	if s := a.Connect(context.Background()); s.State != agentintegration.Enabled {
+		t.Fatalf("connect: %+v", s)
+	}
+	inspect := a.dshInspector
+	calls := 0
+	a.dshInspector = func(ctx context.Context, cli string) (dshRuntimeInspection, error) {
+		calls++
+		if _, ok := ctx.Deadline(); !ok {
+			t.Fatal("runtime inspection lost the operation deadline")
+		}
+		if calls > 1 {
+			return dshRuntimeInspection{}, errors.New("a second inspection would exceed the caller's budget")
+		}
+		return inspect(ctx, cli)
+	}
+	s := a.Disconnect(context.Background())
+	if calls != 1 || s.State != agentintegration.Ready || s.CanDisconnect {
+		t.Fatalf("disconnect: inspections=%d, status=%+v", calls, s)
+	}
+	for _, profile := range s.Profiles {
+		if profile.State != agentintegration.Ready {
+			t.Fatalf("stale enabled profile after disconnect: %+v", profile)
+		}
+	}
+}
+
+func TestDesktopStatusAndDisconnectRespectCancellation(t *testing.T) {
+	for _, action := range []string{"status", "disconnect"} {
+		t.Run(action, func(t *testing.T) {
+			a := desktopAdapterFixture(t)
+			a.dshRunner = func(_ context.Context, name string, _ ...string) error { installDSHFixture(t, name); return nil }
+			if s := a.Connect(context.Background()); s.State != agentintegration.Enabled {
+				t.Fatalf("connect: %+v", s)
+			}
+			patch := a.forDSHProfile("desktop", "").dshConfigPath()
+			before, _ := os.ReadFile(patch)
+			ctx, cancel := context.WithCancel(context.Background())
+			a.dshInspector = func(probeCtx context.Context, _ string) (dshRuntimeInspection, error) {
+				cancel()
+				select {
+				case <-probeCtx.Done():
+					return dshRuntimeInspection{}, probeCtx.Err()
+				case <-time.After(time.Second):
+					t.Fatal("runtime inspection ignored caller cancellation")
+					return dshRuntimeInspection{}, nil
+				}
+			}
+			defer cancel()
+			if action == "status" {
+				a.Status(ctx)
+			} else {
+				a.Disconnect(ctx)
+			}
+			if after, _ := os.ReadFile(patch); string(after) != string(before) {
+				t.Fatal("cancelled operation changed the managed config")
+			}
+		})
 	}
 }
 
