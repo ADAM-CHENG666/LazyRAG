@@ -136,6 +136,7 @@ export default function AgentIntegrationPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [action, setAction] = useState("");
+  const pendingAgentActions = useRef(new Set<DesktopAgent>());
   const [error, setError] = useState("");
   const [bridgeUnavailable, setBridgeUnavailable] = useState(false);
   const [bridgePlatformMismatch, setBridgePlatformMismatch] = useState(false);
@@ -270,27 +271,33 @@ export default function AgentIntegrationPage() {
   }, [executors, executorPolicies, pendingLoginAgent]);
 
   const runAction = async (agent: DesktopAgent, nextAction: DesktopAgentIntegrationAction) => {
+    if (pendingAgentActions.current.has(agent)) return;
+    pendingAgentActions.current.add(agent);
     const key = `${agent}:${nextAction}`;
-    setAction(key);
-    const result = await agentIntegrationAction(agent, nextAction);
-    setAction("");
-    if (!result.ok) {
-      setError(agent === "deepseek-harness" ? t("agentIntegration.dshErrors.operation_failed") : result.error instanceof Error ? result.error.message : result.error ? String(result.error) : result.reason);
-      return;
-    }
-    setStatuses((current) => ({ ...current, [agent]: result.data }));
-    setError("");
-    if (nextAction === "disconnect" && !result.data.can_disconnect && !["enabled", "error", "conflict"].includes(result.data.state)) {
-      message.success(t("agentIntegration.disconnectSuccess", { agent: result.data.display_name }));
-    } else if (nextAction === "login") {
-      const definition = AGENTS.find((item) => item.id === agent);
-      const executorName = definition?.executorName || result.data.display_name;
-      message.info(t(definition?.executorLoginMode === "interactive"
-        ? "agentIntegration.interactiveLoginStarted"
-        : "agentIntegration.loginStarted", { agent: executorName }));
-      setPendingLoginAgent(agent);
-    } else if (result.data.state === "enabled") {
-      message.success(t("agentIntegration.enableSuccess", { agent: result.data.display_name }));
+    try {
+      setAction(key);
+      const result = await agentIntegrationAction(agent, nextAction);
+      if (!result.ok) {
+        setError(agent === "deepseek-harness" ? t("agentIntegration.dshErrors.operation_failed") : result.error instanceof Error ? result.error.message : result.error ? String(result.error) : result.reason);
+        return;
+      }
+      setStatuses((current) => ({ ...current, [agent]: result.data }));
+      setError("");
+      if (nextAction === "disconnect" && !result.data.can_disconnect && !["enabled", "error", "conflict"].includes(result.data.state)) {
+        message.success(t("agentIntegration.disconnectSuccess", { agent: result.data.display_name }));
+      } else if (nextAction === "login") {
+        const definition = AGENTS.find((item) => item.id === agent);
+        const executorName = definition?.executorName || result.data.display_name;
+        message.info(t(definition?.executorLoginMode === "interactive"
+          ? "agentIntegration.interactiveLoginStarted"
+          : "agentIntegration.loginStarted", { agent: executorName }));
+        setPendingLoginAgent(agent);
+      } else if (result.data.state === "enabled") {
+        message.success(t("agentIntegration.enableSuccess", { agent: result.data.display_name }));
+      }
+    } finally {
+      pendingAgentActions.current.delete(agent);
+      setAction((current) => current === key ? "" : current);
     }
   };
 
@@ -730,7 +737,7 @@ function CompactIntegrationControls({
     description: t("agentIntegration.mcpModeDescription", { agent: mcpClientName }),
     checked: mcpChecked,
     disabled: !mcpChecked && !mcpCanToggle,
-    loading: busyAction === `${agent.id}:${mcpChecked ? "disconnect" : "connect"}`,
+    loading: busyAction === `${agent.id}:connect` || busyAction === `${agent.id}:disconnect`,
     onChange: (checked: boolean) => void onMCPAction(agent.id, checked ? "connect" : "disconnect"),
   }];
   if (agent.executorName) {
@@ -1051,7 +1058,7 @@ function AgentConfigurationFlow({
             status={mcpCapabilityStatus(mcpState, t)}
             ready={mcpEnabled}
             disabled={!mcpCanToggle}
-            loading={busyAction === `${agent.id}:${mcpChecked ? "disconnect" : "connect"}`}
+            loading={busyAction === `${agent.id}:connect` || busyAction === `${agent.id}:disconnect`}
             checked={mcpChecked}
             onChange={(checked) => void onMCPAction(agent.id, checked ? "connect" : "disconnect")}
           />

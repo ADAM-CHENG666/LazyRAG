@@ -9,7 +9,6 @@ const zhCN = {
     connected: "授权已完成，返回对话继续任务。",
     returnToChat: "返回原对话",
     retryConnection: "重试连接",
-    retryDisconnection: "重试关闭",
     connecting: "正在连接授权服务…",
 
     ready: "连接已就绪",
@@ -1412,6 +1411,7 @@ const zhCN = {
     },
     executorEnableSuccess: "已允许 LazyMind 使用 {{agent}}。",
     retryConnection: "重试接入",
+    retryDisconnection: "重试关闭",
     dshErrors: {
       unsupported_version: "当前 DSH 版本不受支持，请更新至 0.2.0-rc.2 或更高版本后重试。",
       dependency_environment: "检测到 DSH 依赖环境异常，无法完成接入。",

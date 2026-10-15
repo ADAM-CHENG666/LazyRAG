@@ -9,7 +9,6 @@ const enUS = {
     connected: "Authorization complete. Return to the conversation to continue.",
     returnToChat: "Return to conversation",
     retryConnection: "Retry connection",
-    retryDisconnection: "Retry disconnect",
     connecting: "Connecting to the authorization service…",
 
     ready: "Connection ready",
@@ -1444,6 +1443,7 @@ const enUS = {
     },
     executorEnableSuccess: "LazyMind can now use {{agent}}.",
     retryConnection: "Retry connection",
+    retryDisconnection: "Retry disconnect",
     dshErrors: {
       unsupported_version: "This DSH version is not supported. Update to 0.2.0-rc.2 or later and retry.",
       dependency_environment: "The DSH dependency environment is invalid. Unable to connect.",
