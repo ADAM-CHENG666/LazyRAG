@@ -6,6 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { loadConfig, atomicJSON } from './config.mjs';
 import { desktopRunning } from './platform.mjs';
 import { manageWindows } from './manage-windows.mjs';
+import { disableActivation } from './activation.mjs';
 import { restoreGeneratedPaths } from './restore-paths.mjs';
 import { registerWorkflow, unregisterWorkflow, registrationPath, workflowRegistration } from './workflow-registration.mjs';
 
@@ -49,11 +50,12 @@ if (action === 'plan') {
     note: 'Backend is the last recorded identity, not a liveness check. No processes started.',
   }, null, 2) + '\n');
 } else if (action === 'apply-login') {
-  if (!state || !fs.existsSync(agentFile) || fs.readFileSync(agentFile, 'utf8') !== plist) throw new Error('No matching activation');
+  if (!state || state.disabling || !fs.existsSync(agentFile) || fs.readFileSync(agentFile, 'utf8') !== plist) throw new Error('No matching activation');
   set(desired); // Only configure future GUI launches; never start Desktop or daemon at login.
 } else if (action === 'enable') {
   fs.accessSync(desired.CODEX_CLI_PATH, fs.constants.X_OK);
   if (state) {
+    if (state.disabling) throw new Error('Finish disconnecting before enabling shared mode again');
     if (!fs.existsSync(agentFile) || fs.readFileSync(agentFile, 'utf8') !== plist || !matches(current(), desired)) throw new Error('Activation changed externally; inspect before enabling again');
     registerWorkflow(config);
   } else {
@@ -80,18 +82,23 @@ if (action === 'plan') {
   }
   process.stdout.write('Shared mode configured. Quit Desktop normally, then open its original icon. No App or backend was started by this command.\n');
 } else if (action === 'disable') {
-  if (state) {
-    if (desktopRunning(config)) throw new Error('Quit Desktop normally before disabling, so it cannot rewrite generated CLI paths during restore');
-    if (!fs.existsSync(agentFile) || fs.readFileSync(agentFile, 'utf8') !== plist) throw new Error('LaunchAgent changed externally; refusing removal');
-    const now = current();
-    if (!matches(now, desired) && !matches(now, state.before)) throw new Error('GUI environment changed externally; refusing to overwrite it');
-    // Unload first so login apply cannot race the restore.
-    try { run(['bootout', `${domain}/${label}`]); }
-    catch (error) { if (error.status !== 3 && error.status !== 113) throw error; }
-    set(state.before);
-    unregisterWorkflow(config);
-    restoreGeneratedPaths(config, desired.CODEX_CLI_PATH);
-    fs.unlinkSync(agentFile); fs.unlinkSync(stateFile);
-  }
+  disableActivation(config, stateFile, state, {
+    running: desktopRunning, set, unregister: unregisterWorkflow,
+    validate: state => {
+      if (fs.existsSync(agentFile) ? fs.readFileSync(agentFile, 'utf8') !== plist : !state.disabling) throw new Error('LaunchAgent changed externally; refusing removal');
+      const now = current();
+      const compatible = state.disabling
+        ? Object.keys(desired).every(key => now[key] === desired[key] || now[key] === state.before[key])
+        : matches(now, desired) || matches(now, state.before);
+      if (!compatible) throw new Error('GUI environment changed externally; refusing to overwrite it');
+    },
+    stop: () => {
+      // Unload first so login apply cannot race the restore.
+      try { run(['bootout', `${domain}/${label}`]); }
+      catch (error) { if (error.status !== 3 && error.status !== 113) throw error; }
+    },
+    restore: () => restoreGeneratedPaths(config, desired.CODEX_CLI_PATH),
+    remove: () => { if (fs.existsSync(agentFile)) fs.unlinkSync(agentFile); },
+  });
   process.stdout.write('Original GUI environment restored; owned generated CLI paths reset. Reopen Desktop normally. The shared backend is left running to preserve any ongoing work.\n');
 }

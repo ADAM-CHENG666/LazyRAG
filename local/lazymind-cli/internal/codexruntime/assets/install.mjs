@@ -7,12 +7,12 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 //#region desktop-runtime/installation.mjs
-function currentInstallation(profile, ops) {
+function currentInstallation(profile, ops, requireActive = true) {
 	const registration = ops.registration(profile);
 	if (!registration) return null;
 	const config = ops.config(registration.installation);
 	if (config.codexHome !== profile || registration.profile !== profile) throw new Error("Shared installation belongs to another Codex profile");
-	if (!ops.active(config)) throw new Error("Shared registration has no matching activation; restore it before reconnecting");
+	if (requireActive && !ops.active(config)) throw new Error("Shared registration has no matching activation; restore it before reconnecting");
 	return config;
 }
 function signature(config, build) {
@@ -78,7 +78,7 @@ function activateInstallation(plan, profile, ops) {
 	}
 }
 function disableInstallation(profile, ops) {
-	const current = currentInstallation(profile, ops);
+	const current = currentInstallation(profile, ops, false);
 	if (!current) return;
 	if (ops.running(current)) throw new Error("请先正常退出 Codex，再点击断开以恢复原启动方式；不会自动中断当前聊天。");
 	ops.disable(current);

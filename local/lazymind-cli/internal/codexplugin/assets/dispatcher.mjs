@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import { lstat, mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path, { isAbsolute, join, resolve } from "node:path";
 import { parseArgs, promisify } from "node:util";
@@ -3883,6 +3883,19 @@ function authorization(tokenFile) {
 }
 
 //#endregion
+//#region src/profile.ts
+/** Compare directories without changing the profile used to derive pairing IDs. */
+async function sameProfile(a, b) {
+	if (typeof a !== "string" || typeof b !== "string" || !isAbsolute(a) || !isAbsolute(b)) return false;
+	if (a === b) return true;
+	try {
+		return await realpath(a) === await realpath(b);
+	} catch {
+		return false;
+	}
+}
+
+//#endregion
 //#region src/app-server.ts
 const schemaVersion = "0.162.0-alpha.17.2";
 var RpcError = class extends Error {
@@ -3982,7 +3995,7 @@ var AppServer = class AppServer extends EventEmitter {
 				capabilities: { experimentalApi: options.experimental ?? false }
 			}, options.signal);
 			if (!identity || typeof identity.userAgent !== "string" || typeof identity.codexHome !== "string" || typeof identity.platformOs !== "string" || typeof identity.platformFamily !== "string") throw new Error("Invalid App Server identity");
-			if (options.expectedHome && identity.codexHome !== options.expectedHome) throw new Error("App Server belongs to another Codex profile");
+			if (options.expectedHome && !await sameProfile(identity.codexHome, options.expectedHome)) throw new Error("App Server belongs to another Codex profile");
 			client.notify("initialized");
 			client.ready = true;
 			return {
@@ -4368,7 +4381,7 @@ async function sharedConnection(profile) {
 	}
 	if (!info.isFile() || !checkPrivate(file)) throw new Error("Shared server registration must be a private file owned by this user");
 	const value = JSON.parse(await readFile(file, "utf8"));
-	if (value.version !== 1 || value.profile !== profile || typeof value.app_server_url !== "string") throw new Error("Shared server registration does not match this Codex profile");
+	if (value.version !== 1 || !await sameProfile(value.profile, profile) || typeof value.app_server_url !== "string") throw new Error("Shared server registration does not match this Codex profile");
 	connectionTarget(value.app_server_url, value.auth_token_file);
 	return {
 		endpoint: value.app_server_url,
@@ -4451,7 +4464,7 @@ async function main() {
 	const info = await stat(path$1);
 	if (!info.isFile() || process.platform !== "win32" && (info.mode & 63) !== 0) throw new Error("Pairing must be a private file (0600)");
 	const pairing = JSON.parse(await readFile(path$1, "utf8"));
-	if (pairing.provider !== "codex" || pairing.enabled !== true || pairing.profile !== profile || !/^host-[a-f0-9]{32}$/.test(pairing.connector_id) || !/^[a-f0-9]{64}$/.test(pairing.token)) throw new Error("Pairing does not match this Codex profile");
+	if (pairing.provider !== "codex" || pairing.enabled !== true || !await sameProfile(pairing.profile, profile) || !/^host-[a-f0-9]{32}$/.test(pairing.connector_id) || !/^[a-f0-9]{64}$/.test(pairing.token)) throw new Error("Pairing does not match this Codex profile");
 	const lifetime = new AbortController();
 	const stop = () => lifetime.abort();
 	process.once("SIGINT", stop);

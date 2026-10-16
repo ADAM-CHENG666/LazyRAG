@@ -60,3 +60,52 @@ func TestSharedRegistrationControlsCancellationAndFailsClosed(t *testing.T) {
 		}
 	}
 }
+
+func TestSharedRegistrationAcceptsProfileAliasWithoutChangingPairingPath(t *testing.T) {
+	root := t.TempDir()
+	profile := filepath.Join(root, "profile")
+	alias := filepath.Join(root, "alias")
+	if err := os.Mkdir(profile, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(profile, alias); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	canonical, err := filepath.EvalSymlinks(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := Registration{Version: 1, Endpoint: "ws+unix://localhost/private/tmp/test.sock:/rpc"}
+	if runtime.GOOS == "windows" {
+		valid.Endpoint = "ws://127.0.0.1:49152"
+		valid.TokenFile = filepath.Join(profile, "token")
+		if err := writePrivateJSON(valid.TokenFile, "fixture"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, recorded := range []string{canonical, alias} {
+		valid.Profile = recorded
+		if err := writePrivateJSON(filepath.Join(profile, RegistrationName), valid); err != nil {
+			t.Fatal(err)
+		}
+		for _, lookup := range []string{canonical, alias} {
+			registration, err := Read(lookup)
+			if err != nil || registration.Profile != recorded {
+				t.Fatalf("read %s: %+v %v", lookup, registration, err)
+			}
+		}
+	}
+	other := t.TempDir()
+	if err := os.Remove(alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(other, alias); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Read(canonical); err == nil {
+		t.Fatal("accepted an alias retargeted to another profile")
+	}
+}

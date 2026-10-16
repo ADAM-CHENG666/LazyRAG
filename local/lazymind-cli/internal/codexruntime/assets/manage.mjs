@@ -8,7 +8,6 @@ import { parseArgs } from "node:util";
 
 //#region desktop-runtime/workflow-registration.mjs
 function workflowRegistration(config$1) {
-	path.join(config$1.runtimeDir, "daemon.sock").split("/").map(encodeURIComponent).join("/");
 	return {
 		version: 1,
 		profile: config$1.codexHome,
@@ -74,6 +73,25 @@ function restoreGeneratedPaths(config$1, launcher) {
 }
 
 //#endregion
+//#region desktop-runtime/activation.mjs
+function disableActivation(config$1, stateFile$1, state$1, ops) {
+	if (state$1) {
+		if (ops.running(config$1)) throw new Error("Quit Codex normally before disconnecting");
+		ops.validate(state$1);
+		atomicJSON(stateFile$1, {
+			...state$1,
+			disabling: true
+		});
+		ops.stop?.();
+		ops.set(state$1.before);
+		ops.restore();
+		ops.remove?.();
+		fs.unlinkSync(stateFile$1);
+	}
+	ops.unregister(config$1);
+}
+
+//#endregion
 //#region desktop-runtime/manage-windows.mjs
 function manageWindows(action$1, config$1, ops = {}) {
 	const callNative = ops.native ?? native;
@@ -96,7 +114,8 @@ function manageWindows(action$1, config$1, ops = {}) {
 		values: desired$1,
 		types: Object.fromEntries(Object.entries(desired$1).filter(([, v]) => v !== null).map(([key]) => [key, 1]))
 	};
-	const matches$1 = (a, b) => Object.keys(desired$1).every((key) => a.values[key] === b.values[key] && (a.values[key] === null || a.types[key] === b.types[key]));
+	const matchesKey = (a, b, key) => a.values[key] === b.values[key] && (a.values[key] === null || a.types[key] === b.types[key]);
+	const matches$1 = (a, b) => Object.keys(desired$1).every((key) => matchesKey(a, b, key));
 	if (action$1 === "plan") return console.log(JSON.stringify({
 		environment: desired$1,
 		before: current$1(),
@@ -111,6 +130,7 @@ function manageWindows(action$1, config$1, ops = {}) {
 	}));
 	if (action$1 === "enable") {
 		if (state$1) {
+			if (state$1.disabling) throw new Error("Finish disconnecting before enabling shared mode again");
 			if (!matches$1(current$1(), desiredSnapshot)) throw new Error("Startup environment changed externally");
 			register(config$1);
 		} else {
@@ -133,15 +153,16 @@ function manageWindows(action$1, config$1, ops = {}) {
 		}
 		console.log("Shared mode configured. Reopen Codex from its original icon; if Explorer retains the old environment, sign out and back in once.");
 	} else if (action$1 === "disable") {
-		if (state$1) {
-			if (running(config$1)) throw new Error("Quit Codex normally before disconnecting");
-			const now = current$1();
-			if (!matches$1(now, desiredSnapshot) && !matches$1(now, state$1.before)) throw new Error("Startup environment changed externally; refusing overwrite");
-			set$1(state$1.before);
-			unregister(config$1);
-			restore(config$1, config$1.launcher);
-			fs.unlinkSync(stateFile$1);
-		}
+		disableActivation(config$1, stateFile$1, state$1, {
+			running,
+			set: set$1,
+			unregister,
+			restore: () => restore(config$1, config$1.launcher),
+			validate: (state$2) => {
+				const now = current$1();
+				if (!(state$2.disabling ? Object.keys(desired$1).every((key) => matchesKey(now, desiredSnapshot, key) || matchesKey(now, state$2.before, key)) : matches$1(now, desiredSnapshot) || matches$1(now, state$2.before))) throw new Error("Startup environment changed externally; refusing overwrite");
+			}
+		});
 		console.log("Original user environment restored; backend retained.");
 	} else throw new Error("Unsupported Windows activation operation");
 }
@@ -231,11 +252,12 @@ else if (action === "status") process.stdout.write(JSON.stringify({
 	note: "Backend is the last recorded identity, not a liveness check. No processes started."
 }, null, 2) + "\n");
 else if (action === "apply-login") {
-	if (!state || !fs.existsSync(agentFile) || fs.readFileSync(agentFile, "utf8") !== plist) throw new Error("No matching activation");
+	if (!state || state.disabling || !fs.existsSync(agentFile) || fs.readFileSync(agentFile, "utf8") !== plist) throw new Error("No matching activation");
 	set(desired);
 } else if (action === "enable") {
 	fs.accessSync(desired.CODEX_CLI_PATH, fs.constants.X_OK);
 	if (state) {
+		if (state.disabling) throw new Error("Finish disconnecting before enabling shared mode again");
 		if (!fs.existsSync(agentFile) || fs.readFileSync(agentFile, "utf8") !== plist || !matches(current(), desired)) throw new Error("Activation changed externally; inspect before enabling again");
 		registerWorkflow(config);
 	} else {
@@ -279,22 +301,27 @@ else if (action === "apply-login") {
 	}
 	process.stdout.write("Shared mode configured. Quit Desktop normally, then open its original icon. No App or backend was started by this command.\n");
 } else if (action === "disable") {
-	if (state) {
-		if (desktopRunning(config)) throw new Error("Quit Desktop normally before disabling, so it cannot rewrite generated CLI paths during restore");
-		if (!fs.existsSync(agentFile) || fs.readFileSync(agentFile, "utf8") !== plist) throw new Error("LaunchAgent changed externally; refusing removal");
-		const now = current();
-		if (!matches(now, desired) && !matches(now, state.before)) throw new Error("GUI environment changed externally; refusing to overwrite it");
-		try {
-			run(["bootout", `${domain}/${label}`]);
-		} catch (error) {
-			if (error.status !== 3 && error.status !== 113) throw error;
+	disableActivation(config, stateFile, state, {
+		running: desktopRunning,
+		set,
+		unregister: unregisterWorkflow,
+		validate: (state$1) => {
+			if (fs.existsSync(agentFile) ? fs.readFileSync(agentFile, "utf8") !== plist : !state$1.disabling) throw new Error("LaunchAgent changed externally; refusing removal");
+			const now = current();
+			if (!(state$1.disabling ? Object.keys(desired).every((key) => now[key] === desired[key] || now[key] === state$1.before[key]) : matches(now, desired) || matches(now, state$1.before))) throw new Error("GUI environment changed externally; refusing to overwrite it");
+		},
+		stop: () => {
+			try {
+				run(["bootout", `${domain}/${label}`]);
+			} catch (error) {
+				if (error.status !== 3 && error.status !== 113) throw error;
+			}
+		},
+		restore: () => restoreGeneratedPaths(config, desired.CODEX_CLI_PATH),
+		remove: () => {
+			if (fs.existsSync(agentFile)) fs.unlinkSync(agentFile);
 		}
-		set(state.before);
-		unregisterWorkflow(config);
-		restoreGeneratedPaths(config, desired.CODEX_CLI_PATH);
-		fs.unlinkSync(agentFile);
-		fs.unlinkSync(stateFile);
-	}
+	});
 	process.stdout.write("Original GUI environment restored; owned generated CLI paths reset. Reopen Desktop normally. The shared backend is left running to preserve any ongoing work.\n");
 }
 

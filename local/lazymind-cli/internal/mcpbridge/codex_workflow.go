@@ -63,7 +63,7 @@ func (b *Bridge) bindCodexController(ctx context.Context, runID, threadID string
 	if err != nil {
 		return err
 	}
-	if pair.Provider != "codex" || pair.Profile != profile {
+	if pair.Provider != "codex" || !codexruntime.SameProfile(pair.Profile, profile) {
 		return errors.New("pairing does not match this Codex profile")
 	}
 	cancellation, err := codexruntime.Cancellation(profile)

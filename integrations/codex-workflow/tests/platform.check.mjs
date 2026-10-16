@@ -70,6 +70,25 @@ test('Windows activation restores values and registry types, rejects concurrent 
   busy=true;assert.throws(()=>manageWindows('disable',config,ops),/Quit/);busy=false;
   state.types.CODEX_CLI_PATH=2;assert.throws(()=>manageWindows('disable',config,ops),/changed externally/);
   state.types.CODEX_CLI_PATH=1;manageWindows('disable',config,ops);assert.deepEqual(state,before);assert.equal(registered,false);
+  manageWindows('enable',config,ops);
+  const native = ops.native;
+  let partial = true;
+  ops.native = (operation, request) => {
+    if (operation === 'environment-write' && partial) {
+      partial = false;
+      state.values.CODEX_CLI_PATH = request.values.CODEX_CLI_PATH;
+      state.types.CODEX_CLI_PATH = request.types.CODEX_CLI_PATH;
+      throw new Error('partial restore');
+    }
+    return native(operation, request);
+  };
+  assert.throws(()=>manageWindows('disable',config,ops), /partial restore/);
+  assert.equal(registered,true);
+  assert.throws(()=>manageWindows('enable',config,ops), /Finish disconnecting/);
+  state.values.CODEX_APP_SERVER_WS_URL = 'user-edit';
+  assert.throws(()=>manageWindows('disable',config,ops), /changed externally/);
+  state.values.CODEX_APP_SERVER_WS_URL = null;
+  manageWindows('disable',config,ops);assert.deepEqual(state,before);assert.equal(registered,false);
   fail=true;assert.throws(()=>manageWindows('enable',config,ops),/write failed/);assert.deepEqual(state,before);assert.equal(registered,false);
   assert.equal(fs.existsSync(path.join(root,'activation.json')),false);
  }finally{fs.rmSync(root,{recursive:true,force:true})}

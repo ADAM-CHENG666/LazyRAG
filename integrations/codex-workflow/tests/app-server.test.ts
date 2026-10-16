@@ -1,9 +1,12 @@
 import { createServer } from 'node:http'
 import { randomUUID } from 'node:crypto'
-import { unlink } from 'node:fs/promises'
+import { unlink, mkdtemp, symlink, realpath, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { WebSocketServer, type WebSocket } from 'ws'
-import { AppServer, RpcError, RpcUnavailable, unixEndpoint } from '../src/app-server'
+import { AppServer, RpcError, RpcUnavailable } from '../src/app-server'
+import { connectionTarget } from '../desktop-runtime/endpoint.mjs'
 
 const identity = { userAgent: 'codex/0.162.0-alpha.17.2', codexHome: '/profile', platformFamily: 'unix', platformOs: 'macos' }
 const cleanups: Array<() => Promise<void>> = []
@@ -37,6 +40,16 @@ async function fixture(handler: (message: any, ws: WebSocket) => void = () => {}
 }
 
 describe('App Server RPC over a real Unix Socket', () => {
+  it('accepts the same native profile through a symlink during initialization', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'lm-rpc-profile-'))
+    cleanups.push(() => rm(home, { recursive: true, force: true }))
+    const alias = join(home, 'alias')
+    await symlink(await realpath(home), alias, 'junction')
+    const f = await fixture((message, ws) => {
+      if (message.method === 'initialize') ws.send(JSON.stringify({ id: message.id, result: { ...identity, codexHome: home } }))
+    }, false)
+    await f.connect({ expectedHome: alias })
+  })
   it('initializes once and dispatches concurrent responses by request ID', async () => {
     const requests: Array<{ message: any; ws: WebSocket }> = []
     const f = await fixture((message, ws) => {
@@ -123,9 +136,9 @@ describe('App Server RPC over a real Unix Socket', () => {
   })
   it('rejects non-local endpoints before attempting a connection', () => {
     for (const value of ['ws://localhost:4500', 'ws+unix://remote/tmp/server.sock:/rpc', 'ws+unix://localhost/tmp/a.sock:/rpc?token=secret', 'ws+unix://localhost/tmp/%00.sock:/rpc']) {
-      expect(() => unixEndpoint(value)).toThrow()
+      expect(() => connectionTarget(value)).toThrow()
     }
-    expect(unixEndpoint('ws+unix://localhost/tmp/server.sock:/rpc').socketPath).toBe('/tmp/server.sock')
+    expect(connectionTarget('ws+unix://localhost/tmp/server.sock:/rpc').socketPath).toBe('/tmp/server.sock')
     expect(RpcUnavailable.prototype).toBeInstanceOf(Error)
   })
 })

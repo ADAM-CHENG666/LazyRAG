@@ -9,6 +9,7 @@ import { HostBridge } from '../../workflow-agent-core/src/transport'
 import { setTimeout as delay } from 'node:timers/promises'
 import { dispatcherLock, DispatcherBusy } from './runtime-lock'
 import { openRuntime, sharedEndpoint } from './runtime'
+import { sameProfile } from './profile'
 
 const runFile = promisify(execFile)
 async function main() {
@@ -32,7 +33,7 @@ async function main() {
   // Windows uses profile ACLs, not the synthetic POSIX mode returned by stat.
   if (!info.isFile() || process.platform !== 'win32' && (info.mode & 0o077) !== 0) throw new Error('Pairing must be a private file (0600)')
   const pairing = JSON.parse(await readFile(path, 'utf8'))
-  if (pairing.provider !== 'codex' || pairing.enabled !== true || pairing.profile !== profile
+  if (pairing.provider !== 'codex' || pairing.enabled !== true || !await sameProfile(pairing.profile, profile)
     || !/^host-[a-f0-9]{32}$/.test(pairing.connector_id) || !/^[a-f0-9]{64}$/.test(pairing.token)) {
     throw new Error('Pairing does not match this Codex profile')
   }

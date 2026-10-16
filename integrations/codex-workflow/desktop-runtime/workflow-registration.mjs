@@ -5,7 +5,6 @@ import { checkPrivate } from './platform.mjs';
 import { runtimeEndpoint } from './endpoint.mjs';
 
 export function workflowRegistration(config) {
-  const socket = path.join(config.runtimeDir, 'daemon.sock').split('/').map(encodeURIComponent).join('/');
   return { version: 1, profile: config.codexHome, installation: config.configFile,
     app_server_url: runtimeEndpoint(config), ...(config.tokenFile ? { auth_token_file: config.tokenFile } : {}) };
 }

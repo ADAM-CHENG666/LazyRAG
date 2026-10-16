@@ -16,6 +16,22 @@ import (
 
 const RegistrationName = "lazymind-shared-server.json"
 
+// SameProfile preserves pairing IDs while accepting aliases of the same directory.
+func SameProfile(a, b string) bool {
+	if !filepath.IsAbs(a) || !filepath.IsAbs(b) {
+		return false
+	}
+	if a == b {
+		return true
+	}
+	left, err := os.Stat(a)
+	if err != nil || !left.IsDir() {
+		return false
+	}
+	right, err := os.Stat(b)
+	return err == nil && right.IsDir() && os.SameFile(left, right)
+}
+
 type Registration struct {
 	Version   int    `json:"version"`
 	Profile   string `json:"profile"`
@@ -40,7 +56,7 @@ func Read(profile string) (*Registration, error) {
 		return nil, err
 	}
 	var value Registration
-	if json.Unmarshal(body, &value) != nil || value.Version != 1 || value.Profile != profile {
+	if json.Unmarshal(body, &value) != nil || value.Version != 1 || !SameProfile(value.Profile, profile) {
 		return nil, errors.New("shared server registration does not match this Codex profile")
 	}
 	if err := validateEndpoint(value.Endpoint, value.TokenFile); err != nil {

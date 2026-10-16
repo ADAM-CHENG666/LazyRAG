@@ -187,6 +187,23 @@ func (a *Adapter) Connect(ctx context.Context) agentintegration.Status {
 	return result
 }
 
+// PrepareCLI installs the existing Workflow plugin for CLI execution without
+// changing Desktop startup settings or migrating the user's basic MCP entry.
+func (a *Adapter) PrepareCLI(ctx context.Context) error {
+	if a.discoveryError != nil {
+		return a.discoveryError
+	}
+	if a.pluginEnabled() {
+		return nil
+	}
+	profile, err := codexHome()
+	if err != nil {
+		return err
+	}
+	_, err = codexplugin.Install(ctx, a.home, a.self, a.binary, profile, a.hostID)
+	return err
+}
+
 func (a *Adapter) Disconnect(ctx context.Context) agentintegration.Status {
 	if err := CleanupLegacyControl(); err != nil {
 		return agentintegration.Fail(a.Status(ctx), "clean up legacy Codex control configuration: "+err.Error())

@@ -5,11 +5,6 @@ export { privateDirectory, processIdentity } from './platform.mjs';
 
 export const configVariable = 'LAZYMIND_CODEX_DESKTOP_CONFIG';
 export const kinds = ['codex_app', 'cua_repl'];
-export const desktopEnvironment = [
-  'CODEX_CLI_PATH', 'CODEX_APP_SERVER_FORCE_CLI', 'CODEX_APP_SERVER_WS_URL',
-  'CODEX_APP_SERVER_USE_LOCAL_DAEMON', 'CODEX_APP_TOOLS_PIPE_PATH',
-  'CODEX_TASK_WORKSPACE_VERIFYING_IDENTITY', 'BROWSER_USE_ACCESS_VERIFYING_IDENTITY',
-];
 
 export function loadConfig(file = process.env[configVariable]) {
   if (!file || !path.isAbsolute(file)) throw new Error(`${configVariable} must name an absolute config file`);

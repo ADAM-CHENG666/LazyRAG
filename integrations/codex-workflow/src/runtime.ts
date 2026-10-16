@@ -4,6 +4,7 @@ import { AppServer, schemaVersion } from './app-server'
 import { connectionTarget } from '../desktop-runtime/endpoint.mjs'
 import { checkPrivate } from '../desktop-runtime/platform.mjs'
 import { CodexAdapter } from './adapter'
+import { sameProfile } from './profile'
 import { NativeCodexAdapter, NativeReceipts } from './native-adapter'
 import type { HostTransport } from '../../workflow-agent-core/src/transport'
 
@@ -19,7 +20,7 @@ export async function sharedConnection(profile: string): Promise<{endpoint: stri
     throw new Error('Shared server registration must be a private file owned by this user')
   }
   const value = JSON.parse(await readFile(file, 'utf8'))
-  if (value.version !== 1 || value.profile !== profile || typeof value.app_server_url !== 'string') {
+  if (value.version !== 1 || !await sameProfile(value.profile, profile) || typeof value.app_server_url !== 'string') {
     throw new Error('Shared server registration does not match this Codex profile')
   }
   connectionTarget(value.app_server_url, value.auth_token_file)

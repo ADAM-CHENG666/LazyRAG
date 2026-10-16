@@ -1,7 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
+import fs from 'node:fs';
+import os from 'node:os';
 import { prepareInstallation, activateInstallation, disableInstallation } from '../desktop-runtime/installation.mjs';
+import { disableActivation } from '../desktop-runtime/activation.mjs';
+import { atomicJSON } from '../desktop-runtime/config.mjs';
+import { makePrivate } from '../desktop-runtime/platform.mjs';
+import { restoreGeneratedPaths } from '../desktop-runtime/restore-paths.mjs';
+import { registerWorkflow, unregisterWorkflow, registrationPath } from '../desktop-runtime/workflow-registration.mjs';
 
 function fixture() {
   const profile = '/fixture/profile', root = '/fixture/install';
@@ -75,3 +82,44 @@ test('Desktop reopening after preparation blocks upgrade at activation too', () 
   assert.throws(() => f.activate(next), /退出 Codex/);
   assert.equal(f.current(), old.config);
 });
+
+for (const failure of ['set', 'restore', 'remove', 'unregister']) {
+  test(`disconnect retries after ${failure} fails, retaining its recovery registration`, () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-disconnect-'));
+    makePrivate(root);
+    const config = { configFile: path.join(root, 'runtime.json'), codexHome: root, runtimeDir: root,
+      launcher: path.join(root, 'launch-adapter'), cli: path.join(root, 'codex') };
+    const stateFile = path.join(root, 'activation.json'), generated = path.join(root, 'config.toml');
+    const before = { CODEX_CLI_PATH: null };
+    let environment = { CODEX_CLI_PATH: config.launcher }, failOnce = true, startup = true;
+    const run = (name, action) => {
+      if (failure === name && failOnce) { failOnce = false; throw new Error(`failed ${name}`); }
+      action();
+    };
+    const ops = {
+      registration: () => fs.existsSync(registrationPath(config)) ? JSON.parse(fs.readFileSync(registrationPath(config), 'utf8')) : null,
+      config: () => config, active: () => fs.existsSync(stateFile), running: () => false,
+      disable: () => disableActivation(config, stateFile, fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile, 'utf8')) : null, {
+        running: () => false, validate: () => {}, stop: () => {},
+        set: value => run('set', () => { environment = value; }),
+        restore: () => run('restore', () => restoreGeneratedPaths(config, config.launcher)),
+        remove: () => run('remove', () => { startup = false; }),
+        unregister: () => run('unregister', () => unregisterWorkflow(config)),
+      }),
+    };
+    try {
+      atomicJSON(stateFile, { config: config.configFile, before });
+      fs.writeFileSync(generated, `CODEX_CLI_PATH = ${JSON.stringify(config.launcher)}\n`, { mode: 0o600 });
+      registerWorkflow(config);
+      assert.throws(() => disableInstallation(root, ops), new RegExp(`failed ${failure}`));
+      assert.ok(fs.existsSync(registrationPath(config)));
+      disableInstallation(root, ops);
+      assert.deepEqual(environment, before);
+      assert.equal(startup, false);
+      assert.equal(fs.readFileSync(generated, 'utf8'), `CODEX_CLI_PATH = ${JSON.stringify(config.cli)}\n`);
+      assert.equal(fs.existsSync(stateFile), false);
+      assert.equal(fs.existsSync(registrationPath(config)), false);
+      disableInstallation(root, ops);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+}
