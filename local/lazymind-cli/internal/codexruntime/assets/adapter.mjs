@@ -29,6 +29,7 @@ const log = logger(config, "adapter");
 const root = config.runtimeDir;
 const bridgeDir = path.join(root, `bridge-${process.pid}`);
 const registration = path.join(root, `bridge-${process.pid}.json`);
+const connection = path.join(root, `desktop-${process.pid}.json`);
 const children = /* @__PURE__ */ new Set();
 const servers = [];
 const sockets = /* @__PURE__ */ new Set();
@@ -51,6 +52,9 @@ function stop(code = 0) {
 		} catch {}
 	}
 	try {
+		fs.unlinkSync(connection);
+	} catch {}
+	try {
 		fs.unlinkSync(registration);
 	} catch {}
 	try {
@@ -66,7 +70,8 @@ process.stdin.once("error", () => stop(1));
 process.stdout.once("error", () => stop(1));
 try {
 	log("starting", { desktop: originalParent });
-	log("backend_ready", { backend: native("ensure", { path: config.configFile }, config.helper).process.pid });
+	const backend = native("ensure", { path: config.configFile }, config.helper);
+	log("backend_ready", { backend: backend.process.pid });
 	if (env.CODEX_APP_TOOLS_PIPE_PATH) {
 		privateDirectory(bridgeDir);
 		const endpoints = {};
@@ -161,9 +166,16 @@ try {
 		stop(1);
 	});
 	if (stopping) closeTransport();
-	else parentWatch = setInterval(() => {
-		if (processIdentity(originalParent) !== originalParentIdentity) stop();
-	}, 1e3);
+	else {
+		atomicJSON(connection, {
+			process: native("process", { pid: process.pid }, config.helper),
+			desktop: native("process", { pid: originalParent }, config.helper),
+			backend: backend.process
+		});
+		parentWatch = setInterval(() => {
+			if (processIdentity(originalParent) !== originalParentIdentity) stop();
+		}, 1e3);
+	}
 } catch (error) {
 	log("startup_failed", { code: error.code ?? "startup" });
 	process.stderr.write(`Shared backend startup failed; no private fallback: ${error.message}\n`);

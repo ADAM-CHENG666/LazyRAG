@@ -46,7 +46,11 @@ export function manageWindows(action, config, ops = {}) {
     console.log('Shared mode configured. Reopen Codex from its original icon; if Explorer retains the old environment, sign out and back in once.');
   } else if (action === 'disable') {
     disableActivation(config, stateFile, state, {
-      running, set, unregister, restore: () => restore(config, config.launcher),
+      running, set, unregister, restore: () => {
+        const cli = ops.currentCLI ? callNative('validate-windows-cli', { path: ops.currentCLI }, process.env.LAZYMIND_RUNTIME_HELPER ?? config.helper) : config.cli;
+        if (!fs.existsSync(cli)) throw new Error('Current Codex CLI is required to restore generated paths; startup environment has been restored');
+        restore({ ...config, cli }, config.launcher);
+      },
       validate: state => {
         const now = current();
         const compatible = state.disabling

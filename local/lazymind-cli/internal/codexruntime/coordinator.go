@@ -18,16 +18,18 @@ import (
 )
 
 type runtimeConfig struct {
-	Version    int                       `json:"version"`
-	RuntimeDir string                    `json:"runtimeDir"`
-	BundleDir  string                    `json:"bundleDir"`
-	CLI        string                    `json:"cli"`
-	Node       string                    `json:"node"`
-	Helper     string                    `json:"helper"`
-	CodexHome  string                    `json:"codexHome"`
-	Endpoint   string                    `json:"endpoint"`
-	TokenFile  string                    `json:"tokenFile"`
-	Plugins    map[string]map[string]any `json:"plugins"`
+	DesktopExecutable string                    `json:"desktopExecutable"`
+	CLIVersion        string                    `json:"cliVersion"`
+	Version           int                       `json:"version"`
+	RuntimeDir        string                    `json:"runtimeDir"`
+	BundleDir         string                    `json:"bundleDir"`
+	CLI               string                    `json:"cli"`
+	Node              string                    `json:"node"`
+	Helper            string                    `json:"helper"`
+	CodexHome         string                    `json:"codexHome"`
+	Endpoint          string                    `json:"endpoint"`
+	TokenFile         string                    `json:"tokenFile"`
+	Plugins           map[string]map[string]any `json:"plugins"`
 }
 type backendRecord struct {
 	Process  *ProcessInfo `json:"process"`

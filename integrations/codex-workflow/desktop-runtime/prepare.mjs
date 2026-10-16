@@ -7,6 +7,7 @@ import { parseArgs } from 'node:util';
 import { execFileSync } from 'node:child_process';
 import { atomicJSON, privateDirectory, loadConfig } from './config.mjs';
 import { desktopLayout } from './desktop-layout.mjs';
+import { resolvePluginManifest } from './plugin-manifest.mjs';
 import { runtimeLocation, launcherName, allocateLoopbackEndpoint, makePrivate } from './platform.mjs';
 
 const { values } = parseArgs({ options: {
@@ -51,18 +52,7 @@ function originalPlugin(kind, pluginName, explicit) {
   }
   const plugin = JSON.parse(fs.readFileSync(file, 'utf8')).mcpServers?.[kind];
   sourceManifests[kind] = file;
-  if (!plugin || !Array.isArray(plugin.args) || !path.isAbsolute(plugin.command)) throw new Error(`Expected the installed, resolved ${kind} manifest`);
-  const cwd = plugin.cwd ?? path.dirname(file);
-  fs.accessSync(plugin.command, fs.constants.X_OK);
-  if (kind === 'codex_app') fs.accessSync(path.join(cwd, 'server.mjs'), fs.constants.R_OK);
-  else {
-    if (fs.realpathSync(plugin.command) !== fs.realpathSync(node)) throw new Error('CUA must use the original App bundled Node');
-    if (!plugin.args[0] || !path.isAbsolute(plugin.args[0])) throw new Error('CUA entrypoint is not resolved');
-    fs.accessSync(plugin.args[0], fs.constants.R_OK);
-  }
-  const env = { ...plugin.env };
-  for (const key of ['CODEX_CLI_PATH', 'CODEX_APP_TOOLS_PIPE_PATH', 'CODEX_TASK_WORKSPACE_VERIFYING_IDENTITY', 'BROWSER_USE_ACCESS_VERIFYING_IDENTITY']) delete env[key];
-  return { ...plugin, cwd, env };
+  return resolvePluginManifest(kind, plugin, file, node);
 }
 
 const plugins = {

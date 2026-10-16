@@ -65,6 +65,70 @@ function desktopLayout(app, platform = process.platform, operations = {
 }
 
 //#endregion
+//#region desktop-runtime/plugin-manifest.mjs
+function inside(root, file) {
+	const relative = path.relative(fs.realpathSync(root), fs.realpathSync(file));
+	return relative !== "" && !path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`);
+}
+function resolvePluginManifest(kind, plugin, file, node$1, options = {}) {
+	const platform = options.platform ?? process.platform;
+	const cwd = plugin?.cwd ?? path.dirname(file);
+	if (!plugin || !Array.isArray(plugin.args) || !plugin.args.every((arg) => typeof arg === "string") || typeof plugin.command !== "string" || !path.isAbsolute(cwd)) throw new Error(`Expected the installed, resolved ${kind} manifest`);
+	const args = plugin.args;
+	let resolved = {
+		...plugin,
+		cwd
+	};
+	if (platform === "win32" && kind === "codex_app" && /^(?:.*[\\/])?cmd\.exe$/i.test(plugin.command)) {
+		const wrapper = "./scripts/launch_codex_app_tools_mcp.cmd";
+		const command = [
+			"call",
+			wrapper,
+			"./server.mjs"
+		];
+		const tail = args.slice(3);
+		const known = JSON.stringify(tail) === JSON.stringify(command) || tail.length === 1 && tail[0] === command.join(" ");
+		if (args.slice(0, 3).map((arg) => arg.toLowerCase()).join(" ") !== "/d /s /c" || !known) throw new Error("Unsupported codex_app cmd.exe wrapper");
+		if (!inside(cwd, path.join(cwd, wrapper)) || !inside(cwd, path.join(cwd, "server.mjs"))) throw new Error("codex_app wrapper escapes its plugin directory");
+		resolved = {
+			...resolved,
+			command: node$1,
+			args: [path.join(cwd, "server.mjs")]
+		};
+	}
+	if (!path.isAbsolute(resolved.command)) throw new Error(`Expected the installed, resolved ${kind} manifest`);
+	fs.accessSync(resolved.command, fs.constants.X_OK);
+	if (kind === "codex_app") fs.accessSync(path.join(cwd, "server.mjs"), fs.constants.R_OK);
+	else {
+		const command = fs.realpathSync(resolved.command);
+		const entry = args[0];
+		if (!entry || !path.isAbsolute(entry)) throw new Error("CUA entrypoint is not resolved");
+		fs.accessSync(entry, fs.constants.R_OK);
+		if (command !== fs.realpathSync(node$1)) {
+			const roots = options.localAppDataRoots ?? [process.env.LOCALAPPDATA, path.join(os.homedir(), "AppData", "Local")].filter(Boolean);
+			const runtime = path.dirname(path.dirname(command));
+			if (!(platform === "win32" && path.basename(command).toLowerCase() === "node.exe" && path.basename(path.dirname(command)).toLowerCase() === "bin" && roots.some((root) => {
+				const base = path.join(root, "OpenAI", "Codex", "runtimes", "cua_node");
+				if (!fs.existsSync(base)) return false;
+				const relative = path.relative(fs.realpathSync(base), runtime);
+				return relative !== "" && relative !== ".." && !relative.includes(path.sep) && !path.isAbsolute(relative) && inside(runtime, entry);
+			}))) throw new Error("CUA must use bundled Node or one complete Codex-managed runtime");
+		}
+	}
+	const env = { ...resolved.env };
+	for (const key$1 of [
+		"CODEX_CLI_PATH",
+		"CODEX_APP_TOOLS_PIPE_PATH",
+		"CODEX_TASK_WORKSPACE_VERIFYING_IDENTITY",
+		"BROWSER_USE_ACCESS_VERIFYING_IDENTITY"
+	]) delete env[key$1];
+	return {
+		...resolved,
+		env
+	};
+}
+
+//#endregion
 //#region desktop-runtime/prepare.mjs
 const { values } = parseArgs({ options: {
 	output: { type: "string" },
@@ -123,27 +187,7 @@ function originalPlugin(kind, pluginName, explicit) {
 	}
 	const plugin = JSON.parse(fs.readFileSync(file, "utf8")).mcpServers?.[kind];
 	sourceManifests[kind] = file;
-	if (!plugin || !Array.isArray(plugin.args) || !path.isAbsolute(plugin.command)) throw new Error(`Expected the installed, resolved ${kind} manifest`);
-	const cwd = plugin.cwd ?? path.dirname(file);
-	fs.accessSync(plugin.command, fs.constants.X_OK);
-	if (kind === "codex_app") fs.accessSync(path.join(cwd, "server.mjs"), fs.constants.R_OK);
-	else {
-		if (fs.realpathSync(plugin.command) !== fs.realpathSync(node)) throw new Error("CUA must use the original App bundled Node");
-		if (!plugin.args[0] || !path.isAbsolute(plugin.args[0])) throw new Error("CUA entrypoint is not resolved");
-		fs.accessSync(plugin.args[0], fs.constants.R_OK);
-	}
-	const env = { ...plugin.env };
-	for (const key$1 of [
-		"CODEX_CLI_PATH",
-		"CODEX_APP_TOOLS_PIPE_PATH",
-		"CODEX_TASK_WORKSPACE_VERIFYING_IDENTITY",
-		"BROWSER_USE_ACCESS_VERIFYING_IDENTITY"
-	]) delete env[key$1];
-	return {
-		...plugin,
-		cwd,
-		env
-	};
+	return resolvePluginManifest(kind, plugin, file, node);
 }
 const plugins = {
 	codex_app: originalPlugin("codex_app", "codex-app-tools", values["desktop-plugin"]),

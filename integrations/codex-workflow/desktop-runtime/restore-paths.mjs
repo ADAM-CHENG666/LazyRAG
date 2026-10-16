@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { checkPrivate } from './platform.mjs';
+import { checkPrivate, makePrivate } from './platform.mjs';
 
 // Desktop may write its selected CLI into generated MCP manifests/config.toml.
 // Restore only this installation's exact path; preserve every unrelated edit.
@@ -22,6 +22,7 @@ export function restoreGeneratedPaths(config, launcher) {
     if (after === before) continue;
     const temporary = `${file}.lazymind-${process.pid}.tmp`;
     fs.writeFileSync(temporary, after, { mode: info.mode & 0o777, flag: 'wx' });
+    if (process.platform === 'win32') makePrivate(temporary);
     // Desktop must be closed; this catches edits made since the read above.
     if (fs.readFileSync(file, 'utf8') !== before) { fs.unlinkSync(temporary); throw new Error(`Config changed during restore: ${file}`); }
     fs.renameSync(temporary, file); changed.push(file);

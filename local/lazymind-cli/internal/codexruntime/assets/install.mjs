@@ -94,6 +94,7 @@ try {
 			profile: { type: "string" },
 			app: { type: "string" },
 			build: { type: "string" },
+			"current-cli": { type: "string" },
 			config: { type: "string" },
 			previous: { type: "string" }
 		}
@@ -169,7 +170,8 @@ try {
 		disable: (config) => run("manage.mjs", [
 			"disable",
 			"--config",
-			config.configFile
+			config.configFile,
+			...values["current-cli"] ? ["--current-cli", values["current-cli"]] : []
 		])
 	};
 	if (positionals.length !== 1) throw new Error("Use prepare|activate|disable");

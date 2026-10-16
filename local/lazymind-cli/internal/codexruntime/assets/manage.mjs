@@ -1,4 +1,4 @@
-import { i as loadConfig, p as native, s as checkPrivate, t as atomicJSON, u as desktopRunning } from "./config-C_SuSEAC.mjs";
+import { f as makePrivate, i as loadConfig, p as native, s as checkPrivate, t as atomicJSON, u as desktopRunning } from "./config-C_SuSEAC.mjs";
 import { r as runtimeEndpoint } from "./endpoint-BmObwRIt.mjs";
 import fs from "node:fs";
 import path from "node:path";
@@ -62,6 +62,7 @@ function restoreGeneratedPaths(config$1, launcher) {
 			mode: info.mode & 511,
 			flag: "wx"
 		});
+		if (process.platform === "win32") makePrivate(temporary);
 		if (fs.readFileSync(file, "utf8") !== before) {
 			fs.unlinkSync(temporary);
 			throw new Error(`Config changed during restore: ${file}`);
@@ -157,7 +158,14 @@ function manageWindows(action$1, config$1, ops = {}) {
 			running,
 			set: set$1,
 			unregister,
-			restore: () => restore(config$1, config$1.launcher),
+			restore: () => {
+				const cli = ops.currentCLI ? callNative("validate-windows-cli", { path: ops.currentCLI }, process.env.LAZYMIND_RUNTIME_HELPER ?? config$1.helper) : config$1.cli;
+				if (!fs.existsSync(cli)) throw new Error("Current Codex CLI is required to restore generated paths; startup environment has been restored");
+				restore({
+					...config$1,
+					cli
+				}, config$1.launcher);
+			},
 			validate: (state$2) => {
 				const now = current$1();
 				if (!(state$2.disabling ? Object.keys(desired$1).every((key) => matchesKey(now, desiredSnapshot, key) || matchesKey(now, state$2.before, key)) : matches$1(now, desiredSnapshot) || matches$1(now, state$2.before))) throw new Error("Startup environment changed externally; refusing overwrite");
@@ -171,7 +179,10 @@ function manageWindows(action$1, config$1, ops = {}) {
 //#region desktop-runtime/manage.mjs
 const { values, positionals } = parseArgs({
 	allowPositionals: true,
-	options: { config: { type: "string" } }
+	options: {
+		config: { type: "string" },
+		"current-cli": { type: "string" }
+	}
 });
 const action = positionals[0];
 if (![
@@ -184,7 +195,7 @@ if (![
 if (!["darwin", "win32"].includes(process.platform)) throw new Error("Unsupported platform");
 const config = loadConfig(values.config);
 if (process.platform === "win32") {
-	manageWindows(action, config);
+	manageWindows(action, config, { currentCLI: values["current-cli"] });
 	process.exit(0);
 }
 const directory = path.dirname(config.configFile);

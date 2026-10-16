@@ -1,102 +1,111 @@
-# Windows Codex MSIX discovery validation
+# Windows Codex integration: recovery and acceptance
 
-## Change
+Pull the current PR branch and rebuild LazyMind through the normal Windows build
+workflow. No separate hotfix package is required. Existing shared runtime helpers
+are immutable copies: rebuilding LazyMind alone does not replace an already
+activated helper. Disconnect the old integration, then explicitly reconnect using
+the rebuilt version when ready to test. Keep the recovered Windows machine in
+native mode until that test is scheduled.
 
-Windows desktop discovery keeps the existing order: explicit desktop binding,
-App Paths / protocol / Uninstall registration, then MSIX. For MSIX, it queries
-the current user's `OpenAI.Codex` package with Windows PowerShell's Appx module
-and reads application executables from its manifest. It resolves the executable
-against the returned `InstallLocation`, including `app\ChatGPT.exe`, without
-embedding a package version, install drive, or AppData location.
+## Confirmed Windows findings
 
-Only an existing desktop executable from the matching package counts. A CLI on
-PATH, a stale package, an unreadable manifest, or a failed/timed-out query does
-not count as an installed desktop. No package is installed, launched or changed
-by this discovery query. Codex configuration and integration enablement are
-unchanged.
+The Windows report confirms MSIX discovery (`f28fa113`) and manifest-selected
+Desktop entrypoints (`8b41d526`). Both `ChatGPT.exe` and `Codex.exe` may exist;
+`AppxManifest.xml` identifies the actual Desktop entrypoint. The report also
+confirms a local plugin compatibility fix reached installation/activation, but
+not working shared session control.
 
-## Build and verification boundary
+After a Store update removed the previous package directory, the installed
+launcher still referenced its old Node, CLI and Desktop paths. Launching the old
+Node failed before Codex could read its startup policy. The organization-settings
+warning in this incident therefore must not be treated solely as a network error.
 
-The supplied Windows x64 ZIP is a connector hotfix, not a full desktop installer.
-It contains `lazymind.exe`, `agentexec.test.exe`, this guide, and build/hash
-metadata. The Electron UI uses this connector for Codex detection, so it can be
-tested with the existing PR #835 Windows desktop installation.
+## Source changes and limits
 
-macOS can run the portable discovery/adapter tests and cross-compile Windows
-binaries. Windows PowerShell, Appx enumeration, registry discovery, WindowsApps
-file access and the settings UI still require Windows execution. Cross-compilation
-is not evidence of a successful Windows test run.
+- A native Windows launcher resolves the original bundled CLI from the running
+  Desktop process and its manifest. It does not use an unrelated CLI on PATH.
+- Auxiliary CLI requests retain their original arguments and run without Node.
+  Shared app-server startup checks the saved Desktop path, runtime files and CLI
+  version first. Stale or unsupported shared configuration delegates this launch
+  to the current original CLI and records that reconnection is required. It does
+  not automatically approve a new version for shared operation.
+- This delegation is a decision before shared startup. Failed or disconnected
+  shared conversations are never replayed against another backend.
+- A known `cmd.exe /d /s /c call` desktop-plugin wrapper is normalized to the
+  bundled Node and plugin `server.mjs`. Arbitrary shell commands are rejected.
+- CUA may use bundled Node or a complete runtime under Codex's managed local-data
+  directory. Its entrypoint must belong to that same managed runtime. Neither a
+  PATH Node nor an entrypoint from a different runtime is accepted.
+- Settings distinguish unconfigured, waiting for restart, connected, failed and
+  invalidated states. A registration file alone is not a connected channel.
+  Connected means a verified backend listener and live Desktop adapter transport;
+  it is not proof that a particular Continue/Stop command has been consumed.
+- Disconnect restores generated launcher paths to the validated current bundled
+  CLI, rather than a removed package path. A separate native operation can restore
+  saved user environment values without launching Node or Codex.
 
-## Windows reproduction and acceptance
+## Emergency environment restoration
 
-Use the same user and the same launch environment as the affected desktop test,
-including its existing `LOCALAPPDATA` / `APPDATA` overrides. Do not add a desktop
-binding or enable Codex integration to work around detection.
+Prefer the normal LazyMind disconnect action. If Codex cannot start and normal
+disconnect is blocked, first exit the Codex error dialog and preserve the local
+changes and runtime logs. Use the **newly built** LazyMind CLI for this operation;
+old installed helpers do not include it. Run PowerShell as the same Windows user:
 
-1. Extract the hotfix ZIP to a separate directory. Verify its hashes against
-   `SHA256SUMS.txt` with `Get-FileHash -Algorithm SHA256`.
-2. In **Windows PowerShell**, record the real package and manifest:
+```powershell
+$connector = Read-Host 'Full path to the newly built lazymind.exe'
+if (-not (Test-Path -LiteralPath $connector -PathType Leaf)) { throw 'CLI not found' }
+$profilePath = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }
+$registrationPath = Join-Path $profilePath 'lazymind-shared-server.json'
+$registration = Get-Content -LiteralPath $registrationPath -Raw | ConvertFrom-Json
+@{ path = $registration.installation } | ConvertTo-Json -Compress |
+    & $connector internal codex-runtime restore-windows-startup
+if ($LASTEXITCODE -ne 0) { throw 'Recovery failed; preserve the error and snapshot' }
+```
 
-   ```powershell
-   $packages = @(Get-AppxPackage -Name OpenAI.Codex)
-   $packages | Select-Object Name, Version, PackageFullName, InstallLocation
-   foreach ($package in $packages) {
-       $manifest = Get-AppxPackageManifest -Package $package.PackageFullName
-       foreach ($application in $manifest.Package.Applications.Application) {
-           $exe = Join-Path $package.InstallLocation $application.Executable
-           [PSCustomObject]@{ Executable = $exe; Exists = Test-Path -LiteralPath $exe -PathType Leaf }
-       }
-   }
-   ```
+This restores the four saved user environment values and their registry types,
+refuses unrelated changes, and retains the activation snapshot, registration,
+plugins and conversation data. It marks disconnection in progress. Finish normal
+LazyMind disconnect afterward to restore generated config paths and remove the
+registration. If registration was already renamed during manual recovery, do not
+re-enable it merely to run this command; the supplied `path` can instead refer to
+the original installation's `runtime.json` beside its retained `activation.json`.
 
-3. Run the hotfix connector's status query from the extracted directory:
+An existing Explorer/terminal process may retain its previous environment. Verify
+launch from a fresh process; the new launcher also honors the disconnection marker.
+Do not terminate Codex automatically or remove its user profile/authentication data.
 
-   ```powershell
-   .\lazymind.exe internal agent codex status
-   ```
+## Windows acceptance (still required)
 
-   Expect `codex_desktop.satisfied = true`. With the existing initialized
-   `.codex` profile (or existing `CODEX_HOME` override), expect
-   `codex_desktop_initialized.satisfied = true`. This command does not connect
-   Codex or rewrite its configuration. LazyMind may create its own local host
-   identity if the selected LazyMind data directory has never been initialized.
+Use the same Windows account and LazyMind data-isolation environment as the
+reported machine. Do not hardcode a username, package version or drive.
 
-4. For UI testing, fully exit **LazyMind** and retain the existing Windows test
-   launcher's data-isolation settings. In that launcher's environment, set only:
+1. Record the commit and `Get-AppxPackage -Name OpenAI.Codex` results. Confirm the
+   manifest-selected Desktop and bundled CLI exist. Check traditional installation,
+   explicit binding, CLI-only, missing package and failed-query cases separately.
+2. Verify both the known desktop-plugin wrapper and managed CUA runtime prepare
+   successfully. Run `pnpm test:platform` with `LAZYMIND_RUNTIME_HELPER` pointing to
+   the newly built CLI, under ordinary and elevated execution. Private files must
+   remain owned by the individual user; do not weaken the owner checks.
+3. Enable while Codex is already running. Expect configured/waiting for restart,
+   not a claimed connected channel. Quit normally and launch from the original icon.
+4. Verify native startup policy loading, a live shared backend and connected
+   Desktop transport. Test Continue/Stop in existing and new sessions. Record
+   acceptance, consumption and effect on the intended session, not just `pending`.
+5. Quit and reopen. Verify backend reuse and working desktop/browser tools.
+6. On a disposable test installation, exercise a Store update that removes old
+   package paths. Verify original-icon startup uses the new original CLI and
+   LazyMind reports invalidated shared configuration. Do not remove WindowsApps
+   directories manually. Test unsupported new versions without enabling shared mode.
+7. Verify disconnect after upgrade restores user environment values and generated
+   paths, and original-icon startup succeeds. Test the independent recovery
+   operation with Node unavailable and ensure snapshots remain available for retry.
+8. Inject backend startup/connection failure, verify the failure state, then verify
+   recovery. A failed in-flight request must not be replayed.
 
-   ```powershell
-   $env:LAZYMIND_DESKTOP_AGENT_CONNECTOR = (Resolve-Path .\lazymind.exe).Path
-   # Launch the existing LazyMind test desktop with its usual executable/launcher.
-   ```
+Capture only relevant errors from `adapter.jsonl`, `coordinator.jsonl` and
+`daemon.log` in `runtime.json`'s `runtimeDir`. Do not publish authentication files,
+capability tokens, complete plugin environments or conversation content.
 
-   This process-scoped override selects the hotfix without replacing the installed
-   binary. Open Codex settings and refresh status. The two incorrect desktop
-   warnings should disappear. Do not click Connect/Enable for this acceptance test.
-   Remove the override (or close this PowerShell session) and restart LazyMind to
-   return to the installed connector.
-
-5. Run the packaged discovery tests:
-
-   ```powershell
-   .\agentexec.test.exe -test.v -test.run 'TestWindowsDesktopPackage|TestWindowsAppPackage|TestDesktopManualBinding|TestAppPackageQuery'
-   ```
-
-   These cover MSIX manifest resolution, package upgrades, traditional-install
-   priority, manual-binding priority, CLI-only/no-install cases, query failures,
-   malformed results, and invalid executable paths. Windows-only tests exercise
-   the PowerShell JSON/XML protocol and a real Appx query for an absent identity.
-   Fixtures use temporary data; no Codex settings are changed.
-
-6. On a machine/profile with traditional installation, verify that its prior
-   desktop path still wins. On a CLI-only machine/profile, desktop requirements
-   must remain unsatisfied. These cases can also be checked through the fixtures
-   without uninstalling applications from the original user's machine.
-
-Record the ZIP build commit, Windows version, PowerShell version, command output,
-and settings-page result. A full Windows installer can subsequently be built
-from the same commit using `.github/workflows/windows-installer.yml`.
-
-## References
-
-- [Get-AppxPackage: packages installed in a user profile](https://learn.microsoft.com/en-us/powershell/module/appx/get-appxpackage)
-- [Application manifest executable](https://learn.microsoft.com/en-us/uwp/schemas/appxpackage/uapmanifestschema/element-application)
+macOS logic tests and Windows cross-compilation do not establish Windows end-to-end
+success. In particular, MSIX updates, environment inheritance, original-icon
+launches and actual Continue/Stop effects still require Windows execution.

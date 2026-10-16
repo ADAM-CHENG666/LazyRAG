@@ -10,7 +10,7 @@ import { prepareInstallation, activateInstallation, disableInstallation } from '
 try {
   const { positionals, values } = parseArgs({ allowPositionals: true, options: {
     root: { type: 'string' }, profile: { type: 'string' }, app: { type: 'string' }, build: { type: 'string' },
-    config: { type: 'string' }, previous: { type: 'string' },
+    'current-cli': { type: 'string' }, config: { type: 'string' }, previous: { type: 'string' },
   } });
   if (!['darwin', 'win32'].includes(process.platform)) throw new Error('Shared Desktop installation currently supports macOS and Windows');
   if (!values.profile || !path.isAbsolute(values.profile) || !values.root || !path.isAbsolute(values.root)) throw new Error('Absolute profile and installation root are required');
@@ -56,7 +56,7 @@ try {
     mark: (config, fingerprint) => atomicJSON(path.join(path.dirname(config.configFile), 'installation.json'), { version: 1, fingerprint }),
     removePrepared: directory => fs.rmSync(directory, { recursive: true, force: true }),
     enable: config => run('manage.mjs', ['enable', '--config', config.configFile]),
-    disable: config => run('manage.mjs', ['disable', '--config', config.configFile]),
+    disable: config => run('manage.mjs', ['disable', '--config', config.configFile, ...(values['current-cli'] ? ['--current-cli', values['current-cli']] : [])]),
   };
   if (positionals.length !== 1) throw new Error('Use prepare|activate|disable');
   let result = {};

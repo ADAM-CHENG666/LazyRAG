@@ -7,7 +7,6 @@ import (
 	"errors"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -53,12 +52,17 @@ func RunNative(ctx context.Context, args []string, input io.Reader, output io.Wr
 		err = checkPrivate(req.Path)
 	case "make-private":
 		err = makePrivate(req.Path)
+	case "validate-windows-cli":
+		_, _, err = windowsDesktopLayout(req.Path)
+		result = req.Path
 	case "windows-desktop-executable":
 		result, err = windowsDesktopExecutable(req.Path)
 	case "environment-read":
 		result, err = platformEnvironment(nil, nil)
 	case "environment-write":
 		result, err = platformEnvironment(req.Values, req.Types)
+	case "restore-windows-startup":
+		err = restoreWindowsStartup(req.Path)
 	case "ensure":
 		result, err = ensureBackend(ctx, req.Path)
 	default:
@@ -82,15 +86,10 @@ func RunLauncher(ctx context.Context, args []string) error {
 		return err
 	}
 	file := filepath.Join(filepath.Dir(exe), "runtime.json")
-	config, err := readRuntime(file)
+	cmd, err := windowsLaunchCommand(ctx, file, args, launcherDesktop(os.Getppid(), platformProcess))
 	if err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, config.Node, append([]string{filepath.Join(config.BundleDir, "adapter.mjs")}, args...)...)
-	cmd.Env = append(os.Environ(), "LAZYMIND_CODEX_DESKTOP_CONFIG="+file, "LAZYMIND_RUNTIME_HELPER="+exe)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 

@@ -64,6 +64,7 @@ test('TCP transport authenticates, preserves messages, and refuses untrusted end
  const root = fs.mkdtempSync(path.join(os.tmpdir(),'lm-platform-'));
  makePrivate(root);
  const tokenFile = path.join(root,'token'); fs.writeFileSync(tokenFile,'a'.repeat(64),{mode:0o600});
+ makePrivate(tokenFile);
  const server=http.createServer();const ws=new WebSocketServer({noServer:true});
  const seen=[];
  server.on('upgrade',(req,socket,head)=>{
@@ -103,7 +104,8 @@ test('Windows bridge mechanism rejects an invalid token before invoking any plug
 test('Windows activation restores values and registry types, rejects concurrent edits and rolls back failed activation', async()=>{
  const { manageWindows }=await import('../desktop-runtime/manage-windows.mjs');
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'lm-win-activation-'));makePrivate(root);
- const config={configFile:path.join(root,'runtime.json'),launcher:'C:\\fixture\\launch-adapter.exe',helper:'fixture'};
+ const config={configFile:path.join(root,'runtime.json'),launcher:'C:\\fixture\\launch-adapter.exe',helper:'fixture',cli:path.join(root,'current-codex.exe')};
+ fs.writeFileSync(config.cli,'fixture');
  const before={values:{CODEX_CLI_PATH:'%LOCALAPPDATA%\\original.exe',CODEX_APP_SERVER_FORCE_CLI:null,CODEX_APP_SERVER_WS_URL:null,CODEX_APP_SERVER_USE_LOCAL_DAEMON:null},types:{CODEX_CLI_PATH:2}};
  let state=structuredClone(before), registered=false, busy=false, fail=false;
  const ops={
@@ -140,4 +142,27 @@ test('Windows activation restores values and registry types, rejects concurrent 
   fail=true;assert.throws(()=>manageWindows('enable',config,ops),/write failed/);assert.deepEqual(state,before);assert.equal(registered,false);
   assert.equal(fs.existsSync(path.join(root,'activation.json')),false);
  }finally{fs.rmSync(root,{recursive:true,force:true})}
+});
+
+test('Windows disconnect restores generated paths to the validated current CLI after an app upgrade', async () => {
+ const { manageWindows } = await import('../desktop-runtime/manage-windows.mjs');
+ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-upgrade-restore-')); makePrivate(root);
+ const currentCLI = path.join(root, 'current-codex.exe'); fs.writeFileSync(currentCLI, 'fixture');
+ const config = { configFile: path.join(root, 'runtime.json'), launcher: path.join(root, 'launch-adapter.exe'), cli: path.join(root, 'removed', 'codex.exe'), helper: 'fixture' };
+ let snapshot = { values: { CODEX_CLI_PATH: null, CODEX_APP_SERVER_FORCE_CLI: null, CODEX_APP_SERVER_WS_URL: null, CODEX_APP_SERVER_USE_LOCAL_DAEMON: null }, types: {} };
+ let restored;
+ const ops = { currentCLI, register() {}, unregister() {}, running: () => false,
+  restore: value => { restored = value.cli; },
+  native: (operation, request) => {
+   if (operation === 'validate-windows-cli') { assert.equal(request.path, currentCLI); return currentCLI; }
+   if (operation === 'environment-write') snapshot = request;
+   return snapshot;
+  },
+ };
+ try {
+  manageWindows('enable', config, ops);
+  manageWindows('disable', config, ops);
+  assert.equal(restored, currentCLI);
+  assert.equal(snapshot.values.CODEX_CLI_PATH, null);
+ } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

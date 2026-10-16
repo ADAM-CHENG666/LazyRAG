@@ -121,7 +121,22 @@ func (a *Adapter) Status(context.Context) agentintegration.Status {
 				status.State = agentintegration.Ready
 				status.Message = "Workflow 插件已安装；点击连接以完成共享模式配置。"
 			} else {
-				status.Message = "共享模式已启用；配置变更后请正常退出并重开 Codex。"
+				state := codexruntime.ConnectionState(registration)
+				status.CanConnect, status.CanDisconnect = true, true
+				if state == "connected" {
+					status.Message = "Codex 桌面已连接共享后台；会话控制通道已连接。"
+				} else {
+					status.State = agentintegration.ActionRequired
+					status.Issue = &agentintegration.Issue{Code: "codex_shared_" + state}
+					switch state {
+					case "invalidated":
+						status.Message = "Codex 共享配置已失效（应用升级或运行文件变化）；请关闭联动后重新配置。"
+					case "failed":
+						status.Message = "Codex 共享后台连接失败，会话控制不可用；请检查共享运行日志，或关闭联动恢复默认启动。"
+					default:
+						status.Message = "共享模式已配置，等待 Codex 重启并连接后台；当前尚不能控制会话。"
+					}
+				}
 			}
 		} else {
 			status.Message = "Workflow 插件已安装；当前平台使用 queue 模式，尚不支持原生停止。"
@@ -143,7 +158,7 @@ func (a *Adapter) Connect(ctx context.Context) agentintegration.Status {
 		return agentintegration.Fail(a.Status(ctx), "clean up legacy Codex control configuration: "+err.Error())
 	}
 	status := a.Status(ctx)
-	if status.State != agentintegration.Ready && status.State != agentintegration.Enabled {
+	if status.State != agentintegration.Ready && status.State != agentintegration.Enabled && !status.CanConnect {
 		return status
 	}
 	// Installation is local and uses the saved account scope. A temporarily
@@ -179,9 +194,9 @@ func (a *Adapter) Connect(ctx context.Context) agentintegration.Status {
 		return agentintegration.Fail(a.Status(ctx), err.Error())
 	}
 	result := a.Status(ctx)
-	if codexruntime.Supported() {
+	if codexruntime.Supported() && result.State == agentintegration.Enabled {
 		result.Message = "Codex 共享模式已配置。请正常退出并重开 Codex，然后新建 Workflow 使用继续/停止控制。"
-	} else {
+	} else if !codexruntime.Supported() {
 		result.Message = "Workflow 插件已安装，当前平台使用 queue 模式；共享后台与原生停止尚不支持当前平台。"
 	}
 	return result

@@ -24,7 +24,7 @@ var runtimeAssets embed.FS
 
 // Include native code in the release identity: installed helpers are immutable copies.
 //
-//go:embed platform.go platform_unix.go platform_windows.go coordinator.go listener_unix.go listener_windows.go layout.go shared.go
+//go:embed platform.go platform_unix.go platform_windows.go coordinator.go listener_unix.go listener_windows.go layout.go shared.go launch.go status.go
 var nativeSources embed.FS
 
 // BuildID makes a changed runtime an upgrade, without overwriting live files.
@@ -90,7 +90,7 @@ func WithInstallation(ctx context.Context, binary, profile string, installPlugin
 		if err := installPlugin(); err != nil {
 			return err
 		}
-		_, err = i.run(ctx, "activate", "--profile", profile, "--config", plan.Config, "--previous", plan.Previous)
+		_, err = i.run(ctx, "activate", "--profile", profile, "--config", plan.Config, "--previous", plan.Previous, "--current-cli", binary)
 		return err
 	})
 }
@@ -115,7 +115,7 @@ func Disable(ctx context.Context, binary, profile string) error {
 		}
 	}
 	return withInstaller(ctx, node, func(i *installer) error {
-		_, err := i.run(ctx, "disable", "--profile", profile)
+		_, err := i.run(ctx, "disable", "--profile", profile, "--current-cli", binary)
 		return err
 	})
 }

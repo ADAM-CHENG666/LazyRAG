@@ -89,14 +89,14 @@ exit 1
 		t.Fatal("failed install changed original MCP")
 	}
 	_ = os.Remove(fail)
-	if status := adapter.Connect(context.Background()); status.State != agentintegration.Enabled {
+	if status := adapter.Connect(context.Background()); status.State != agentintegration.ActionRequired || !status.CanDisconnect || !status.CanConnect {
 		t.Fatalf("offline install failed: %+v", status)
 	}
 	events, _ := os.ReadFile(filepath.Join(profile, "events"))
 	if string(events) != "installed\nmigrated\n" {
 		t.Fatalf("migration ordering: %s", events)
 	}
-	if status := adapter.Connect(context.Background()); status.State != agentintegration.Enabled {
+	if status := adapter.Connect(context.Background()); status.State != agentintegration.ActionRequired || !status.CanDisconnect || !status.CanConnect {
 		t.Fatalf("idempotent connect failed: %+v", status)
 	}
 	after, _ := os.ReadFile(filepath.Join(profile, "events"))

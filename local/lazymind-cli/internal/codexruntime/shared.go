@@ -33,10 +33,11 @@ func SameProfile(a, b string) bool {
 }
 
 type Registration struct {
-	Version   int    `json:"version"`
-	Profile   string `json:"profile"`
-	Endpoint  string `json:"app_server_url"`
-	TokenFile string `json:"auth_token_file,omitempty"`
+	Installation string `json:"installation,omitempty"`
+	Version      int    `json:"version"`
+	Profile      string `json:"profile"`
+	Endpoint     string `json:"app_server_url"`
+	TokenFile    string `json:"auth_token_file,omitempty"`
 }
 
 func Read(profile string) (*Registration, error) {

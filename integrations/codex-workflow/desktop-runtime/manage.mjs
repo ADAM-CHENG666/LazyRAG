@@ -10,12 +10,12 @@ import { disableActivation } from './activation.mjs';
 import { restoreGeneratedPaths } from './restore-paths.mjs';
 import { registerWorkflow, unregisterWorkflow, registrationPath, workflowRegistration } from './workflow-registration.mjs';
 
-const { values, positionals } = parseArgs({ allowPositionals: true, options: { config: { type: 'string' } } });
+const { values, positionals } = parseArgs({ allowPositionals: true, options: { config: { type: 'string' }, 'current-cli': { type: 'string' } } });
 const action = positionals[0];
 if (!['plan', 'enable', 'disable', 'status', 'apply-login'].includes(action) || positionals.length !== 1) throw new Error('Use plan|enable|disable|status --config <runtime.json>');
 if (!['darwin', 'win32'].includes(process.platform)) throw new Error('Unsupported platform');
 const config = loadConfig(values.config);
-if (process.platform === 'win32') { manageWindows(action, config); process.exit(0); }
+if (process.platform === 'win32') { manageWindows(action, config, { currentCLI: values['current-cli'] }); process.exit(0); }
 const directory = path.dirname(config.configFile);
 const stateFile = path.join(directory, 'activation.json');
 const agentFile = path.join(os.homedir(), 'Library/LaunchAgents/com.lazymind.codex-desktop.plist');

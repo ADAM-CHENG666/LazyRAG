@@ -22,6 +22,7 @@ const log = logger(config, 'adapter');
 const root = config.runtimeDir;
 const bridgeDir = path.join(root, `bridge-${process.pid}`);
 const registration = path.join(root, `bridge-${process.pid}.json`);
+const connection = path.join(root, `desktop-${process.pid}.json`);
 const children = new Set();
 const servers = [];
 const sockets = new Set();
@@ -42,6 +43,7 @@ function stop(code = 0) {
     server.close();
     try { if (socketPath) fs.unlinkSync(socketPath); } catch { /* Already closed. */ }
   }
+  try { fs.unlinkSync(connection); } catch { /* No connection yet. */ }
   try { fs.unlinkSync(registration); } catch { /* No registration yet. */ }
   try { fs.rmdirSync(bridgeDir); } catch { /* Only remove our empty directory. */ }
   log('stopped', { code });
@@ -110,9 +112,16 @@ try {
     process.stderr.write(`Shared backend: ${error.message}\n`); stop(1);
   });
   if (stopping) closeTransport();
-  else parentWatch = setInterval(() => {
-    if (processIdentity(originalParent) !== originalParentIdentity) stop();
-  }, 1000);
+  else {
+    atomicJSON(connection, {
+      process: native('process', { pid: process.pid }, config.helper),
+      desktop: native('process', { pid: originalParent }, config.helper),
+      backend: backend.process,
+    });
+    parentWatch = setInterval(() => {
+      if (processIdentity(originalParent) !== originalParentIdentity) stop();
+    }, 1000);
+  }
 } catch (error) {
   log('startup_failed', { code: error.code ?? 'startup' });
   process.stderr.write(`Shared backend startup failed; no private fallback: ${error.message}\n`);
