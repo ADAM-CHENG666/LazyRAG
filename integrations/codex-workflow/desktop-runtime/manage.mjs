@@ -4,14 +4,17 @@ import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { execFileSync } from 'node:child_process';
 import { loadConfig, atomicJSON } from './config.mjs';
+import { desktopRunning } from './platform.mjs';
+import { manageWindows } from './manage-windows.mjs';
 import { restoreGeneratedPaths } from './restore-paths.mjs';
 import { registerWorkflow, unregisterWorkflow, registrationPath, workflowRegistration } from './workflow-registration.mjs';
 
 const { values, positionals } = parseArgs({ allowPositionals: true, options: { config: { type: 'string' } } });
 const action = positionals[0];
 if (!['plan', 'enable', 'disable', 'status', 'apply-login'].includes(action) || positionals.length !== 1) throw new Error('Use plan|enable|disable|status --config <runtime.json>');
-if (process.platform !== 'darwin') throw new Error('macOS only');
+if (!['darwin', 'win32'].includes(process.platform)) throw new Error('Unsupported platform');
 const config = loadConfig(values.config);
+if (process.platform === 'win32') { manageWindows(action, config); process.exit(0); }
 const directory = path.dirname(config.configFile);
 const stateFile = path.join(directory, 'activation.json');
 const agentFile = path.join(os.homedir(), 'Library/LaunchAgents/com.lazymind.codex-desktop.plist');
@@ -78,8 +81,7 @@ if (action === 'plan') {
   process.stdout.write('Shared mode configured. Quit Desktop normally, then open its original icon. No App or backend was started by this command.\n');
 } else if (action === 'disable') {
   if (state) {
-    const executables = execFileSync('/bin/ps', ['-axo', 'comm='], { encoding: 'utf8', timeout: 5000 }).split('\n').map(line => line.trim());
-    if (executables.includes(config.desktopExecutable)) throw new Error('Quit Desktop normally before disabling, so it cannot rewrite generated CLI paths during restore');
+    if (desktopRunning(config)) throw new Error('Quit Desktop normally before disabling, so it cannot rewrite generated CLI paths during restore');
     if (!fs.existsSync(agentFile) || fs.readFileSync(agentFile, 'utf8') !== plist) throw new Error('LaunchAgent changed externally; refusing removal');
     const now = current();
     if (!matches(now, desired) && !matches(now, state.before)) throw new Error('GUI environment changed externally; refusing to overwrite it');

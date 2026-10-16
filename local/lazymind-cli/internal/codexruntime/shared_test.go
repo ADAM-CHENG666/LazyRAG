@@ -10,11 +10,21 @@ import (
 
 func TestSharedRegistrationControlsCancellationAndFailsClosed(t *testing.T) {
 	profile := t.TempDir()
+	if err := makePrivate(profile); err != nil {
+		t.Fatal(err)
+	}
 	file := filepath.Join(profile, RegistrationName)
 	if got, err := Cancellation(profile); err != nil || got != "none" {
 		t.Fatalf("legacy: %s %v", got, err)
 	}
 	valid := Registration{Version: 1, Profile: profile, Endpoint: "ws+unix://localhost/private/tmp/test.sock:/rpc"}
+	if runtime.GOOS == "windows" {
+		valid.Endpoint = "ws://127.0.0.1:49152"
+		valid.TokenFile = filepath.Join(profile, "token")
+		if err := os.WriteFile(valid.TokenFile, []byte("fixture"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	write := func(value Registration) {
 		t.Helper()
 		body, _ := json.Marshal(value)

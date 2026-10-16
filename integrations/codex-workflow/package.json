@@ -13,7 +13,9 @@
     "test:control": "node --test tests/native-dispatcher.check.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "start": "node dist/main.mjs"
+    "start": "node dist/main.mjs",
+    "test:platform": "node --test tests/platform.check.mjs",
+    "test:install": "node --test tests/desktop-install.check.mjs"
   },
   "dependencies": {
     "ws": "8.21.3"

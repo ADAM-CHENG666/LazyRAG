@@ -290,7 +290,9 @@ export default function AgentIntegrationPage() {
         : "agentIntegration.loginStarted", { agent: executorName }));
       setPendingLoginAgent(agent);
     } else if (result.data.state === "enabled") {
-      message.success(t("agentIntegration.enableSuccess", { agent: result.data.display_name }));
+      message.success(agent === "codex" && result.data.message
+        ? result.data.message
+        : t("agentIntegration.enableSuccess", { agent: result.data.display_name }), 8);
     }
   };
 

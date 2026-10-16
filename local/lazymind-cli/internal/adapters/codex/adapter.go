@@ -14,6 +14,7 @@ import (
 	"lazymind/agentconnector/internal/agentexec"
 	"lazymind/agentconnector/internal/agentintegration"
 	"lazymind/agentconnector/internal/codexplugin"
+	"lazymind/agentconnector/internal/codexruntime"
 	"lazymind/agentconnector/internal/credentials"
 	"lazymind/agentconnector/internal/mcpbridge"
 	"lazymind/agentconnector/internal/workflowhost"
@@ -32,6 +33,7 @@ type Adapter struct {
 	bridge         *mcpbridge.Bridge
 	home           string
 	hostID         string
+	sharedRuntime  func(context.Context, bool, func() error) error
 }
 
 type mcpConfig struct {
@@ -106,6 +108,24 @@ func (a *Adapter) Status(context.Context) agentintegration.Status {
 	case !exists && a.pluginEnabled():
 		status.State = agentintegration.Enabled
 		status.Message = "LazyMind Workflow plugin is installed. Open a new Codex task to load its tools."
+		if codexruntime.Supported() {
+			profile, err := codexHome()
+			if err != nil {
+				return agentintegration.Fail(status, err.Error())
+			}
+			registration, err := codexruntime.Read(profile)
+			if err != nil {
+				return agentintegration.Fail(status, err.Error())
+			}
+			if registration == nil {
+				status.State = agentintegration.Ready
+				status.Message = "Workflow 插件已安装；点击连接以完成共享模式配置。"
+			} else {
+				status.Message = "共享模式已启用；配置变更后请正常退出并重开 Codex。"
+			}
+		} else {
+			status.Message = "Workflow 插件已安装；当前平台使用 queue 模式，尚不支持原生停止。"
+		}
 
 	case agentintegration.MissingRequirement(requirements):
 		status.State = agentintegration.RequirementsMissing
@@ -123,7 +143,7 @@ func (a *Adapter) Connect(ctx context.Context) agentintegration.Status {
 		return agentintegration.Fail(a.Status(ctx), "clean up legacy Codex control configuration: "+err.Error())
 	}
 	status := a.Status(ctx)
-	if status.State != agentintegration.Ready {
+	if status.State != agentintegration.Ready && status.State != agentintegration.Enabled {
 		return status
 	}
 	// Installation is local and uses the saved account scope. A temporarily
@@ -133,21 +153,38 @@ func (a *Adapter) Connect(ctx context.Context) agentintegration.Status {
 	if err != nil {
 		return agentintegration.Fail(status, err.Error())
 	}
-	record, err := codexplugin.Install(ctx, a.home, a.self, a.binary, profile, a.hostID)
-	if err != nil {
-		return agentintegration.Fail(status, "install LazyMind Workflow plugin: "+err.Error())
-	}
-	// Migrate only after successful plugin installation. An unrelated MCP entry
-	// was already rejected by Status and is never overwritten.
-	if _, exists, err := a.getConfig(); err != nil {
-		return agentintegration.Fail(status, err.Error())
-	} else if exists {
-		if _, err := a.run(ctx, "mcp", "remove", serverName); err != nil {
-			_, _ = a.run(ctx, "plugin", "remove", codexplugin.Name+"@"+record.Marketplace, "--json")
-			return agentintegration.Fail(status, "remove legacy MCP entry: "+err.Error())
+	err = a.configureShared(ctx, true, func() error {
+		if a.pluginEnabled() {
+			if _, exists, err := a.getConfig(); err != nil {
+				return err
+			} else if !exists {
+				return nil
+			}
 		}
+		record, err := codexplugin.Install(ctx, a.home, a.self, a.binary, profile, a.hostID)
+		if err != nil {
+			return fmt.Errorf("install LazyMind Workflow plugin: %w", err)
+		}
+		if _, exists, err := a.getConfig(); err != nil {
+			return err
+		} else if exists {
+			if _, err := a.run(ctx, "mcp", "remove", serverName); err != nil {
+				_, _ = a.run(ctx, "plugin", "remove", codexplugin.Name+"@"+record.Marketplace, "--json")
+				return fmt.Errorf("remove legacy MCP entry: %w", err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return agentintegration.Fail(a.Status(ctx), err.Error())
 	}
-	return a.Status(ctx)
+	result := a.Status(ctx)
+	if codexruntime.Supported() {
+		result.Message = "Codex 共享模式已配置。请正常退出并重开 Codex，然后新建 Workflow 使用继续/停止控制。"
+	} else {
+		result.Message = "Workflow 插件已安装，当前平台使用 queue 模式；共享后台与原生停止尚不支持当前平台。"
+	}
+	return result
 }
 
 func (a *Adapter) Disconnect(ctx context.Context) agentintegration.Status {
@@ -157,6 +194,9 @@ func (a *Adapter) Disconnect(ctx context.Context) agentintegration.Status {
 	status := a.Status(ctx)
 	if status.State == agentintegration.Conflict || status.State == agentintegration.Failed {
 		return status
+	}
+	if err := a.configureShared(ctx, false, nil); err != nil {
+		return agentintegration.Fail(status, err.Error())
 	}
 	if record, err := codexplugin.Read(); err == nil && record.Home == a.home {
 		if _, err := a.run(ctx, "plugin", "remove", codexplugin.Name+"@"+record.Marketplace, "--json"); err != nil {
@@ -286,4 +326,18 @@ func (a *Adapter) pluginEnabled() bool {
 	}
 	account, err := store.AccountScope()
 	return err == nil && workflowhost.Configured(a.home, record.ConnectorID, account)
+}
+
+func (a *Adapter) configureShared(ctx context.Context, enable bool, install func() error) error {
+	if a.sharedRuntime != nil {
+		return a.sharedRuntime(ctx, enable, install)
+	}
+	profile, err := codexHome()
+	if err != nil {
+		return err
+	}
+	if enable {
+		return codexruntime.WithInstallation(ctx, a.binary, profile, install)
+	}
+	return codexruntime.Disable(ctx, a.binary, profile)
 }

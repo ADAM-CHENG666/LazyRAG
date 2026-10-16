@@ -62,6 +62,12 @@ func StartWorker(ctx context.Context, home string) (func(), error) {
 	launch := func() (*worker, error) {
 		workerContext, stopWorker := context.WithCancel(lifetime)
 		cmd := exec.CommandContext(workerContext, node, args...)
+		self, selfErr := os.Executable()
+		if selfErr != nil {
+			stopWorker()
+			return nil, selfErr
+		}
+		cmd.Env = append(os.Environ(), "LAZYMIND_RUNTIME_HELPER="+self)
 		cmd.Stdout, cmd.Stderr = log, log
 		cmd.WaitDelay = 5 * time.Second
 		cmd.Cancel = func() error {

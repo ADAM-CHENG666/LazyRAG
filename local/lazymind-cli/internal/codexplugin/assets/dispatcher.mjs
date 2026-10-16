@@ -1,13 +1,14 @@
 import { createRequire } from "node:module";
 import { lstat, mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import path, { isAbsolute, join, resolve } from "node:path";
 import { parseArgs, promisify } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { setTimeout as setTimeout$1 } from "node:timers/promises";
 import { createConnection } from "node:net";
 import { EventEmitter } from "node:events";
+import fs from "node:fs";
 
 //#region rolldown:runtime
 var __create = Object.create;
@@ -63,8 +64,8 @@ var HostBridge = class {
 		].includes(parsed.hostname) || parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error("Workflow Bridge must be a loopback URL without credentials");
 		this.base = parsed.href.replace(/\/$/, "") + "/v1/workflow-host";
 	}
-	async request(path, signal, body) {
-		const response = await fetch(this.base + path, {
+	async request(path$1, signal, body) {
+		const response = await fetch(this.base + path$1, {
 			method: body === void 0 ? "GET" : "POST",
 			signal: AbortSignal.any([signal, AbortSignal.timeout(15e3)]),
 			headers: {
@@ -211,9 +212,9 @@ function continuationMessage(action) {
 var DispatcherBusy = class extends Error {};
 /** One cooperating dispatcher per Codex profile pairing. */
 async function dispatcherLock(pairingFile, instanceId) {
-	const path = `${pairingFile}.runtime.lock`;
+	const path$1 = `${pairingFile}.runtime.lock`;
 	for (let attempt = 0; attempt < 2; attempt++) try {
-		const file = await open(path, "wx", 384);
+		const file = await open(path$1, "wx", 384);
 		try {
 			await file.writeFile(JSON.stringify({
 				pid: process.pid,
@@ -224,20 +225,20 @@ async function dispatcherLock(pairingFile, instanceId) {
 		}
 		return async () => {
 			try {
-				if (JSON.parse(await readFile(path, "utf8")).instanceId === instanceId) await unlink(path);
+				if (JSON.parse(await readFile(path$1, "utf8")).instanceId === instanceId) await unlink(path$1);
 			} catch (error) {
 				if (error.code !== "ENOENT") throw error;
 			}
 		};
 	} catch (error) {
 		if (error.code !== "EEXIST") throw error;
-		const previous = JSON.parse(await readFile(path, "utf8"));
+		const previous = JSON.parse(await readFile(path$1, "utf8"));
 		if (!Number.isSafeInteger(previous.pid) || previous.pid < 1) throw new Error("Invalid Codex dispatcher lock; repair this connection explicitly");
 		try {
 			process.kill(previous.pid, 0);
 		} catch (error$1) {
 			if (error$1.code === "ESRCH") {
-				await unlink(path);
+				await unlink(path$1);
 				continue;
 			}
 			throw error$1;
@@ -3828,6 +3829,60 @@ var import_websocket_server = /* @__PURE__ */ __toESM(require_websocket_server()
 var wrapper_default = import_websocket.default;
 
 //#endregion
+//#region desktop-runtime/platform.mjs
+function native(operation, request, helper = process.env.LAZYMIND_RUNTIME_HELPER) {
+	if (!helper || !path.isAbsolute(helper)) throw new Error("Native runtime helper is required; reconnect LazyMind");
+	return JSON.parse(execFileSync(helper, [
+		"internal",
+		"codex-runtime",
+		operation
+	], {
+		input: JSON.stringify(request),
+		encoding: "utf8",
+		timeout: operation === "ensure" ? 55e3 : 1e4,
+		windowsHide: true,
+		stdio: [
+			"pipe",
+			"pipe",
+			"pipe"
+		]
+	}));
+}
+function checkPrivate(file) {
+	const info = fs.lstatSync(file);
+	if (info.isSymbolicLink()) throw new Error("Expected a private owned path");
+	if (process.platform === "win32") native("check-private", { path: file });
+	else if (info.uid !== process.getuid() || info.mode & 63) throw new Error("Expected a private owned path");
+	return info;
+}
+
+//#endregion
+//#region desktop-runtime/endpoint.mjs
+function connectionTarget(endpoint, tokenFile) {
+	if (endpoint.startsWith("ws+unix://")) {
+		const match = /^ws\+unix:\/\/localhost(\/[^?#]*):\/rpc$/.exec(endpoint);
+		if (!match) throw new Error("Invalid local Unix endpoint");
+		const socketPath = decodeURIComponent(match[1]);
+		if (!path.isAbsolute(socketPath) || /[\x00-\x1f:]/.test(socketPath) || tokenFile) throw new Error("Invalid Unix endpoint");
+		return {
+			socketPath,
+			rpcPath: "/rpc"
+		};
+	}
+	if (!/^ws:\/\/127\.0\.0\.1:([1-9]\d{0,4})$/.test(endpoint) || Number(endpoint.split(":").at(-1)) > 65535 || typeof tokenFile !== "string" || !path.isAbsolute(tokenFile)) throw new Error("Use a local loopback endpoint with a private token file");
+	return {
+		url: endpoint,
+		tokenFile
+	};
+}
+function authorization(tokenFile) {
+	if (!checkPrivate(tokenFile).isFile()) throw new Error("Token must be a private file");
+	const token = fs.readFileSync(tokenFile, "utf8").trim();
+	if (!/^[a-f0-9]{64}$/.test(token)) throw new Error("Invalid capability token");
+	return { Authorization: `Bearer ${token}` };
+}
+
+//#endregion
 //#region src/app-server.ts
 const schemaVersion = "0.162.0-alpha.17.2";
 var RpcError = class extends Error {
@@ -3842,16 +3897,6 @@ var RpcUnavailable = class extends Error {
 		this.sent = sent;
 	}
 };
-function unixEndpoint(endpoint) {
-	const match = /^ws\+unix:\/\/localhost(\/[^?#]*):\/rpc$/.exec(endpoint);
-	if (!match) throw new Error("Use a local ws+unix://localhost/absolute/socket:/rpc endpoint");
-	const socketPath = decodeURIComponent(match[1]);
-	if (!isAbsolute(socketPath) || /[\x00-\x1f:]/.test(socketPath)) throw new Error("Invalid App Server Unix socket path");
-	return {
-		socketPath,
-		rpcPath: "/rpc"
-	};
-}
 /** One connection, with no automatic replay. Notifications and requests stay separate. */
 var AppServer = class AppServer extends EventEmitter {
 	pending = /* @__PURE__ */ new Map();
@@ -3890,12 +3935,12 @@ var AppServer = class AppServer extends EventEmitter {
 		});
 	}
 	static async connect(endpoint, options = {}) {
-		const target = unixEndpoint(endpoint);
+		const target = connectionTarget(endpoint, options.tokenFile);
 		const timeoutMs = options.timeoutMs ?? 15e3;
 		if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error("RPC timeout must be positive");
 		options.signal?.throwIfAborted();
-		const socket = new wrapper_default("ws+unix://localhost/socket:/rpc", {
-			createConnection: () => createConnection({ path: target.socketPath }),
+		const socket = new wrapper_default(target.url ?? "ws+unix://localhost/socket:/rpc", {
+			...target.socketPath ? { createConnection: () => createConnection({ path: target.socketPath }) } : { headers: authorization(target.tokenFile) },
 			handshakeTimeout: timeoutMs,
 			maxPayload: 32 * 1024 * 1024,
 			perMessageDeflate: false,
@@ -4139,12 +4184,12 @@ var NativeReceipts = class {
 			recursive: true,
 			mode: 448
 		});
-		const path = this.path(receipt.actionId), temp = `${path}.${randomUUID()}.tmp`;
+		const path$1 = this.path(receipt.actionId), temp = `${path$1}.${randomUUID()}.tmp`;
 		await writeFile(temp, JSON.stringify(receipt), {
 			mode: 384,
 			flag: "wx"
 		});
-		await rename(temp, path);
+		await rename(temp, path$1);
 	}
 };
 /** Only native MCP receipts after the latest user input establish execution ownership. */
@@ -4312,7 +4357,7 @@ var NativeCodexAdapter = class {
 //#region src/runtime.ts
 const registrationName = "lazymind-shared-server.json";
 /** Absence means legacy queue. Invalid or unavailable shared mode never falls back. */
-async function sharedEndpoint(profile) {
+async function sharedConnection(profile) {
 	const file = join(profile, registrationName);
 	let info;
 	try {
@@ -4321,14 +4366,21 @@ async function sharedEndpoint(profile) {
 		if (error.code === "ENOENT") return void 0;
 		throw error;
 	}
-	if (!info.isFile() || process.platform !== "win32" && ((info.mode & 63) !== 0 || info.uid !== process.getuid())) throw new Error("Shared server registration must be a private file owned by this user");
+	if (!info.isFile() || !checkPrivate(file)) throw new Error("Shared server registration must be a private file owned by this user");
 	const value = JSON.parse(await readFile(file, "utf8"));
 	if (value.version !== 1 || value.profile !== profile || typeof value.app_server_url !== "string") throw new Error("Shared server registration does not match this Codex profile");
-	unixEndpoint(value.app_server_url);
-	return value.app_server_url;
+	connectionTarget(value.app_server_url, value.auth_token_file);
+	return {
+		endpoint: value.app_server_url,
+		tokenFile: value.auth_token_file
+	};
+}
+async function sharedEndpoint(profile) {
+	return (await sharedConnection(profile))?.endpoint;
 }
 async function openRuntime(input) {
-	const endpoint = input.endpoint === void 0 ? await sharedEndpoint(input.profile) : input.endpoint;
+	const selected = await sharedConnection(input.profile);
+	const endpoint = input.endpoint === void 0 ? selected?.endpoint : input.endpoint;
 	if (!endpoint) return {
 		mode: "queue",
 		adapter: new CodexAdapter(input.binary, input.profile),
@@ -4338,7 +4390,8 @@ async function openRuntime(input) {
 	const { client, identity } = await AppServer.connect(endpoint, {
 		expectedHome: input.profile,
 		experimental: true,
-		signal: input.lifetime.signal
+		signal: input.lifetime.signal,
+		tokenFile: selected?.endpoint === endpoint ? selected.tokenFile : void 0
 	});
 	if (!identity.userAgent.includes(schemaVersion)) {
 		client.close();
@@ -4384,20 +4437,20 @@ async function main() {
 	const binary = values["codex-bin"];
 	if (!binary || !isAbsolute(binary)) throw new Error("--codex-bin must be the absolute path to the desktop bundled Codex executable");
 	const profile = resolve(values["codex-home"] ?? process.env.CODEX_HOME ?? join(homedir(), ".codex"));
-	let path = values["pairing-file"];
-	if (!path) {
+	let path$1 = values["pairing-file"];
+	if (!path$1) {
 		const { stdout } = await runFile(values["lazymind-cli"], [
 			"internal",
 			"codex-workflow-pair",
 			"--codex-home",
 			profile
 		]);
-		path = JSON.parse(stdout).pairing_file;
+		path$1 = JSON.parse(stdout).pairing_file;
 	}
-	if (!path) throw new Error("LazyMind did not return a pairing file");
-	const info = await stat(path);
+	if (!path$1) throw new Error("LazyMind did not return a pairing file");
+	const info = await stat(path$1);
 	if (!info.isFile() || process.platform !== "win32" && (info.mode & 63) !== 0) throw new Error("Pairing must be a private file (0600)");
-	const pairing = JSON.parse(await readFile(path, "utf8"));
+	const pairing = JSON.parse(await readFile(path$1, "utf8"));
 	if (pairing.provider !== "codex" || pairing.enabled !== true || pairing.profile !== profile || !/^host-[a-f0-9]{32}$/.test(pairing.connector_id) || !/^[a-f0-9]{64}$/.test(pairing.token)) throw new Error("Pairing does not match this Codex profile");
 	const lifetime = new AbortController();
 	const stop = () => lifetime.abort();
@@ -4419,7 +4472,7 @@ async function main() {
 	let modeWatch;
 	try {
 		while (!lifetime.signal.aborted) try {
-			unlock = await dispatcherLock(path, instanceId);
+			unlock = await dispatcherLock(path$1, instanceId);
 			break;
 		} catch (error) {
 			if (!values.managed || !(error instanceof DispatcherBusy)) throw error;
@@ -4431,7 +4484,7 @@ async function main() {
 		const runtime = await openRuntime({
 			binary,
 			profile,
-			pairingFile: path,
+			pairingFile: path$1,
 			connectorId: pairing.connector_id,
 			bridge,
 			lifetime,

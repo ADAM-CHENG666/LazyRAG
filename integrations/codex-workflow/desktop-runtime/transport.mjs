@@ -1,10 +1,12 @@
 import net from 'node:net';
 import WebSocket from 'ws';
+import { connectionTarget, authorization, runtimeEndpoint } from './endpoint.mjs';
 
-export function openSocket(socketPath) {
+export function openSocket(target) {
+  const endpoint = typeof target === "string" ? { socketPath: target } : connectionTarget(runtimeEndpoint(target), target.tokenFile);
   return new Promise((resolve, reject) => {
-    const socket = new WebSocket('ws+unix://localhost/socket:/rpc', {
-      createConnection: () => net.createConnection({ path: socketPath }),
+    const socket = new WebSocket(endpoint.url ?? 'ws+unix://localhost/socket:/rpc', {
+      ...(endpoint.socketPath ? { createConnection: () => net.createConnection({ path: endpoint.socketPath }) } : { headers: authorization(endpoint.tokenFile) }),
       handshakeTimeout: 5000, maxPayload: 32 * 1024 * 1024,
       perMessageDeflate: false, followRedirects: false,
     });

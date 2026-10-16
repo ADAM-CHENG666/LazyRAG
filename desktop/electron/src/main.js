@@ -718,10 +718,12 @@ function runAgentConnector(agent, action) {
   if (action === "login") {
     return startAgentLogin(agent);
   }
-  const installWorkflow = agent === "deepseek-harness" && action === "connect";
+  const installWorkflow = ["deepseek-harness", "codex"].includes(agent) && action === "connect";
+  const configureCodex = agent === "codex" && ["connect", "disconnect"].includes(action);
   const run = () => runConnectorJSON(
     ["internal", "agent", agent, action],
-    installWorkflow ? agentConnectorInstallTimeoutMs : agentConnectorActionTimeoutMs,
+    configureCodex ? agentConnectorInstallTimeoutMs * 2
+      : installWorkflow ? agentConnectorInstallTimeoutMs : agentConnectorActionTimeoutMs,
   );
   if (installWorkflow) {
     const address = new URL(process.env.LAZYMIND_ASSISTANT_BRIDGE_URL || "http://127.0.0.1:19091").host;

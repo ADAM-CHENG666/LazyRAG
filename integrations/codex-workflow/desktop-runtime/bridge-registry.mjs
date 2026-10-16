@@ -1,12 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { processIdentity } from './config.mjs';
+import { checkPrivate } from './platform.mjs';
 
 export function selectBridge(root) {
   const records = [];
   for (const name of fs.readdirSync(root).filter(name => /^bridge-\d+\.json$/.test(name))) {
     let record;
-    try { record = JSON.parse(fs.readFileSync(path.join(root, name), 'utf8')); } catch { continue; }
+    try { checkPrivate(path.join(root, name)); record = JSON.parse(fs.readFileSync(path.join(root, name), 'utf8')); } catch { continue; }
     const identity = processIdentity(record.pid);
     const parentIdentity = processIdentity(record.ppid);
     if (!identity || !parentIdentity || identity !== record.identity || parentIdentity !== record.parentIdentity) continue;

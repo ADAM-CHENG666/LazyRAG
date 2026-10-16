@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { checkPrivate } from './platform.mjs';
 
 // Desktop may write its selected CLI into generated MCP manifests/config.toml.
 // Restore only this installation's exact path; preserve every unrelated edit.
@@ -15,7 +16,7 @@ export function restoreGeneratedPaths(config, launcher) {
   for (const file of [path.join(config.codexHome, 'config.toml'), ...Object.values(config.sourceManifests ?? {})]) {
     if (!fs.existsSync(file)) continue;
     const info = fs.lstatSync(file);
-    if (!info.isFile() || info.uid !== process.getuid()) throw new Error(`Refusing to modify an unowned generated config: ${file}`);
+    if (!info.isFile() || (process.platform === 'win32' ? !checkPrivate(file) : info.uid !== process.getuid())) throw new Error(`Refusing to modify an unowned generated config: ${file}`);
     const before = fs.readFileSync(file, 'utf8');
     const after = restoreLauncherText(before, launcher, config.cli);
     if (after === before) continue;

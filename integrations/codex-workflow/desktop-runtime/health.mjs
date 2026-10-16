@@ -1,4 +1,3 @@
-import path from 'node:path';
 import { loadConfig } from './config.mjs';
 import { openSocket } from './transport.mjs';
 
@@ -6,7 +5,7 @@ const config = loadConfig();
 const timer = setTimeout(() => { process.stderr.write('Backend readiness timed out\n'); process.exit(1); }, 7000);
 let socket;
 try {
-  socket = await openSocket(path.join(config.runtimeDir, 'daemon.sock'));
+  socket = await openSocket(config);
   const identity = await new Promise((resolve, reject) => {
     socket.on('error', reject);
     socket.on('close', () => reject(new Error('Backend closed during readiness check')));

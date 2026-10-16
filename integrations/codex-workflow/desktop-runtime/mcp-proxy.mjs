@@ -1,8 +1,7 @@
-import net from 'node:net';
-import path from 'node:path';
 import readline from 'node:readline';
 import { loadConfig, logger, kinds } from './config.mjs';
 import { selectBridge } from './bridge-registry.mjs';
+import { connectBridge } from './bridge-transport.mjs';
 
 const config = loadConfig();
 const kind = process.argv[2];
@@ -22,7 +21,7 @@ async function connect() {
   if (socket && !socket.destroyed) return;
   connecting = (async () => {
     const bridge = selectBridge(config.runtimeDir);
-    const current = net.createConnection(path.join(bridge.dir, `${kind}.sock`));
+    const current = connectBridge(bridge, kind);
     const epoch = ++generation;
     let buffer = '';
     current.setEncoding('utf8');

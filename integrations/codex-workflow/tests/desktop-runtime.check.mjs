@@ -26,7 +26,7 @@ async function until(check) {
 function fixture() {
   const dir = fs.mkdtempSync('/private/tmp/lm-runtime-');
   const config = { version: 1, runtimeDir: dir, bundleDir: bundle, cli: process.execPath, node: process.execPath,
-    python: '/usr/bin/python3', desktopExecutable: '/fixture/Desktop', codexHome: dir, cliVersion: 'fixture',
+    helper: process.env.LAZYMIND_TEST_HELPER, desktopExecutable: '/fixture/Desktop', codexHome: dir, cliVersion: 'fixture',
     plugins: Object.fromEntries(['codex_app', 'cua_repl'].map(kind => [kind, { command: process.execPath, args: [] }])),
   };
   const file = path.join(dir, 'runtime.json');
@@ -99,8 +99,8 @@ test('built MCP proxy preserves context, reconnects and never replays an uncerta
   const bridge = { pid: process.pid, ppid: process.ppid, identity: processIdentity(process.pid), parentIdentity: processIdentity(process.ppid),
     dir: path.join(f.dir, `bridge-${process.pid}`), group: 'fixture', created: 1 };
   fs.mkdirSync(bridge.dir, { mode: 0o700 });
-  fs.writeFileSync(path.join(f.dir, `bridge-${process.pid}.json`), JSON.stringify(bridge));
-  fs.writeFileSync(path.join(f.dir, 'bridge-999999.json'), JSON.stringify({ ...bridge, pid: 999999 }));
+  fs.writeFileSync(path.join(f.dir, `bridge-${process.pid}.json`), JSON.stringify(bridge), {mode: 0o600});
+  fs.writeFileSync(path.join(f.dir, 'bridge-999999.json'), JSON.stringify({ ...bridge, pid: 999999 }), {mode: 0o600});
   assert.equal(selectBridge(f.dir).pid, process.pid);
   const seen = [], sockets = new Set(); let connections = 0;
   const server = net.createServer(socket => {
@@ -146,20 +146,26 @@ test('three concurrent coordinator requests create one owned fixture backend and
   fs.writeFileSync(cli, `#!${process.execPath}\nimport http from 'node:http';\nimport {WebSocketServer} from ${JSON.stringify(new URL('wrapper.mjs', 'file://' + path.dirname(require.resolve('ws')) + '/').href)};
 const server=http.createServer();const ws=new WebSocketServer({server});
 ws.on('connection',s=>s.on('message',raw=>{const m=JSON.parse(raw);if(m.method==='initialize')s.send(JSON.stringify({id:m.id,result:{userAgent:'fixture',codexHome:process.env.CODEX_HOME}}))}));
+process.umask(0o077);
 server.listen(process.argv[process.argv.indexOf('--listen')+1].slice(7),()=>console.log('LISTENING'));
 process.on('SIGTERM',()=>{for(const s of ws.clients)s.terminate();server.close(()=>process.exit(0))});
 `, { mode: 0o700 });
   f.config.cli = cli; f.save();
   let backend;
   try {
-    const coordinate = () => run(f.config.python, [path.join(bundle, 'coordinator.py')], { env: f.env });
+    assert.ok(f.config.helper, 'Set LAZYMIND_TEST_HELPER to the freshly built LazyMind CLI');
+    const coordinate = () => new Promise((resolve,reject) => {
+      const child = spawn(f.config.helper, ['internal','codex-runtime','ensure'], {env:f.env,stdio:['pipe','pipe','pipe']});
+      let out='',err=''; child.stdout.on('data',v=>out+=v); child.stderr.on('data',v=>err+=v); child.once('error',reject); child.once('exit',code=>code===0?resolve(out):reject(new Error(err)));
+      child.stdin.end(JSON.stringify({path:f.file}));
+    });
     const results = await Promise.all([coordinate(), coordinate(), coordinate()]);
     backend = JSON.parse(results[0]).process;
     assert.equal(new Set(results.map(result => JSON.parse(result).process.pid)).size, 1);
     const events = fs.readFileSync(path.join(f.dir, 'coordinator.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
     assert.equal(events.filter(event => event.event === 'spawn').length, 1);
     assert.equal(events.filter(event => event.event === 'reuse').length, 2);
-    assert.match(backend.command, /LAZYMIND_CODEX_DESKTOP_CONFIG/);
+    assert.ok(backend.identity);
     // An unknown endpoint is never deleted, even after the recorded process exits.
     process.kill(backend.pid, 'SIGTERM');
     await until(() => { try { process.kill(backend.pid, 0); return false; } catch { return true; } });
@@ -193,4 +199,27 @@ test('auxiliary CLI calls delegate unchanged without starting a backend; config 
     fs.chmodSync(f.file, 0o644);
     assert.throws(() => loadConfig(f.file), /private owned/);
   } finally { f.remove(); }
+});
+
+test('prepared macOS installation ships a working native helper and launcher without Python or activation', {skip:process.platform!=='darwin'}, async()=>{
+ const f=fixture();
+ try{
+  assert.ok(f.config.helper,'Set LAZYMIND_TEST_HELPER to the freshly built CLI');
+  const app=path.join(f.dir,"Fixture App's.app"),resources=path.join(app,'Contents/Resources');
+  const cli=path.join(resources,'codex-cli/CodexCLI.app/Contents/MacOS/codex'),node=path.join(resources,'cua_node/bin/node');
+  for(const dir of [path.dirname(cli),path.dirname(node),path.join(app,'Contents/MacOS')])fs.mkdirSync(dir,{recursive:true,mode:0o700});
+  fs.writeFileSync(cli,'#!/bin/sh\nprintf "codex-cli 0.162.0-alpha.17.2\\n"\n',{mode:0o700});fs.symlinkSync(process.execPath,node);
+  fs.writeFileSync(path.join(app,'Contents/Info.plist'),'<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleExecutable</key><string>Fixture</string><key>CFBundleShortVersionString</key><string>fixture</string></dict></plist>');
+  fs.writeFileSync(path.join(f.dir,'server.mjs'),'');fs.writeFileSync(path.join(f.dir,'browser.mjs'),'');
+  const desktop=path.join(f.dir,'desktop.json'),browser=path.join(f.dir,'browser.json');
+  fs.writeFileSync(desktop,JSON.stringify({mcpServers:{codex_app:{command:node,args:[],cwd:f.dir}}}));
+  fs.writeFileSync(browser,JSON.stringify({mcpServers:{cua_repl:{command:node,args:[path.join(f.dir,'browser.mjs')],cwd:f.dir}}}));
+  const output=path.join(f.dir,"install's folder"),state=path.join(f.dir,'state');
+  const result=JSON.parse(await run(process.execPath,[path.join(bundle,'prepare.mjs'),'--output',output,'--app',app,'--codex-home',f.dir,'--runtime-dir',state,'--desktop-plugin',desktop,'--browser-plugin',browser],
+   {env:{...f.env,LAZYMIND_RUNTIME_HELPER:f.config.helper}}));
+  const config=JSON.parse(fs.readFileSync(result.config,'utf8'));
+  assert.equal(config.python,undefined);assert.equal(config.version,2);assert.match(config.helperDigest,/^[a-f0-9]{64}$/);
+  assert.equal((await run(result.launcher,['--version'],{env:f.env})).trim(),'codex-cli 0.162.0-alpha.17.2');
+  assert.equal(fs.existsSync(path.join(output,'activation.json')),false);assert.equal(fs.existsSync(path.join(state,'backend.json')),false);
+ }finally{f.remove()}
 });
