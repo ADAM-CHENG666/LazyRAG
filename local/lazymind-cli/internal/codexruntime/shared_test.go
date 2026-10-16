@@ -1,7 +1,6 @@
 package codexruntime
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -21,14 +20,13 @@ func TestSharedRegistrationControlsCancellationAndFailsClosed(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		valid.Endpoint = "ws://127.0.0.1:49152"
 		valid.TokenFile = filepath.Join(profile, "token")
-		if err := os.WriteFile(valid.TokenFile, []byte("fixture"), 0600); err != nil {
+		if err := writePrivateJSON(valid.TokenFile, "fixture"); err != nil {
 			t.Fatal(err)
 		}
 	}
 	write := func(value Registration) {
 		t.Helper()
-		body, _ := json.Marshal(value)
-		if err := os.WriteFile(file, body, 0600); err != nil {
+		if err := writePrivateJSON(file, value); err != nil {
 			t.Fatal(err)
 		}
 	}

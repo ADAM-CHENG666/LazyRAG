@@ -200,7 +200,11 @@ func materialize(root string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if err := os.WriteFile(filepath.Join(temporary, entry.Name()), data, 0600); err != nil {
+		file := filepath.Join(temporary, entry.Name())
+		if err := os.WriteFile(file, data, 0600); err != nil {
+			return "", err
+		}
+		if err := makePrivate(file); err != nil {
 			return "", err
 		}
 	}

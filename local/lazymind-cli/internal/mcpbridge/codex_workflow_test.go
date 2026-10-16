@@ -20,11 +20,15 @@ import (
 
 func TestCodexBindingUsesCurrentAccountAndProfilePairing(t *testing.T) {
 	home, profile := t.TempDir(), t.TempDir()
-	// POSIX modes alone do not restrict inherited Windows ACLs.
-	privatePath, _ := json.Marshal(map[string]string{"path": profile})
-	if err := codexruntime.RunNative(context.Background(), []string{"make-private"}, bytes.NewReader(privatePath), io.Discard); err != nil {
-		t.Fatal(err)
+	// POSIX modes alone do not restrict Windows ACLs or set individual ownership.
+	makePrivate := func(path string) {
+		t.Helper()
+		privatePath, _ := json.Marshal(map[string]string{"path": path})
+		if err := codexruntime.RunNative(context.Background(), []string{"make-private"}, bytes.NewReader(privatePath), io.Discard); err != nil {
+			t.Fatal(err)
+		}
 	}
+	makePrivate(profile)
 	calls := 0
 	var received map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -69,11 +73,13 @@ func TestCodexBindingUsesCurrentAccountAndProfilePairing(t *testing.T) {
 		if err := os.WriteFile(config.TokenFile, []byte("fixture"), 0600); err != nil {
 			t.Fatal(err)
 		}
+		makePrivate(config.TokenFile)
 	}
 	shared, _ := json.Marshal(config)
 	if err := os.WriteFile(registration, shared, 0600); err != nil {
 		t.Fatal(err)
 	}
+	makePrivate(registration)
 	if err := bridge.bindCodexController(context.Background(), "run-1", "thread-1"); err != nil {
 		t.Fatal(err)
 	}

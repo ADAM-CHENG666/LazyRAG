@@ -169,7 +169,7 @@ func makePrivate(file string) error {
 	if err != nil {
 		return err
 	}
-	if owner == nil || !owner.Equals(sid) {
+	if !canPrivatizeOwner(owner, sid, windows.GetCurrentProcessToken().IsElevated()) {
 		return errors.New("refusing ACL change on unowned path")
 	}
 	sd, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;" + sid.String() + ")(A;OICI;FA;;;SY)")
@@ -180,7 +180,19 @@ func makePrivate(file string) error {
 	if err != nil {
 		return err
 	}
-	return windows.SetNamedSecurityInfo(file, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
+	securityInfo := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	var newOwner *windows.SID
+	if !owner.Equals(sid) {
+		// Elevated Windows processes can create Administrators-owned paths.
+		// Normalize them to the user SID; readers still require individual ownership.
+		securityInfo |= windows.OWNER_SECURITY_INFORMATION
+		newOwner = sid
+	}
+	return windows.SetNamedSecurityInfo(file, windows.SE_FILE_OBJECT, securityInfo, newOwner, nil, acl, nil)
+}
+
+func canPrivatizeOwner(owner, user *windows.SID, elevated bool) bool {
+	return owner != nil && (owner.Equals(user) || elevated && owner.IsWellKnown(windows.WinBuiltinAdministratorsSid))
 }
 func detachedCommand(cmd *exec.Cmd) {
 	// Failure to escape a restrictive Job is an explicit startup failure, never a
