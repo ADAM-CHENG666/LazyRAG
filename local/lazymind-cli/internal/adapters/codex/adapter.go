@@ -262,6 +262,7 @@ func codexDesktopApplication() agentexec.DesktopApplication {
 		ExecutableNames: []string{"ChatGPT.exe", "Codex.exe"},
 		Protocols:       []string{"chatgpt", "codex"},
 		DisplayNames:    []string{"ChatGPT", "Codex"},
+		PackageNames:    []string{"OpenAI.Codex"},
 	}
 }
 
