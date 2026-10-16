@@ -2,7 +2,9 @@
 
 **[English](README.md)** | **中文**
 
-> **让 AI 按照你的资料、标准和偏好，稳定完成真实任务。**
+<img width="1672" height="600" alt="LazyMind 标志" src="docs/assets/lazymind-banner.png" />
+
+> **LazyMind: Keep AI-Agent under your control.**
 
 [![GitHub stars](https://img.shields.io/github/stars/LazyAGI/LazyMind?style=flat-square)](https://github.com/LazyAGI/LazyMind/stargazers)
 [![License](https://img.shields.io/github/license/LazyAGI/LazyMind?style=flat-square)](LICENSE)
@@ -17,7 +19,18 @@ LazyMind 是面向知识密集型工作的 **AI Skill Runtime**：一个把知�
 - **Desktop Mode** 面向具备一定技术基础、但不以编程为主要工作的解决方案、产品、运营、测试和内容从业者，重点降低复杂任务的使用门槛。
 - **团队与企业部署** 面向二次开发、项目交付、投标、FDE 和组织知识协作场景，提供权限、共享部署与评测演进能力。
 
-**[快速开始](#快速开始)** · **[产品架构](docs/architecture.md)** · **[构建工作流](docs/workflow-format.md)** · **[桌面模式](desktop/README.md)**
+**[快速开始](#快速开始)** · **[Showcase](#showcase)** · **[案例目录](examples/README.CN.md)** · **[产品架构](docs/architecture.md)** · **[构建工作流](docs/workflow-format.md)** · **[桌面模式](desktop/README.md)**
+
+---
+
+## 使用方式
+
+| 方式 | 适用场景 | 如何使用 |
+|------|----------|----------|
+| **直接使用 LazyMind** | 本地知识工作，或团队共享工作流 | 通过桌面应用获得本地优先的使用体验，或部署团队服务；直接在 LazyMind 工作台中创建任务、使用知识库并运行 Skill 与 Workflow。 |
+| **作为其他 Agent 的插件** | 增强你已经在使用的 Agent 环境 | 在 **设置 → 助理** 中连接 LazyMind。Codex 和 DeepSeek Harness 随后即可在原生会话中调用 LazyMind 的知识、Skill 与 Workflow，并查看工作流进度、审阅节点和产物。 |
+
+实现细节参见 [Codex 集成](integrations/codex-workflow/README.md)和 [DeepSeek Harness 集成](integrations/dsh-workflow/README.md)。
 
 ---
 
@@ -38,6 +51,27 @@ https://github.com/user-attachments/assets/ebc2440e-86f8-4117-a917-62ce4e79a117
 
 > 上方视频展示 LazyMind 从任务输入到可编辑产物的完整执行过程。
 
+
+## Showcase
+
+通过已发布的视频，看看 LazyMind 如何参与实际任务。点击链接即可在原平台观看。
+
+| 演示 | 看点 | 时长 | 案例资料 |
+| --- | --- | --- | --- |
+| [DeepSeek Harness × LazyMind：从需求到 PPT 成品](https://www.bilibili.com/video/BV1Xcpt6REjc/) | 接入工作流、澄清需求、预览底图、审阅逐页内容与导出成品 | 1 分 29 秒 | [案例说明](examples/deepseek-harness-ppt/README.CN.md) |
+| [从产品想法到方案、PRD 与原型](https://www.bilibili.com/video/BV1Mypv6zEUN/) | 通过需求追问明确方向，串联竞品分析、产品方案、需求文档与原型展示 | 55 秒 | [案例说明](examples/product-idea-to-prototype/README.CN.md) |
+| [Codex × LazyMind：制作并迭代 PPT](https://www.bilibili.com/video/BV1TppR6xEj7/) | 在 Codex 中发起任务，预览和修改中间内容，并调整成稿中的单个元素 | 1 分 23 秒 | [案例说明](examples/codex-ppt/README.CN.md) |
+
+### 更多演示
+
+- [AI PPT 的排版与修改](https://www.bilibili.com/video/BV1cjHS6wEad/)（B 站） · [案例说明](examples/refine-ai-ppt/README.CN.md)
+- [制作自己的动态表情包](https://weixin.qq.com/sph/AoG4jZWyfh)（微信视频号） · [案例说明](examples/animated-stickers/README.CN.md)
+- [让 AI Agent 进入工作流](https://weixin.qq.com/sph/AMEf3NOyDe)（微信视频号） · [案例说明](examples/agents-in-workflow/README.CN.md)
+
+### 相关文章
+
+- [LazyMind v0.2 正式发布：让 AI 从“给出答案”走到“完成交付”](https://mp.weixin.qq.com/s/yoU7DZKkq_jw05695e36Qw)（2026-08-04，版本发布介绍）
+- [AI 干完活，怎么加班的还是我？](https://mp.weixin.qq.com/s/uj15cKnPNZpdrHWPuua2Tg)（2026-09-01，产品介绍）
 
 ## LazyMind 如何工作
 
@@ -255,7 +289,16 @@ Desktop Mode 使用原生进程、SQLite 和 Milvus Lite，并遵循平台规范
 
 ## 快速开始
 
-### 本机运行
+### 安装桌面应用（本地使用推荐）
+
+从 [GitHub Releases](https://github.com/LazyAGI/LazyMind/releases/latest) 下载最新安装包：
+
+- **macOS（Apple 芯片）：**下载 `.dmg`，打开后将 LazyMind 拖入“应用程序”。
+- **Windows x64：**下载并运行安装程序 `.exe`。
+
+安装包已包含 Desktop Mode 所需的本地运行环境。日常本地使用建议直接安装 `.dmg` 或 `.exe`，无需从源码重新构建和打包。
+
+### 从源码在本机运行
 
 前置条件：Go、Python 3、uv、pnpm 和 Node.js。
 
@@ -301,7 +344,9 @@ make local-down
 
 Windows 使用 `make local-win-down`。完整配置见 [快速开始](docs/quick_start.CN.md)。
 
-### 构建桌面应用
+### 从源码构建桌面应用
+
+以下命令主要用于开发和发布打包；普通本地用户建议直接使用上方安装包。
 
 Mac 本地打包并上传 RAG 依赖，请按 [Mac 构建、上传与安装验证流程](desktop/INSTALL.zh-CN.md) 操作。文档包含构建环境、原始组件 ZIP 的位置、ModelScope 上传及安装后测试步骤。
 
