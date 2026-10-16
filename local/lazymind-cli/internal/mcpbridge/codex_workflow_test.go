@@ -1,8 +1,10 @@
 package mcpbridge
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,6 +20,11 @@ import (
 
 func TestCodexBindingUsesCurrentAccountAndProfilePairing(t *testing.T) {
 	home, profile := t.TempDir(), t.TempDir()
+	// POSIX modes alone do not restrict inherited Windows ACLs.
+	privatePath, _ := json.Marshal(map[string]string{"path": profile})
+	if err := codexruntime.RunNative(context.Background(), []string{"make-private"}, bytes.NewReader(privatePath), io.Discard); err != nil {
+		t.Fatal(err)
+	}
 	calls := 0
 	var received map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -55,7 +62,15 @@ func TestCodexBindingUsesCurrentAccountAndProfilePairing(t *testing.T) {
 		t.Fatal("legacy binding advertised native cancellation")
 	}
 	registration := filepath.Join(profile, codexruntime.RegistrationName)
-	shared, _ := json.Marshal(codexruntime.Registration{Version: 1, Profile: profile, Endpoint: "ws+unix://localhost/private/tmp/native.sock:/rpc"})
+	config := codexruntime.Registration{Version: 1, Profile: profile, Endpoint: "ws+unix://localhost/private/tmp/native.sock:/rpc"}
+	if runtime.GOOS == "windows" {
+		config.Endpoint = "ws://127.0.0.1:49152"
+		config.TokenFile = filepath.Join(profile, "token")
+		if err := os.WriteFile(config.TokenFile, []byte("fixture"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	shared, _ := json.Marshal(config)
 	if err := os.WriteFile(registration, shared, 0600); err != nil {
 		t.Fatal(err)
 	}
