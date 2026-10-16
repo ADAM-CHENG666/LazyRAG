@@ -53,6 +53,8 @@ func RunNative(ctx context.Context, args []string, input io.Reader, output io.Wr
 		err = checkPrivate(req.Path)
 	case "make-private":
 		err = makePrivate(req.Path)
+	case "windows-desktop-executable":
+		result, err = windowsDesktopExecutable(req.Path)
 	case "environment-read":
 		result, err = platformEnvironment(nil, nil)
 	case "environment-write":

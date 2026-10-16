@@ -1,7 +1,10 @@
 package codexruntime
 
 import (
+	"encoding/xml"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,11 +29,8 @@ func windowsDesktopLayout(binary string) (string, string, error) {
 		if !match {
 			continue
 		}
-		desktops := 0
-		for _, name := range []string{"Codex.exe", "ChatGPT.exe"} {
-			if info, e := os.Stat(filepath.Join(dir, name)); e == nil && info.Mode().IsRegular() {
-				desktops++
-			}
+		if _, err := windowsDesktopExecutable(dir); err != nil {
+			return "", "", err
 		}
 		nodes := []string{}
 		for _, p := range []string{"node.exe", filepath.Join("bin", "node.exe")} {
@@ -39,10 +39,81 @@ func windowsDesktopLayout(binary string) (string, string, error) {
 				nodes = append(nodes, p)
 			}
 		}
-		if desktops == 1 && len(nodes) == 1 {
+		if len(nodes) == 1 {
 			return dir, nodes[0], nil
 		}
 		return "", "", errors.New("unsupported or ambiguous Windows Desktop layout")
 	}
 	return "", "", errors.New("shared mode requires the Windows Desktop bundled CLI")
+}
+
+// A Store package can contain both a launcher and the desktop executable. Only
+// its own manifest may disambiguate them; unrelated manifests and entrypoints
+// outside this application directory must not authorize a desktop executable.
+func windowsDesktopExecutable(app string) (string, error) {
+	app, err := filepath.EvalSymlinks(app)
+	if err != nil {
+		return "", err
+	}
+	var candidates []string
+	for _, name := range []string{"Codex.exe", "ChatGPT.exe"} {
+		file := filepath.Join(app, name)
+		if info, err := os.Lstat(file); err == nil && info.Mode().IsRegular() {
+			candidates = append(candidates, file)
+		}
+	}
+	for _, root := range []string{app, filepath.Dir(app)} {
+		file := filepath.Join(root, "AppxManifest.xml")
+		info, err := os.Lstat(file)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		if !info.Mode().IsRegular() {
+			return "", errors.New("MSIX manifest must be a regular file")
+		}
+		manifest, err := os.Open(file)
+		if err != nil {
+			return "", err
+		}
+		var pkg struct {
+			XMLName  xml.Name `xml:"Package"`
+			Identity struct {
+				Name string `xml:"Name,attr"`
+			} `xml:"Identity"`
+			Applications []struct {
+				Executable string `xml:"Executable,attr"`
+			} `xml:"Applications>Application"`
+		}
+		err = xml.NewDecoder(io.LimitReader(manifest, 1<<20)).Decode(&pkg)
+		manifest.Close()
+		if err != nil || pkg.Identity.Name != "OpenAI.Codex" {
+			return "", errors.New("invalid Codex MSIX manifest")
+		}
+		selected := map[string]bool{}
+		for _, entry := range pkg.Applications {
+			relative := filepath.FromSlash(strings.ReplaceAll(entry.Executable, `\`, "/"))
+			if strings.ContainsAny(relative, ":\x00") || !filepath.IsLocal(relative) {
+				return "", errors.New("invalid MSIX executable path")
+			}
+			resolved := filepath.Join(root, relative)
+			for _, candidate := range candidates {
+				if strings.EqualFold(resolved, candidate) {
+					selected[candidate] = true
+				}
+			}
+		}
+		if len(selected) != 1 {
+			return "", errors.New("unsupported or ambiguous MSIX Desktop entrypoint")
+		}
+		for candidate := range selected {
+			return candidate, nil
+		}
+	}
+	if len(candidates) != 1 {
+		return "", fmt.Errorf("expected one Windows Desktop executable without an MSIX manifest, found %d", len(candidates))
+	}
+	return candidates[0], nil
 }

@@ -9,7 +9,55 @@ import { WebSocketServer } from 'ws';
 import { openSocket } from '../desktop-runtime/transport.mjs';
 import { connectionTarget } from '../desktop-runtime/endpoint.mjs';
 import { listenBridge } from '../desktop-runtime/bridge-transport.mjs';
-import { makePrivate } from '../desktop-runtime/platform.mjs';
+import { makePrivate, native } from '../desktop-runtime/platform.mjs';
+import { desktopLayout } from '../desktop-runtime/desktop-layout.mjs';
+
+test('Windows prepare uses the native manifest-selected desktop with both executables present', () => {
+ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-msix-layout-'));
+ const app = fs.realpathSync(root);
+ const desktop = path.join(app, 'ChatGPT.exe');
+ const cli = path.join(app, 'resources/codex.exe');
+ const node = path.join(app, 'resources/cua_node/bin/node.exe');
+ for (const file of [desktop, path.join(app, 'Codex.exe'), cli, node]) {
+  fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, 'fixture');
+ }
+ let requests = 0;
+ const operations = {
+  native: (operation, request) => {
+   requests++; assert.equal(operation, 'windows-desktop-executable'); assert.deepEqual(request, { path: app });
+   return desktop;
+  },
+  execFileSync: (_command, _args, options) => {
+   assert.equal(options.env.LAZYMIND_VERSION_TARGET, desktop); return 'fixture-version\n';
+  },
+ };
+ try {
+  assert.deepEqual(desktopLayout(app, 'win32', operations), { resources: path.join(app, 'resources'), cli, node, desktopExecutable: desktop, desktopVersion: 'fixture-version' });
+  assert.equal(requests, 1);
+  assert.throws(() => desktopLayout(app, 'win32', { ...operations, native: () => { throw new Error('ambiguous MSIX entrypoint'); } }), /ambiguous MSIX/);
+  const duplicate = path.join(app, 'resources/codex-cli/codex.exe');
+  fs.mkdirSync(path.dirname(duplicate), { recursive: true }); fs.writeFileSync(duplicate, 'fixture');
+  assert.throws(() => desktopLayout(app, 'win32', operations), /one bundled CLI/);
+  fs.rmSync(duplicate); fs.rmSync(node);
+  assert.throws(() => desktopLayout(app, 'win32', operations), /one bundled Node/);
+ } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Windows prepare resolves a real MSIX fixture through the Go helper', { skip: !process.env.LAZYMIND_TEST_HELPER }, () => {
+ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-msix-helper-'));
+ const app = path.join(fs.realpathSync(root), 'app');
+ for (const relative of ['ChatGPT.exe', 'Codex.exe', 'resources/codex.exe', 'resources/cua_node/bin/node.exe']) {
+  const file = path.join(app, relative); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, 'fixture');
+ }
+ fs.writeFileSync(path.join(root, 'AppxManifest.xml'), '<Package><Identity Name="OpenAI.Codex"/><Applications><Application Executable="app/ChatGPT.exe"/><Application Executable="app/resources/codex-command-runner.exe"/></Applications></Package>');
+ try {
+  const layout = desktopLayout(app, 'win32', {
+   native: (operation, request) => native(operation, request, process.env.LAZYMIND_TEST_HELPER),
+   execFileSync: () => 'fixture-version',
+  });
+  assert.equal(layout.desktopExecutable, path.join(app, 'ChatGPT.exe'));
+ } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
 
 const close = server => new Promise(resolve => server.close(resolve));
 test('TCP transport authenticates, preserves messages, and refuses untrusted endpoint forms', async () => {

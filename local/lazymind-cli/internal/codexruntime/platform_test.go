@@ -61,7 +61,7 @@ func TestWindowsLayoutRequiresBundledResources(t *testing.T) {
 	}
 	_ = os.WriteFile(filepath.Join(root, "ChatGPT.exe"), []byte("ambiguous"), 0600)
 	if _, _, err = windowsDesktopLayout(cli); err == nil {
-		t.Fatal("accepted ambiguous app layout")
+		t.Fatal("accepted ambiguous app layout without a package manifest")
 	}
 }
 func TestPrivateFilesAndProcessIdentity(t *testing.T) {

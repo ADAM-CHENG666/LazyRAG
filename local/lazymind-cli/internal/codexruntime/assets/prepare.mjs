@@ -1,4 +1,4 @@
-import { d as launcherName, f as makePrivate, g as runtimeLocation, i as loadConfig, m as privateDirectory, o as allocateLoopbackEndpoint, t as atomicJSON } from "./config-C_SuSEAC.mjs";
+import { d as launcherName, f as makePrivate, g as runtimeLocation, i as loadConfig, m as privateDirectory, o as allocateLoopbackEndpoint, p as native, t as atomicJSON } from "./config-C_SuSEAC.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -13,7 +13,10 @@ const uniqueFile = (candidates, label) => {
 	if (found.length !== 1) throw new Error(`Expected one bundled ${label}; unsupported or ambiguous Desktop layout`);
 	return found[0];
 };
-function desktopLayout(app, platform = process.platform) {
+function desktopLayout(app, platform = process.platform, operations = {
+	native,
+	execFileSync
+}) {
 	if (platform === "darwin") {
 		const resources$2 = path.join(app, "Contents/Resources");
 		const plist = (key$1) => execFileSync("/usr/libexec/PlistBuddy", [
@@ -37,13 +40,14 @@ function desktopLayout(app, platform = process.platform) {
 		"codex-cli/bin/codex.exe"
 	].map((p) => path.join(resources$1, p)), "CLI");
 	const node$1 = uniqueFile(["cua_node/node.exe", "cua_node/bin/node.exe"].map((p) => path.join(resources$1, p)), "Node");
-	const desktopExecutable$1 = uniqueFile(["Codex.exe", "ChatGPT.exe"].map((p) => path.join(app, p)), "Desktop");
+	const desktopExecutable$1 = operations.native("windows-desktop-executable", { path: app });
+	const powershell = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe");
 	return {
 		resources: resources$1,
 		cli: cli$1,
 		node: node$1,
 		desktopExecutable: desktopExecutable$1,
-		desktopVersion: execFileSync(path.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe"), [
+		desktopVersion: operations.execFileSync(powershell, [
 			"-NoProfile",
 			"-NonInteractive",
 			"-Command",
