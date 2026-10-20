@@ -31,6 +31,8 @@ import (
 
 // The real Core router and database are exercised. Only the unchanged Algorithm
 // HTTP service is simulated, including WAITING-only cancellation and its races.
+var marketControlFixtureSequence atomic.Uint64
+
 type marketControlFixture struct {
 	t            *testing.T
 	db           *orm.DB
@@ -71,13 +73,17 @@ func newMarketControlFixture(t *testing.T, states ...string) *marketControlFixtu
 	f.workerStatus.Store(200)
 	f.cancelStatus.Store(200)
 	t.Setenv("LAZYMIND_UPLOAD_ROOT", f.root)
-	server := httptest.NewServer(http.HandlerFunc(f.algorithm))
+	// Health probes cache by URL across fixtures. Ports can be reused before
+	// that cache expires, so each fixture needs its own endpoint namespace.
+	prefix := fmt.Sprintf("/fixture-%d", marketControlFixtureSequence.Add(1))
+	server := httptest.NewServer(http.StripPrefix(prefix, http.HandlerFunc(f.algorithm)))
 	t.Cleanup(server.Close)
-	t.Setenv("LAZYMIND_DOCUMENT_WORKER_URL", server.URL)
-	t.Setenv("LAZYMIND_DOCUMENT_SERVICE_URL", server.URL)
-	t.Setenv("LAZYMIND_DOCUMENT_PROCESSOR_URL", server.URL)
-	t.Setenv("LAZYMIND_ALGO_SERVICE_URL", server.URL)
-	t.Setenv("LAZYMIND_SCAN_CONTROL_PLANE_URL", server.URL)
+	endpoint := server.URL + prefix
+	t.Setenv("LAZYMIND_DOCUMENT_WORKER_URL", endpoint)
+	t.Setenv("LAZYMIND_DOCUMENT_SERVICE_URL", endpoint)
+	t.Setenv("LAZYMIND_DOCUMENT_PROCESSOR_URL", endpoint)
+	t.Setenv("LAZYMIND_ALGO_SERVICE_URL", endpoint)
+	t.Setenv("LAZYMIND_SCAN_CONTROL_PLANE_URL", endpoint)
 	now := time.Now().UTC()
 	base := orm.BaseModel{CreateUserID: "control-owner", CreatedAt: now, UpdatedAt: now}
 	f.insert(&orm.KnowledgeMarketItem{ID: "control-item", Name: "Control fixture", Category: "industry", Status: "published", Tags: json.RawMessage(`[]`), SourceOptions: json.RawMessage(`{}`), SampleQuestions: json.RawMessage(`[]`), CreatedAt: now, UpdatedAt: now})
