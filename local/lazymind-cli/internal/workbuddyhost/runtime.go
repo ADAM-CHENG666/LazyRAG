@@ -1,11 +1,13 @@
 package workbuddyhost
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
 	"fmt"
+	"html"
 	"log"
 	"os"
 	"os/exec"
@@ -124,7 +126,10 @@ func Supervise(ctx context.Context, home, bridgeURL string, account func() (stri
 	}
 }
 
-func PresentationHTML() []byte { body, _ := assets.ReadFile("assets/presentation.html"); return body }
+func PresentationHTML(frontendURL string) []byte {
+	body, _ := assets.ReadFile("assets/presentation.html")
+	return bytes.ReplaceAll(body, []byte("__LAZYMIND_FRONTEND_URL__"), []byte(html.EscapeString(frontendURL)))
+}
 
 // A stopped Bridge cannot remove an old renderer mount. Disconnect therefore
 // performs one bounded cleanup, after the worker has relinquished its lock.

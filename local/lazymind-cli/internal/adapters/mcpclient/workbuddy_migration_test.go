@@ -11,7 +11,8 @@ func TestWorkBuddyRelocatesOnlySameHostManagedEntry(t *testing.T) {
 	home := t.TempDir()
 	path := filepath.Join(home, "mcp.json")
 	self, _ := os.Executable()
-	old := managedStdio("/removed/desktop/dist/mac-arm64/LazyMind.app/Contents/Resources/runtime/bin/lazymind", home, "host-test", WorkBuddy)
+	oldPath := filepath.Join(home, "removed", "desktop", "dist", "mac-arm64", "LazyMind.app", "Contents", "Resources", "runtime", "bin", "lazymind")
+	old := managedStdio(oldPath, home, "host-test", WorkBuddy)
 	original, _ := json.Marshal(map[string]any{"custom": "keep", "mcpServers": map[string]any{"lazymind": old, "other": map[string]string{"command": "keep-me"}}})
 	if err := os.WriteFile(path, original, 0600); err != nil {
 		t.Fatal(err)

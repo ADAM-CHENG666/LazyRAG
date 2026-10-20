@@ -5,7 +5,9 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
+	"strings"
 	"time"
 
 	"lazymind/agentconnector/internal/coreapi"
@@ -63,7 +65,10 @@ func (s *Server) handleWorkBuddyPresentation(w http.ResponseWriter, r *http.Requ
 			}
 			if err := api.DoJSON(ctx, "GET", "/workflow-sessions/"+item.ID+"/control?view=control", nil, &state); err != nil {
 				var apiErr *coreapi.Error
-				if errors.As(err, &apiErr) && apiErr.StatusCode == 404 {
+				// The account-wide inventory also contains legacy runs, which
+				// cannot have a binding in the current control protocol.
+				if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusNotFound ||
+					apiErr.StatusCode == http.StatusConflict && apiErr.Code == "CONTROL_PROTOCOL_REQUIRED") {
 					continue
 				}
 				workflowHostError(w, err)
@@ -92,9 +97,26 @@ func (s *Server) handleWorkBuddyPresentation(w http.ResponseWriter, r *http.Requ
 // The wrapper contains no credentials or run data. Core authenticates the
 // original Workflow page independently, using its existing browser session.
 func (s *Server) handleWorkBuddyFrame(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	frontendURL := strings.TrimSpace(os.Getenv("LAZYMIND_WEB_URL"))
+	if frontendURL == "" {
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		var err error
+		frontendURL, err = s.store.ServerURL(ctx)
+		if err != nil {
+			workflowHostError(w, err)
+			return
+		}
+	}
+	base, err := url.Parse(frontendURL)
+	if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" ||
+		base.User != nil || base.RawQuery != "" || base.Fragment != "" {
+		workflowHostError(w, errors.New("WorkBuddy frontend must be an absolute HTTP(S) URL without credentials, query or fragment"))
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	_, _ = w.Write(workbuddyhost.PresentationHTML())
+	_, _ = w.Write(workbuddyhost.PresentationHTML(frontendURL))
 }

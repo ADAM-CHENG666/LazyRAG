@@ -6,7 +6,10 @@ export function startPresentationFrame() {
   const frame = document.querySelector<HTMLIFrameElement>('#workflow')!
   const notice = document.querySelector<HTMLElement>('#notice')!
   const retry = document.querySelector<HTMLButtonElement>('#retry')
-  const url = new URL(`/workflow-runs/${run}/embed`, 'http://localhost:8090')
+  // Assistant Bridge supplies the current configured frontend on every load.
+  const base = new URL(document.querySelector<HTMLMetaElement>('meta[name="lazymind-workflow-frontend"]')!.content)
+  if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password || base.search || base.hash) return
+  const url = new URL(`${base.href.replace(/\/$/, '')}/workflow-runs/${run}/embed`)
   url.searchParams.set('hostOrigin', location.origin)
   url.searchParams.set('downloadHostOrigin', location.origin)
   url.searchParams.set('downloadBridgeId', bridgeId)

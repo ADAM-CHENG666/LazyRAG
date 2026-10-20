@@ -1,4 +1,4 @@
-<!doctype html><html><head><meta charset="utf-8"><style>
+<!doctype html><html><head><meta charset="utf-8"><meta name="lazymind-workflow-frontend" content="__LAZYMIND_FRONTEND_URL__"><style>
 html,body{height:100%;margin:0;overflow:hidden;background:transparent}iframe{display:block;width:100%;height:100%;border:0}
 #notice{position:fixed;bottom:8px;left:8px;right:8px;font:14px system-ui;padding:8px;background:Canvas;color:CanvasText}
 #retry{position:fixed;top:12px;right:12px;padding:6px 12px;cursor:pointer}
@@ -10,7 +10,9 @@ html,body{height:100%;margin:0;overflow:hidden;background:transparent}iframe{dis
 	const frame = document.querySelector("#workflow");
 	const notice = document.querySelector("#notice");
 	const retry = document.querySelector("#retry");
-	const url = new URL(`/workflow-runs/${run}/embed`, "http://localhost:8090");
+	const base = new URL(document.querySelector("meta[name=\"lazymind-workflow-frontend\"]").content);
+	if (!["http:", "https:"].includes(base.protocol) || base.username || base.password || base.search || base.hash) return;
+	const url = new URL(`${base.href.replace(/\/$/, "")}/workflow-runs/${run}/embed`);
 	url.searchParams.set("hostOrigin", location.origin);
 	url.searchParams.set("downloadHostOrigin", location.origin);
 	url.searchParams.set("downloadBridgeId", bridgeId);
