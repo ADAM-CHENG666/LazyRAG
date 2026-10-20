@@ -142,6 +142,7 @@ export default function AgentIntegrationPage() {
   const [bridgePlatformMismatch, setBridgePlatformMismatch] = useState(false);
   const [manualBindingTarget, setManualBindingTarget] = useState<DesktopAgentBindingTarget | null>(null);
   const [manualBindingPath, setManualBindingPath] = useState("");
+  const [workBuddyGuideOpen, setWorkBuddyGuideOpen] = useState(false);
   const confirmBindingClose = useSettingsDraft({
     dirty: manualBindingTarget !== null && manualBindingPath !== "",
     saving: Boolean(manualBindingTarget && action === `binding:${manualBindingTarget}`),
@@ -274,6 +275,7 @@ export default function AgentIntegrationPage() {
     if (pendingAgentActions.current.has(agent)) return;
     pendingAgentActions.current.add(agent);
     const key = `${agent}:${nextAction}`;
+    if (agent === "workbuddy" && nextAction === "connect") setWorkBuddyGuideOpen(true);
     try {
       setAction(key);
       const result = await agentIntegrationAction(agent, nextAction);
@@ -413,6 +415,7 @@ export default function AgentIntegrationPage() {
                       return next;
                     })}
                     onMCPAction={runAction}
+                    onOpenInstallationGuide={() => setWorkBuddyGuideOpen(true)}
                     onExecutorAction={runExecutorAction}
                     onBindingAction={runBindingAction}
                     onExternalConfigurationStarted={(target) => {
@@ -429,6 +432,11 @@ export default function AgentIntegrationPage() {
         </section>
       </Spin>
       <ExternalCapabilityAccess />
+      <WorkBuddyInstallationGuide
+        open={workBuddyGuideOpen}
+        onClose={() => setWorkBuddyGuideOpen(false)}
+        t={t}
+      />
       <Modal
         open={manualBindingTarget !== null}
         title={t("agentIntegration.executablePathTitle")}
@@ -457,6 +465,38 @@ export default function AgentIntegrationPage() {
         />
       </Modal>
     </div>
+  );
+}
+
+function WorkBuddyInstallationGuide({ open, onClose, t }: {
+  open: boolean;
+  onClose: () => void;
+  t: TFunction;
+}) {
+  return (
+    <Modal
+      open={open}
+      centered
+      className="agent-integration-installation-guide"
+      title={t("agentIntegration.workbuddyInstallGuide.title")}
+      onCancel={onClose}
+      footer={<Button type="primary" onClick={onClose}>{t("agentIntegration.workbuddyInstallGuide.close")}</Button>}
+    >
+      <Typography.Paragraph type="secondary">
+        {t("agentIntegration.workbuddyInstallGuide.description")}
+      </Typography.Paragraph>
+      <ol className="agent-integration-installation-steps">
+        {["install", "trust", "verify"].map((step) => (
+          <li key={step}>
+            <strong>{t(`agentIntegration.workbuddyInstallGuide.${step}Title`)}</strong>
+            <p>{t(`agentIntegration.workbuddyInstallGuide.${step}Description`)}</p>
+          </li>
+        ))}
+      </ol>
+      <Typography.Paragraph type="secondary" className="agent-integration-installation-note">
+        <QuestionCircleOutlined /> {t("agentIntegration.workbuddyInstallGuide.reopenHint")}
+      </Typography.Paragraph>
+    </Modal>
   );
 }
 
@@ -505,6 +545,7 @@ function AgentCard({
   bindings,
   onToggle,
   onMCPAction,
+  onOpenInstallationGuide,
   onExecutorAction,
   onBindingAction,
   onExternalConfigurationStarted,
@@ -521,6 +562,7 @@ function AgentCard({
   bindings: BindingMap;
   onToggle: () => void;
   onMCPAction: (agent: DesktopAgent, action: DesktopAgentIntegrationAction) => Promise<void>;
+  onOpenInstallationGuide: () => void;
   onExecutorAction: (provider: DesktopExecutorProvider, action: DesktopExecutorPolicyAction) => Promise<void>;
   onBindingAction: (target: DesktopAgentBindingTarget, clear: boolean) => Promise<void>;
   onExternalConfigurationStarted: (agent: DesktopAgent) => void;
@@ -547,7 +589,7 @@ function AgentCard({
 
   return (
     <Card
-      className={`agent-integration-card${expanded ? " is-expanded" : ""}${agent.id === "workbuddy" ? " is-workbuddy" : ""}`}
+      className={`agent-integration-card${expanded ? " is-expanded" : ""}`}
       data-testid={`agent-panel-${agent.id}`}
     >
       <div className="agent-integration-card-header">
@@ -615,16 +657,15 @@ function AgentCard({
             busyAction={busyAction}
             bindings={bindings}
             onMCPAction={onMCPAction}
+            onOpenInstallationGuide={onOpenInstallationGuide}
             onExecutorAction={onExecutorAction}
             onBindingAction={onBindingAction}
             onExternalConfigurationStarted={onExternalConfigurationStarted}
             t={t}
           />
           <div className="agent-integration-card-footer">
-            {agent.id !== "workbuddy" && <span><InfoCircleFilled />{t("agentIntegration.guideFooter")}</span>}
+            <span><InfoCircleFilled />{t("agentIntegration.guideFooter")}</span>
             <Button
-              type={agent.id === "workbuddy" ? "text" : "default"}
-              size={agent.id === "workbuddy" ? "small" : "middle"}
               icon={<ReloadOutlined />}
               onClick={() => void onRefresh()}
               loading={refreshing}
@@ -736,7 +777,7 @@ function CompactIntegrationControls({
   const methods = [{
     id: "mcp",
     title: t(agent.id === "workbuddy" ? "agentIntegration.workbuddyModeTitle" : "agentIntegration.mcpModeTitle", { agent: mcpClientName }),
-    description: agent.id === "workbuddy" ? (mcpChecked ? "" : t("agentIntegration.workbuddyRestartHint")) : t("agentIntegration.mcpModeDescription", { agent: mcpClientName }),
+    description: t(agent.id === "workbuddy" ? "agentIntegration.workbuddyModeDescription" : "agentIntegration.mcpModeDescription", { agent: mcpClientName }),
     checked: mcpChecked,
     disabled: !mcpChecked && !mcpCanToggle,
     loading: busyAction === `${agent.id}:connect` || busyAction === `${agent.id}:disconnect`,
@@ -789,6 +830,7 @@ function AgentConfigurationFlow({
   busyAction,
   bindings,
   onMCPAction,
+  onOpenInstallationGuide,
   onExecutorAction,
   onBindingAction,
   onExternalConfigurationStarted,
@@ -801,12 +843,12 @@ function AgentConfigurationFlow({
   busyAction: string;
   bindings: BindingMap;
   onMCPAction: (agent: DesktopAgent, action: DesktopAgentIntegrationAction) => Promise<void>;
+  onOpenInstallationGuide: () => void;
   onExecutorAction: (provider: DesktopExecutorProvider, action: DesktopExecutorPolicyAction) => Promise<void>;
   onBindingAction: (target: DesktopAgentBindingTarget, clear: boolean) => Promise<void>;
   onExternalConfigurationStarted: (agent: DesktopAgent) => void;
   t: TFunction;
 }) {
-  const compact = agent.id === "workbuddy";
   const mcpState = mcpStatus?.state || "requirements_missing";
   const mcpRequirements = mcpStatus?.requirements || [];
   const mcpPrepared = mcpRequirements.length > 0 && mcpRequirements.every((item) => item.satisfied);
@@ -1053,23 +1095,29 @@ function AgentConfigurationFlow({
   );
   return (
     <div className="agent-integration-flow">
-      {compact ? <div className="agent-integration-preparation-details">{preparation}</div> : preparation}
+      {preparation}
 
       <ConfigurationStage
         step={executorSupported ? 3 : 2}
         title={t("agentIntegration.integrationStageTitle")}
         ready={mcpEnabled || executorEnabled}
-        status={compact ? "" : t("agentIntegration.chooseIntegrationMode")}
+        status={t("agentIntegration.chooseIntegrationMode")}
       >
         <div className="agent-integration-methods">
           <IntegrationMethod
             title={t(agent.id === "workbuddy" ? "agentIntegration.workbuddyModeTitle" : "agentIntegration.mcpModeTitle", { agent: mcpClientName })}
-            compact={compact}
-            description={compact
-              ? busyAction === `${agent.id}:connect` ? t("agentIntegration.enabling")
-                : busyAction === `${agent.id}:disconnect` ? t("agentIntegration.disabling")
-                : !mcpEnabled ? t("agentIntegration.workbuddyRestartHint") : ""
-              : t("agentIntegration.mcpModeDescription", { agent: mcpClientName })}
+            description={t(agent.id === "workbuddy" ? "agentIntegration.workbuddyModeDescription" : "agentIntegration.mcpModeDescription", { agent: mcpClientName })}
+            help={agent.id === "workbuddy" ? (
+              <Button
+                type="text"
+                size="small"
+                className="agent-integration-installation-help"
+                icon={<QuestionCircleOutlined />}
+                onClick={onOpenInstallationGuide}
+              >
+                {t("agentIntegration.workbuddyInstallGuide.entry")}
+              </Button>
+            ) : undefined}
             status={mcpCapabilityStatus(mcpState, t)}
             ready={mcpEnabled}
             disabled={!mcpCanToggle}
@@ -1080,11 +1128,7 @@ function AgentConfigurationFlow({
           {executorSupported && (
             <IntegrationMethod
               title={t("agentIntegration.executorModeTitle", { agent: agent.executorName })}
-              compact={compact}
-              description={compact
-                ? busyAction === `executor:${agent.id}:enable` ? t("agentIntegration.enabling")
-                  : busyAction === `executor:${agent.id}:disable` ? t("agentIntegration.disabling") : ""
-                : t("agentIntegration.executorModeDescription", { agent: agent.executorName })}
+              description={t("agentIntegration.executorModeDescription", { agent: agent.executorName })}
               status={executorEnabled
                 ? t("agentIntegration.enabled")
                 : executorPrepared
@@ -1184,9 +1228,9 @@ function RequirementList({
 }
 
 function IntegrationMethod({
-  compact = false,
   title,
   description,
+  help,
   status,
   ready,
   disabled,
@@ -1194,9 +1238,9 @@ function IntegrationMethod({
   checked,
   onChange,
 }: {
-  compact?: boolean;
   title: string;
   description: string;
+  help?: ReactNode;
   status: string;
   ready: boolean;
   disabled: boolean;
@@ -1205,21 +1249,22 @@ function IntegrationMethod({
   onChange: (checked: boolean) => void;
 }) {
   return (
-    <div className={`agent-integration-method${ready ? " is-ready" : ""}${compact ? " is-compact" : ""}`}>
-      <div>
-        <div className="agent-integration-method-title">
-          <strong>{title}</strong>
-          {!compact && <span>{status}</span>}
-        </div>
-        {description && <p role={loading ? "status" : undefined}>{description}</p>}
+    <div className={`agent-integration-method${ready ? " is-ready" : ""}`}>
+      <div className="agent-integration-method-title">
+        <strong>{title}</strong>
       </div>
-      <Switch
-        aria-label={title}
-        checked={checked}
-        disabled={disabled || loading}
-        loading={loading}
-        onChange={onChange}
-      />
+      <p role={loading ? "status" : undefined}>{description}</p>
+      <div className="agent-integration-method-controls">
+        <span className="agent-integration-method-status">{status}</span>
+        {help && <div className="agent-integration-method-help">{help}</div>}
+        <Switch
+          aria-label={title}
+          checked={checked}
+          disabled={disabled || loading}
+          loading={loading}
+          onChange={onChange}
+        />
+      </div>
     </div>
   );
 }

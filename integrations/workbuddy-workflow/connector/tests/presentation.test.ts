@@ -11,7 +11,7 @@ function fixture() {
   window.HTMLElement.prototype.hidePopover = vi.fn()
   window.document.querySelector('.conversation-shell__main').getBoundingClientRect = () => ({ left: 100, top: 60, right: 1000, bottom: 750 })
   const listeners = new Set<() => void>()
-  const saveAs = vi.fn(async () => ({ success: true }))
+  const saveAs = vi.fn(async (_options: { defaultFileName: string, contentBase64: string }) => ({ success: true }))
   window.workbuddyDesktop = { appVersion: '5.8.3' }
   window.wb = { conversations: { currentId: 'native-1', onCurrentChange: (fn: () => void) => { listeners.add(fn); return () => listeners.delete(fn) } }, fileTransfer: { saveAs } }
   const doc = window.document.querySelector('.cr-document')
@@ -119,6 +119,18 @@ it('saves Blob bytes through native saveAs; cancellation, replay and invalid fil
   f.message({ ...request, filename: '../escape.txt', requestId: crypto.randomUUID() })
   expect(f.saveAs).toHaveBeenCalledTimes(2)
   expect(f.reply).toHaveBeenLastCalledWith(expect.objectContaining({ ok: false }), expect.anything())
+})
+
+it('saves files larger than 64 MiB through native saveAs', async () => {
+  const f = fixture()
+  const bytes = new Uint8Array(64 * 1024 * 1024 + 1).fill(97)
+  const requestId = crypto.randomUUID()
+  f.message({ type: 'lazymind.workflow.download', action: 'save', filename: 'large.bin', blob: new Blob([bytes]), requestId })
+  await vi.waitFor(() => expect(f.reply).toHaveBeenCalledWith(expect.objectContaining({ requestId, ok: true }), expect.anything()))
+  expect(f.saveAs).toHaveBeenCalledOnce()
+  const saved = f.saveAs.mock.calls[0][0]
+  expect(saved.defaultFileName).toBe('large.bin')
+  expect(Buffer.from(saved.contentBase64, 'base64').equals(Buffer.from(bytes))).toBe(true)
 })
 
 it('removes an old panel when trusted lookup reports no binding', () => {

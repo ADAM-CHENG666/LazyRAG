@@ -227,7 +227,6 @@ export function mountPresentation(target: PresentationTarget, followTail = insta
       if (data.action === 'capabilities') { respond(true); return }
       if (data.action !== 'save' || !(data.blob instanceof Blob) || typeof data.filename !== 'string'
         || !data.filename.trim() || data.filename.length > 240 || /[\/\\\u0000-\u001f]/.test(data.filename)) throw Error('无效的下载文件。')
-      if (data.blob.size > 64 * 1024 * 1024) throw Error('超过 64 MiB，请在 LazyMind 中下载。')
       if (saving) throw Error('请先完成当前保存对话框。')
       ownsSave = saving = true
       const base64 = await new Promise<string>((resolve, reject) => {

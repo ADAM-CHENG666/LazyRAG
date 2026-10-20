@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ConfigProvider } from "antd";
 
 import { createInstance } from "i18next";
 import zhCN from "@/i18n/locales/zh-CN";
@@ -49,7 +50,7 @@ vi.mock("./externalCapabilitiesApi", () => ({
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
     t: (key: string, options?: { defaultValue?: string; agent?: string; count?: number }) => {
-      if (key === "agentIntegration.retryDisconnection") return retryI18n.t(key);
+      if (key === "agentIntegration.retryDisconnection" || key.startsWith("agentIntegration.workbuddyInstallGuide.")) return retryI18n.t(key);
       const agent = options?.agent || "Agent";
       const values: Record<string, string> = {
         "common.refresh": "刷新",
@@ -115,6 +116,7 @@ vi.mock("react-i18next", () => ({
         "agentIntegration.login": "登录",
         "agentIntegration.openLoginTerminal": "打开登录终端",
         "agentIntegration.workbuddyModeTitle": "WorkBuddy 使用 LazyMind",
+        "agentIntegration.workbuddyModeDescription": "允许 WorkBuddy 调用 LazyMind",
         "agentIntegration.workbuddyRestartHint": "启用时将重启 WorkBuddy",
         "agentIntegration.openWorkBuddy": "打开 WorkBuddy 登录",
         "agentIntegration.workbuddyRuntimeReady": "已自动识别 WorkBuddy 执行能力",
@@ -606,6 +608,59 @@ describe("AgentIntegrationPage", () => {
     expect(within(workbuddy).getByRole("switch", { name: "LazyMind 调用 WorkBuddy" })).toBeChecked();
     expect(within(workbuddy).queryByText("启用时将重启 WorkBuddy")).not.toBeInTheDocument();
     expect(within(workbuddy).getByText("已自动复用 WorkBuddy 登录")).toBeInTheDocument();
+  });
+
+  it.each([
+    true,
+    false,
+  ])("guides WorkBuddy installation from the switch (expanded: %s) and can reopen without reinstalling", async (expanded) => {
+    const status = {
+      agent: "workbuddy", display_name: "WorkBuddy", state: "ready",
+      requirements: [
+        { id: "workbuddy_desktop", satisfied: true },
+        { id: "workbuddy_desktop_initialized", satisfied: true },
+      ],
+    };
+    mocks.statuses.mockResolvedValue({ ok: true, data: { workbuddy: status } });
+    mocks.executors.mockResolvedValue({ data: { data: { executors: [{
+      id: "workbuddy", installed: true, host_online: true, available: true,
+    }] } } });
+    mocks.executorPolicies.mockResolvedValue({ ok: true, data: {
+      workbuddy: { provider: "workbuddy", enabled: false, installed: true, ready: true },
+    } });
+    mocks.action.mockImplementation(async (_agent, action) => ({
+      ok: true, data: { ...status, state: action === "connect" ? "enabled" : "ready" },
+    }));
+
+    render(<ConfigProvider theme={{ token: { motion: false } }}><AgentIntegrationPage /></ConfigProvider>);
+    await screen.findByText("外部 Agent 集成");
+    const card = expanded ? expandAgent("workbuddy") : screen.getByTestId("agent-panel-workbuddy");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    fireEvent.click(within(card).getByRole("switch", { name: "WorkBuddy 使用 LazyMind" }));
+    const dialog = await screen.findByRole("dialog", { name: "在 WorkBuddy 中使用 LazyMind" });
+    expect(mocks.action).toHaveBeenCalledWith("workbuddy", "connect");
+    expect(dialog).toHaveTextContent("可能重启 WorkBuddy");
+    expect(dialog).toHaveTextContent("连接器界面");
+    expect(dialog).toHaveTextContent("确认信任并启用");
+    expect(dialog).toHaveTextContent("重新检测");
+    fireEvent.click(within(dialog).getByRole("button", { name: "我知道了" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+
+    expandAgent("workbuddy");
+    expect(card).toHaveTextContent("完成对应配置后可启用");
+    expect(card).toHaveTextContent("完成后重新检测");
+    expect(card).toHaveTextContent("允许 WorkBuddy 调用 LazyMind");
+    expect(card).toHaveTextContent("调用外部 Agent 能力");
+    expect(card).not.toHaveTextContent("待确认信任");
+    fireEvent.click(within(card).getByRole("button", { name: /安装引导/ }));
+    await screen.findByRole("dialog", { name: "在 WorkBuddy 中使用 LazyMind" });
+    expect(mocks.action).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "我知道了" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+
+    await act(async () => fireEvent.click(within(card).getByRole("switch", { name: "WorkBuddy 使用 LazyMind" })));
+    expect(mocks.action).toHaveBeenLastCalledWith("workbuddy", "disconnect");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it.each([
