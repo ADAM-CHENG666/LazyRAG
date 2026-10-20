@@ -483,6 +483,14 @@ func runAgent(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 			return err
 		}
 		defer stopOwnerWatch()
+		if *ownerPID > 0 {
+			for _, provider := range providers {
+				if provider == "workbuddy" {
+					go assistantbridge.KeepWorkBuddyAvailable(hostCtx, credentialStore, stderr)
+					break
+				}
+			}
+		}
 		return runAgentHosts(hostCtx, api, policy, providers, *agentBinary, stderr)
 	}
 	return errors.New("usage: lazymind agent host <run|status>")

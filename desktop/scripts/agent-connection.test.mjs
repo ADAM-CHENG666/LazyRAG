@@ -13,6 +13,7 @@ const timeoutDeclarations = [
   'agentConnectorStatusTimeoutMs',
   'agentConnectorDisconnectTimeoutMs',
   'agentConnectorInstallTimeoutMs',
+  'agentConnectorWorkBuddyInstallTimeoutMs',
 ].map((name) => {
   const declaration = source.match(new RegExp(`^const ${name} = .+;$`, 'm'));
   assert.ok(declaration, `missing Desktop timeout declaration: ${name}`);
@@ -30,6 +31,7 @@ for (const platform of ['darwin', 'win32']) {
       },
     });
     assert.equal((await run('deepseek-harness', 'connect')).state, 'enabled');
+    await run('workbuddy', 'connect');
     await run('all', 'status');
     await run('deepseek-harness', 'status');
     await run('deepseek-harness', 'disconnect');
@@ -38,6 +40,8 @@ for (const platform of ['darwin', 'win32']) {
     assert.deepEqual(commands, [
       [['assistant', 'start', '--listen', '127.0.0.1:19091'], 15000],
       [['internal', 'agent', 'deepseek-harness', 'connect'], 660000],
+      [['assistant', 'start', '--listen', '127.0.0.1:19091'], 15000],
+      [['internal', 'agent', 'workbuddy', 'connect'], 120000],
       [['internal', 'agent', 'all', 'status'], 30000],
       [['internal', 'agent', 'deepseek-harness', 'status'], 30000],
       [['internal', 'agent', 'deepseek-harness', 'disconnect'], 60000],

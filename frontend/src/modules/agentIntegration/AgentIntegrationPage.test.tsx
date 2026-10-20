@@ -114,6 +114,8 @@ vi.mock("react-i18next", () => ({
         "agentIntegration.checkAgain": "重新检测",
         "agentIntegration.login": "登录",
         "agentIntegration.openLoginTerminal": "打开登录终端",
+        "agentIntegration.workbuddyModeTitle": "WorkBuddy 使用 LazyMind",
+        "agentIntegration.workbuddyRestartHint": "启用时将重启 WorkBuddy",
         "agentIntegration.openWorkBuddy": "打开 WorkBuddy 登录",
         "agentIntegration.workbuddyRuntimeReady": "已自动识别 WorkBuddy 执行能力",
         "agentIntegration.workbuddyRuntimeMissing": "未找到 WorkBuddy 执行能力",
@@ -598,7 +600,33 @@ describe("AgentIntegrationPage", () => {
       installed: true, host_online: true, available: true, unavailable_reason: "",
     }] } } });
     await act(async () => fireEvent.click(screen.getByRole("button", { name: /reload刷新/ })));
-    await waitFor(() => expect(within(workbuddy).getByText("已自动复用 WorkBuddy 登录")).toBeInTheDocument());
+    await waitFor(() => expect(within(workbuddy).getByRole("switch", { name: "LazyMind 调用 WorkBuddy" })).toBeChecked());
+    expect(within(workbuddy).getByText("已自动复用 WorkBuddy 登录")).toBeInTheDocument();
+    expect(within(workbuddy).getByRole("switch", { name: "WorkBuddy 使用 LazyMind" })).toBeChecked();
+    expect(within(workbuddy).getByRole("switch", { name: "LazyMind 调用 WorkBuddy" })).toBeChecked();
+    expect(within(workbuddy).queryByText("启用时将重启 WorkBuddy")).not.toBeInTheDocument();
+    expect(within(workbuddy).getByText("已自动复用 WorkBuddy 登录")).toBeInTheDocument();
+  });
+
+  it.each([
+    { control_ready: true, presentation_status: "mounted", page_status: "loading" },
+    { control_ready: false, presentation_status: "host-offline" },
+  ])("keeps WorkBuddy runtime details out of setup: %j", async (connection) => {
+    const status = { agent: "workbuddy", display_name: "WorkBuddy", state: "enabled",
+      requirements: [{ id: "workbuddy_desktop", satisfied: true }, { id: "workbuddy_desktop_initialized", satisfied: true }],
+      connection: { mcp_configured: true, ...connection } };
+    mocks.statuses.mockResolvedValue({ ok: true, data: { workbuddy: status } });
+    mocks.executors.mockResolvedValue({ data: { data: { executors: [{ id: "workbuddy", installed: true, host_online: true, available: true }] } } });
+    mocks.executorPolicies.mockResolvedValue({ ok: true, data: { workbuddy: { provider: "workbuddy", enabled: false, installed: true, ready: true } } });
+    render(<AgentIntegrationPage />);
+    await screen.findByText("外部 Agent 集成");
+    const card = expandAgent("workbuddy");
+    const toggle = within(card).getByRole("switch", { name: "WorkBuddy 使用 LazyMind" });
+    expect(toggle).toBeChecked();
+    expect(toggle).not.toBeDisabled();
+    expect(card).not.toHaveTextContent(/待完成|修复连接|面板正在|会话控制|工作流工具|workbuddyConnection/);
+    expect(card.querySelector(".agent-integration-requirements")?.children).toHaveLength(2);
+    expect(mocks.action).not.toHaveBeenCalled();
   });
 
   it("retries a transient Assistant Bridge failure before showing an error", async () => {

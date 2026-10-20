@@ -30,17 +30,18 @@ type Issue struct {
 }
 
 type Status struct {
-	RetryAction   string          `json:"retry_action,omitempty"`
-	Issue         *Issue          `json:"issue,omitempty"`
-	CanConnect    bool            `json:"can_connect,omitempty"`
-	CanDisconnect bool            `json:"can_disconnect,omitempty"`
-	Profiles      []ProfileStatus `json:"profiles,omitempty"`
-	Agent         string          `json:"agent"`
-	DisplayName   string          `json:"display_name"`
-	State         State           `json:"state"`
-	Requirements  []Requirement   `json:"requirements,omitempty"`
-	Action        *Action         `json:"action,omitempty"`
-	Message       string          `json:"message,omitempty"`
+	Connection    *ConnectionStatus `json:"connection,omitempty"`
+	RetryAction   string            `json:"retry_action,omitempty"`
+	Issue         *Issue            `json:"issue,omitempty"`
+	CanConnect    bool              `json:"can_connect,omitempty"`
+	CanDisconnect bool              `json:"can_disconnect,omitempty"`
+	Profiles      []ProfileStatus   `json:"profiles,omitempty"`
+	Agent         string            `json:"agent"`
+	DisplayName   string            `json:"display_name"`
+	State         State             `json:"state"`
+	Requirements  []Requirement     `json:"requirements,omitempty"`
+	Action        *Action           `json:"action,omitempty"`
+	Message       string            `json:"message,omitempty"`
 }
 
 type ProfileStatus struct {
@@ -72,4 +73,12 @@ func Fail(status Status, message string) Status {
 	status.Action = nil
 	status.Message = strings.TrimSpace(message)
 	return status
+}
+
+// Connection reports runtime health separately from the user's enabled setting.
+type ConnectionStatus struct {
+	MCPConfigured      bool   `json:"mcp_configured"`
+	ControlReady       bool   `json:"control_ready"`
+	PresentationStatus string `json:"presentation_status"`
+	PageStatus         string `json:"page_status,omitempty"`
 }

@@ -98,6 +98,13 @@ export interface DesktopAgentAction {
   url?: string;
 }
 
+export interface DesktopAgentConnectionStatus {
+  mcp_configured: boolean;
+  control_ready: boolean;
+  presentation_status: string;
+  page_status?: string;
+}
+
 export interface DesktopAgentIntegrationStatus {
   issue?: { code: "unsupported_version" | "dependency_environment" | "operation_failed"; path?: string };
 	can_connect?: boolean;
@@ -109,6 +116,7 @@ export interface DesktopAgentIntegrationStatus {
   version?: string;
   state: DesktopAgentIntegrationState;
   requirements?: DesktopAgentRequirement[];
+  connection?: DesktopAgentConnectionStatus;
   action?: DesktopAgentAction;
   message?: string;
 }
@@ -467,6 +475,7 @@ export async function agentIntegrationAction(agent: DesktopAgent, action: Deskto
       `/agents/${encodeURIComponent(agent)}/${action}`,
       { method: "POST" },
       action === "login" ? LOGIN_TIMEOUT_MS
+        : agent === "workbuddy" && action === "connect" ? WORKBUDDY_INSTALL_TIMEOUT_MS
         : agent === "deepseek-harness" && action === "connect" ? INSTALL_TIMEOUT_MS
         : agent === "deepseek-harness" && action === "disconnect" ? DSH_DISCONNECT_TIMEOUT_MS : ACTION_TIMEOUT_MS,
     );
@@ -603,6 +612,7 @@ const AGENT_STATUS_TIMEOUT_MS = 30_000;
 const DSH_DISCONNECT_TIMEOUT_MS = 60_000;
 const ACTION_TIMEOUT_MS = 15_000;
 const INSTALL_TIMEOUT_MS = 660_000;
+const WORKBUDDY_INSTALL_TIMEOUT_MS = 120_000;
 const BINDING_TIMEOUT_MS = 30_000;
 const LOGIN_TIMEOUT_MS = 125_000;
 

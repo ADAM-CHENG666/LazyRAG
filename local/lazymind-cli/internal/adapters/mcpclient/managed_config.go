@@ -127,6 +127,9 @@ func managedStdio(self, home, hostID string, kind Kind) stdioMCPDefinition {
 	if home != "" {
 		environment["LAZYMIND_HOME"] = home
 	}
+	if kind == WorkBuddy {
+		environment["LAZYMIND_WORKFLOW_HOST_CONTROL"] = "1"
+	}
 	return stdioMCPDefinition{Type: "stdio", Command: self, Args: []string{"mcp", "proxy"}, Env: environment}
 }
 
@@ -148,7 +151,7 @@ func ownedStdio(entry stdioMCPDefinition, self, home string) bool {
 }
 
 func currentStdio(entry stdioMCPDefinition, self, home, hostID string, kind Kind) bool {
-	return ownedStdio(entry, self, home) &&
+	return (kind != WorkBuddy || entry.Env["LAZYMIND_WORKFLOW_HOST_CONTROL"] == "1") && ownedStdio(entry, self, home) &&
 		entry.Env["LAZYMIND_AGENT_PROVIDER"] == string(kind) &&
 		entry.Env["LAZYMIND_AGENT_HOST_ID"] == hostID &&
 		normalizedManagedHome(entry.Env["LAZYMIND_HOME"]) == home
@@ -156,11 +159,27 @@ func currentStdio(entry stdioMCPDefinition, self, home, hostID string, kind Kind
 
 func stateForStdio(entry stdioMCPDefinition, self, home, hostID string, kind Kind) managedConfigState {
 	owned := ownedStdio(entry, self, home)
+	if kind == WorkBuddy && !owned {
+		owned = legacyWorkBuddyStdio(entry, home, hostID)
+	}
 	return managedConfigState{
 		configured: true, owned: owned,
 		current: currentStdio(entry, self, home, hostID, kind),
 		command: entry.Command, arguments: append([]string(nil), entry.Args...),
 	}
+}
+
+// Older desktop packages wrote their staging path into WB. Match the exact
+// managed invocation and local identity before relocating that entry.
+func legacyWorkBuddyStdio(entry stdioMCPDefinition, home, hostID string) bool {
+	command := filepath.ToSlash(entry.Command)
+	return filepath.IsAbs(entry.Command) &&
+		strings.HasSuffix(command, "/LazyMind.app/Contents/Resources/runtime/bin/lazymind") &&
+		(entry.Type == "" || entry.Type == "stdio") && len(entry.Args) == 2 &&
+		entry.Args[0] == "mcp" && entry.Args[1] == "proxy" &&
+		home != "" && normalizedManagedHome(entry.Env["LAZYMIND_HOME"]) == home &&
+		hostID != "" && entry.Env["LAZYMIND_AGENT_HOST_ID"] == hostID &&
+		entry.Env["LAZYMIND_AGENT_PROVIDER"] == "workbuddy"
 }
 
 func normalizedManagedHome(value string) string {

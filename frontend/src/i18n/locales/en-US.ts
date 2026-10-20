@@ -1377,6 +1377,10 @@ const enUS = {
     waitingForDetection: "Waiting for the local Agent Host to report its status",
     viewInstallGuide: "View installation guide",
     mcpModeTitle: "{{agent}} uses LazyMind MCP",
+    workbuddyModeTitle: "Use LazyMind in WorkBuddy",
+    workbuddyRestartHint: "Enabling will restart WorkBuddy",
+    enabling: "Enabling…",
+    disabling: "Disabling…",
     mcpModeDescription: "Allow {{agent}} to use LazyMind capabilities.",
     executorModeTitle: "LazyMind calls {{agent}}",
     executorModeDescription: "Allow LazyMind to call {{agent}}.",
@@ -1508,8 +1512,8 @@ const enUS = {
       workbuddy: {
         mcp: {
           install: "Install and open WorkBuddy Desktop once.",
-          connect: "When enabled, LazyMind writes `lazymind` to `~/.workbuddy/mcp.json`.",
-          verify: "Restart WorkBuddy and confirm `lazymind` in its MCP tool list.",
+          connect: "Enable the connection to install the Workflow panel and session control and restart WorkBuddy; finish running tasks first.",
+          verify: "Once connected, start a Workflow in WorkBuddy and use its panel to continue or stop the bound conversation.",
         },
         executor: {
           install: "Install and open WorkBuddy once; no separate CLI is required.",

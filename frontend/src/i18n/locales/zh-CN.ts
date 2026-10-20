@@ -1345,6 +1345,10 @@ const zhCN = {
     waitingForDetection: "正在等待本机 Agent Host 返回检测结果",
     viewInstallGuide: "查看安装指南",
     mcpModeTitle: "{{agent}} 使用 LazyMind MCP",
+    workbuddyModeTitle: "WorkBuddy 使用 LazyMind",
+    workbuddyRestartHint: "启用时将重启 WorkBuddy",
+    enabling: "正在启用…",
+    disabling: "正在停用…",
     mcpModeDescription: "允许 {{agent}} 使用 LazyMind 能力。",
     executorModeTitle: "LazyMind 调用 {{agent}}",
     executorModeDescription: "允许 LazyMind 调用 {{agent}}。",
@@ -1476,8 +1480,8 @@ const zhCN = {
       workbuddy: {
         mcp: {
           install: "安装并启动一次 WorkBuddy 桌面版。",
-          connect: "启用后，LazyMind 在 `~/.workbuddy/mcp.json` 写入 `lazymind` 配置。",
-          verify: "重启 WorkBuddy，在 MCP 工具列表中确认 `lazymind`。",
+          connect: "开启连接后，自动安装 Workflow 面板与会话控制，并重启 WorkBuddy；请先结束正在进行的任务。",
+          verify: "连接完成后，在 WorkBuddy 中启动 Workflow；可通过面板继续或停止对应会话。",
         },
         executor: {
           install: "安装并启动一次 WorkBuddy；无需另装命令行工具。",

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { HostBridge, loadPairing } from './bridge'
 import { installHost } from './host'
 import { dispatcherLock } from './runtime-lock'
+import { installPresentationConfig } from './presentation-config'
 
 export interface Config {
   bridgeUrl: string
@@ -19,6 +20,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const instance = randomUUID()
   const release = await dispatcherLock(config.pairingFile, instance)
   try {
+    installPresentationConfig(ctx, config)
     const dispose = installHost(ctx, new HostBridge(config.bridgeUrl, pairing), config, instance)
     ctx.effect(() => async () => { try { await dispose() } finally { await release() } })
   } catch (error) { await release(); throw error }

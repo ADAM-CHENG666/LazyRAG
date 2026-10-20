@@ -547,7 +547,7 @@ function AgentCard({
 
   return (
     <Card
-      className={`agent-integration-card${expanded ? " is-expanded" : ""}`}
+      className={`agent-integration-card${expanded ? " is-expanded" : ""}${agent.id === "workbuddy" ? " is-workbuddy" : ""}`}
       data-testid={`agent-panel-${agent.id}`}
     >
       <div className="agent-integration-card-header">
@@ -621,8 +621,10 @@ function AgentCard({
             t={t}
           />
           <div className="agent-integration-card-footer">
-            <span><InfoCircleFilled />{t("agentIntegration.guideFooter")}</span>
+            {agent.id !== "workbuddy" && <span><InfoCircleFilled />{t("agentIntegration.guideFooter")}</span>}
             <Button
+              type={agent.id === "workbuddy" ? "text" : "default"}
+              size={agent.id === "workbuddy" ? "small" : "middle"}
               icon={<ReloadOutlined />}
               onClick={() => void onRefresh()}
               loading={refreshing}
@@ -733,8 +735,8 @@ function CompactIntegrationControls({
 }) {
   const methods = [{
     id: "mcp",
-    title: t("agentIntegration.mcpModeTitle", { agent: mcpClientName }),
-    description: t("agentIntegration.mcpModeDescription", { agent: mcpClientName }),
+    title: t(agent.id === "workbuddy" ? "agentIntegration.workbuddyModeTitle" : "agentIntegration.mcpModeTitle", { agent: mcpClientName }),
+    description: agent.id === "workbuddy" ? (mcpChecked ? "" : t("agentIntegration.workbuddyRestartHint")) : t("agentIntegration.mcpModeDescription", { agent: mcpClientName }),
     checked: mcpChecked,
     disabled: !mcpChecked && !mcpCanToggle,
     loading: busyAction === `${agent.id}:connect` || busyAction === `${agent.id}:disconnect`,
@@ -804,6 +806,7 @@ function AgentConfigurationFlow({
   onExternalConfigurationStarted: (agent: DesktopAgent) => void;
   t: TFunction;
 }) {
+  const compact = agent.id === "workbuddy";
   const mcpState = mcpStatus?.state || "requirements_missing";
   const mcpRequirements = mcpStatus?.requirements || [];
   const mcpPrepared = mcpRequirements.length > 0 && mcpRequirements.every((item) => item.satisfied);
@@ -945,8 +948,8 @@ function AgentConfigurationFlow({
     </Space>
   ) : null;
 
-  return (
-    <div className="agent-integration-flow">
+  const preparation = (
+    <>
       <ConfigurationStage
         step={1}
         title={t("agentIntegration.clientStageTitle", { agent: mcpClientName })}
@@ -972,6 +975,7 @@ function AgentConfigurationFlow({
           emptyLabel={t("agentIntegration.waitingForDetection")}
         />
         {mcpActions}
+
       </ConfigurationStage>
 
       {executorSupported && (
@@ -1045,16 +1049,27 @@ function AgentConfigurationFlow({
         </ConfigurationStage>
       )}
 
+    </>
+  );
+  return (
+    <div className="agent-integration-flow">
+      {compact ? <div className="agent-integration-preparation-details">{preparation}</div> : preparation}
+
       <ConfigurationStage
         step={executorSupported ? 3 : 2}
         title={t("agentIntegration.integrationStageTitle")}
         ready={mcpEnabled || executorEnabled}
-        status={t("agentIntegration.chooseIntegrationMode")}
+        status={compact ? "" : t("agentIntegration.chooseIntegrationMode")}
       >
         <div className="agent-integration-methods">
           <IntegrationMethod
-            title={t("agentIntegration.mcpModeTitle", { agent: mcpClientName })}
-            description={t("agentIntegration.mcpModeDescription", { agent: mcpClientName })}
+            title={t(agent.id === "workbuddy" ? "agentIntegration.workbuddyModeTitle" : "agentIntegration.mcpModeTitle", { agent: mcpClientName })}
+            compact={compact}
+            description={compact
+              ? busyAction === `${agent.id}:connect` ? t("agentIntegration.enabling")
+                : busyAction === `${agent.id}:disconnect` ? t("agentIntegration.disabling")
+                : !mcpEnabled ? t("agentIntegration.workbuddyRestartHint") : ""
+              : t("agentIntegration.mcpModeDescription", { agent: mcpClientName })}
             status={mcpCapabilityStatus(mcpState, t)}
             ready={mcpEnabled}
             disabled={!mcpCanToggle}
@@ -1065,7 +1080,11 @@ function AgentConfigurationFlow({
           {executorSupported && (
             <IntegrationMethod
               title={t("agentIntegration.executorModeTitle", { agent: agent.executorName })}
-              description={t("agentIntegration.executorModeDescription", { agent: agent.executorName })}
+              compact={compact}
+              description={compact
+                ? busyAction === `executor:${agent.id}:enable` ? t("agentIntegration.enabling")
+                  : busyAction === `executor:${agent.id}:disable` ? t("agentIntegration.disabling") : ""
+                : t("agentIntegration.executorModeDescription", { agent: agent.executorName })}
               status={executorEnabled
                 ? t("agentIntegration.enabled")
                 : executorPrepared
@@ -1132,7 +1151,7 @@ function ConfigurationStage({
         <div className="agent-integration-stage-heading">
           <div>
             <strong>{title}</strong>
-            <span>{status}</span>
+            {status && <span>{status}</span>}
           </div>
           {help}
         </div>
@@ -1165,6 +1184,7 @@ function RequirementList({
 }
 
 function IntegrationMethod({
+  compact = false,
   title,
   description,
   status,
@@ -1174,6 +1194,7 @@ function IntegrationMethod({
   checked,
   onChange,
 }: {
+  compact?: boolean;
   title: string;
   description: string;
   status: string;
@@ -1184,13 +1205,13 @@ function IntegrationMethod({
   onChange: (checked: boolean) => void;
 }) {
   return (
-    <div className={`agent-integration-method${ready ? " is-ready" : ""}`}>
+    <div className={`agent-integration-method${ready ? " is-ready" : ""}${compact ? " is-compact" : ""}`}>
       <div>
         <div className="agent-integration-method-title">
           <strong>{title}</strong>
-          <span>{status}</span>
+          {!compact && <span>{status}</span>}
         </div>
-        <p>{description}</p>
+        {description && <p role={loading ? "status" : undefined}>{description}</p>}
       </div>
       <Switch
         aria-label={title}

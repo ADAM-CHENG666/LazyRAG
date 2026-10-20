@@ -674,6 +674,44 @@
       gap: 6px;
     }
   }
+
+  .agent-integration-card.is-workbuddy {
+    .agent-integration-preparation-details {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin-bottom: 6px;
+    }
+
+    .agent-integration-flow > .agent-integration-stage {
+      border: 0;
+      background: transparent;
+
+      > .agent-integration-stage-copy { padding: 0; }
+      .agent-integration-stage-heading { margin-bottom: 10px; }
+    }
+
+    .agent-integration-method.is-compact {
+      align-items: flex-start;
+      min-height: 80px;
+      padding: 16px;
+      gap: 12px;
+
+      .agent-integration-method-title strong {
+        font-weight: 600;
+        line-height: 1.6;
+      }
+
+      p { margin-top: 8px; }
+      .ant-switch { margin-top: 1px; }
+    }
+
+    .agent-integration-card-footer { justify-content: flex-end; }
+
+    @media (max-width: 900px) {
+      .agent-integration-preparation-details { grid-template-columns: 1fr; }
+    }
+  }
 }
 
 .external-capability-result-modal {

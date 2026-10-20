@@ -21,7 +21,7 @@ export interface HostConfig { serverName: string; webUrl: string }
 /** Wire DSH public hooks to the shared coordinator. MCP execution remains in workflowTool. */
 export function installHost(ctx: Context, bridge: HostTransport, config: HostConfig, instanceId: string): () => Promise<void> {
   const lifetime = new AbortController()
-  const runtime = dshRuntime(ctx, config.serverName)
+  const runtime = dshRuntime(ctx, config.serverName, config.webUrl)
   const coordinator = createCoordinator(runtime, bridge, config.webUrl, lifetime.signal)
   const registrations = new Map<Agent, Registration>()
   const tracked = new Set<Promise<unknown>>()
@@ -49,7 +49,7 @@ export function installHost(ctx: Context, bridge: HostTransport, config: HostCon
       const previous = registration.wrappers.get(schema.name)
       if (!original || previous?.original === original) continue
       previous?.dispose()
-      const definition = workflowTool(original, { trustedOrigin: config.webUrl,
+      const definition = workflowTool(original, {
         hostSessionId: runtime.id(coordinator.driver(agent)), operation,
         afterResult: (value, exec) => own(coordinator.afterResult(value, call(exec))),
         shouldConclude: control => coordinator.shouldConclude(agent, control),
@@ -88,7 +88,9 @@ export function installHost(ctx: Context, bridge: HostTransport, config: HostCon
   ctx.on('tools/ptc-dispatch-log', async (dispatch, next) => {
     const content = await next()
     const run = coordinator.takeNestedLink(dispatch.subCallId)
-    return run ? [...content, { type: 'text', text: JSON.stringify({ lazymind_workflow: run }) }] : content
+    if (!run) return content
+    const { url: _url, ...identity } = run
+    return [...content, { type: 'text', text: JSON.stringify({ lazymind_workflow: identity }) }]
   })
   ctx.on('agent/status', ({ agent, status }) => { if (status === 'idle') coordinator.idle(agent) })
   ctx.on('agent/disposed', ({ agent }) => {

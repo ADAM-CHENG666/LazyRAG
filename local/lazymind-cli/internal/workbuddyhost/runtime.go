@@ -1,0 +1,152 @@
+package workbuddyhost
+
+import (
+	"context"
+	"crypto/sha256"
+	"embed"
+	"encoding/hex"
+	"fmt"
+	"log"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"time"
+)
+
+//go:embed assets/connector.mjs assets/presentation.html
+var assets embed.FS
+
+// Supervise belongs to Assistant Bridge, not to any MCP connection. Configuration
+// or account changes stop the old worker before a replacement is launched.
+func Supervise(ctx context.Context, home, bridgeURL string, account func() (string, error)) {
+	bundle, err := assets.ReadFile("assets/connector.mjs")
+	if err != nil {
+		return
+	}
+	sum := sha256.Sum256(bundle)
+	script := filepath.Join(home, "workbuddy-workflow", "connector-"+hex.EncodeToString(sum[:8])+".mjs")
+	var worker *exec.Cmd
+	var stop context.CancelFunc
+	var done chan error
+	var fingerprint string
+	var startupFingerprint string
+	startupChecked := false
+	cleanup := func() {
+		if stop != nil {
+			stop()
+			<-done
+		}
+		worker = nil
+		stop = nil
+		done = nil
+	}
+	defer cleanup()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		scope, scopeErr := account()
+		config, pair, configErr := Load(home, scope)
+		current := config.Node + "|" + config.PairingFile + "|" + strconv.Itoa(config.CDPPort) + "|" + scope
+		if scopeErr != nil || configErr != nil || !pair.Enabled {
+			if worker != nil {
+				cleanup()
+			}
+			if !startupChecked || startupFingerprint != "" {
+				if err := configureDesktopStartup(ctx, home, 0, false); err != nil {
+					log.Printf("WorkBuddy startup cleanup: %v", err)
+				} else {
+					startupChecked = true
+					startupFingerprint = ""
+				}
+			}
+		} else {
+			if worker != nil && current != fingerprint {
+				cleanup()
+			}
+			if !startupChecked || startupFingerprint != current {
+				if err := configureDesktopStartup(ctx, home, config.CDPPort, true); err != nil {
+					log.Printf("WorkBuddy startup configuration: %v", err)
+				} else {
+					startupChecked = true
+					startupFingerprint = current
+				}
+			}
+			if worker == nil {
+				if err := writeAtomic(script, bundle); err == nil {
+					logDir := filepath.Join(home, "logs")
+					_ = os.MkdirAll(logDir, 0700)
+					log, err := os.OpenFile(filepath.Join(logDir, "workbuddy-workflow.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+					if err == nil {
+						var lifetime context.Context
+						lifetime, stop = context.WithCancel(ctx)
+						cmd := exec.CommandContext(lifetime, config.Node, script, "--pairing-file", config.PairingFile,
+							"--bridge-url", bridgeURL, "--cdp-port", strconv.Itoa(config.CDPPort), "--parent-pid", strconv.Itoa(os.Getpid()))
+						cmd.Stdout, cmd.Stderr = log, log
+						cmd.Cancel = func() error {
+							if runtime.GOOS == "windows" {
+								return cmd.Process.Kill()
+							}
+							return cmd.Process.Signal(os.Interrupt)
+						}
+						cmd.WaitDelay = 3 * time.Second
+						if err := cmd.Start(); err == nil {
+							worker = cmd
+							fingerprint = current
+							done = make(chan error, 1)
+							ch := done
+							go func() { ch <- cmd.Wait(); log.Close() }()
+						} else {
+							stop()
+							stop = nil
+							log.Close()
+						}
+					}
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-done:
+			stop()
+			worker = nil
+			stop = nil
+			done = nil
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		case <-ticker.C:
+		}
+	}
+}
+
+func PresentationHTML() []byte { body, _ := assets.ReadFile("assets/presentation.html"); return body }
+
+// A stopped Bridge cannot remove an old renderer mount. Disconnect therefore
+// performs one bounded cleanup, after the worker has relinquished its lock.
+func removePresentation(home string, config Config) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 9*time.Second)
+	defer cancel()
+	ready, err := desktopStatus(ctx, config.CDPPort)
+	if err != nil || !ready {
+		return err
+	}
+	bundle, err := assets.ReadFile("assets/connector.mjs")
+	if err != nil {
+		return err
+	}
+	sum := sha256.Sum256(bundle)
+	script := filepath.Join(home, "workbuddy-workflow", "connector-"+hex.EncodeToString(sum[:8])+".mjs")
+	if err := writeAtomic(script, bundle); err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, config.Node, script, "--pairing-file", config.PairingFile, "--cdp-port", strconv.Itoa(config.CDPPort), "--cleanup-only")
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("WorkBuddy is disabled but its panel cleanup failed; retry disconnect: %w", err)
+	}
+	return nil
+}
