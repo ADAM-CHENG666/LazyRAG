@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/jackc/pgx/v5"
 	"lazymind/core/asyncjob"
@@ -31,8 +32,6 @@ import (
 
 // The real Core router and database are exercised. Only the unchanged Algorithm
 // HTTP service is simulated, including WAITING-only cancellation and its races.
-var marketControlFixtureSequence atomic.Uint64
-
 type marketControlFixture struct {
 	t            *testing.T
 	db           *orm.DB
@@ -73,9 +72,8 @@ func newMarketControlFixture(t *testing.T, states ...string) *marketControlFixtu
 	f.workerStatus.Store(200)
 	f.cancelStatus.Store(200)
 	t.Setenv("LAZYMIND_UPLOAD_ROOT", f.root)
-	// Health probes cache by URL across fixtures. Ports can be reused before
-	// that cache expires, so each fixture needs its own endpoint namespace.
-	prefix := fmt.Sprintf("/fixture-%d", marketControlFixtureSequence.Add(1))
+	// Health probes cache by URL; isolate fixtures even if a port is reused.
+	prefix := "/" + uuid.NewString()
 	server := httptest.NewServer(http.StripPrefix(prefix, http.HandlerFunc(f.algorithm)))
 	t.Cleanup(server.Close)
 	endpoint := server.URL + prefix
