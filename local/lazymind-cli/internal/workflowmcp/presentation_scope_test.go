@@ -9,11 +9,13 @@ import (
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"lazymind/agentconnector/internal/coreapi"
 	"lazymind/agentconnector/internal/credentials"
 )
 
 func TestPanelURLScopeOnMCPWire(t *testing.T) {
+	t.Setenv("LAZYMIND_WEB_URL", "https://panel.example")
 	for _, provider := range []string{"codex", "workbuddy", "deepseek-harness", ""} {
 		t.Run(provider, func(t *testing.T) {
 			apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -48,7 +50,7 @@ func TestPanelURLScopeOnMCPWire(t *testing.T) {
 			}
 			api, _ := coreapi.New(store)
 			server := mcp.NewServer(&mcp.Implementation{Name: "presentation-test", Version: "1"}, nil)
-			Register(server, &Client{api: api, HostProvider: provider, interactionBaseURL: "https://panel.example"})
+			Register(server, &Client{api: api, HostProvider: provider})
 			a, b := mcp.NewInMemoryTransports()
 			ctx := context.Background()
 			ss, err := server.Connect(ctx, b, nil)

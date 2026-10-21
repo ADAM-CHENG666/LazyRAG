@@ -13,6 +13,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"lazymind/agentconnector/internal/connectorconfig"
 	"lazymind/agentconnector/internal/coreapi"
 	"lazymind/agentconnector/internal/credentials"
 	"lazymind/agentconnector/internal/workflowmcp"
@@ -57,7 +58,7 @@ func New(store *credentials.Store) (*Bridge, error) {
 	}
 	return &Bridge{
 		api: api, connectorInstanceID: instanceID, home: store.Directory(),
-		sourceProvider: strings.ToLower(strings.TrimSpace(os.Getenv("LAZYMIND_AGENT_PROVIDER"))),
+		sourceProvider: strings.ToLower(strings.TrimSpace(connectorconfig.Value("LAZYMIND_AGENT_PROVIDER"))),
 	}, nil
 }
 
@@ -121,11 +122,17 @@ func (b *Bridge) Probe(ctx context.Context) (ProbeResult, error) {
 }
 
 func (b *Bridge) RunStdio(ctx context.Context) error {
-	upstream, tools, _, err := b.Connect(ctx)
+	upstream, tools, endpoint, err := b.Connect(ctx)
 	if err != nil {
 		return err
 	}
-	defer upstream.Close()
+	scope, err := b.api.AccountScope()
+	if err != nil {
+		_ = upstream.Close()
+		return err
+	}
+	connection := &liveConnection{bridge: b, scope: scope, endpoint: endpoint, session: upstream}
+	defer connection.close()
 	webBase, err := b.api.ServerURL(ctx)
 	if err != nil {
 		return err
@@ -148,7 +155,7 @@ func (b *Bridge) RunStdio(ctx context.Context) error {
 					return nil, fmt.Errorf("decode tool arguments: %w", err)
 				}
 			}
-			return upstream.CallTool(callCtx, &mcp.CallToolParams{
+			return connection.call(callCtx, &mcp.CallToolParams{
 				Meta:           request.Params.Meta,
 				Name:           request.Params.Name,
 				Arguments:      arguments,
@@ -165,7 +172,7 @@ func (b *Bridge) RunStdio(ctx context.Context) error {
 		return err
 	}
 	workflowClient.HostProvider = b.sourceProvider
-	workflowClient.RequireHostBinding = (b.sourceProvider == "deepseek-harness" || b.sourceProvider == "codex" || b.sourceProvider == "workbuddy") && os.Getenv("LAZYMIND_WORKFLOW_HOST_CONTROL") == "1"
+	workflowClient.RequireHostBinding = (b.sourceProvider == "deepseek-harness" || b.sourceProvider == "codex" || b.sourceProvider == "workbuddy") && connectorconfig.Value("LAZYMIND_WORKFLOW_HOST_CONTROL") == "1"
 	if b.sourceProvider == "codex" && workflowClient.RequireHostBinding {
 		workflowClient.BindController = b.bindCodexController
 	}
@@ -180,6 +187,7 @@ func (b *Bridge) RunStdio(ctx context.Context) error {
 	server.AddReceivingMiddleware(invocationMiddleware(
 		b.api, b.connectorInstanceID, b.sourceProvider, readOnlyTools,
 	))
+	server.AddReceivingMiddleware(accountGuard(b.api.AccountScope, scope))
 	err = server.Run(ctx, &mcp.StdioTransport{})
 	if errors.Is(err, context.Canceled) {
 		return nil

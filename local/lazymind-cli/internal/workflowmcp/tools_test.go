@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"lazymind/agentconnector/internal/coreapi"
 	"lazymind/agentconnector/internal/credentials"
 )
@@ -37,7 +38,8 @@ func TestStateExposesPanelURLOnlyForCodex(t *testing.T) {
 	}
 	for _, provider := range []string{"codex", "workbuddy", "deepseek-harness", "cursor", ""} {
 		for _, base := range []string{"", "https://panel.example.test/"} {
-			client := &Client{api: api, HostProvider: provider, interactionBaseURL: base}
+			t.Setenv("LAZYMIND_WEB_URL", base)
+			client := &Client{api: api, HostProvider: provider}
 			state, err := client.State(context.Background(), "test-session")
 			if base == "" {
 				base = server.URL

@@ -5,11 +5,10 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
-	"os"
 	"regexp"
-	"strings"
 	"time"
 
+	"lazymind/agentconnector/internal/connectorconfig"
 	"lazymind/agentconnector/internal/coreapi"
 	"lazymind/agentconnector/internal/workbuddyhost"
 )
@@ -98,21 +97,24 @@ func (s *Server) handleWorkBuddyPresentation(w http.ResponseWriter, r *http.Requ
 // original Workflow page independently, using its existing browser session.
 func (s *Server) handleWorkBuddyFrame(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	frontendURL := strings.TrimSpace(os.Getenv("LAZYMIND_WEB_URL"))
-	if frontendURL == "" {
-		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-		defer cancel()
-		var err error
-		frontendURL, err = s.store.ServerURL(ctx)
-		if err != nil {
-			workflowHostError(w, err)
-			return
-		}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	api, err := coreapi.New(s.store)
+	if err != nil {
+		workflowHostError(w, err)
+		return
 	}
-	base, err := url.Parse(frontendURL)
-	if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" ||
-		base.User != nil || base.RawQuery != "" || base.Fragment != "" {
-		workflowHostError(w, errors.New("WorkBuddy frontend must be an absolute HTTP(S) URL without credentials, query or fragment"))
+	frontendURL, err := api.WebURL(ctx)
+	if err != nil {
+		workflowHostError(w, err)
+		return
+	}
+	connection, err := connectorconfig.ForProvider(s.store.Directory(), "workbuddy", "")
+	if err == nil && connection != nil {
+		frontendURL, err = connection.URL("LAZYMIND_WEB_URL", frontendURL)
+	}
+	if err != nil {
+		workflowHostError(w, err)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

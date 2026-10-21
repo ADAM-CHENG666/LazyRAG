@@ -6,6 +6,8 @@ import (
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"log"
@@ -15,6 +17,9 @@ import (
 	"runtime"
 	"strconv"
 	"time"
+
+	"lazymind/agentconnector/internal/agentexec"
+	"lazymind/agentconnector/internal/connectorconfig"
 )
 
 //go:embed assets/connector.mjs assets/presentation.html
@@ -50,7 +55,15 @@ func Supervise(ctx context.Context, home, bridgeURL string, account func() (stri
 	for {
 		scope, scopeErr := account()
 		config, pair, configErr := Load(home, scope)
-		current := config.Node + "|" + config.PairingFile + "|" + strconv.Itoa(config.CDPPort) + "|" + scope
+		connection, connectionErr := connectorconfig.ForProvider(home, "workbuddy", "")
+		if connectionErr != nil {
+			configErr = connectionErr
+		}
+		if config.ConnectionFile != "" && (connection == nil || config.ConnectionFile != connectorconfig.Path(home, "workbuddy", "")) {
+			configErr = errors.New("WorkBuddy connection configuration is missing; reconnect")
+		}
+		definition, _ := json.Marshal(connection)
+		current := config.Node + "|" + config.PairingFile + "|" + strconv.Itoa(config.CDPPort) + "|" + scope + "|" + pair.Token + "|" + string(definition)
 		if scopeErr != nil || configErr != nil || !pair.Enabled {
 			if worker != nil {
 				cleanup()
@@ -76,33 +89,45 @@ func Supervise(ctx context.Context, home, bridgeURL string, account func() (stri
 				}
 			}
 			if worker == nil {
-				if err := writeAtomic(script, bundle); err == nil {
-					logDir := filepath.Join(home, "logs")
-					_ = os.MkdirAll(logDir, 0700)
-					log, err := os.OpenFile(filepath.Join(logDir, "workbuddy-workflow.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
-					if err == nil {
-						var lifetime context.Context
-						lifetime, stop = context.WithCancel(ctx)
-						cmd := exec.CommandContext(lifetime, config.Node, script, "--pairing-file", config.PairingFile,
-							"--bridge-url", bridgeURL, "--cdp-port", strconv.Itoa(config.CDPPort), "--parent-pid", strconv.Itoa(os.Getpid()))
-						cmd.Stdout, cmd.Stderr = log, log
-						cmd.Cancel = func() error {
-							if runtime.GOOS == "windows" {
-								return cmd.Process.Kill()
+				var node string
+				var nodeErr error
+				if connection != nil && connection.Overrides["LAZYMIND_NODE_BIN"] != "" {
+					node, nodeErr = agentexec.CompatibleNode(ctx, connection.Overrides["LAZYMIND_NODE_BIN"])
+				} else {
+					node, nodeErr = findNode(ctx, pair.Profile, config.Node)
+				}
+				if nodeErr != nil {
+					log.Printf("WorkBuddy runtime: %v", nodeErr)
+				} else {
+					config.Node = node
+					if err := writeAtomic(script, bundle); err == nil {
+						logDir := filepath.Join(home, "logs")
+						_ = os.MkdirAll(logDir, 0700)
+						log, err := os.OpenFile(filepath.Join(logDir, "workbuddy-workflow.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+						if err == nil {
+							var lifetime context.Context
+							lifetime, stop = context.WithCancel(ctx)
+							cmd := exec.CommandContext(lifetime, config.Node, script, "--pairing-file", config.PairingFile,
+								"--bridge-url", bridgeURL, "--cdp-port", strconv.Itoa(config.CDPPort), "--parent-pid", strconv.Itoa(os.Getpid()))
+							cmd.Stdout, cmd.Stderr = log, log
+							cmd.Cancel = func() error {
+								if runtime.GOOS == "windows" {
+									return cmd.Process.Kill()
+								}
+								return cmd.Process.Signal(os.Interrupt)
 							}
-							return cmd.Process.Signal(os.Interrupt)
-						}
-						cmd.WaitDelay = 3 * time.Second
-						if err := cmd.Start(); err == nil {
-							worker = cmd
-							fingerprint = current
-							done = make(chan error, 1)
-							ch := done
-							go func() { ch <- cmd.Wait(); log.Close() }()
-						} else {
-							stop()
-							stop = nil
-							log.Close()
+							cmd.WaitDelay = 3 * time.Second
+							if err := cmd.Start(); err == nil {
+								worker = cmd
+								fingerprint = current
+								done = make(chan error, 1)
+								ch := done
+								go func() { ch <- cmd.Wait(); log.Close() }()
+							} else {
+								stop()
+								stop = nil
+								log.Close()
+							}
 						}
 					}
 				}

@@ -5,20 +5,23 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"lazymind/agentconnector/internal/agentexec"
-	"lazymind/agentconnector/internal/localfile"
-	"lazymind/agentconnector/internal/workflowhost"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
+
+	"lazymind/agentconnector/internal/agentexec"
+	"lazymind/agentconnector/internal/connectorconfig"
+	"lazymind/agentconnector/internal/localfile"
+	"lazymind/agentconnector/internal/workflowhost"
 )
 
 type Config struct {
-	PairingFile string `json:"pairing_file"`
-	Node        string `json:"node"`
-	CDPPort     int    `json:"cdp_port"`
+	ConnectionFile string `json:"connection_file,omitempty"`
+	PairingFile    string `json:"pairing_file"`
+	Node           string `json:"node"`
+	CDPPort        int    `json:"cdp_port"`
 }
 
 func ConfigPath(home string) string { return filepath.Join(home, "workbuddy-workflow", "config.json") }
@@ -56,7 +59,7 @@ func Install(ctx context.Context, home, profile, account string) error {
 	if existing, _, err := Load(home, account); err == nil {
 		port = existing.CDPPort
 	}
-	config := Config{PairingFile: filepath.Join(home, "workflow-hosts", pair.ConnectorID+".json"), Node: node, CDPPort: port}
+	config := Config{ConnectionFile: connectorconfig.Path(home, "workbuddy", ""), PairingFile: filepath.Join(home, "workflow-hosts", pair.ConnectorID+".json"), Node: node, CDPPort: port}
 	body, _ := json.Marshal(config)
 	if err := retireLegacyPlugins(profile); err != nil {
 		return err
@@ -177,10 +180,14 @@ func writeAtomic(path string, body []byte) error {
 
 // Reuse WorkBuddy's managed runtime, so a desktop user does not need to
 // install Node or configure the GUI process's PATH.
-func findNode(ctx context.Context, profile string) (string, error) {
-	candidates := []string{}
-	if override := os.Getenv("LAZYMIND_NODE_BIN"); override != "" {
-		candidates = append(candidates, override)
+func findNode(ctx context.Context, profile string, preferred ...string) (string, error) {
+	candidates := append([]string{}, preferred...)
+	if override := connectorconfig.Value("LAZYMIND_NODE_BIN"); override != "" {
+		node, err := agentexec.CompatibleNode(ctx, override)
+		if err != nil {
+			return "", fmt.Errorf("LAZYMIND_NODE_BIN: %w", err)
+		}
+		return node, nil
 	}
 	versions := filepath.Join(profile, "binaries", "node", "versions")
 	names := []string{}
@@ -209,18 +216,5 @@ func findNode(ctx context.Context, profile string) (string, error) {
 	if node, err := agentexec.FindExecutable("", []string{"node"}); err == nil {
 		candidates = append(candidates, node)
 	}
-	for _, candidate := range candidates {
-		node, err := agentexec.ResolveExecutable(candidate)
-		if err != nil {
-			continue
-		}
-		version, err := agentexec.Run(ctx, node, "--version")
-		var major, minor int
-		if err == nil {
-			if _, err := fmt.Sscanf(strings.TrimSpace(version), "v%d.%d", &major, &minor); err == nil && (major > 22 || major == 22 && minor >= 19) {
-				return node, nil
-			}
-		}
-	}
-	return "", errors.New("WorkBuddy connector needs Node.js 22.19 or later; open WorkBuddy once to finish installing its bundled runtime")
+	return agentexec.CompatibleNode(ctx, candidates...)
 }

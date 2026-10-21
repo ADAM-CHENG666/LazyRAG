@@ -181,7 +181,7 @@ WorkflowPanel 继续由 LazyMind Web 托管，直接向 Core 提交用户操作�
 
 自动打开由 MCP 服务指令与工具描述引导 Agent 调用宿主工具，不是 MCP 服务直接操纵窗口。工具缺失或失败时明确报告并提供链接，不声称已打开。正在运行的 MCP 连接需要重新加载才能使用更新后的指令。
 
-Codex 不再注册 MCP App HTML 资源或专用面板工具，不需要额外 HTTPS 代理、端口或本地 CA。通用 `LAZYMIND_WEB_URL` 覆盖能力仍保留供有需要的部署使用。
+Codex 不再注册 MCP App HTML 资源或专用面板工具，不需要额外 HTTPS 代理、端口或本地 CA。自定义部署可在连接记录的 `overrides.LAZYMIND_WEB_URL` 中显式覆盖面板地址；桌面托管连接不继承启动进程中的旧地址。
 
 当前 Codex 接入采用 queue：MCP 在 `workflow.start` 内绑定原会话并返回最新状态，dispatcher 向该会话排队投递 continue。元数据缺失时允许 Agent 传入从宿主取得的真实 thread UUID；这是协议明确记录的身份信任降级。启动不再需要扫描会话或额外绑定唤醒。
 
@@ -424,3 +424,16 @@ CLI 接入基础设施也需要同步调整：
 - Codex 的 `integrations/codex-workflow` 使用桌面自带 CLI 的 queue，复用共享 dispatcher、HostBridge 和单实例锁；MCP 启动时绑定。配置与测试入口见该目录 README。
 - Codex 集成要求显式提供桌面自带 CLI 路径和匹配的 profile 配对；不连接 App Server。Stop 只保证在 Core 生效，取消回执明确说明不支持中断。
 - Codex 尚无 DSH 的 pre-tool / pre-step 钩子和持久事件序号；不确定投递保持 `unknown`，不自动重发。审批不自动批准，不能宣称两个宿主已完全等价。
+
+
+## 外部 Agent 的统一连接配置
+
+桌面安装的 Codex、WorkBuddy、DSH、Cursor、Raccoon、TRAE Work MCP 配置只传入 `LAZYMIND_CONNECTOR_CONFIG`。它指向 `LAZYMIND_HOME/connections/` 下的版本化记录，保存 home、provider、host ID、profile、配对文件引用及控制模式。地址读取现有凭据，程序读取现有绑定，令牌仍仅由凭据模块管理。DSH 的 Node 插件通过 `internal connection resolve` 使用同一个 Go 解析器。
+
+- 托管连接忽略继承的 WEB/MCP/Bridge 地址和程序路径环境变量，手动 CLI 保留显式覆盖。连接记录的 `overrides` 用于有意设置的部署差异，不从安装进程的环境复制。
+- 每次 API 请求和面板生成读取当前地址；MCP 在下一次调用前替换地址已变化的上游会话，不自动重放失败的工具调用。DSH 已打开页面需重载以获得新面板地址。
+- Codex 检查连接记录、程序绑定、安装记录和配对变化，先停止旧 worker 再重新解析并启动。WorkBuddy 继续使用 Bridge 的既有监督循环，启动 worker 时重新发现可用 Node。
+- 桌面通过会话交接记录数据目录身份，同一目录的端口变化不改变配对命名空间；账号、租户或数据目录变化仍使旧配对失效。远端服务保留完整服务地址隔离。
+- 配置缺失或损坏报告具体配置路径，不回退到继承的旧值。迁移仅覆盖确认归属的托管条目，保留其他条目和原始备份；重复连接不复制条目。
+
+回归验收覆盖旧环境变量非空、非法覆盖、运行中端口变化、账号/数据目录切换、配置损坏、配对撤销、DSH 控制器释放与重复迁移；插件源码、编译产物和嵌入归档需一并更新并通过 CI 的可重现构建检查。

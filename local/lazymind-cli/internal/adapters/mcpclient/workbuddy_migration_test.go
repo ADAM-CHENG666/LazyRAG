@@ -12,7 +12,7 @@ func TestWorkBuddyRelocatesOnlySameHostManagedEntry(t *testing.T) {
 	path := filepath.Join(home, "mcp.json")
 	self, _ := os.Executable()
 	oldPath := filepath.Join(home, "removed", "desktop", "dist", "mac-arm64", "LazyMind.app", "Contents", "Resources", "runtime", "bin", "lazymind")
-	old := managedStdio(oldPath, home, "host-test", WorkBuddy)
+	old := legacyTestStdio(oldPath, home, "host-test", WorkBuddy)
 	original, _ := json.Marshal(map[string]any{"custom": "keep", "mcpServers": map[string]any{"lazymind": old, "other": map[string]string{"command": "keep-me"}}})
 	if err := os.WriteFile(path, original, 0600); err != nil {
 		t.Fatal(err)
@@ -26,7 +26,7 @@ func TestWorkBuddyRelocatesOnlySameHostManagedEntry(t *testing.T) {
 		func(v *stdioMCPDefinition) { v.Env["LAZYMIND_HOME"] = "/other" },
 		func(v *stdioMCPDefinition) { v.Command = "/unrelated/lazymind" },
 	} {
-		candidate := managedStdio(old.Command, home, "host-test", WorkBuddy)
+		candidate := legacyTestStdio(old.Command, home, "host-test", WorkBuddy)
 		mutate(&candidate)
 		if stateForStdio(candidate, self, home, "host-test", WorkBuddy).owned {
 			t.Fatal("foreign entry accepted")
@@ -61,4 +61,8 @@ func TestWorkBuddyRelocatesOnlySameHostManagedEntry(t *testing.T) {
 	if servers["other"] == nil || servers["lazymind"] == nil {
 		t.Fatal("reconnect did not preserve config")
 	}
+}
+
+func legacyTestStdio(self, home, host string, kind Kind) stdioMCPDefinition {
+	return stdioMCPDefinition{Type: "stdio", Command: self, Args: []string{"mcp", "proxy"}, Env: map[string]string{"LAZYMIND_HOME": home, "LAZYMIND_AGENT_PROVIDER": string(kind), "LAZYMIND_AGENT_HOST_ID": host, "LAZYMIND_WEB_URL": "http://stale.example"}}
 }

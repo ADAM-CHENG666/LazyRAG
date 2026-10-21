@@ -22,6 +22,7 @@ import (
 	workbuddyadapter "lazymind/agentconnector/internal/adapters/workbuddy"
 	"lazymind/agentconnector/internal/agentexec"
 	"lazymind/agentconnector/internal/agentintegration"
+	"lazymind/agentconnector/internal/connectorconfig"
 	"lazymind/agentconnector/internal/credentials"
 	"lazymind/agentconnector/internal/executorpolicy"
 	"lazymind/agentconnector/internal/mcpbridge"
@@ -88,7 +89,7 @@ func Start(ctx context.Context, address string) (map[string]any, error) {
 		if err := validateBridgeIdentity(status, self); err != nil {
 			return nil, err
 		}
-		if status["version"] == "v3" {
+		if status["version"] == "v4" {
 			return status, nil
 		}
 		if err := Stop(ctx, address); err != nil {
@@ -109,6 +110,7 @@ func Start(ctx context.Context, address string) (map[string]any, error) {
 		return nil, err
 	}
 	command := exec.Command(self, "assistant", "serve", "--listen", address)
+	command.Env = connectorconfig.ServiceEnvironment(home)
 	command.SysProcAttr = detachedProcessAttributes()
 	command.Stdout = logFile
 	command.Stderr = logFile
@@ -208,7 +210,7 @@ func Health(ctx context.Context, address string) (map[string]any, error) {
 }
 
 func assistantHome() (string, error) {
-	if configured := strings.TrimSpace(os.Getenv("LAZYMIND_HOME")); configured != "" {
+	if configured := strings.TrimSpace(connectorconfig.Value("LAZYMIND_HOME")); configured != "" {
 		return filepath.Abs(configured)
 	}
 	home, err := os.UserHomeDir()
@@ -267,7 +269,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /v1/health", func(writer http.ResponseWriter, _ *http.Request) {
 		executable, _ := os.Executable()
 		writeJSON(writer, http.StatusOK, map[string]any{
-			"ok": true, "pid": os.Getpid(), "version": "v3",
+			"ok": true, "pid": os.Getpid(), "version": "v4",
 			"platform": runtime.GOOS, "executable": executable,
 		})
 	})

@@ -14,6 +14,7 @@ import (
 	"lazymind/agentconnector/internal/agentexec"
 	"lazymind/agentconnector/internal/agentintegration"
 	"lazymind/agentconnector/internal/codexplugin"
+	"lazymind/agentconnector/internal/connectorconfig"
 	"lazymind/agentconnector/internal/credentials"
 	"lazymind/agentconnector/internal/mcpbridge"
 	"lazymind/agentconnector/internal/workflowhost"
@@ -251,7 +252,7 @@ func (a *Adapter) isOwned(config mcpConfig) bool {
 
 func findBinary(configured string) (string, error) {
 	var desktop string
-	if strings.TrimSpace(configured) == "" && strings.TrimSpace(os.Getenv("LAZYMIND_CODEX_BIN")) == "" {
+	if strings.TrimSpace(configured) == "" && strings.TrimSpace(connectorconfig.Value("LAZYMIND_CODEX_BIN")) == "" {
 		if _, bound, err := agentexec.ExecutableBinding(agentexec.CodexCLI); err == nil && !bound {
 			// The Windows desktop launcher can also be named Codex.exe. Prefer
 			// the bundled CLI before falling back to generic executable discovery.
@@ -274,7 +275,7 @@ func findBinary(configured string) (string, error) {
 }
 
 func codexHome() (string, error) {
-	if configured := strings.TrimSpace(os.Getenv("CODEX_HOME")); configured != "" {
+	if configured := strings.TrimSpace(connectorconfig.Value("CODEX_HOME")); configured != "" {
 		return filepath.Abs(configured)
 	}
 	home, err := os.UserHomeDir()

@@ -4,11 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net"
-	"net/url"
-	"os"
 	"time"
 
+	"lazymind/agentconnector/internal/connectorconfig"
 	"lazymind/agentconnector/internal/credentials"
 	"lazymind/agentconnector/internal/workbuddyhost"
 )
@@ -17,14 +15,10 @@ import (
 // It restores the Bridge, which already supervises the Connector, only while
 // this account has enabled WorkBuddy. It never launches or restarts WorkBuddy.
 func KeepWorkBuddyAvailable(ctx context.Context, store *credentials.Store, stderr io.Writer) {
-	address := DefaultAddress
-	if configured := os.Getenv("LAZYMIND_ASSISTANT_BRIDGE_URL"); configured != "" {
-		u, err := url.Parse(configured)
-		if err != nil || u.Scheme != "http" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") || u.Port() == "" || (u.Hostname() != "localhost" && !net.ParseIP(u.Hostname()).IsLoopback()) {
-			fmt.Fprintln(stderr, "WorkBuddy recovery requires a loopback Assistant Bridge URL")
-			return
-		}
-		address = u.Host
+	address, err := connectorconfig.BridgeAddress()
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return
 	}
 	keepWorkBuddyAvailable(ctx, 5*time.Second, func() bool {
 		account, err := store.AccountScope()

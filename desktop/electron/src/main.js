@@ -395,6 +395,7 @@ function sidecarEnv() {
     PYTHONDONTWRITEBYTECODE: "1",
     LAZYMIND_FILE_WATCHER_EXTRA_ALLOWED_ROOTS_JSON: JSON.stringify(localFolderAccess.allowedRoots),
   };
+  delete env.LAZYMIND_CONNECTOR_CONFIG;
   Object.assign(
     env,
     buildObsidianRuntimeEnv(obsidianConfig.root, obsidianDisabledRoot),
@@ -729,8 +730,7 @@ function runAgentConnector(agent, action) {
       : action === "status" ? agentConnectorStatusTimeoutMs : agentConnectorActionTimeoutMs,
   );
   if (installWorkflow) {
-    const address = new URL(process.env.LAZYMIND_ASSISTANT_BRIDGE_URL || "http://127.0.0.1:19091").host;
-    return runConnectorJSON(["assistant", "start", "--listen", address], agentConnectorActionTimeoutMs).then(run);
+    return runConnectorJSON(["assistant", "start"], agentConnectorActionTimeoutMs).then(run);
   }
   return run();
 }

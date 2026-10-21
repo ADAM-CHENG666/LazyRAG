@@ -42,7 +42,7 @@ function presentationLink(runId, webUrl) {
 		if (!["http:", "https:"].includes(base.protocol) || base.username || base.password || base.search || base.hash) return null;
 		return {
 			runId,
-			url: new URL(`/workflow-runs/${encodeURIComponent(runId)}`, base).href
+			url: new URL(`workflow-runs/${encodeURIComponent(runId)}`, base.href.replace(/\/?$/, "/")).href
 		};
 	} catch {
 		return null;
@@ -390,7 +390,7 @@ function apply(ctx) {
 			ref: anchor,
 			hidden: true
 		});
-		const url = new URL(`/workflow-runs/${encodeURIComponent(current.run.runId)}/embed`, origin);
+		const url = new URL(`${current.run.url.replace(/\/$/, "")}/embed`);
 		url.searchParams.set("hostOrigin", window.location.origin);
 		const panel = /* @__PURE__ */ (0, react_jsx_runtime.jsx)("section", {
 			"aria-label": "LazyMind Workflow",

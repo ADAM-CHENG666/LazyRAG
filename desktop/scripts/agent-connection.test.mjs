@@ -24,7 +24,7 @@ for (const platform of ['darwin', 'win32']) {
   test(`desktop ${platform} uses production budgets for installation, status and disconnection`, async () => {
     const commands = [];
     const run = vm.runInNewContext(`${timeoutDeclarations}\n(${source.slice(start, end)})`, {
-      URL, process: { platform, env: {} },
+      URL, process: { platform, env: { LAZYMIND_ASSISTANT_BRIDGE_URL: 'file:///stale-invalid' } },
       runConnectorJSON: async (args, timeout) => {
         commands.push([Array.from(args), timeout]);
         return { state: 'enabled' };
@@ -38,9 +38,9 @@ for (const platform of ['darwin', 'win32']) {
     await run('cursor', 'connect');
     await run('cursor', 'disconnect');
     assert.deepEqual(commands, [
-      [['assistant', 'start', '--listen', '127.0.0.1:19091'], 15000],
+      [['assistant', 'start'], 15000],
       [['internal', 'agent', 'deepseek-harness', 'connect'], 660000],
-      [['assistant', 'start', '--listen', '127.0.0.1:19091'], 15000],
+      [['assistant', 'start'], 15000],
       [['internal', 'agent', 'workbuddy', 'connect'], 120000],
       [['internal', 'agent', 'all', 'status'], 30000],
       [['internal', 'agent', 'deepseek-harness', 'status'], 30000],

@@ -122,7 +122,7 @@ export function apply(ctx: ClientContext): void {
     }
     useEffect(syncExpansion, [expanded, collapsed, origin, runId])
     if (!current) return <span ref={anchor} hidden />
-    const url = new URL(`/workflow-runs/${encodeURIComponent(current.run.runId)}/embed`, origin)
+    const url = new URL(`${current.run.url.replace(/\/$/, "")}/embed`)
     url.searchParams.set('hostOrigin', window.location.origin)
     const panel = <section aria-label="LazyMind Workflow" style={{
       ...interactiveRegion,

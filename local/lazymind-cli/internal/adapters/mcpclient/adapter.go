@@ -17,6 +17,7 @@ import (
 
 	"lazymind/agentconnector/internal/agentexec"
 	"lazymind/agentconnector/internal/agentintegration"
+	"lazymind/agentconnector/internal/connectorconfig"
 	"lazymind/agentconnector/internal/credentials"
 	"lazymind/agentconnector/internal/mcpbridge"
 	"lazymind/agentconnector/internal/workbuddyhost"
@@ -358,6 +359,9 @@ func configPath(kind Kind) string {
 }
 
 func (a *Adapter) cursorInstallURL() (string, error) {
+	if _, err := connectorconfig.Save(connectorconfig.Config{Home: a.home, Provider: string(Cursor), HostID: a.hostID}); err != nil {
+		return "", err
+	}
 	body, err := json.Marshal(managedStdio(a.self, a.home, a.hostID, Cursor))
 	if err != nil {
 		return "", err

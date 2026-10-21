@@ -75,7 +75,7 @@ export function installHost(ctx: Context, bridge: HostTransport, config: HostCon
     return entry
   }
 
-  ctx.on('agent/pre-step', (payload, next) => own((async () => {
+  const removeHook0 = ctx.on('agent/pre-step', (payload, next) => own((async () => {
     const registration = ensure(payload.agent)
     await registration.ready
     wrap(payload.agent, registration)
@@ -85,15 +85,15 @@ export function installHost(ctx: Context, bridge: HostTransport, config: HostCon
     }) })
     return allowed ? next() : { kind: 'reject' as const }
   })()))
-  ctx.on('tools/ptc-dispatch-log', async (dispatch, next) => {
+  const removeHook1 = ctx.on('tools/ptc-dispatch-log', async (dispatch, next) => {
     const content = await next()
     const run = coordinator.takeNestedLink(dispatch.subCallId)
     if (!run) return content
     const { url: _url, ...identity } = run
     return [...content, { type: 'text', text: JSON.stringify({ lazymind_workflow: identity }) }]
   })
-  ctx.on('agent/status', ({ agent, status }) => { if (status === 'idle') coordinator.idle(agent) })
-  ctx.on('agent/disposed', ({ agent }) => {
+  const removeHook2 = ctx.on('agent/status', ({ agent, status }) => { if (status === 'idle') coordinator.idle(agent) })
+  const removeHook3 = ctx.on('agent/disposed', ({ agent }) => {
     const entry = registrations.get(agent)
     if (entry) {
       for (const wrapper of entry.wrappers.values()) wrapper.dispose()
@@ -107,6 +107,7 @@ export function installHost(ctx: Context, bridge: HostTransport, config: HostCon
   const polling = createDispatcher(runtime, coordinator, bridge, instanceId, lifetime.signal).poll()
   return async () => {
     lifetime.abort()
+    removeHook0(); removeHook1(); removeHook2(); removeHook3()
     await polling
     await Promise.allSettled([...tracked])
     for (const entry of registrations.values()) {

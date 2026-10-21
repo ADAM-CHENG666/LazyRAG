@@ -11,9 +11,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 
+	"lazymind/agentconnector/internal/connectorconfig"
 	"lazymind/agentconnector/internal/coreapi"
 )
 
@@ -28,7 +28,6 @@ type StartOrigin struct {
 type Client struct {
 	api                *coreapi.Client
 	origin             StartOrigin
-	interactionBaseURL string
 	HostProvider       string
 	RequireHostBinding bool
 	BindController     func(context.Context, string, string) error
@@ -232,14 +231,15 @@ func NewClient(api *coreapi.Client, origin StartOrigin) (*Client, error) {
 	}
 	origin.ConversationID = strings.TrimSpace(origin.ConversationID)
 	origin.ExternalRef = strings.TrimSpace(origin.ExternalRef)
-	base := strings.TrimSpace(os.Getenv("LAZYMIND_WEB_URL"))
-	if base != "" {
-		parsed, err := url.Parse(base)
-		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-			return nil, errors.New("LAZYMIND_WEB_URL must be an absolute HTTP(S) frontend URL without credentials, query or fragment")
+	if _, err := connectorconfig.Current(); err != nil {
+		return nil, err
+	}
+	if base := connectorconfig.Value("LAZYMIND_WEB_URL"); base != "" {
+		if err := connectorconfig.ValidateURL("LAZYMIND_WEB_URL", base); err != nil {
+			return nil, err
 		}
 	}
-	return &Client{api: api, origin: origin, interactionBaseURL: strings.TrimRight(base, "/")}, nil
+	return &Client{api: api, origin: origin}, nil
 }
 
 func (c *Client) List(ctx context.Context) (map[string]any, error) {
@@ -302,12 +302,9 @@ func (c *Client) State(ctx context.Context, sessionID string) (Projection, error
 	// outside the model's tool results, including any URL returned by Core.
 	state.InteractionURL = ""
 	if c.HostProvider == "codex" {
-		base := c.interactionBaseURL
-		if base == "" {
-			base, err = c.api.ServerURL(ctx)
-			if err != nil {
-				return Projection{}, err
-			}
+		base, err := c.api.WebURL(ctx)
+		if err != nil {
+			return Projection{}, err
 		}
 		state.InteractionURL = strings.TrimRight(base, "/") + "/workflow-runs/" + url.PathEscape(sessionID) + "/embed"
 	}

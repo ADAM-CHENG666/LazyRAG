@@ -7,8 +7,10 @@ const CONFIG_KEY = '__LAZYMIND_WORKFLOW_PRESENTATION__'
 export interface PresentationConfig { serverName: string; webUrl: string }
 
 /** DSH loads browser plugins independently of the Node plugin's config. */
-export function installPresentationConfig(ctx: Context, config: PresentationConfig): void {
+export function installPresentationConfig(ctx: Context, source: PresentationConfig | (() => PresentationConfig | undefined)): void {
   ctx.on('webserver/index-inject', table => {
+    const config = typeof source === 'function' ? source() : source
+    if (!config) return
     table.push({ kind: 'global', name: CONFIG_KEY, value: {
       serverName: config.serverName, webUrl: config.webUrl,
     } })

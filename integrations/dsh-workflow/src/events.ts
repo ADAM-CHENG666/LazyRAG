@@ -6,7 +6,7 @@ export function presentationLink(runId: unknown, webUrl: string): RunLink | null
   try {
     const base = new URL(webUrl)
     if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password || base.search || base.hash) return null
-    return { runId, url: new URL(`/workflow-runs/${encodeURIComponent(runId)}`, base).href }
+    return { runId, url: new URL(`workflow-runs/${encodeURIComponent(runId)}`, base.href.replace(/\/?$/, "/")).href }
   } catch { return null }
 }
 

@@ -190,7 +190,7 @@ func TestWorkBuddyFrameUsesCurrentFrontend(t *testing.T) {
 	for _, test := range []struct{ server, override, want string }{
 		{"http://127.0.0.1:18090", "", "http://127.0.0.1:18090"},
 		{"http://127.0.0.1:28090", "", "http://127.0.0.1:28090"},
-		{"http://127.0.0.1:28090", "https://panel.example.test/lazymind/", "https://panel.example.test/lazymind/"},
+		{"http://127.0.0.1:28090", "https://panel.example.test/lazymind", "https://panel.example.test/lazymind"},
 		{"http://127.0.0.1:28090", `https://panel.example.test/a"b<c`, `https://panel.example.test/a"b<c`},
 	} {
 		if err := server.store.Save(credentials.Credentials{

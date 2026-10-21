@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { open, readFile, stat, unlink } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { isAbsolute } from "node:path";
 
 //#region ../workflow-agent-core/src/protocol.ts
 function object(value) {
@@ -520,7 +522,7 @@ function presentationLink(runId, webUrl) {
 		if (!["http:", "https:"].includes(base.protocol) || base.username || base.password || base.search || base.hash) return null;
 		return {
 			runId,
-			url: new URL(`/workflow-runs/${encodeURIComponent(runId)}`, base).href
+			url: new URL(`workflow-runs/${encodeURIComponent(runId)}`, base.href.replace(/\/?$/, "/")).href
 		};
 	} catch {
 		return null;
@@ -860,7 +862,7 @@ function installHost(ctx, bridge, config, instanceId) {
 		entry.dispose = () => registration.dispose();
 		return entry;
 	}
-	ctx.on("agent/pre-step", (payload, next) => own((async () => {
+	const removeHook0 = ctx.on("agent/pre-step", (payload, next) => own((async () => {
 		const registration = ensure(payload.agent);
 		await registration.ready;
 		wrap(payload.agent, registration);
@@ -875,7 +877,7 @@ function installHost(ctx, bridge, config, instanceId) {
 			})
 		}) ? next() : { kind: "reject" };
 	})()));
-	ctx.on("tools/ptc-dispatch-log", async (dispatch, next) => {
+	const removeHook1 = ctx.on("tools/ptc-dispatch-log", async (dispatch, next) => {
 		const content = await next();
 		const run = coordinator.takeNestedLink(dispatch.subCallId);
 		if (!run) return content;
@@ -885,10 +887,10 @@ function installHost(ctx, bridge, config, instanceId) {
 			text: JSON.stringify({ lazymind_workflow: identity })
 		}];
 	});
-	ctx.on("agent/status", ({ agent, status }) => {
+	const removeHook2 = ctx.on("agent/status", ({ agent, status }) => {
 		if (status === "idle") coordinator.idle(agent);
 	});
-	ctx.on("agent/disposed", ({ agent }) => {
+	const removeHook3 = ctx.on("agent/disposed", ({ agent }) => {
 		const entry = registrations.get(agent);
 		if (entry) {
 			for (const wrapper of entry.wrappers.values()) wrapper.dispose();
@@ -901,6 +903,10 @@ function installHost(ctx, bridge, config, instanceId) {
 	const polling = createDispatcher(runtime, coordinator, bridge, instanceId, lifetime.signal).poll();
 	return async () => {
 		lifetime.abort();
+		removeHook0();
+		removeHook1();
+		removeHook2();
+		removeHook3();
 		await polling;
 		await Promise.allSettled([...tracked]);
 		for (const entry of registrations.values()) {
@@ -956,8 +962,10 @@ async function dispatcherLock(pairingFile, instanceId) {
 //#region src/presentation-config.ts
 const CONFIG_KEY = "__LAZYMIND_WORKFLOW_PRESENTATION__";
 /** DSH loads browser plugins independently of the Node plugin's config. */
-function installPresentationConfig(ctx, config) {
+function installPresentationConfig(ctx, source) {
 	ctx.on("webserver/index-inject", (table) => {
+		const config = typeof source === "function" ? source() : source;
+		if (!config) return;
 		table.push({
 			kind: "global",
 			name: CONFIG_KEY,
@@ -970,30 +978,138 @@ function installPresentationConfig(ctx, config) {
 }
 
 //#endregion
+//#region src/connection.ts
+/** Resolve through the connector so both runtimes share one configuration policy. */
+function resolveConnection(config, signal) {
+	if (!isAbsolute(config.connectorConfig ?? "") || !isAbsolute(config.command ?? "")) return Promise.reject(/* @__PURE__ */ new Error("Reconnect DSH from LazyMind to configure its connection"));
+	return new Promise((resolve, reject) => {
+		execFile(config.command, [
+			"internal",
+			"connection",
+			"resolve"
+		], {
+			env: {
+				...process.env,
+				LAZYMIND_CONNECTOR_CONFIG: config.connectorConfig
+			},
+			timeout: 1e4,
+			maxBuffer: 64 * 1024,
+			windowsHide: true,
+			signal
+		}, (error, stdout) => {
+			if (error) {
+				reject(/* @__PURE__ */ new Error(`LazyMind connection unavailable (${config.connectorConfig}); check its configuration or sign in again`));
+				return;
+			}
+			try {
+				const value = JSON.parse(stdout);
+				if (value.provider !== "deepseek-harness" || !value.webUrl || !value.bridgeUrl || !value.pairingFile || !value.serverName || !value.revision) throw new Error("Invalid DSH connection");
+				resolve(value);
+			} catch (error$1) {
+				reject(error$1);
+			}
+		});
+	});
+}
+/** Serial refresh: never keep an old controller after invalidation or overlap owners. */
+function watchConnection(resolve, install, unavailable, interval = 3e3) {
+	const lifetime = new AbortController();
+	let readyResolve;
+	let readyReject;
+	const ready = new Promise((resolve$1, reject) => {
+		readyResolve = resolve$1;
+		readyReject = reject;
+	});
+	let dispose;
+	let fingerprint = "";
+	let wake;
+	const stopCurrent = async (error) => {
+		const previous = dispose;
+		dispose = void 0;
+		fingerprint = "";
+		unavailable(error);
+		await previous?.();
+	};
+	const done = (async () => {
+		try {
+			while (!lifetime.signal.aborted) {
+				try {
+					const next = await resolve(lifetime.signal);
+					if (lifetime.signal.aborted) break;
+					const key = JSON.stringify(next);
+					if (key !== fingerprint) {
+						await stopCurrent();
+						if (lifetime.signal.aborted) break;
+						dispose = await install(next);
+						fingerprint = key;
+						readyResolve();
+					}
+				} catch (error) {
+					readyReject(error);
+					await stopCurrent(error);
+				}
+				if (!lifetime.signal.aborted) await new Promise((ready$1) => {
+					const timer = setTimeout(ready$1, interval);
+					wake = () => {
+						clearTimeout(timer);
+						ready$1();
+					};
+				});
+			}
+		} finally {
+			readyResolve();
+			await stopCurrent();
+		}
+	})();
+	return Object.assign(async () => {
+		lifetime.abort();
+		wake?.();
+		await done;
+	}, { ready });
+}
+
+//#endregion
 //#region src/index.ts
 const inject = [
 	"tools",
 	"agents",
 	"sessionController"
 ];
-/** Install only public DSH extensions. The pairing secret stays in a private host file. */
+/** Pairing and live addresses are resolved together; inherited endpoint env is ignored. */
 async function apply(ctx, config) {
-	if (!config.webUrl || !config.serverName) throw new Error("Reconnect DSH from LazyMind to configure the workflow bundle");
-	const pairing = await loadPairing(config.pairingFile);
-	const instance = randomUUID();
-	const release = await dispatcherLock(config.pairingFile, instance);
+	let presentation;
+	let lastError = "";
+	installPresentationConfig(ctx, () => presentation);
+	const stop = watchConnection((signal) => resolveConnection(config, signal), async (current) => {
+		const pairing = await loadPairing(current.pairingFile);
+		const instance = randomUUID();
+		const release = await dispatcherLock(current.pairingFile, instance);
+		try {
+			const dispose = installHost(ctx, new HostBridge(current.bridgeUrl, pairing), current, instance);
+			presentation = current;
+			lastError = "";
+			return async () => {
+				try {
+					await dispose();
+				} finally {
+					await release();
+				}
+			};
+		} catch (error) {
+			await release();
+			throw error;
+		}
+	}, (error) => {
+		presentation = void 0;
+		const message = error instanceof Error ? error.message : "";
+		if (message && message !== lastError) console.warn("LazyMind Workflow:", message);
+		if (message) lastError = message;
+	});
+	ctx.effect(() => stop);
 	try {
-		installPresentationConfig(ctx, config);
-		const dispose = installHost(ctx, new HostBridge(config.bridgeUrl, pairing), config, instance);
-		ctx.effect(() => async () => {
-			try {
-				await dispose();
-			} finally {
-				await release();
-			}
-		});
+		await stop.ready;
 	} catch (error) {
-		await release();
+		await stop();
 		throw error;
 	}
 }
