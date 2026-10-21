@@ -610,57 +610,67 @@ describe("AgentIntegrationPage", () => {
     expect(within(workbuddy).getByText("已自动复用 WorkBuddy 登录")).toBeInTheDocument();
   });
 
-  it.each([
-    true,
-    false,
-  ])("guides WorkBuddy installation from the switch (expanded: %s) and can reopen without reinstalling", async (expanded) => {
-    const status = {
-      agent: "workbuddy", display_name: "WorkBuddy", state: "ready",
-      requirements: [
-        { id: "workbuddy_desktop", satisfied: true },
-        { id: "workbuddy_desktop_initialized", satisfied: true },
-      ],
-    };
+  it.each([true, false])("requires confirmation before restarting WorkBuddy (expanded: %s)", async (expanded) => {
+    const status = { agent: "workbuddy", display_name: "WorkBuddy", state: "ready",
+      requirements: [{ id: "workbuddy_desktop", satisfied: true }, { id: "workbuddy_desktop_initialized", satisfied: true }] };
+    const installed = { ...status, state: "enabled", connection: { mcp_configured: true, control_ready: true, mcp_ready: false, presentation_status: "mounted" } };
     mocks.statuses.mockResolvedValue({ ok: true, data: { workbuddy: status } });
-    mocks.executors.mockResolvedValue({ data: { data: { executors: [{
-      id: "workbuddy", installed: true, host_online: true, available: true,
-    }] } } });
-    mocks.executorPolicies.mockResolvedValue({ ok: true, data: {
-      workbuddy: { provider: "workbuddy", enabled: false, installed: true, ready: true },
-    } });
-    mocks.action.mockImplementation(async (_agent, action) => ({
-      ok: true, data: { ...status, state: action === "connect" ? "enabled" : "ready" },
-    }));
-
+    mocks.executors.mockResolvedValue({ data: { data: { executors: [{ id: "workbuddy", installed: true, host_online: true, available: true }] } } });
+    mocks.executorPolicies.mockResolvedValue({ ok: true, data: { workbuddy: { provider: "workbuddy", enabled: false, installed: true, ready: true } } });
+    mocks.action.mockResolvedValue({ ok: true, data: installed });
     render(<ConfigProvider theme={{ token: { motion: false } }}><AgentIntegrationPage /></ConfigProvider>);
-    await screen.findByText("外部 Agent 集成");
+    await waitFor(() => expect(screen.getByTestId("agent-panel-workbuddy")).toHaveTextContent("已安装"));
     const card = expanded ? expandAgent("workbuddy") : screen.getByTestId("agent-panel-workbuddy");
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     fireEvent.click(within(card).getByRole("switch", { name: "WorkBuddy 使用 LazyMind" }));
-    const dialog = await screen.findByRole("dialog", { name: "在 WorkBuddy 中使用 LazyMind" });
-    expect(mocks.action).toHaveBeenCalledWith("workbuddy", "connect");
-    expect(dialog).toHaveTextContent("可能重启 WorkBuddy");
-    expect(dialog).toHaveTextContent("连接器界面");
-    expect(dialog).toHaveTextContent("确认信任并启用");
-    expect(dialog).toHaveTextContent("重新检测");
-    fireEvent.click(within(dialog).getByRole("button", { name: "我知道了" }));
+    let dialog = await screen.findByRole("dialog");
+    expect(mocks.action).not.toHaveBeenCalled();
+    expect(dialog).toHaveTextContent("即将重启 WorkBuddy，请先保存会话并结束运行中的任务。");
+    fireEvent.click(within(dialog).getByRole("button", { name: /取\s*消/ }));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
-
-    expandAgent("workbuddy");
-    expect(card).toHaveTextContent("完成对应配置后可启用");
-    expect(card).toHaveTextContent("完成后重新检测");
-    expect(card).toHaveTextContent("允许 WorkBuddy 调用 LazyMind");
-    expect(card).toHaveTextContent("调用外部 Agent 能力");
-    expect(card).not.toHaveTextContent("待确认信任");
-    fireEvent.click(within(card).getByRole("button", { name: /安装引导/ }));
-    await screen.findByRole("dialog", { name: "在 WorkBuddy 中使用 LazyMind" });
+    expect(mocks.action).not.toHaveBeenCalled();
+    fireEvent.click(within(card).getByRole("switch", { name: "WorkBuddy 使用 LazyMind" }));
+    dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "已保存，继续" }));
+    await within(dialog).findByText("组件安装成功");
     expect(mocks.action).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByRole("button", { name: "我知道了" }));
+    expect(mocks.action).toHaveBeenCalledWith("workbuddy", "connect");
+    fireEvent.click(within(dialog).getByRole("button", { name: "下一步：信任并开启" }));
+    expect(within(dialog).getByRole("img", { name: /MCP 服务管理/ })).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "我已信任并开启" }));
+    mocks.statuses.mockResolvedValue({ ok: true, data: { workbuddy: installed } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "检查连接" }));
+    await within(dialog).findByText("连接尚未就绪");
+    expect(within(dialog).queryByText("连接成功")).not.toBeInTheDocument();
+    mocks.statuses.mockResolvedValue({ ok: true, data: { workbuddy: { ...installed, connection: { ...installed.connection, mcp_ready: true } } } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "重新检查" }));
+    await within(dialog).findByText("连接成功");
+    fireEvent.click(within(dialog).getByRole("button", { name: /完\s*成/ }));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expandAgent("workbuddy");
+    fireEvent.click(within(card).getByRole("button", { name: /安装引导/ }));
+    dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("组件安装成功");
+    expect(mocks.action).toHaveBeenCalledTimes(1);
+    expect(card).not.toHaveTextContent(/待完成信任|继续设置/);
+  });
 
-    await act(async () => fireEvent.click(within(card).getByRole("switch", { name: "WorkBuddy 使用 LazyMind" })));
-    expect(mocks.action).toHaveBeenLastCalledWith("workbuddy", "disconnect");
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  it.each(["zh-CN", "en-US"])("keeps installation failure in the guide (%s)", async (language) => {
+    await retryI18n.changeLanguage(language);
+    const tr = (key: string) => retryI18n.t(`agentIntegration.workbuddyInstallGuide.${key}`);
+    const status = { agent: "workbuddy", display_name: "WorkBuddy", state: "ready", requirements: [{ id: "workbuddy_desktop", satisfied: true }, { id: "workbuddy_desktop_initialized", satisfied: true }] };
+    mocks.statuses.mockResolvedValue({ ok: true, data: { workbuddy: status } });
+    mocks.action.mockResolvedValue({ ok: true, data: { ...status, state: "error", message: "Installation failed" } });
+    render(<AgentIntegrationPage />);
+    const card = expandAgent("workbuddy");
+    const toggle = await within(card).findByRole("switch", { name: "WorkBuddy 使用 LazyMind" });
+    fireEvent.click(toggle);
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent(tr("saveDescription"));
+    fireEvent.click(within(dialog).getByRole("button", { name: tr("saveAndContinue") }));
+    await within(dialog).findByText(tr("installFailedTitle"));
+    expect(dialog).toHaveTextContent("Installation failed");
+    expect(within(dialog).queryByText(tr("installedTitle"))).not.toBeInTheDocument();
+    expect(await within(dialog).findByRole("button", { name: tr("retryInstall") })).toBeEnabled();
   });
 
   it.each([

@@ -39,6 +39,7 @@ import {
 } from "@/modules/chat/utils/request";
 import "./index.scss";
 import ExternalCapabilityAccess from "./ExternalCapabilityAccess";
+import WorkBuddyInstallationGuide from "./WorkBuddyInstallationGuide";
 
 interface AgentDefinition {
   id: DesktopAgent;
@@ -271,11 +272,14 @@ export default function AgentIntegrationPage() {
     }
   }, [executors, executorPolicies, pendingLoginAgent]);
 
-  const runAction = async (agent: DesktopAgent, nextAction: DesktopAgentIntegrationAction) => {
+  const runAction = async (agent: DesktopAgent, nextAction: DesktopAgentIntegrationAction, restartConfirmed = false) => {
+    if (agent === "workbuddy" && nextAction === "connect" && !restartConfirmed) {
+      setWorkBuddyGuideOpen(true);
+      return;
+    }
     if (pendingAgentActions.current.has(agent)) return;
     pendingAgentActions.current.add(agent);
     const key = `${agent}:${nextAction}`;
-    if (agent === "workbuddy" && nextAction === "connect") setWorkBuddyGuideOpen(true);
     try {
       setAction(key);
       const result = await agentIntegrationAction(agent, nextAction);
@@ -294,9 +298,12 @@ export default function AgentIntegrationPage() {
           ? "agentIntegration.interactiveLoginStarted"
           : "agentIntegration.loginStarted", { agent: executorName }));
         setPendingLoginAgent(agent);
-      } else if (result.data.state === "enabled") {
+      } else if (result.data.state === "enabled" && agent !== "workbuddy") {
         message.success(t("agentIntegration.enableSuccess", { agent: result.data.display_name }));
       }
+      return result.data;
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       pendingAgentActions.current.delete(agent);
       setAction((current) => current === key ? "" : current);
@@ -414,7 +421,7 @@ export default function AgentIntegrationPage() {
                       else next.add(agent.id);
                       return next;
                     })}
-                    onMCPAction={runAction}
+                    onMCPAction={async (agent, operation) => { await runAction(agent, operation); }}
                     onOpenInstallationGuide={() => setWorkBuddyGuideOpen(true)}
                     onExecutorAction={runExecutorAction}
                     onBindingAction={runBindingAction}
@@ -432,11 +439,12 @@ export default function AgentIntegrationPage() {
         </section>
       </Spin>
       <ExternalCapabilityAccess />
-      <WorkBuddyInstallationGuide
-        open={workBuddyGuideOpen}
+      {workBuddyGuideOpen && <WorkBuddyInstallationGuide
+        status={statuses.workbuddy}
+        onConnect={() => runAction("workbuddy", "connect", true)}
+        onStatus={(status) => setStatuses(current => ({ ...current, workbuddy: status }))}
         onClose={() => setWorkBuddyGuideOpen(false)}
-        t={t}
-      />
+      />}
       <Modal
         open={manualBindingTarget !== null}
         title={t("agentIntegration.executablePathTitle")}
@@ -465,38 +473,6 @@ export default function AgentIntegrationPage() {
         />
       </Modal>
     </div>
-  );
-}
-
-function WorkBuddyInstallationGuide({ open, onClose, t }: {
-  open: boolean;
-  onClose: () => void;
-  t: TFunction;
-}) {
-  return (
-    <Modal
-      open={open}
-      centered
-      className="agent-integration-installation-guide"
-      title={t("agentIntegration.workbuddyInstallGuide.title")}
-      onCancel={onClose}
-      footer={<Button type="primary" onClick={onClose}>{t("agentIntegration.workbuddyInstallGuide.close")}</Button>}
-    >
-      <Typography.Paragraph type="secondary">
-        {t("agentIntegration.workbuddyInstallGuide.description")}
-      </Typography.Paragraph>
-      <ol className="agent-integration-installation-steps">
-        {["install", "trust", "verify"].map((step) => (
-          <li key={step}>
-            <strong>{t(`agentIntegration.workbuddyInstallGuide.${step}Title`)}</strong>
-            <p>{t(`agentIntegration.workbuddyInstallGuide.${step}Description`)}</p>
-          </li>
-        ))}
-      </ol>
-      <Typography.Paragraph type="secondary" className="agent-integration-installation-note">
-        <QuestionCircleOutlined /> {t("agentIntegration.workbuddyInstallGuide.reopenHint")}
-      </Typography.Paragraph>
-    </Modal>
   );
 }
 

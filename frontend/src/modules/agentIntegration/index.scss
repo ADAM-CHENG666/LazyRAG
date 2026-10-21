@@ -694,29 +694,12 @@
 }
 
 .agent-integration-installation-guide {
-  .agent-integration-installation-steps {
-    display: grid;
-    gap: 18px;
-    margin: 20px 0;
-    padding-left: 24px;
-
-    li { padding-left: 6px; }
-    li::marker { color: #3973ff; }
-
-    p {
-      margin: 5px 0 0;
-      color: #8591a5;
-      font-size: 13px;
-      line-height: 1.6;
-    }
-  }
-
-  .agent-integration-installation-note {
-    margin: 0;
-    padding-top: 14px;
-    border-top: 1px solid #e2e8f1;
-    font-size: 12px;
-  }
+  .ant-steps { margin: 20px 0; }
+  .agent-integration-installation-content { min-height: 90px; margin: 20px 0; }
+  .agent-integration-installation-progress { width: 100%; padding: 20px 0; }
+  .agent-integration-installation-footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; }
+  .agent-integration-installation-image { display: block; width: 100%; padding: 0; border: 0; background: transparent; cursor: zoom-in; img { display: block; width: 100%; border-radius: 8px; } }
+  .agent-integration-installation-note { margin: 10px 0 0; font-size: 12px; }
 }
 
 .external-capability-result-modal {

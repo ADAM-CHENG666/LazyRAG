@@ -237,6 +237,7 @@ func (a *Adapter) status(ctx context.Context) agentintegration.Status {
 				state.current = false
 				status.Message = "Reconnect WorkBuddy to configure the independent Workflow connector."
 			} else {
+				status.Connection.MCPReady = workbuddyhost.MCPReady(a.home, account)
 				// A temporary outage must not turn the user's enabled switch off
 				// or prevent disconnecting. Health is reported independently.
 				state.current = true
