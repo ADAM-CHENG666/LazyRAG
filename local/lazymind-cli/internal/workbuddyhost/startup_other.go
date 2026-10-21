@@ -1,9 +1,8 @@
-//go:build !darwin
+//go:build !darwin && !windows
 
 package workbuddyhost
 
 import "context"
 
-// Persistent GUI launch configuration is currently implemented for macOS.
-// Other platforms retain their explicit launchDesktop behavior.
+// WorkBuddy desktop integration is supported on macOS and Windows.
 func configureDesktopStartup(context.Context, string, int, bool) error { return nil }

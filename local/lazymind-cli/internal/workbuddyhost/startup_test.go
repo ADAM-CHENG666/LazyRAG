@@ -4,23 +4,100 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
 type fakeStartupEnvironment struct {
+	mu    sync.Mutex
 	value string
 	fail  bool
 }
 
-func (e *fakeStartupEnvironment) Get() (string, error) { return e.value, nil }
+type publishedStartupEnvironment struct {
+	fakeStartupEnvironment
+	failNotification bool
+	publications     int
+}
+
+func (e *publishedStartupEnvironment) Refresh() error {
+	e.publications++
+	if e.failNotification {
+		return errors.New("notification unavailable")
+	}
+	return nil
+}
+func (e *publishedStartupEnvironment) Set(value string) error { e.value = value; return e.Refresh() }
+func (e *publishedStartupEnvironment) Unset() error           { e.value = ""; return e.Refresh() }
+
+func TestStartupEnvironmentRetriesPublishAndRestoreWithoutLosingOriginal(t *testing.T) {
+	home := t.TempDir()
+	env := &publishedStartupEnvironment{fakeStartupEnvironment: fakeStartupEnvironment{value: "9444"}, failNotification: true}
+	if err := updateStartupEnvironment(home, 9333, true, env); err == nil {
+		t.Fatal("expected publication failure")
+	}
+	env.failNotification = false
+	if err := updateStartupEnvironment(home, 9333, true, env); err != nil {
+		t.Fatal(err)
+	}
+	if env.publications != 2 || env.value != "9333" {
+		t.Fatalf("enable: %+v", env)
+	}
+	env.failNotification = true
+	if err := updateStartupEnvironment(home, 0, false, env); err == nil {
+		t.Fatal("expected restore publication failure")
+	}
+	env.failNotification = false
+	if err := updateStartupEnvironment(home, 0, false, env); err != nil {
+		t.Fatal(err)
+	}
+	if env.publications != 4 || env.value != "9444" {
+		t.Fatalf("restore: %+v", env)
+	}
+}
+
+func TestStartupEnvironmentConcurrentConnectKeepsOriginalValue(t *testing.T) {
+	home := t.TempDir()
+	env := &fakeStartupEnvironment{value: "9444"}
+	var workers sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			if err := updateStartupEnvironment(home, 9333, true, env); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	workers.Wait()
+	if err := updateStartupEnvironment(home, 0, false, env); err != nil {
+		t.Fatal(err)
+	}
+	if env.value != "9444" {
+		t.Fatalf("lost original value: %q", env.value)
+	}
+}
+
+func (e *fakeStartupEnvironment) Get() (string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.value, nil
+}
 func (e *fakeStartupEnvironment) Set(value string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	if e.fail {
 		return errors.New("unavailable")
 	}
 	e.value = value
 	return nil
 }
-func (e *fakeStartupEnvironment) Unset() error { e.value = ""; return nil }
+func (e *fakeStartupEnvironment) Unset() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.value = ""
+	return nil
+}
 func TestStartupEnvironmentLifecycle(t *testing.T) {
 	home := t.TempDir()
 	env := &fakeStartupEnvironment{value: "9444"}

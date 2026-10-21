@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+
+	"lazymind/agentconnector/internal/localfile"
 )
 
 const desktopDebugPortEnv = "WORKBUDDY_REMOTE_DEBUGGING_PORT"
@@ -25,6 +27,14 @@ type startupOwnership struct {
 // outside the app bundle so upgrades do not erase it and disable can restore it.
 func updateStartupEnvironment(home string, port int, enabled bool, env startupEnvironment) error {
 	path := filepath.Join(home, "workbuddy-workflow", "startup-environment.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	unlock, err := localfile.Lock(path + ".lock")
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	var owned startupOwnership
 	body, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
@@ -50,6 +60,10 @@ func updateStartupEnvironment(home string, port int, enabled bool, env startupEn
 			if err != nil {
 				return err
 			}
+		} else if err := refreshStartupEnvironment(env); err != nil {
+			// A prior restore may have written the registry but failed to
+			// notify Explorer. Keep ownership until publication succeeds.
+			return err
 		}
 		return os.Remove(path)
 	}
@@ -58,7 +72,9 @@ func updateStartupEnvironment(home string, port int, enabled bool, env startupEn
 	}
 	desired := strconv.Itoa(port)
 	if current == desired {
-		return nil
+		// A previous write may have succeeded while notifying the desktop
+		// failed. Retry publication without taking ownership of user settings.
+		return refreshStartupEnvironment(env)
 	}
 	// An empty value is expected after logout; reinstall our setting then. Do
 	// not replace an environment value someone else changed while enabled.
@@ -74,4 +90,11 @@ func updateStartupEnvironment(home string, port int, enabled bool, env startupEn
 		return err
 	}
 	return env.Set(desired)
+}
+
+func refreshStartupEnvironment(env startupEnvironment) error {
+	if publisher, ok := env.(interface{ Refresh() error }); ok {
+		return publisher.Refresh()
+	}
+	return nil
 }
