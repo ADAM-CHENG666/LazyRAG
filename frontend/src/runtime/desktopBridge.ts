@@ -108,7 +108,7 @@ export interface DesktopAgentConnectionStatus {
 }
 
 export interface DesktopAgentIntegrationStatus {
-  issue?: { code: "unsupported_version" | "dependency_environment" | "operation_failed"; path?: string };
+  issue?: { code: "unsupported_version" | "dependency_environment" | "operation_failed" | "version_unreadable" | "capability_unavailable" | "host_unavailable"; path?: string };
 	can_connect?: boolean;
 	can_disconnect?: boolean;
 	retry_action?: "connect" | "disconnect";

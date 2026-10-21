@@ -50,7 +50,7 @@ vi.mock("./externalCapabilitiesApi", () => ({
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
     t: (key: string, options?: { defaultValue?: string; agent?: string; count?: number }) => {
-      if (key === "agentIntegration.retryDisconnection" || key.startsWith("agentIntegration.workbuddyInstallGuide.")) return retryI18n.t(key);
+      if (key === "agentIntegration.retryDisconnection" || key.startsWith("agentIntegration.workbuddyInstallGuide.") || key.startsWith("agentIntegration.workbuddyErrors.")) return retryI18n.t(key);
       const agent = options?.agent || "Agent";
       const values: Record<string, string> = {
         "common.refresh": "刷新",
@@ -701,6 +701,33 @@ describe("AgentIntegrationPage", () => {
     expect(dialog).toHaveTextContent("Installation failed");
     expect(within(dialog).queryByText(tr("installedTitle"))).not.toBeInTheDocument();
     expect(await within(dialog).findByRole("button", { name: tr("retryInstall") })).toBeEnabled();
+  });
+
+  it.each(["zh-CN", "en-US"])("explains WB version and capability failures and keeps cleanup available (%s)", async (language) => {
+    await retryI18n.changeLanguage(language);
+    const tr = (key: string) => retryI18n.t(`agentIntegration.workbuddyInstallGuide.${key}`);
+    const status = { agent: "workbuddy", display_name: "WorkBuddy", state: "ready", requirements: [{ id: "workbuddy_desktop", satisfied: true }, { id: "workbuddy_desktop_initialized", satisfied: true }] };
+    mocks.statuses.mockResolvedValue({ ok: true, data: { workbuddy: status } });
+    mocks.action.mockResolvedValue({ ok: true, data: { ...status, state: "error", can_disconnect: true, issue: { code: "unsupported_version" }, message: "raw preflight details" } });
+    render(<ConfigProvider theme={{ token: { motion: false } }}><AgentIntegrationPage /></ConfigProvider>);
+    const card = expandAgent("workbuddy");
+    fireEvent.click(await within(card).findByRole("switch", { name: "WorkBuddy 使用 LazyMind" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: tr("saveAndContinue") }));
+    await within(dialog).findByText(retryI18n.t("agentIntegration.workbuddyErrors.unsupported_version"));
+    expect(dialog).not.toHaveTextContent("raw preflight details");
+    mocks.action.mockResolvedValue({ ok: true, data: { ...status, state: "error", can_disconnect: true, issue: { code: "capability_unavailable" }, message: "raw SDK details" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: tr("retryInstall") }));
+    await within(dialog).findByText(retryI18n.t("agentIntegration.workbuddyErrors.capability_unavailable"));
+    expect(dialog).not.toHaveTextContent("raw SDK details");
+    expect(dialog).not.toHaveTextContent("5.8.3");
+    fireEvent.click(within(dialog).getByRole("button", { name: tr("later") }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    const toggle = within(card).getByRole("switch", { name: "WorkBuddy 使用 LazyMind" });
+    expect(toggle).toBeEnabled();
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    fireEvent.click(toggle);
+    await waitFor(() => expect(mocks.action).toHaveBeenLastCalledWith("workbuddy", "disconnect"));
   });
 
   it.each([

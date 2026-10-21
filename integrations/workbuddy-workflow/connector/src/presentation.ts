@@ -1,3 +1,4 @@
+import { workbuddyVersionIssue } from './compatibility'
 import type { Cdp } from './cdp'
 import { setTimeout as delay } from 'node:timers/promises'
 import { installTailFollow } from './tail-follow'
@@ -44,7 +45,7 @@ export function readPresentationSession(): { session_id: string | null; epoch: s
 const cleanupPresentation = 'window.__lazymindWorkflowTail?.dispose(); window.__lazymindWorkflowPresentationSession?.dispose()'
 
 // Serialized into the renderer: keep this function independent of module scope.
-export function mountPresentation(target: PresentationTarget, followTail = installTailFollow, fitTail = installTailExtent) {
+export function mountPresentation(target: PresentationTarget, followTail = installTailFollow, fitTail = installTailExtent, versionIssue = workbuddyVersionIssue) {
   const host = window as any
   const version = 'tail-v4'
   const key = '__lazymindWorkflowTail'
@@ -52,7 +53,9 @@ export function mountPresentation(target: PresentationTarget, followTail = insta
   const wb = host.wb
   if (target.epoch && host.__lazymindWorkflowPresentationSession?.read().epoch !== target.epoch) return { status: 'stale' }
   if (!wb?.conversations) return { status: 'page-not-ready' }
-  if (host.workbuddyDesktop?.appVersion !== '5.8.3') { previous?.dispose(); return { status: 'layout-incompatible' } }
+  const issue = versionIssue(host.workbuddyDesktop?.appVersion)
+  if (issue) { previous?.dispose(); return { status: issue } }
+  if (typeof wb.conversations.onCurrentChange !== 'function') { previous?.dispose(); return { status: 'capability_unavailable' } }
   if (wb?.conversations?.currentId !== target.session_id) return { status: 'stale' }
   if (!target.run_id) { previous?.dispose(); return { status: 'unbound' } }
   const url = new URL(target.frame_url)
@@ -275,7 +278,7 @@ export function mountPresentation(target: PresentationTarget, followTail = insta
 }
 
 export function presentationExpression(target: PresentationTarget) {
-  return `(${mountPresentation.toString()})(${JSON.stringify(target)}, ${installTailFollow.toString()}, ${installTailExtent.toString()})`
+  return `(${mountPresentation.toString()})(${JSON.stringify(target)}, ${installTailFollow.toString()}, ${installTailExtent.toString()}, ${workbuddyVersionIssue.toString()})`
 }
 
 export interface PresentationStatus { status: string; page_status?: string; checked_at: number; native_session_id?: string; run_id?: string }

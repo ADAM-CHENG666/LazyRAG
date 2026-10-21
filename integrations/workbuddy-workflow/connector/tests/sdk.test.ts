@@ -14,12 +14,12 @@ function fixture() {
   }
   const sdk = { currentId: B, get: vi.fn(async (id: string) => sessions[id]),
     local: { list: vi.fn(async () => ({ items: Object.values(sessions).map((c: any) => c.info), total: 2 })) } }
-  vi.stubGlobal('wb', { conversations: sdk }); vi.stubGlobal('workbuddyDesktop', { appVersion: '5.7.7' })
+  vi.stubGlobal('wb', { conversations: sdk }); vi.stubGlobal('workbuddyDesktop', { appVersion: '5.8.3' })
   return { sdk, sessions, block, request }
 }
 afterEach(() => vi.unstubAllGlobals())
 describe('WorkBuddy native SDK contract', () => {
-  it.each(['5.7.7', '5.8.3'])('supports the checked SDK contract on %s', async version => {
+  it.each(['5.8.3', '5.8.4', '5.9.0', '6.0.0', '5.8.4-rc.1'])('supports the checked SDK contract on %s', async version => {
     const f = fixture(); vi.stubGlobal('workbuddyDesktop', { appVersion: version })
     expect(await sdkOperation({ kind: 'probe' })).toEqual({ version })
     expect(await sdkOperation({ kind: 'send', sessionId: B, actionId: 'version-check', message: 'wake' })).toEqual({ accepted: true })
@@ -69,9 +69,9 @@ describe('WorkBuddy native SDK contract', () => {
     f.sessions[A].cancel.mockResolvedValue({ errorCode: 'unavailable' })
     expect(await sdkOperation({ kind: 'cancel', sessionId: A })).toEqual({ rejected: 'unavailable' })
   })
-  it('requires revalidation after an app upgrade', async () => {
+  it('rejects versions below the minimum', async () => {
     fixture(); vi.stubGlobal('workbuddyDesktop', { appVersion: '5.8.2' })
-    await expect(sdkOperation({ kind: 'status', sessionId: A })).rejects.toThrow('Unverified')
+    await expect(sdkOperation({ kind: 'status', sessionId: A })).rejects.toThrow('unsupported_version')
   })
   it('reports a deleted bound session without recreating or choosing another', async () => {
     const f = fixture()

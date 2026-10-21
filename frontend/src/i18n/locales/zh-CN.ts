@@ -1348,6 +1348,13 @@ const zhCN = {
     workbuddyModeTitle: "WorkBuddy 使用 LazyMind",
     workbuddyModeDescription: "允许 WorkBuddy 调用 LazyMind",
     workbuddyRestartHint: "启用时将重启 WorkBuddy",
+    workbuddyErrors: {
+      unsupported_version: "请升级至 WorkBuddy 5.8.3 或更高版本后重试。",
+      version_unreadable: "无法读取 WorkBuddy 版本，请检查安装位置后重试。",
+      capability_unavailable: "当前 WorkBuddy 缺少所需的 Workflow 接口，请检查安装或反馈此问题。",
+      host_unavailable: "暂时无法连接 WorkBuddy，请保持 WorkBuddy 和 LazyMind 运行后重试。",
+      operation_failed: "WorkBuddy 连接失败，请重试；如仍失败，请反馈此问题。",
+    },
     workbuddyInstallGuide: {
       enlargeImage: "放大图片",
       entry: "安装引导",

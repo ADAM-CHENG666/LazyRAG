@@ -3,6 +3,8 @@ import { Alert, Button, Modal, Space, Spin, Steps, Typography } from "antd";
 import { useTranslation } from "react-i18next";
 import { agentIntegrationStatuses, type DesktopAgentIntegrationStatus } from "@/runtime/desktopBridge";
 
+import { workbuddyErrorMessage } from "./workbuddyErrors";
+
 type Stage = "prepare" | "installing" | "installFailed" | "entry" | "trust" | "enable" | "verify" | "checking" | "notReady" | "success";
 
 export default function WorkBuddyInstallationGuide({ status, onConnect, onStatus, onClose }: {
@@ -17,6 +19,7 @@ export default function WorkBuddyInstallationGuide({ status, onConnect, onStatus
   const [error, setError] = useState("");
   const [zoomed, setZoomed] = useState(false);
   const [controlUnavailable, setControlUnavailable] = useState(false);
+  const [controlError, setControlError] = useState("");
   const mounted = useRef(true);
   const busy = useRef(false);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
@@ -29,7 +32,7 @@ export default function WorkBuddyInstallationGuide({ status, onConnect, onStatus
       const result = await onConnect();
       if (!mounted.current) return;
       if (result?.state !== "enabled" || !result.connection?.mcp_configured) {
-        setError(result?.message || text("installFailedDescription"));
+        setError(result?.issue ? workbuddyErrorMessage(result, t) : result?.message || text("installFailedDescription"));
         setStage("installFailed"); return;
       }
       // Connect includes restart and installation checks. Trust is a separate step.
@@ -52,8 +55,10 @@ export default function WorkBuddyInstallationGuide({ status, onConnect, onStatus
       const connection = current?.connection;
       const configured = current?.state === "enabled" && connection?.mcp_configured;
       const ready = configured && connection?.mcp_trusted && connection.mcp_enabled;
-      setControlUnavailable(Boolean(ready && !connection?.control_ready));
-      if (!ready) setError(text(!configured ? "configurationMissingDescription"
+      setControlUnavailable(Boolean(ready && (!connection?.control_ready || current?.issue)));
+      setControlError(current?.issue ? workbuddyErrorMessage(current, t) : "");
+      if (!ready && current?.issue) setError(workbuddyErrorMessage(current, t));
+      else if (!ready) setError(text(!configured ? "configurationMissingDescription"
         : connection?.mcp_trusted === undefined || connection.mcp_enabled === undefined ? "checkFailedDescription"
           : !connection.mcp_trusted ? "trustRequiredDescription" : "enableRequiredDescription"));
       setStage(ready ? "success" : "notReady");
@@ -102,7 +107,7 @@ export default function WorkBuddyInstallationGuide({ status, onConnect, onStatus
       {stage === "notReady" && <Alert type="warning" showIcon message={text("notReadyTitle")} description={error || text("notReadyDescription")} />}
       {stage === "success" && <>
         <Alert type="success" showIcon message={text("successTitle")} description={text("successDescription")} />
-        {controlUnavailable && <Alert type="warning" showIcon message={text("controlUnavailableTitle")} description={text("controlUnavailableDescription")} />}
+        {controlUnavailable && <Alert type="warning" showIcon message={text("controlUnavailableTitle")} description={controlError || text("controlUnavailableDescription")} />}
       </>}
     </div>
   </Modal>

@@ -8,11 +8,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
-
-	"lazymind/agentconnector/internal/agentexec"
 )
 
 // DesktopStatus distinguishes an absent endpoint from an occupied, incompatible
@@ -34,12 +33,24 @@ func desktopStatus(ctx context.Context, port int) (bool, error) {
 	var targets []struct {
 		Type  string `json:"type"`
 		Title string `json:"title"`
+		URL   string `json:"url"`
 	}
 	if resp.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&targets) != nil {
 		return false, fmt.Errorf("WorkBuddy control port %d is occupied by another service", port)
 	}
 	count := 0
 	for _, t := range targets {
+		u, err := url.Parse(t.URL)
+		if err != nil || u.Scheme != "file" || !strings.HasSuffix(u.Path, "/renderer/index.html") {
+			continue
+		}
+		kind := u.Query().Get("windowAppId")
+		if kind == "" {
+			kind = u.Query().Get("windowKind")
+		}
+		if kind != "" && kind != "main" {
+			continue
+		}
 		if t.Type == "page" && strings.EqualFold(t.Title, "WorkBuddy") {
 			count++
 		}
@@ -61,10 +72,7 @@ func PrepareDesktop(ctx context.Context, port int, reloadMCP bool) error {
 	if ready && !reloadMCP {
 		return nil
 	}
-	application, err := agentexec.FindDesktopApplication(agentexec.DesktopApplication{
-		BindingTarget: agentexec.WorkBuddyDesktop, DisplayNames: []string{"WorkBuddy", "WorkBuddy CN"},
-		ExecutableNames: []string{"WorkBuddy.exe", "WorkBuddy CN.exe"},
-	})
+	application, err := desktopApplication()
 	if err != nil {
 		return err
 	}
@@ -93,15 +101,18 @@ func WaitReady(ctx context.Context, home, account string, since time.Time) error
 		if err != nil {
 			return err
 		}
-		if status, err := ReadStatus(config, pair.ConnectorID); err == nil && status.Ready && status.Cancellation == "session" && status.CheckedAt >= since.UnixMilli() {
-			if status.Version != "5.8.3" {
-				return fmt.Errorf("WorkBuddy %s is not supported by the Workflow panel; use WorkBuddy 5.8.3", status.Version)
+		if status, err := ReadStatus(config, pair.ConnectorID); err == nil && status.CheckedAt >= since.UnixMilli() {
+			// Transport/startup failures may recover; explicit compatibility failures do not.
+			if issue := StatusIssue(status); issue != "" && issue != "host_unavailable" {
+				return &CompatibilityError{Code: issue}
 			}
-			return nil
+			if status.Ready && status.Cancellation == "session" {
+				return nil
+			}
 		}
 		select {
 		case <-ctx.Done():
-			return errors.New("WorkBuddy connector is not ready; keep Assistant Bridge running and use WorkBuddy 5.8.3, then enable the connection again")
+			return &CompatibilityError{Code: "host_unavailable"}
 		case <-ticker.C:
 		}
 	}

@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { JSDOM } from 'jsdom'
-import { mountPresentation, readPresentationSession } from '../src/presentation'
+import { mountPresentation, readPresentationSession, presentationExpression } from '../src/presentation'
 
 let dom: JSDOM
 afterEach(() => { (globalThis.window as any)?.__lazymindWorkflowTail?.dispose(); (globalThis.window as any)?.__lazymindWorkflowPresentationSession?.dispose(); dom?.window.close(); vi.unstubAllGlobals() })
@@ -236,3 +236,21 @@ it('wakes presentation immediately on session change, including a change before 
   gate.dispose()
   await cleanup // stop also releases an outstanding CDP evaluation
 })
+
+ it.each(['5.8.4', '5.10.0', '6.0.0'])('mounts the existing panel contract on newer %s', version => {
+   const f = fixture()
+   f.window.workbuddyDesktop.appVersion = version
+   f.window.__lazymindWorkflowTail.dispose()
+   expect((0, eval)(presentationExpression(f.target)).status).toBe('mounted')
+   expect(document.querySelectorAll('iframe')).toHaveLength(1)
+ })
+ it('distinguishes an old version from missing SDK capabilities', () => {
+   const f = fixture()
+   f.window.workbuddyDesktop.appVersion = '5.8.2'
+   expect(mountPresentation(f.target).status).toBe('unsupported_version')
+   expect(document.querySelector('iframe')).toBeNull()
+   f.window.workbuddyDesktop.appVersion = '6.0.0'
+   delete f.window.wb.conversations.onCurrentChange
+   expect(mountPresentation(f.target).status).toBe('capability_unavailable')
+   expect(document.querySelector('iframe')).toBeNull()
+ })

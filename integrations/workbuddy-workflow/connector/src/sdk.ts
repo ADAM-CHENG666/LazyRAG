@@ -1,11 +1,14 @@
-// This function is serialized into the WorkBuddy renderer, so it has no imports.
+import { workbuddyVersionIssue } from './compatibility'
+
+// Serialized with its version check supplied explicitly.
 // Native SDK records are the only identity source; currentId is never consulted.
-export async function sdkOperation(input: any): Promise<any> {
+export async function sdkOperation(input: any, versionIssue = workbuddyVersionIssue): Promise<any> {
   const host = globalThis as any
-  if (!['5.7.7', '5.8.3'].includes(host.workbuddyDesktop?.appVersion)) throw new Error('Unverified WorkBuddy version')
+  const version = host.workbuddyDesktop?.appVersion
   const sdk = host.wb?.conversations
-  if (typeof sdk?.get !== 'function') throw new Error('Conversation SDK unavailable')
-  if (input.kind === 'probe') return { version: host.workbuddyDesktop.appVersion }
+  const issue = versionIssue(version) || (typeof sdk?.get !== 'function' || typeof sdk?.local?.list !== 'function' ? 'capability_unavailable' : '')
+  if (input.kind === 'probe') return { version: typeof version === 'string' ? version : '', ...(issue ? { issue } : {}) }
+  if (issue) throw new Error(issue)
   if (input.kind === 'identity') {
     const canonical = (v: any): string => {
       if (Array.isArray(v)) return '[' + v.map(canonical).join(',') + ']'
@@ -25,6 +28,7 @@ export async function sdkOperation(input: any): Promise<any> {
         seen.add(info.id); added++
         if (!['working', 'pending', 'planning'].includes(info.state)) continue
         const conversation = await sdk.get(info.id)
+        if (typeof conversation?.requests !== 'function') throw new Error('capability_unavailable')
         const requests = await conversation.requests(null)
         for (const request of requests.items) {
           if (['completed', 'cancelled', 'error'].includes(request.state)) continue
@@ -47,7 +51,7 @@ export async function sdkOperation(input: any): Promise<any> {
   let conversation
   try { conversation = await sdk.get(input.sessionId) }
   catch (error) {
-    // get() throws for a deleted session in 5.7.7. Distinguish that from an
+    // Some SDK versions throw for a deleted session. Distinguish that from an
     // outage using an exact-ID lookup; never create a replacement conversation.
     if (typeof sdk.listByIds === 'function') {
       const known = await sdk.listByIds([input.sessionId])

@@ -14,9 +14,11 @@ func TestDesktopStatusRejectsForeignAndAmbiguousEndpoints(t *testing.T) {
 		body string
 		ok   bool
 	}{
-		{`[{"type":"page","title":"WorkBuddy"}]`, true},
+		{`[{"type":"page","title":"WorkBuddy","url":"file:///app/renderer/index.html"}]`, true},
 		{`[{"type":"page","title":"Other"}]`, false},
-		{`[{"type":"page","title":"WorkBuddy"},{"type":"page","title":"WorkBuddy"}]`, false},
+		{`[{"type":"page","title":"WorkBuddy","url":"file:///app/renderer/index.html"},{"type":"page","title":"WorkBuddy","url":"file:///app/renderer/index.html"}]`, false},
+		{`[{"type":"page","title":"WorkBuddy","url":"file:///C:/app/renderer/index.html?windowKind=main"},{"type":"page","title":"WorkBuddy","url":"file:///C:/app/renderer/index.html?windowAppId=settings"}]`, true},
+		{`[{"type":"page","title":"WorkBuddy","url":"https://example.com/renderer/index.html"}]`, false},
 		{`not json`, false},
 	} {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(test.body)) }))

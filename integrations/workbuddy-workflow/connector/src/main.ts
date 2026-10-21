@@ -66,11 +66,14 @@ async function main() {
   let presentation: PresentationStatus = { status: 'starting', checked_at: Date.now() }
   async function heartbeat() {
     while (!signal.aborted) {
-      let version = '', ready = false
-      try { version = (await adapter.probe(signal)).version; ready = true } catch { /* Offline or unverified version. */ }
+      let version = '', ready = false, issue = 'host_unavailable'
+      try {
+        const probe = await adapter.probe(signal)
+        version = probe.version; issue = probe.issue || ''; ready = !issue
+      } catch { /* A transport failure is not evidence of an unsupported version. */ }
       try {
         await writeFile(temporaryStatus, JSON.stringify({ connector_id: pairing.connector_id, checked_at: Date.now(),
-          ready, version, cancellation: adapter.cancellation, bridge_url: values['bridge-url'], presentation }), { mode: 0o600 })
+          ready, version, issue, cancellation: adapter.cancellation, bridge_url: values['bridge-url'], presentation }), { mode: 0o600 })
         await rename(temporaryStatus, statusPath)
       } catch { /* Status failure never changes delivery receipts. */ }
       try { await delay(2000, undefined, { signal }) } catch { break }

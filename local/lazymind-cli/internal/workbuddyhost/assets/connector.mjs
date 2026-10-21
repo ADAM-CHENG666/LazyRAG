@@ -214,13 +214,37 @@ async function dispatcherLock(pairingFile, instanceId) {
 }
 
 //#endregion
+//#region src/compatibility.ts
+function workbuddyVersionIssue(version) {
+	if (typeof version !== "string") return "version_unreadable";
+	const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(version);
+	if (!match || match[4]?.split(".").some((part) => /^0\d+$/.test(part))) return "version_unreadable";
+	if (match.slice(1, 4).some((part) => !Number.isSafeInteger(Number(part)))) return "version_unreadable";
+	const minimum = [
+		5,
+		8,
+		3
+	];
+	for (let i = 0; i < minimum.length; i++) {
+		const value = Number(match[i + 1]);
+		if (!Number.isSafeInteger(value)) return "version_unreadable";
+		if (value !== minimum[i]) return value > minimum[i] ? "" : "unsupported_version";
+	}
+	return match[4] ? "unsupported_version" : "";
+}
+
+//#endregion
 //#region src/sdk.ts
-async function sdkOperation(input) {
+async function sdkOperation(input, versionIssue = workbuddyVersionIssue) {
 	const host = globalThis;
-	if (!["5.7.7", "5.8.3"].includes(host.workbuddyDesktop?.appVersion)) throw new Error("Unverified WorkBuddy version");
+	const version = host.workbuddyDesktop?.appVersion;
 	const sdk = host.wb?.conversations;
-	if (typeof sdk?.get !== "function") throw new Error("Conversation SDK unavailable");
-	if (input.kind === "probe") return { version: host.workbuddyDesktop.appVersion };
+	const issue = versionIssue(version) || (typeof sdk?.get !== "function" || typeof sdk?.local?.list !== "function" ? "capability_unavailable" : "");
+	if (input.kind === "probe") return {
+		version: typeof version === "string" ? version : "",
+		...issue ? { issue } : {}
+	};
+	if (issue) throw new Error(issue);
 	if (input.kind === "identity") {
 		const canonical = (v) => {
 			if (Array.isArray(v)) return "[" + v.map(canonical).join(",") + "]";
@@ -246,7 +270,9 @@ async function sdkOperation(input) {
 					"pending",
 					"planning"
 				].includes(info.state)) continue;
-				const requests = await (await sdk.get(info.id)).requests(null);
+				const conversation$1 = await sdk.get(info.id);
+				if (typeof conversation$1?.requests !== "function") throw new Error("capability_unavailable");
+				const requests = await conversation$1.requests(null);
 				for (const request of requests.items) {
 					if ([
 						"completed",
@@ -339,7 +365,7 @@ var WorkBuddyAdapter = class {
 		return this.call({ kind: "probe" }, signal);
 	}
 	call(input, signal) {
-		return this.cdp.evaluate(`(${sdkOperation.toString()})(${JSON.stringify(input)})`, signal);
+		return this.cdp.evaluate(`(${sdkOperation.toString()})(${JSON.stringify(input)}, ${workbuddyVersionIssue.toString()})`, signal);
 	}
 	async admission(kind, sessionId, input, signal, fields) {
 		const started = performance.now();
@@ -774,7 +800,7 @@ function readPresentationSession() {
 	return host[key].read();
 }
 const cleanupPresentation = "window.__lazymindWorkflowTail?.dispose(); window.__lazymindWorkflowPresentationSession?.dispose()";
-function mountPresentation(target, followTail = installTailFollow, fitTail = installTailExtent) {
+function mountPresentation(target, followTail = installTailFollow, fitTail = installTailExtent, versionIssue = workbuddyVersionIssue) {
 	const host = window;
 	const version = "tail-v4";
 	const key = "__lazymindWorkflowTail";
@@ -782,9 +808,14 @@ function mountPresentation(target, followTail = installTailFollow, fitTail = ins
 	const wb = host.wb;
 	if (target.epoch && host.__lazymindWorkflowPresentationSession?.read().epoch !== target.epoch) return { status: "stale" };
 	if (!wb?.conversations) return { status: "page-not-ready" };
-	if (host.workbuddyDesktop?.appVersion !== "5.8.3") {
+	const issue = versionIssue(host.workbuddyDesktop?.appVersion);
+	if (issue) {
 		previous?.dispose();
-		return { status: "layout-incompatible" };
+		return { status: issue };
+	}
+	if (typeof wb.conversations.onCurrentChange !== "function") {
+		previous?.dispose();
+		return { status: "capability_unavailable" };
 	}
 	if (wb?.conversations?.currentId !== target.session_id) return { status: "stale" };
 	if (!target.run_id) {
@@ -1115,7 +1146,7 @@ function mountPresentation(target, followTail = installTailFollow, fitTail = ins
 	return status();
 }
 function presentationExpression(target) {
-	return `(${mountPresentation.toString()})(${JSON.stringify(target)}, ${installTailFollow.toString()}, ${installTailExtent.toString()})`;
+	return `(${mountPresentation.toString()})(${JSON.stringify(target)}, ${installTailFollow.toString()}, ${installTailExtent.toString()}, ${workbuddyVersionIssue.toString()})`;
 }
 async function presentationLoop(cdp, request, bridgeURL, signal, report = () => {}) {
 	let native_session_id, run_id;
@@ -1331,10 +1362,12 @@ async function main() {
 	};
 	async function heartbeat() {
 		while (!signal.aborted) {
-			let version = "", ready = false;
+			let version = "", ready = false, issue = "host_unavailable";
 			try {
-				version = (await adapter.probe(signal)).version;
-				ready = true;
+				const probe = await adapter.probe(signal);
+				version = probe.version;
+				issue = probe.issue || "";
+				ready = !issue;
 			} catch {}
 			try {
 				await writeFile(temporaryStatus, JSON.stringify({
@@ -1342,6 +1375,7 @@ async function main() {
 					checked_at: Date.now(),
 					ready,
 					version,
+					issue,
 					cancellation: adapter.cancellation,
 					bridge_url: values["bridge-url"],
 					presentation

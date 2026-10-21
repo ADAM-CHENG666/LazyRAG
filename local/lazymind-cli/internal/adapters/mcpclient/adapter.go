@@ -89,7 +89,16 @@ func (a *Adapter) Status(ctx context.Context) agentintegration.Status {
 	return a.status(ctx)
 }
 
-func (a *Adapter) Connect(ctx context.Context) agentintegration.Status {
+func (a *Adapter) Connect(ctx context.Context) (result agentintegration.Status) {
+	defer func() {
+		if a.kind == WorkBuddy && result.State == agentintegration.Failed {
+			sanitizeWorkBuddyFailure(&result)
+			// Installation may have written the owned entry before startup failed.
+			if state, err := readManagedConfig(a.kind, configPath(a.kind), a.self, a.home, a.hostID); err == nil {
+				result.CanDisconnect = state.configured && state.owned
+			}
+		}
+	}()
 	if a.desktopDSHMode() {
 		return a.connectDSHDesktop(ctx)
 	}
@@ -100,6 +109,9 @@ func (a *Adapter) Connect(ctx context.Context) agentintegration.Status {
 		ctx = bounded
 	}
 	status := a.status(ctx)
+	if a.kind == WorkBuddy {
+		status.Issue = nil
+	}
 	if status.State != agentintegration.Ready && !(a.kind == WorkBuddy && status.State == agentintegration.Enabled) {
 		return status
 	}
@@ -119,6 +131,9 @@ func (a *Adapter) Connect(ctx context.Context) agentintegration.Status {
 		return status
 	}
 	if a.kind == WorkBuddy {
+		if err := workbuddyhost.Preflight(); err != nil {
+			return workBuddyFailure(status, err)
+		}
 		store, err := credentials.NewStore(a.home, "")
 		if err != nil {
 			return agentintegration.Fail(status, err.Error())
@@ -162,7 +177,7 @@ func (a *Adapter) Connect(ctx context.Context) agentintegration.Status {
 			return agentintegration.Fail(status, err.Error())
 		}
 		if err := workbuddyhost.WaitReady(setup, a.home, account, time.Now()); err != nil {
-			return agentintegration.Fail(status, err.Error())
+			return workBuddyFailure(status, err)
 		}
 	}
 	return a.status(ctx)
@@ -173,7 +188,7 @@ func (a *Adapter) Disconnect(ctx context.Context) agentintegration.Status {
 		return a.disconnectDSHDesktop(ctx)
 	}
 	status := a.status(ctx)
-	if status.State == agentintegration.Conflict || status.State == agentintegration.Failed {
+	if status.State == agentintegration.Conflict || status.State == agentintegration.Failed && !(a.kind == WorkBuddy && status.CanDisconnect) {
 		return status
 	}
 	if a.kind == DeepSeekHarness {
@@ -217,6 +232,9 @@ func (a *Adapter) status(ctx context.Context) agentintegration.Status {
 	if err != nil {
 		return agentintegration.Fail(status, err.Error())
 	}
+	if a.kind == WorkBuddy {
+		status.CanDisconnect = state.configured && state.owned
+	}
 	if a.kind == DeepSeekHarness && state.configured && state.owned && state.current {
 		if !a.dshWorkflowConfigured() {
 			state.current = false
@@ -243,12 +261,17 @@ func (a *Adapter) status(ctx context.Context) agentintegration.Status {
 				state.current = true
 				status.Message = ""
 				if host, err := workbuddyhost.ReadStatus(config, pair.ConnectorID); err == nil {
-					status.Connection.ControlReady = host.Ready && host.Cancellation == "session"
+					issue := workbuddyhost.StatusIssue(host)
+					status.Connection.ControlReady = issue == "" && host.Ready && host.Cancellation == "session"
+					if issue == "" && host.Presentation.Status == "capability_unavailable" {
+						issue = "capability_unavailable"
+					}
+					if issue != "" {
+						status.Issue = &agentintegration.Issue{Code: issue}
+						status.Message = workBuddyIssueMessage(issue)
+					}
 					status.Connection.PresentationStatus = host.Presentation.Status
 					status.Connection.PageStatus = host.Presentation.PageStatus
-					if host.Ready && host.Version != "5.8.3" {
-						status.Connection.PresentationStatus = "layout-incompatible"
-					}
 				}
 			}
 		}

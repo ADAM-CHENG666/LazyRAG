@@ -1380,6 +1380,13 @@ const enUS = {
     workbuddyModeTitle: "Use LazyMind in WorkBuddy",
     workbuddyModeDescription: "Allow WorkBuddy to call LazyMind",
     workbuddyRestartHint: "Enabling will restart WorkBuddy",
+    workbuddyErrors: {
+      unsupported_version: "Update WorkBuddy to 5.8.3 or later, then retry.",
+      version_unreadable: "Unable to read the WorkBuddy version. Check its installation path and retry.",
+      capability_unavailable: "This WorkBuddy installation lacks the required Workflow interfaces. Check the installation or report this issue.",
+      host_unavailable: "Unable to reach WorkBuddy. Keep WorkBuddy and LazyMind running, then retry.",
+      operation_failed: "WorkBuddy connection failed. Retry, and report the issue if it persists.",
+    },
     workbuddyInstallGuide: {
       enlargeImage: "Enlarge image",
       entry: "Installation guide",

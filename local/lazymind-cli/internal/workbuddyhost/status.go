@@ -9,6 +9,7 @@ import (
 )
 
 type Status struct {
+	Issue        string             `json:"issue,omitempty"`
 	ConnectorID  string             `json:"connector_id"`
 	CheckedAt    int64              `json:"checked_at"`
 	Ready        bool               `json:"ready"`

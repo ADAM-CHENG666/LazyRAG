@@ -2,6 +2,7 @@ import { AdmissionRejected, type RuntimeAdapter } from '../../../workflow-agent-
 import type { ActionClaim } from '../../../workflow-agent-core/src/transport'
 import { Cdp } from './cdp'
 import { sdkOperation } from './sdk'
+import { workbuddyVersionIssue } from './compatibility'
 import type { Diagnostic, DiagnosticFields } from './diagnostics'
 
 const sessionPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
@@ -14,7 +15,7 @@ export class WorkBuddyAdapter implements RuntimeAdapter<string> {
   }
   probe(signal: AbortSignal) { return this.call({ kind: 'probe' }, signal) }
   private call(input: unknown, signal: AbortSignal): Promise<any> {
-    return this.cdp.evaluate(`(${sdkOperation.toString()})(${JSON.stringify(input)})`, signal)
+    return this.cdp.evaluate(`(${sdkOperation.toString()})(${JSON.stringify(input)}, ${workbuddyVersionIssue.toString()})`, signal)
   }
   private async admission(kind: 'send' | 'cancel', sessionId: string, input: object, signal: AbortSignal, fields: DiagnosticFields) {
     const started = performance.now()

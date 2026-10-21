@@ -1,3 +1,4 @@
+import { workbuddyErrorMessage } from "./workbuddyErrors";
 import { useSettingsDraft } from "@/modules/settings/SettingsNavigationGuard";
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type ReactNode } from "react";
 import { Alert, Button, Card, Input, Modal, Popover, Space, Spin, Switch, Tag, Tooltip, Typography, message } from "antd";
@@ -495,6 +496,7 @@ function executablePathPlaceholderKey(target: DesktopAgentBindingTarget | null):
 }
 
 function integrationErrorMessage(agent: DesktopAgent, status: DesktopAgentIntegrationStatus, t: TFunction): string {
+  if (agent === "workbuddy" && status.state !== "conflict") return workbuddyErrorMessage(status, t);
   if (agent !== "deepseek-harness") return status.message || "";
   const code = status.issue?.code;
   const key = code === "unsupported_version" || code === "dependency_environment" ? code : "operation_failed";
@@ -709,7 +711,7 @@ function CollapsedDetectionSummary({
       });
     }
   }
-  if (mcpStatus?.message && ["error", "conflict"].includes(mcpStatus.state)) {
+  if (mcpStatus?.message && (["error", "conflict"].includes(mcpStatus.state) || agent.id === "workbuddy" && mcpStatus.issue)) {
     items.push({ id: "mcp-error", label: integrationErrorMessage(agent.id, mcpStatus, t), ready: false });
   }
   if (!items.length) {
@@ -1121,7 +1123,7 @@ function AgentConfigurationFlow({
             />
           )}
         </div>
-        {mcpStatus?.message && ["error", "conflict"].includes(mcpState) && (
+        {mcpStatus?.message && (["error", "conflict"].includes(mcpState) || agent.id === "workbuddy" && mcpStatus.issue) && (
           <div className="agent-integration-stage-hint is-error" role="alert">
             <WarningOutlined />
             {integrationErrorMessage(agent.id, mcpStatus, t)}

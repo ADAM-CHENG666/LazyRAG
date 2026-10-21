@@ -3,6 +3,7 @@ package workbuddyhost
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"lazymind/agentconnector/internal/workflowhost"
 	"os"
 	"path/filepath"
@@ -59,6 +60,10 @@ func TestWaitReadyRequiresAHeartbeatAfterInstallationWithCancellation(t *testing
 		ok           bool
 	}{
 		{"fresh", "session", "5.8.3", time.Now(), true},
+		{"newer", "session", "6.0.0", time.Now(), true},
+		{"numeric ordering", "session", "5.8.10", time.Now(), true},
+		{"prerelease below minimum", "session", "5.8.3-rc.1", time.Now(), false},
+		{"unknown version", "session", "", time.Now(), false},
 		{"before restart", "session", "5.8.3", since.Add(-time.Second), false},
 		{"old worker", "none", "5.8.3", time.Now(), false},
 		{"unsupported layout", "session", "5.7.7", time.Now(), false},
@@ -75,5 +80,29 @@ func TestWaitReadyRequiresAHeartbeatAfterInstallationWithCancellation(t *testing
 				t.Fatalf("error=%v", err)
 			}
 		})
+	}
+}
+
+func TestWaitReadyReportsExplicitCapabilityFailureWithoutTimingOut(t *testing.T) {
+	home := t.TempDir()
+	pair, err := workflowhost.EnsureForProvider(home, "workbuddy", filepath.Join(home, "profile"), "account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := Config{PairingFile: filepath.Join(home, "workflow-hosts", pair.ConnectorID+".json"), Node: filepath.Join(home, "node"), CDPPort: 9333}
+	body, _ := json.Marshal(config)
+	if err = writeAtomic(ConfigPath(home), body); err != nil {
+		t.Fatal(err)
+	}
+	body, _ = json.Marshal(Status{ConnectorID: pair.ConnectorID, Version: "6.0.0", Issue: "capability_unavailable", CheckedAt: time.Now().UnixMilli(), BridgeURL: "http://127.0.0.1:19091"})
+	if err = writeAtomic(config.PairingFile+".workbuddy-status.json", body); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err = WaitReady(ctx, home, "account", time.Now().Add(-time.Second))
+	var compatibility *CompatibilityError
+	if !errors.As(err, &compatibility) || compatibility.Code != "capability_unavailable" || ctx.Err() != nil {
+		t.Fatalf("error=%v context=%v", err, ctx.Err())
 	}
 }
