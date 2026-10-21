@@ -76,3 +76,51 @@ func TestLiveConnectionMovesToCurrentPortAndRejectsAccountSwitch(t *testing.T) {
 		t.Fatal("called tool under another account")
 	}
 }
+
+func TestLiveConnectionRetainsConcurrentToolCalls(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	started, release := make(chan struct{}), make(chan struct{})
+	var calls atomic.Int32
+	server := mcp.NewServer(&mcp.Implementation{Name: "concurrency", Version: "1"}, nil)
+	for _, name := range requiredTools {
+		server.AddTool(&mcp.Tool{Name: name, InputSchema: map[string]any{"type": "object"}}, func(callCtx context.Context, _ *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			if calls.Add(1) == 1 {
+				close(started)
+				select {
+				case <-release:
+				case <-callCtx.Done():
+					return nil, callCtx.Err()
+				}
+			}
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "done"}}}, nil
+		})
+	}
+	httpServer := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil))
+	defer httpServer.Close()
+	store, _ := credentials.NewStore(t.TempDir(), "")
+	if err := store.Save(credentials.Credentials{ServerURL: httpServer.URL, AccessToken: "access", RefreshToken: "refresh"}); err != nil {
+		t.Fatal(err)
+	}
+	bridge, _ := New(store)
+	session, _, endpoint, err := bridge.Connect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope, _ := store.AccountScope()
+	connection := &liveConnection{bridge: bridge, scope: scope, session: session, endpoint: endpoint}
+	defer connection.close()
+	defer close(release)
+	first := make(chan error, 1)
+	go func() { _, err := connection.call(ctx, &mcp.CallToolParams{Name: requiredTools[0]}); first <- err }()
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	second, cancelSecond := context.WithTimeout(ctx, time.Second)
+	defer cancelSecond()
+	if _, err := connection.call(second, &mcp.CallToolParams{Name: requiredTools[1]}); err != nil {
+		t.Fatalf("second tool was blocked by first tool: %v", err)
+	}
+}
