@@ -99,7 +99,8 @@ export interface DesktopAgentAction {
 }
 
 export interface DesktopAgentConnectionStatus {
-  mcp_ready?: boolean;
+  mcp_trusted?: boolean;
+  mcp_enabled?: boolean;
   mcp_configured: boolean;
   control_ready: boolean;
   presentation_status: string;

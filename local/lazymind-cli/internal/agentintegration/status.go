@@ -77,7 +77,8 @@ func Fail(status Status, message string) Status {
 
 // Connection reports runtime health separately from the user's enabled setting.
 type ConnectionStatus struct {
-	MCPReady           bool   `json:"mcp_ready"`
+	MCPTrusted         bool   `json:"mcp_trusted"`
+	MCPEnabled         bool   `json:"mcp_enabled"`
 	MCPConfigured      bool   `json:"mcp_configured"`
 	ControlReady       bool   `json:"control_ready"`
 	PresentationStatus string `json:"presentation_status"`

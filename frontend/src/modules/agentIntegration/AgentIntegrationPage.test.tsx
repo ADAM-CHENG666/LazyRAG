@@ -613,7 +613,7 @@ describe("AgentIntegrationPage", () => {
   it.each([true, false])("requires confirmation before restarting WorkBuddy (expanded: %s)", async (expanded) => {
     const status = { agent: "workbuddy", display_name: "WorkBuddy", state: "ready",
       requirements: [{ id: "workbuddy_desktop", satisfied: true }, { id: "workbuddy_desktop_initialized", satisfied: true }] };
-    const installed = { ...status, state: "enabled", connection: { mcp_configured: true, control_ready: true, mcp_ready: false, presentation_status: "mounted" } };
+    const installed = { ...status, state: "enabled", connection: { mcp_configured: true, control_ready: true, mcp_trusted: false, mcp_enabled: true, presentation_status: "mounted" } };
     mocks.statuses.mockResolvedValue({ ok: true, data: { workbuddy: status } });
     mocks.executors.mockResolvedValue({ data: { data: { executors: [{ id: "workbuddy", installed: true, host_online: true, available: true }] } } });
     mocks.executorPolicies.mockResolvedValue({ ok: true, data: { workbuddy: { provider: "workbuddy", enabled: false, installed: true, ready: true } } });
@@ -634,16 +634,18 @@ describe("AgentIntegrationPage", () => {
     await within(dialog).findByText("组件安装成功");
     expect(mocks.action).toHaveBeenCalledTimes(1);
     expect(mocks.action).toHaveBeenCalledWith("workbuddy", "connect");
-    fireEvent.click(within(dialog).getByRole("button", { name: "下一步：信任并开启" }));
-    expect(within(dialog).getByRole("img", { name: /MCP 服务管理/ })).toBeInTheDocument();
-    fireEvent.click(within(dialog).getByRole("button", { name: "我已信任并开启" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "下一步：首次信任" }));
+    expect(within(dialog).getByRole("img", { name: /首次连接的信任按钮/ })).toHaveAttribute("src", "/installation-guides/workbuddy/trust.png");
+    fireEvent.click(within(dialog).getByRole("button", { name: "已信任或无需信任，继续" }));
+    expect(within(dialog).getByRole("img", { name: /开启位置/ })).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "我已确认开启" }));
     mocks.statuses.mockResolvedValue({ ok: true, data: { workbuddy: installed } });
-    fireEvent.click(within(dialog).getByRole("button", { name: "检查连接" }));
-    await within(dialog).findByText("连接尚未就绪");
-    expect(within(dialog).queryByText("连接成功")).not.toBeInTheDocument();
-    mocks.statuses.mockResolvedValue({ ok: true, data: { workbuddy: { ...installed, connection: { ...installed.connection, mcp_ready: true } } } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "检查设置" }));
+    await within(dialog).findByText("设置尚未完成");
+    expect(within(dialog).queryByText("设置完成")).not.toBeInTheDocument();
+    mocks.statuses.mockResolvedValue({ ok: true, data: { workbuddy: { ...installed, connection: { ...installed.connection, mcp_trusted: true, mcp_enabled: true } } } });
     fireEvent.click(within(dialog).getByRole("button", { name: "重新检查" }));
-    await within(dialog).findByText("连接成功");
+    await within(dialog).findByText("设置完成");
     fireEvent.click(within(dialog).getByRole("button", { name: /完\s*成/ }));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     expandAgent("workbuddy");
@@ -652,6 +654,34 @@ describe("AgentIntegrationPage", () => {
     expect(dialog).toHaveTextContent("组件安装成功");
     expect(mocks.action).toHaveBeenCalledTimes(1);
     expect(card).not.toHaveTextContent(/待完成信任|继续设置/);
+  });
+
+  it.each(["zh-CN", "en-US"])("checks WorkBuddy setup independently of live sessions (%s)", async (language) => {
+    await retryI18n.changeLanguage(language);
+    const tr = (key: string) => retryI18n.t(`agentIntegration.workbuddyInstallGuide.${key}`);
+    const status = { agent: "workbuddy", display_name: "WorkBuddy", state: "enabled",
+      requirements: [{ id: "workbuddy_desktop", satisfied: true }, { id: "workbuddy_desktop_initialized", satisfied: true }],
+      connection: { mcp_configured: true, mcp_trusted: false, mcp_enabled: false, control_ready: false, presentation_status: "host-offline" } };
+    mocks.statuses.mockResolvedValue({ ok: true, data: { workbuddy: status } });
+    render(<ConfigProvider theme={{ token: { motion: false } }}><AgentIntegrationPage /></ConfigProvider>);
+    const card = expandAgent("workbuddy");
+    fireEvent.click(await within(card).findByRole("button", { name: new RegExp(tr("entry")) }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: tr("next") }));
+    expect(dialog).toHaveTextContent(tr("trustDescription"));
+    fireEvent.click(within(dialog).getByRole("button", { name: tr("trustConfirmation") }));
+    fireEvent.click(within(dialog).getByRole("button", { name: tr("enabledConfirmation") }));
+    fireEvent.click(within(dialog).getByRole("button", { name: tr("check") }));
+    await within(dialog).findByText(tr("trustRequiredDescription"));
+    mocks.statuses.mockResolvedValue({ ok: true, data: { workbuddy: { ...status, connection: { ...status.connection, mcp_trusted: true } } } });
+    fireEvent.click(within(dialog).getByRole("button", { name: tr("retryCheck") }));
+    await within(dialog).findByText(tr("enableRequiredDescription"));
+    mocks.statuses.mockResolvedValue({ ok: true, data: { workbuddy: { ...status, connection: { ...status.connection, mcp_trusted: true, mcp_enabled: true } } } });
+    fireEvent.click(within(dialog).getByRole("button", { name: tr("retryCheck") }));
+    await within(dialog).findByText(tr("successTitle"));
+    expect(dialog).toHaveTextContent(tr("controlUnavailableTitle"));
+    expect(dialog).not.toHaveTextContent(tr("notReadyTitle"));
+    expect(mocks.action).not.toHaveBeenCalled();
   });
 
   it.each(["zh-CN", "en-US"])("keeps installation failure in the guide (%s)", async (language) => {
