@@ -421,6 +421,20 @@ var WorkBuddyAdapter = class {
 //#endregion
 //#region src/cdp.ts
 /** Loopback-only transport. Never use a page title as a conversation identity. */
+function selectWorkBuddyTarget(targets) {
+	const pages = targets.filter((target) => {
+		if (target.type !== "page" || target.title?.toLowerCase() !== "workbuddy") return false;
+		try {
+			const url = new URL(target.url);
+			const appId = url.searchParams.get("windowAppId") ?? url.searchParams.get("windowKind") ?? "main";
+			return url.protocol === "file:" && url.pathname.endsWith("/renderer/index.html") && appId === "main";
+		} catch {
+			return false;
+		}
+	});
+	if (pages.length !== 1) throw new Error("Expected one WorkBuddy desktop target");
+	return pages[0];
+}
 var Cdp = class {
 	constructor(port) {
 		this.port = port;
@@ -433,9 +447,8 @@ var Cdp = class {
 			redirect: "error"
 		});
 		if (!response.ok) throw new Error("CDP discovery failed");
-		const pages = (await response.json()).filter((t) => t.type === "page" && t.title?.toLowerCase() === "workbuddy");
-		if (pages.length !== 1) throw new Error("Expected one WorkBuddy desktop target");
-		const url = new URL(pages[0].webSocketDebuggerUrl);
+		const page = selectWorkBuddyTarget(await response.json());
+		const url = new URL(page.webSocketDebuggerUrl);
 		if (url.protocol !== "ws:" || url.hostname !== "127.0.0.1" || Number(url.port) !== this.port || url.username || url.password) throw new Error("Unexpected CDP endpoint");
 		bounded.throwIfAborted();
 		const socket = new WebSocket(url);

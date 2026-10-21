@@ -1,4 +1,19 @@
 /** Loopback-only transport. Never use a page title as a conversation identity. */
+export function selectWorkBuddyTarget(targets: any[]) {
+  const pages = targets.filter(target => {
+    if (target.type !== 'page' || target.title?.toLowerCase() !== 'workbuddy') return false
+    try {
+      const url = new URL(target.url)
+      // WorkBuddy's main and independent settings windows share a title and
+      // renderer entry. Match its own main-window discriminator, not list order.
+      const appId = url.searchParams.get('windowAppId') ?? url.searchParams.get('windowKind') ?? 'main'
+      return url.protocol === 'file:' && url.pathname.endsWith('/renderer/index.html') && appId === 'main'
+    } catch { return false }
+  })
+  if (pages.length !== 1) throw new Error('Expected one WorkBuddy desktop target')
+  return pages[0]
+}
+
 export class Cdp {
   constructor(private port: number) {
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid CDP port')
@@ -7,9 +22,8 @@ export class Cdp {
     const bounded = AbortSignal.any([signal, AbortSignal.timeout(8000)])
     const response = await fetch(`http://127.0.0.1:${this.port}/json/list`, { signal: bounded, redirect: 'error' })
     if (!response.ok) throw new Error('CDP discovery failed')
-    const pages = (await response.json() as any[]).filter(t => t.type === 'page' && t.title?.toLowerCase() === 'workbuddy')
-    if (pages.length !== 1) throw new Error('Expected one WorkBuddy desktop target')
-    const url = new URL(pages[0].webSocketDebuggerUrl)
+    const page = selectWorkBuddyTarget(await response.json() as any[])
+    const url = new URL(page.webSocketDebuggerUrl)
     if (url.protocol !== 'ws:' || url.hostname !== '127.0.0.1' || Number(url.port) !== this.port || url.username || url.password) {
       throw new Error('Unexpected CDP endpoint')
     }
