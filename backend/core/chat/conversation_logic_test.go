@@ -2194,9 +2194,12 @@ func TestShouldEmitStreamFrame(t *testing.T) {
 }
 
 func TestFeedBackChatHistoryCancelsFeedback(t *testing.T) {
-	db := orm.MigrateTestDB(t, &orm.ChatHistory{})
+	db := orm.MigrateTestDB(t, &orm.Conversation{}, &orm.ChatHistory{})
 	store.Init(db.DB, nil, nil)
 	t.Cleanup(func() { store.Init(nil, nil, nil) })
+	if err := db.Create(&orm.Conversation{ID: "conv-1"}).Error; err != nil {
+		t.Fatal(err)
+	}
 
 	now := time.Now()
 	if err := db.Create(&orm.ChatHistory{
@@ -2243,11 +2246,14 @@ func TestFeedBackChatHistoryReplacesOnlyTargetFeedback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect db: %v", err)
 	}
-	if err := db.AutoMigrate(&orm.ChatHistory{}); err != nil {
+	if err := db.AutoMigrate(&orm.Conversation{}, &orm.ChatHistory{}); err != nil {
 		t.Fatalf("auto migrate: %v", err)
 	}
 	store.Init(db.DB, nil, nil)
 	t.Cleanup(func() { store.Init(nil, nil, nil) })
+	if err := db.Create(&orm.Conversation{ID: "conv-1"}).Error; err != nil {
+		t.Fatal(err)
+	}
 
 	now := time.Now()
 	for _, history := range []orm.ChatHistory{
@@ -2357,6 +2363,26 @@ func TestUserExplicitlyRequestedWorkflowRetry(t *testing.T) {
 	for _, query := range []string{"继续", "不要重试", "do not retry", "分析为什么重试失败"} {
 		if userExplicitlyRequestedWorkflowRetry(query) {
 			t.Errorf("unexpected retry authorization for %q", query)
+		}
+	}
+}
+
+func TestDirectoryFeatureControlOverridesClientAndReachesChat(t *testing.T) {
+	db := newPromptTestDB(t)
+	for _, enabled := range []bool{true, false, true} {
+		if err := db.Exec("DELETE FROM user_ui_preferences WHERE user_id=?", "directory-user").Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Model(&orm.UserUIPreferences{}).Create(map[string]any{"user_id": "directory-user", "document_directories_enabled": enabled, "document_directories_generation": int64(3), "created_at": time.Now().UTC(), "updated_at": time.Now().UTC()}).Error; err != nil {
+			t.Fatal(err)
+		}
+		body := map[string]any{"document_directories_enabled": !enabled}
+		if err := applyChatFeatureControls(context.Background(), db.DB, "directory-user", body); err != nil {
+			t.Fatal(err)
+		}
+		req := buildLazyChatRequest(body)
+		if req.Agent.DocumentDirectoriesGeneration != 3 || req.Agent.DocumentDirectoriesEnabled == nil || *req.Agent.DocumentDirectoriesEnabled != enabled {
+			t.Fatalf("wrong directory control: %+v", req.Agent)
 		}
 	}
 }
