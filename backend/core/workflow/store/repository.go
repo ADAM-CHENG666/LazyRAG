@@ -49,7 +49,7 @@ func normalizeWorkflowMode(value string) string {
 // including the initial execution and subsequent AI retries.
 // A retry explicitly requested by the user is a separate control path and is
 // deliberately not constrained by this budget.
-const MaxAutomaticWorkflowStepAttempts = 3
+const MaxAutomaticWorkflowStepAttempts = controlpolicy.MaxAutomaticStepAttempts
 
 type repositoryError string
 

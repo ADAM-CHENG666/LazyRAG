@@ -308,10 +308,16 @@ func (c *Client) State(ctx context.Context, sessionID string) (Projection, error
 		}
 		state.InteractionURL = strings.TrimRight(base, "/") + "/workflow-runs/" + url.PathEscape(sessionID) + "/embed"
 	}
-	if c.HostProvider == "codex" || c.HostProvider == "workbuddy" {
+	continuation, _ := state.Control["continuation"].(string)
+	admission, _ := state.Control["admission"].(map[string]any)
+	retries, _ := state.Control["automatic_retry_steps"].([]any)
+	if continuation == "continue" && admission["can_begin"] == true && len(retries) > 0 {
+		steps, _ := json.Marshal(retries)
+		state.AgentInstruction = "A step failed but automatic retry budget remains. Call workflow.step.begin for one step in control.automatic_retry_steps=" + string(steps) + " using the current state version. Keep this run; do not stop it or start a replacement run. Inspect the failure and adjust the retry instruction if needed."
+	} else if c.HostProvider == "codex" || c.HostProvider == "workbuddy" {
 		if continuation, _ := state.Control["continuation"].(string); continuation == "awaiting_user" {
 			state.AgentInstruction = "Human review is required. Tell the user to review in the Workflow panel, then END this turn. Do not approve the review yourself, begin another step, or poll while waiting. Resume only on a new notification or explicit user input, and read workflow.state first."
-		} else if continuation == "awaiting_executor" || continuation == "stopped" || continuation == "completed" || continuation == "binding_required" {
+		} else if continuation == "awaiting_executor" || continuation == "draining" || continuation == "stopped" || continuation == "completed" || continuation == "binding_required" || continuation == "failed" {
 			state.AgentInstruction = "END this turn. Do not continue Workflow execution or poll while waiting. Resume only on a new notification or explicit user input, and read workflow.state first."
 		}
 	}
