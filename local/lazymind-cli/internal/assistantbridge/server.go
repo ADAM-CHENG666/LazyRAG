@@ -22,6 +22,7 @@ import (
 	workbuddyadapter "lazymind/agentconnector/internal/adapters/workbuddy"
 	"lazymind/agentconnector/internal/agentexec"
 	"lazymind/agentconnector/internal/agentintegration"
+	"lazymind/agentconnector/internal/codexhost"
 	"lazymind/agentconnector/internal/connectorconfig"
 	"lazymind/agentconnector/internal/credentials"
 	"lazymind/agentconnector/internal/executorpolicy"
@@ -232,6 +233,12 @@ func (s *Server) Serve(ctx context.Context) error {
 		workbuddyhost.Supervise(runCtx, s.store.Directory(), "http://"+s.address, s.store.AccountScope)
 	}()
 	defer func() { cancel(); <-workerDone }()
+	codexDone := make(chan struct{})
+	go func() {
+		defer close(codexDone)
+		codexhost.Supervise(runCtx, s.store.Directory(), "http://"+s.address, s.store.AccountScope)
+	}()
+	defer func() { cancel(); <-codexDone }()
 	httpServer := &http.Server{
 		Addr:              s.address,
 		Handler:           s.routes(),
@@ -277,6 +284,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /v1/workflow-runs/{session}/control", s.handleWorkflowControl)
 	mux.HandleFunc("GET /v1/workbuddy/presentation", s.handleWorkBuddyPresentation)
 	mux.HandleFunc("GET /v1/workbuddy/frame", s.handleWorkBuddyFrame)
+	mux.HandleFunc("GET /v1/codex/presentation", s.handleCodexPresentation)
+	mux.HandleFunc("GET /v1/codex/frame", s.handleCodexFrame)
 	mux.HandleFunc("POST /v1/workbuddy/resolve", s.handleWorkBuddyResolve)
 	mux.HandleFunc("GET /v1/workbuddy/identity-requests", s.handleWorkBuddyIdentities)
 	mux.HandleFunc("POST /v1/workbuddy/identity-receipts", s.handleWorkBuddyIdentityReceipt)

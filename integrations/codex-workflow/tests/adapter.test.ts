@@ -1,98 +1,57 @@
-import { describe, expect, it, vi } from 'vitest'
-import { CodexAdapter, type QueueRunner } from '../src/adapter'
-import { createDispatcher } from '../../workflow-agent-core/src/dispatcher'
-import { BridgeError, type HostAction, type HostTransport } from '../../workflow-agent-core/src/transport'
-import type { WorkflowControl } from '../../workflow-agent-core/src/protocol'
-
-const thread = '01a0cd90-7aaa-7960-86ab-6ee368c3d327'
-function fixture(run: QueueRunner = vi.fn(async () => {})) {
-  const signal = new AbortController().signal
-  const adapter = new CodexAdapter('/desktop/codex', '/profile', run)
-  const cancel = vi.spyOn(adapter, 'cancel')
-  let action: HostAction = { id: 'action-1', session_id: 'run-1', native_session_id: thread,
-    kind: 'continue', status: 'pending' }
-  let control: WorkflowControl = { protocol: 'workflow.control.v1', session_id: 'run-1', state_version: 1,
-    continuation: 'continue', admission: { can_begin: true },
-    binding: { driver_session_id: thread, bound: true } }
-  const bridge: HostTransport = {
-    bind: vi.fn(async () => control), state: vi.fn(async () => control),
-    actions: vi.fn(async () => ({ actions: [action] })),
-    action: vi.fn(async () => ({ action: { ...action }, control })),
-    claim: vi.fn(async () => {
-      if (action.status === 'pending') {
-        action = { ...action, status: 'dispatching' }
-        return { action: { ...action }, dispatch_token: 'token', control }
-      }
-      if (action.status === 'dispatching') action.status = 'unknown'
-      return { action: { ...action }, control }
-    }),
-    settle: vi.fn(async (_id, _instance, _token, status) => { action.status = status }),
-  }
-  const dispatcher = () => createDispatcher(adapter, undefined, bridge, 'instance', signal)
-  return { adapter, run, cancel, bridge, signal, dispatcher,
-    action: () => ({ ...action }),
-    update: (fields: Partial<HostAction>) => Object.assign(action, fields),
-    setControl: (fields: Partial<WorkflowControl>) => { control = { ...control, ...fields } } }
+import { describe, it, expect, vi } from 'vitest'
+import { mkdtemp } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { CodexAdapter } from '../src/adapter'
+import { NativeReceipts } from '../src/receipts'
+import { selectCodexTarget } from '../src/native'
+const thread = '01a12f01-e372-7ef3-aaae-4a0a295d6700'
+const claim = (kind = 'continue') => ({ action: { id: 'action-1', session_id: 'run-1', native_session_id: thread,
+  kind, status: 'dispatching', created_at: '2026-10-26T00:00:10Z' }, control: { session_id: 'run-1', continuation: kind === 'cancel' ? 'stopped' : 'continue',
+  binding: { bound: true, driver_session_id: thread, provider: 'codex' } } }) as any
+async function fixture() {
+ const native = { read: vi.fn().mockResolvedValue({ id: thread, active: false, turns: [] }),
+   start: vi.fn().mockResolvedValue({ accepted: true, turnId: 'turn-new' }), interrupt: vi.fn().mockResolvedValue({ interruptedTurnId: 'turn-owned' }) }
+ const receipts = new NativeReceipts(await mkdtemp(join(tmpdir(), 'codex-cdp-receipts-')))
+ const bridge = { action: vi.fn() } as any
+ return { native, receipts, bridge, adapter: new CodexAdapter(native, receipts, bridge, new AbortController().signal) }
 }
-
-describe('Codex queue delivery', () => {
-  it('queues once to an exact UUID with the notification and runtime instructions', async () => {
-    const run = vi.fn(async () => {})
-    const f = fixture(run)
-    const pending = f.action()
-    await f.dispatcher().deliver(pending)
-    await f.dispatcher().deliver(pending)
-    expect(run).toHaveBeenCalledTimes(1)
-    const [binary, args, signal, home] = run.mock.calls[0] as unknown as Parameters<QueueRunner>
-    expect(binary).toBe('/desktop/codex'); expect(home).toBe('/profile'); expect(signal).toBe(f.signal)
-    expect(args.slice(0, 4)).toEqual(['queue', '--thread', thread, '--message'])
-    expect(args[4]).toContain('action_id=action-1')
-    expect(args[4]).toContain('workflow.step.begin')
-    expect(args[4]).toContain('END this turn')
-    expect(args[4]).toContain('current Core state and authorization override')
-    expect(f.cancel).not.toHaveBeenCalled()
-    expect(f.bridge.settle).toHaveBeenCalledWith('action-1', 'instance', 'token', 'accepted', 0, '', f.signal)
-  })
-  it('rejects unsupported cancellation without claiming that the turn stopped', async () => {
-    const f = fixture(); f.update({ kind: 'cancel' }); f.setControl({ continuation: 'stopped' })
-    await f.dispatcher().deliver(f.action())
-    expect(f.action().status).toBe('failed'); expect(f.cancel).not.toHaveBeenCalled(); expect(f.run).not.toHaveBeenCalled()
-  })
-  it('does not redeliver after an uncertain queue result or dispatcher restart', async () => {
-    const run = vi.fn(async () => { throw new Error('timeout') })
-    const f = fixture(run)
-    await f.dispatcher().deliver(f.action())
-    expect(f.action().status).toBe('unknown')
-    await f.dispatcher().deliver(f.action())
-    expect(run).toHaveBeenCalledTimes(1)
-  })
-  it('does not resend after a successful queue whose Core receipt was lost', async () => {
-    const f = fixture()
-    vi.mocked(f.bridge.settle).mockRejectedValue(new Error('disconnected'))
-    await expect(f.dispatcher().deliver(f.action())).rejects.toThrow('disconnected')
-    expect(f.action().status).toBe('dispatching')
-    await f.dispatcher().deliver(f.action())
-    expect(f.run).toHaveBeenCalledTimes(1)
-    expect(f.action().status).toBe('unknown')
-  })
-  it('records definite launch failure as failed but nonzero exit as unknown', async () => {
-    for (const [code, status] of [['ENOENT', 'failed'], [1, 'unknown']] as const) {
-      const f = fixture(vi.fn(async () => { throw Object.assign(new Error('exit'), { code }) }))
-      await f.dispatcher().deliver(f.action())
-      expect(f.action().status).toBe(status)
-    }
-  })
-  it('rejects a task title instead of queuing to an ambiguous target', async () => {
-    const f = fixture()
-    f.update({ native_session_id: 'task title' })
-    await f.dispatcher().deliver(f.action())
-    expect(f.action().status).toBe('failed')
-    expect(f.run).not.toHaveBeenCalled()
-  })
-  it('does not queue when Core rejects a claim', async () => {
-    const f = fixture()
-    vi.mocked(f.bridge.claim).mockRejectedValue(new BridgeError('DELIVERY_PENDING', 'another dispatcher owns the notification', 409))
-    await expect(f.dispatcher().deliver(f.action())).rejects.toThrow('another dispatcher owns the notification')
-    expect(f.run).not.toHaveBeenCalled()
-  })
+describe('CDP Workflow admission and interruption', () => {
+ it('sends one notification to the bound chat and saves its actual turn receipt', async () => {
+  const {adapter,native,receipts}=await fixture();adapter.host.cacheClaim(claim())
+  await expect(adapter.prompt(thread,{actionId:'action-1',message:'continue'},new AbortController().signal)).resolves.toBe(0)
+  expect(native.start).toHaveBeenCalledWith(thread,expect.any(String),'[LazyMind action_id=action-1]\ncontinue',expect.any(AbortSignal))
+  expect(await receipts.read('action-1')).toMatchObject({status:'accepted',turnId:'turn-new',threadId:thread})
+ })
+ it('does not send when the target becomes busy', async()=>{
+  const {adapter,native}=await fixture();adapter.host.cacheClaim(claim());native.read.mockResolvedValue({id:thread,active:true,turns:[]})
+  await expect(adapter.prompt(thread,{actionId:'action-1',message:'continue'},new AbortController().signal)).rejects.toThrow('busy')
+  expect(native.start).not.toHaveBeenCalled()
+ })
+ it('does not resend a write with an uncertain outcome',async()=>{
+  const {adapter,native}=await fixture();native.start.mockRejectedValue(new Error('CDP disconnected'))
+  adapter.host.cacheClaim(claim());await expect(adapter.prompt(thread,{actionId:'action-1',message:'continue'},new AbortController().signal)).rejects.toThrow()
+  adapter.host.cacheClaim(claim());await expect(adapter.prompt(thread,{actionId:'action-1',message:'continue'},new AbortController().signal)).rejects.toThrow('already attempted')
+  expect(native.start).toHaveBeenCalledTimes(1)
+ })
+ it('interrupts the exact Workflow-owned turn',async()=>{
+  const {adapter,native,bridge}=await fixture();const action=claim('cancel');bridge.action.mockResolvedValue(action)
+  native.read.mockResolvedValue({id:thread,active:true,turns:[{id:'turn-owned',status:'inProgress',startedAt:Date.parse('2026-10-26T00:00:00Z'),items:[{
+   type:'mcpToolCall',server:'lazymind',tool:'workflow.start',status:'completed',result:{structuredContent:{session_id:'run-1'}}
+  }]}]})
+  await adapter.host.cancelSession(thread,action)
+  expect(native.interrupt).toHaveBeenCalledWith(thread,'turn-owned',expect.any(AbortSignal))
+ })
+ it('refuses Stop against a new user turn or work started after Stop',async()=>{
+  const {adapter,native}=await fixture()
+  for(const items of [[{type:'userMessage',content:[{type:'text',text:'another task'}]}],[{type:'mcpToolCall',server:'lazymind',tool:'workflow.start',status:'completed',result:{structuredContent:{session_id:'run-1'}}}]]) {
+   native.read.mockResolvedValue({id:thread,active:true,turns:[{id:'new',status:'inProgress',startedAt:Date.parse('2026-10-26T00:00:20Z'),items}]})
+   await expect(adapter.host.cancelSession(thread,claim('cancel'))).rejects.toThrow('not the target')
+  }
+  expect(native.interrupt).not.toHaveBeenCalled()
+ })
+ it('selects the Codex renderer and rejects ambiguity',()=>{
+  expect(selectCodexTarget([{type:'page',url:'app://-/index.html'},{type:'page',url:'https://example.test'}]).url).toBe('app://-/index.html')
+  expect(()=>selectCodexTarget([{type:'page',url:'app://-/index.html'},{type:'page',url:'app://-/index.html'}])).toThrow('one Codex')
+ })
 })

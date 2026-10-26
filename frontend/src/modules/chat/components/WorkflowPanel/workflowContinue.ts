@@ -1,8 +1,8 @@
 import type { TabDef, WorkflowSession } from '@/modules/chat/store/workflowPanel';
 import { resolvePendingApprovalStep } from './workflowApproval';
 
-/** Resolve the permitted protocol command after the shared UI checkpoint check. */
-export function resolveExternalContinueAction(
+/** Select the Continue command from normalized Panel capabilities. */
+export function resolvePanelContinueAction(
   control: { continuation: string; available_actions: string[]; admission?: { reason?: string } },
   completedStep?: string,
 ): 'continue' | 'resume' | 'rewind' | undefined {
@@ -11,7 +11,7 @@ export function resolveExternalContinueAction(
   return control.available_actions.includes(action) ? action : undefined;
 }
 
-export type WorkflowContinueAction = { kind: 'approval' | 'resume' | 'completed'; stepId: string };
+export type WorkflowContinueAction = { kind: 'approval' | 'resume' | 'completed' | 'continue'; stepId: string };
 
 /** Waiting alone is not a checkpoint: automatic dispatch also passes through it. */
 export function resolveWorkflowContinueAction(
@@ -25,13 +25,19 @@ export function resolveWorkflowContinueAction(
   const approvalStep = resolvePendingApprovalStep(session, displayStatus);
   if (approvalStep) return { kind: 'approval', stepId: approvalStep };
   if (!['waiting', 'stopped'].includes(displayStatus) || session.projection?.completed) return undefined;
+  if (displayStatus === 'stopped') return { kind: 'resume', stepId: session.current_step_id ?? '' };
   const nodes = session.projection?.nodes ?? {};
   if (Object.values(nodes).some((node) => node.validity !== 'stale'
     && ['pending', 'queued', 'claimed', 'running', 'failed'].includes(node.execution))) return undefined;
   const interruptedStep = (session.projection?.current ?? []).find((id) =>
     nodes[id]?.validity !== 'stale' && ['interrupted', 'cancelled', 'canceled'].includes(nodes[id]?.execution),
   );
-  return interruptedStep ? { kind: 'resume', stepId: interruptedStep } : undefined;
+  if (interruptedStep) return { kind: 'resume', stepId: interruptedStep };
+  // Once execution has yielded with a ready successor, users can explicitly
+  // continue on either surface. An initial dispatch is not a checkpoint.
+  const succeeded = (session.steps ?? []).some(step => step.validity !== 'stale' && step.status === 'succeeded');
+  return succeeded && (session.projection?.ready?.length ?? 0) > 0
+    ? { kind: 'continue', stepId: session.current_step_id ?? '' } : undefined;
 }
 
 export function resolveCompletedContinueStep(

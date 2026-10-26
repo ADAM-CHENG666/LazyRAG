@@ -50,7 +50,7 @@ vi.mock("./externalCapabilitiesApi", () => ({
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
     t: (key: string, options?: { defaultValue?: string; agent?: string; count?: number }) => {
-      if (key === "agentIntegration.retryDisconnection" || key.startsWith("agentIntegration.workbuddyInstallGuide.") || key.startsWith("agentIntegration.workbuddyErrors.") || key.startsWith("agentIntegration.loginStates.") ||
+      if (key === "agentIntegration.retryDisconnection" || key.startsWith("agentIntegration.workbuddyInstallGuide.") || key.startsWith("agentIntegration.codexInstallGuide.") || key.startsWith("agentIntegration.workbuddyErrors.") || key.startsWith("agentIntegration.loginStates.") ||
         key.startsWith("agentIntegration.cliSources.") || ["agentIntegration.selectedCLI", "agentIntegration.reselectCLI"].includes(key)) {
         return retryI18n.t(key);
       }
@@ -960,6 +960,9 @@ describe("AgentIntegrationPage", () => {
 
     const codex = await screen.findByTestId("agent-panel-codex");
     fireEvent.click(within(codex).getByRole("switch", { name: "Codex 桌面端 使用 LazyMind MCP" }));
+    expect(mocks.action).not.toHaveBeenCalled();
+    const guide = await screen.findByRole("dialog", { name: "在 Codex 中使用 LazyMind" });
+    fireEvent.click(within(guide).getByRole("button", { name: "已保存，继续" }));
     await waitFor(() => expect(mocks.action).toHaveBeenCalledWith("codex", "connect"));
 
     fireEvent.click(within(codex).getByRole("switch", { name: "LazyMind 调用 Codex CLI" }));
@@ -1376,6 +1379,18 @@ describe("AgentIntegrationPage", () => {
     expect(within(dsh).getByText("已安装")).toBeInTheDocument();
     expect(within(dsh).getByRole("switch", { name: "DeepSeek Harness Web 使用 LazyMind MCP" })).toBeChecked();
     expect(within(dsh).queryByRole("button", { name: /输入本机路径|定位 CLI|查看安装指南/ })).not.toBeInTheDocument();
+  });
+
+  it("shows Codex disconnection and requires saved-work confirmation before reconnecting", async () => {
+    mocks.statuses.mockResolvedValue({ok:true,data:{codex:{...readyCodexStatus,state:"enabled",message:"CDP offline",issue:{code:"cdp_unavailable"},
+      connection:{mcp_configured:true,mcp_enabled:true,mcp_trusted:true,control_ready:false,presentation_status:"host-offline"}}}});
+    render(<AgentIntegrationPage />);
+    const card=expandAgent("codex");
+    await within(card).findByText(zhCN.agentIntegration.codexInstallGuide.controlUnavailableDescription);
+    fireEvent.click(within(card).getByRole("button",{name:"agentIntegration.retryConnection"}));
+    const dialog=await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent(zhCN.agentIntegration.codexInstallGuide.saveDescription);
+    expect(mocks.action).not.toHaveBeenCalled();
   });
 
 });

@@ -1,0 +1,36 @@
+id: codex-cdp-acceptance-20261026
+name: Codex CDP 外部执行验收（临时）
+description: 四步外部执行小流程，测试审核继续、运行中停止、恢复、失败重试和完成后回退。仅生成短文本，不使用业务文件或外部服务。
+when_to_use: 仅当用户明确要求测试 Codex 外部会话控制时使用。请从 Codex 中启动，不从 LazyMind 内部聊天执行。
+steps:
+  - {id: prepare, label: 1 · 准备与审核}
+  - {id: interrupt, label: 2 · 中断窗口（90秒）}
+  - {id: retry, label: 3 · 失败与重试}
+  - {id: finish, label: 4 · 完成与回退}
+slots:
+  - {id: preparation, label: 准备结果, type: text, cardinality: single}
+  - {id: interrupt_result, label: 中断窗口结果, type: text, cardinality: single}
+  - {id: retry_result, label: 重试结果, type: text, cardinality: single}
+  - {id: report, label: 最终记录, type: text, cardinality: single}
+ui:
+  tabs:
+    - id: prepare
+      step_id: prepare
+      label: 准备审核
+      layout: list
+      slots: [{id: preparation}]
+    - id: interrupt
+      step_id: interrupt
+      label: 停止与恢复
+      layout: list
+      slots: [{id: interrupt_result}]
+    - id: retry
+      step_id: retry
+      label: 失败重试
+      layout: list
+      slots: [{id: retry_result}]
+    - id: finish
+      step_id: finish
+      label: 完成回退
+      layout: list
+      slots: [{id: report}]

@@ -61,10 +61,10 @@ import { SlideThumb } from './ppt/SlideThumb';
 import { WorkflowTabActions } from './actions/WorkflowTabActions';
 import { WorkflowPanelTabActiveContext, SlotEditingContext } from './slotEditingContext';
 import { findWriterArtifactStream } from './writerArtifactStream';
-import { resolveCompletedContinueStep, resolveExternalContinueAction, resolveWorkflowContinueAction } from './workflowContinue';
-import { resolvePendingApprovalStep } from './workflowApproval';
+import { panelControlState, panelControlActions } from './workflowPanelControl';
+import { nativePanelCommands } from './workflowPanelTransport';
 import { moveSelectedCompositePages, sameCompositePageOrder } from './compositePageReorder';
-import { deliveryPending, type WorkflowActionIntent, type WorkflowControlView } from '@/modules/chat/utils/workflowControl';
+import { type WorkflowActionIntent, type WorkflowControlView } from '@/modules/chat/utils/workflowControl';
 import {
   filterPresentCompositeItems,
   findAlignedCompositeRevision,
@@ -1927,12 +1927,6 @@ export function WorkflowPanel({
   const visibleActiveTabIdx = hasTabs
     ? Math.min(activeTabIdx, tabs.length - 1)
     : 0;
-  const showActions =
-    session.status === 'waiting' ||
-    session.status === 'active' ||
-    session.status === 'completed' ||
-    session.status === 'failed' ||
-    session.status === 'stopped';
   const documentFooter = useMemo(
     () => buildDocumentFooterItems(ui?.group_downloads
       ? groupDownloadActions(footerActions, key => {
@@ -1942,11 +1936,10 @@ export function WorkflowPanel({
       : footerActions),
     [footerActions, ui?.group_downloads, tabs, i18n.language, runFooterAction],
   );
-  const displayStatus = autoRunning ? 'active' : session.status;
-  const externalControl = controlAdapter?.control;
-  const availableActions = new Set(externalControl?.available_actions ?? []);
-  const pendingReview = externalControl?.reviews.find(review => review.status === 'pending');
-  const approvalStepId = resolvePendingApprovalStep(session, displayStatus);
+  const panelState = panelControlState(session, autoRunning, tabs[visibleActiveTabIdx], controlAdapter?.control, Boolean(onStop));
+  const actions = panelControlActions(panelState, session, tabs[visibleActiveTabIdx]);
+  const displayStatus = panelState.status;
+  const approvalStepId = actions.review?.step_id;
   const displayStatusKey = approvalStepId ? 'chat.workflowStatusWaiting'
     : displayStatus === 'waiting' && (session.projection?.blocked?.length ?? 0) > 0 ? 'chat.workflowStatusBlocked'
     : isWorkflowReadyToStart(
@@ -1958,55 +1951,38 @@ export function WorkflowPanel({
     : STATUS_KEY[displayStatus] ?? displayStatus;
   // Only block footer actions while the plugin is actually running (or flush-in-progress).
   // Dirty editors no longer disable retry — click flushes saves first, then proceeds.
-  const sessionBusy = displayStatus === 'active' || autoRunning;
-  const externalDeliveryBusy = externalControl ? deliveryPending(externalControl) : false;
-  const buttonsDisabled = sessionBusy || actionPending || externalDeliveryBusy;
+  const sessionBusy = panelState.busy;
+  const buttonsDisabled = sessionBusy || actionPending || panelState.deliveryBusy;
   const dismissDisabled = dismissing || anySlotEditing || actionPending;
   const collapseDisabled = (anySlotEditing || actionPending) && !collapsed;
-  const completedContinueStepId = resolveCompletedContinueStep(
-    session,
-    tabs[visibleActiveTabIdx],
-  );
-  const continueAction = resolveWorkflowContinueAction(session, displayStatus, tabs[visibleActiveTabIdx]);
-  // Control capabilities constrain an existing UI action; they must not invent
-  // a checkpoint/button that the native panel would not render for this run.
-  const showContinue = Boolean(continueAction) && (!externalControl
-    || Boolean(resolveExternalContinueAction(externalControl, completedContinueStepId)));
-  const showStepRollback =
-    (session.status === 'completed' || session.status === 'failed')
-    && Boolean(session.steps && session.steps.length > 0)
-    && (!externalControl || availableActions.has('rewind'));
+  const completedContinueStepId = actions.completedStepId;
+  const showContinue = actions.canContinue;
 
-  // A failed step cannot be checkpoint-resumed — the SubAgent exited uncleanly and there is
-  // no valid checkpoint to restore. Only "重试" (full restart) is meaningful in this case.
-  // Note: "interrupted" steps CAN be resumed via checkpoint, so only "failed" is blocked.
-  const authoritativeCurrent = session.projection?.current ?? [];
-  const currentStepStatus = authoritativeCurrent
-    .map((id) => session.projection?.nodes?.[id]?.execution)
-    .find((status) => status === 'failed')
-    ?? (session.current_step_id
-      ? session.steps
-        ?.filter((s) => s.step_id === session.current_step_id && s.validity !== 'stale')
-        ?.sort((a, b) => b.attempt - a.attempt)[0]?.status
-      : undefined);
-  const effectivePast = new Set(session.projection?.past ?? []);
-  const rollbackSteps = showStepRollback ? session.steps!.filter((step, index, all) => effectivePast.has(step.step_id)
-    && step.validity !== 'stale'
-    && all.findIndex((candidate) => candidate.step_id === step.step_id && candidate.validity !== 'stale') === index) : [];
+  const rollbackSteps = actions.rollbackSteps;
   const stepLabel = (stepId: string) => tabs.find(tab => getTabStepId(tab) === stepId)?.label
     ?? tabs.find(tab => tab.status_step_ids?.includes(stepId))?.label ?? stepId;
-  const continueDisabled = buttonsDisabled || currentStepStatus === 'failed';
+  const continueDisabled = buttonsDisabled;
   const activeControlTab = tabs[visibleActiveTabIdx];
   const activeControlStepId = (activeControlTab
     ? resolveWorkflowTabStepId(activeControlTab, session.steps)
     : undefined) ?? session.current_step_id ?? '';
-  const supportsExternal = (action: string) => !externalControl || availableActions.has(action);
+  const execute = controlAdapter?.execute ?? nativePanelCommands({
+    session, tab: tabs[visibleActiveTabIdx], send: onSendMessage, stop: handleStop,
+    latest: () => {
+      const store = useWorkflowStore.getState();
+      return { session: store.sessionByConversation[conversationId], running: store.autoRunningByConversation[conversationId] };
+    },
+    setApproval: (stepId, scope) => WorkflowSessionApi().setApprovalPreference(session.session_id, {
+      step_id: stepId, scope, approval_required: false,
+    }),
+    text: key => String(t(key)),
+  });
 
-  async function runFooterAction(action: () => void | Promise<void>, flushKey?: string, flush = true, allowBusy = false) {
-    if ((!allowBusy && sessionBusy) || actionPending) return;
+  async function runFooterAction(action: () => void | Promise<void>, flushKey?: string) {
+    if (sessionBusy || actionPending) return;
     setActionPending(true);
     try {
-      const saved = !flush || await flushPendingEdits(flushKey);
+      const saved = await flushPendingEdits(flushKey);
       if (!saved) return;
       await action();
     } finally {
@@ -2015,86 +1991,30 @@ export function WorkflowPanel({
   }
 
   function handleContinue() {
-    if (!isContinuationCurrent()) return;
-    if (controlAdapter) {
-      const intent: WorkflowActionIntent = completedContinueStepId
-        ? { kind: 'continue', completedStepId: completedContinueStepId }
-        : externalControl?.continuation === 'stopped'
-          ? { kind: 'resume' }
-          : { kind: 'continue' };
-      void runFooterAction(() => controlAdapter.execute(intent));
-      return;
-    }
-    const message = completedContinueStepId
-      ? `${t('chat.workflowRollbackPrefix')}${completedContinueStepId}`
-      : t('chat.workflowContinue');
-    void runFooterAction(() => {
-      if (isContinuationCurrent()) onSendMessage?.(message);
-    });
-  }
-
-  // Saving edits is asynchronous: execution may have advanced since the click.
-  function isContinuationCurrent() {
-    if (controlAdapter) return true;
-    if (!continueAction) return false;
-    const state = useWorkflowStore.getState();
-    const latest = state.sessionByConversation[conversationId];
-    if (!latest || latest.session_id !== session?.session_id
-      || latest.state_version !== session?.state_version || state.autoRunningByConversation[conversationId]) return false;
-    const action = resolveWorkflowContinueAction(latest, latest.status, tabs[visibleActiveTabIdx]);
-    return action?.kind === continueAction.kind && action.stepId === continueAction.stepId;
+    const intent: WorkflowActionIntent = completedContinueStepId
+      ? { kind: 'continue', completedStepId: completedContinueStepId }
+      : { kind: actions.continueKind === 'resume' ? 'resume' : 'continue' };
+    void runFooterAction(() => execute(intent));
   }
 
   function handleContinueWithApprovalPreference(scope?: 'step' | 'following') {
-    if (!session || !approvalStepId || !isContinuationCurrent()) return;
-    if (controlAdapter && pendingReview) {
-      const kind = availableActions.has('confirm_and_continue') ? 'confirm_and_continue' : 'confirm';
-      void runFooterAction(() => controlAdapter.execute({
-        kind, review: pendingReview,
-        ...(kind === 'confirm_and_continue' && scope ? { preferenceScope: scope } : {}),
-      }));
-      return;
-    }
-    if (!scope) { handleContinue(); return; }
-    const sessionId = session.session_id;
-    void runFooterAction(async () => {
-      if (!isContinuationCurrent()) return;
-      try {
-        await WorkflowSessionApi().setApprovalPreference(sessionId, {
-          step_id: approvalStepId,
-          scope,
-          approval_required: false,
-        });
-        if (isContinuationCurrent()) onSendMessage?.(t('chat.workflowContinue'));
-      } catch (error) {
-        antdMessage.error(getLocalizedErrorMessage(error));
-      }
-    });
+    if (!approvalStepId) return;
+    void runFooterAction(() => execute({
+      kind: actions.approvalKind,
+      ...actions.review!.confirmation,
+      ...(scope ? { preferenceScope: scope } : {}),
+    })).catch(error => antdMessage.error(getLocalizedErrorMessage(error)));
   }
 
   function handleRetry() {
-    if (controlAdapter) {
-      void runFooterAction(() => controlAdapter.execute({ kind: 'retry', stepId: activeControlStepId }));
-      return;
-    }
-    void runFooterAction(() => onSendMessage?.(t('chat.workflowRetry')));
+    void runFooterAction(() => execute({ kind: 'retry', stepId: activeControlStepId }));
   }
 
   function handleRollback(stepId: string) {
-    if (controlAdapter) {
-      void runFooterAction(() => controlAdapter.execute({ kind: 'rewind', stepId }));
-      return;
-    }
-    void runFooterAction(() => onSendMessage?.(`${t('chat.workflowRollbackPrefix')}${stepId}`));
+    void runFooterAction(() => execute({ kind: 'rewind', stepId }));
   }
 
-  const continueLabel = approvalStepId
-    ? t('chat.workflowContinueExecution')
-    : continueAction?.kind === 'resume'
-      ? t('chat.workflowContinue')
-    : displayStatus === 'waiting'
-      ? t('chat.workflowSaveAndContinue')
-    : t('chat.workflowContinue');
+  const continueLabel = t(actions.continueLabel);
 
   const panel = (
     <CompactWorkflowEmptyStatesContext.Provider value={externalPresentation?.compactEmptyStates === true}>
@@ -2356,7 +2276,7 @@ export function WorkflowPanel({
       )}
 
       {/* Footer */}
-      {!collapsed && (showActions || controlAdapter) && (documentFooter.actionItems.length > 0 || documentFooter.statusMessages.length > 0
+      {!collapsed && (documentFooter.actionItems.length > 0 || documentFooter.statusMessages.length > 0
         || rollbackSteps.length > 0 || sessionBusy || (showContinue && !approvalStepId) || displayStatus === 'failed' || displayStatus === 'stopped') && (
         <div className='workflow-panel__footer' role='group' aria-label={t('chat.workflowSessionControls')}>
           {documentFooter.actionItems.length > 0 || documentFooter.statusMessages.length > 0 ? (
@@ -2367,19 +2287,17 @@ export function WorkflowPanel({
               {t('chat.workflowStatusRunning')}{session.current_step_id ? ` · ${stepLabel(session.current_step_id)}` : ''}
             </span>
           )}
-          {displayStatus === 'active' && (onStop || controlAdapter) && supportsExternal('stop') && (
+          {actions.canStop && (
             <button
               type='button'
               className='workflow-panel__action-btn workflow-panel__action-btn--danger'
-              onClick={controlAdapter
-                ? () => { void runFooterAction(() => controlAdapter.execute({ kind: 'stop' }), undefined, false, true); }
-                : handleStop}
+              onClick={() => { void execute({ kind: 'stop' }); }}
               title={t('chat.workflowStop')}
             >
               {t('chat.workflowStop')}
             </button>
           )}
-          {displayStatus === 'failed' && supportsExternal('retry') && (
+          {actions.canRetry && (
             <button
               type='button'
               className='workflow-panel__action-btn workflow-panel__action-btn--secondary'
@@ -2399,9 +2317,7 @@ export function WorkflowPanel({
               {actionPending ? t('chat.workflowSavingBeforeAction') : t('chat.workflowRetry')}
             </button>
           )}
-          {showContinue && !approvalStepId && supportsExternal(
-            externalControl ? resolveExternalContinueAction(externalControl, completedContinueStepId) ?? 'continue' : 'continue',
-          ) && (
+          {showContinue && (
             <button
               type='button'
               className='workflow-panel__action-btn workflow-panel__action-btn--primary'
@@ -2409,9 +2325,7 @@ export function WorkflowPanel({
               aria-disabled={continueDisabled}
               onClick={handleContinue}
               title={
-                currentStepStatus === 'failed'
-                  ? t('chat.workflowContinueDisabledFailed')
-                  : actionPending
+                actionPending
                     ? t('chat.workflowSavingBeforeAction')
                     : buttonsDisabled
                       ? t('chat.workflowBtnDisabledHint')
@@ -2445,8 +2359,7 @@ export function WorkflowPanel({
           )}
         </div>
       )}
-    {!collapsed && approvalStepId && (!externalControl
-      || Boolean(pendingReview && (availableActions.has('confirm_and_continue') || availableActions.has('confirm')))) && (
+    {!collapsed && approvalStepId && (
       <WorkflowApprovalActions disabled={continueDisabled} onContinue={scope => {
         void handleContinueWithApprovalPreference(scope);
       }} />

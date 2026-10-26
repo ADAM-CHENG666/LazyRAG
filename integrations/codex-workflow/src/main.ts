@@ -1,73 +1,77 @@
-import { readFile, stat } from 'node:fs/promises'
-import { homedir } from 'node:os'
-import { isAbsolute, join, resolve } from 'node:path'
-import { parseArgs, promisify } from 'node:util'
+import { readFile, writeFile, rename } from 'node:fs/promises'
+import { parseArgs } from 'node:util'
 import { randomUUID } from 'node:crypto'
-import { execFile } from 'node:child_process'
+import { join, dirname } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import { createDispatcher } from '../../workflow-agent-core/src/dispatcher'
 import { HostBridge } from '../../workflow-agent-core/src/transport'
-import { setTimeout as delay } from 'node:timers/promises'
 import { dispatcherLock, DispatcherBusy } from '../../workflow-agent-core/node/runtime-lock'
 import { CodexAdapter } from './adapter'
+import { CodexNative } from './native'
+import { NativeReceipts } from './receipts'
+import { presentationLoop, type PresentationStatus } from './presentation'
+import { cleanupCodexPresentations } from './presentation'
 
-const runFile = promisify(execFile)
 async function main() {
   const { values } = parseArgs({ options: {
-    'managed': { type: 'boolean', default: false }, 'parent-pid': { type: 'string' },
-    'codex-bin': { type: 'string' }, 'codex-home': { type: 'string' },
-    'pairing-file': { type: 'string' }, 'lazymind-cli': { type: 'string', default: 'lazymind' },
-    'bridge-url': { type: 'string', default: 'http://127.0.0.1:19091' },
+    'pairing-file': { type: 'string' }, 'bridge-url': { type: 'string', default: 'http://127.0.0.1:19091' },
+    'cdp-port': { type: 'string' }, 'parent-pid': { type: 'string' },
+    'cleanup-only': { type: 'boolean', default: false },
   } })
-  const binary = values['codex-bin']
-  if (!binary || !isAbsolute(binary)) throw new Error('--codex-bin must be the absolute path to the desktop bundled Codex executable')
-  const profile = resolve(values['codex-home'] ?? process.env.CODEX_HOME ?? join(homedir(), '.codex'))
-  let path = values['pairing-file']
-  if (!path) {
-    const { stdout } = await runFile(values['lazymind-cli']!, ['internal', 'codex-workflow-pair', '--codex-home', profile])
-    path = JSON.parse(stdout).pairing_file
-  }
-  if (!path) throw new Error('LazyMind did not return a pairing file')
-  const info = await stat(path)
-  // Windows uses profile ACLs, not the synthetic POSIX mode returned by stat.
-  if (!info.isFile() || process.platform !== 'win32' && (info.mode & 0o077) !== 0) throw new Error('Pairing must be a private file (0600)')
+  const path = values['pairing-file']
+  if (!path) throw new Error('pairing-file is required')
   const pairing = JSON.parse(await readFile(path, 'utf8'))
-  if (pairing.provider !== 'codex' || pairing.enabled !== true || pairing.profile !== profile
-    || !/^host-[a-f0-9]{32}$/.test(pairing.connector_id) || !/^[a-f0-9]{64}$/.test(pairing.token)) {
-    throw new Error('Pairing does not match this Codex profile')
-  }
-  const lifetime = new AbortController()
-  const stop = () => lifetime.abort()
-  process.once('SIGINT', stop)
-  process.once('SIGTERM', stop)
-  const parentPID = values['parent-pid'] ? Number(values['parent-pid']) : undefined
-  if (parentPID !== undefined && (!Number.isSafeInteger(parentPID) || parentPID < 1)) throw new Error('Invalid parent PID')
-  // A killed MCP process cannot run cleanup. Its worker must not outlive it.
-  const parentWatch = parentPID === undefined ? undefined : setInterval(() => {
-    try { process.kill(parentPID, 0) }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') lifetime.abort() }
-  }, 1000)
-  parentWatch?.unref()
-  const instanceId = randomUUID()
-  let unlock: (() => Promise<void>) | undefined
-  try {
-    while (!lifetime.signal.aborted) {
-      try { unlock = await dispatcherLock(path, instanceId); break }
-      catch (error) {
-        if (!values.managed || !(error instanceof DispatcherBusy)) throw error
-        await delay(1000, undefined, { signal: lifetime.signal })
-      }
+  if (pairing.provider !== 'codex' || !pairing.enabled && !values['cleanup-only']) throw new Error('Codex pairing is disabled')
+  if (values['cleanup-only']) {
+    const deadline = Date.now()+3000
+    let release: (() => Promise<void>) | undefined
+    while (!release) {
+      try {release=await dispatcherLock(path,randomUUID())}
+      catch(error) {if(!(error instanceof DispatcherBusy)||Date.now()>=deadline)throw error;await delay(100)}
     }
-    lifetime.signal.throwIfAborted()
-    const bridge = new HostBridge(values['bridge-url']!, pairing)
-    const adapter = new CodexAdapter(binary, profile)
-    console.log(`Codex Workflow queue dispatcher ready. MCP pairing file: ${path}. Native turn interruption is unavailable.`)
-    await createDispatcher(adapter, undefined, bridge, instanceId, lifetime.signal).poll()
-  } finally {
-    lifetime.abort()
-    if (parentWatch) clearInterval(parentWatch)
-    if (unlock) await unlock()
-    process.removeListener('SIGINT', stop)
-    process.removeListener('SIGTERM', stop)
+    try { await cleanupCodexPresentations(Number(values['cdp-port']),AbortSignal.timeout(2000)) }
+    finally { await release() }
+    return
   }
+  const native = new CodexNative(Number(values['cdp-port']))
+  const lifetime = new AbortController(), signal = lifetime.signal
+  const stop = () => lifetime.abort()
+  process.once('SIGINT', stop); process.once('SIGTERM', stop)
+  const instance = randomUUID(), unlock = await dispatcherLock(path, instance)
+  const bridge = new HostBridge(values['bridge-url']!, pairing)
+  const adapter = new CodexAdapter(native, new NativeReceipts(join(dirname(path), pairing.connector_id + '.receipts')), bridge, signal)
+  let presentation: PresentationStatus = { status: 'starting', checked_at: Date.now() }
+  const lookup = async (session: string) => {
+    const response = await fetch(new URL('/v1/codex/presentation?session_id=' + encodeURIComponent(session), values['bridge-url']!), {
+      signal: AbortSignal.any([signal, AbortSignal.timeout(15000)]), redirect: 'error',
+      headers: { Authorization: `Bearer ${pairing.token}`, 'X-LazyMind-Connector-Id': pairing.connector_id },
+    })
+    if (!response.ok) throw Object.assign(new Error('Codex presentation lookup unavailable'), {status:response.status})
+    return response.json() as Promise<{session_id:string;run_id:string}>
+  }
+  const parent = Number(values['parent-pid'])
+  if (!Number.isSafeInteger(parent) || parent < 1) throw new Error('parent-pid is required')
+  const timer = setInterval(async () => {
+    try {
+      process.kill(parent, 0)
+      const latest = JSON.parse(await readFile(path, 'utf8'))
+      if (!latest.enabled || latest.token !== pairing.token) stop()
+    } catch { stop() }
+  }, 1000)
+  async function heartbeat() {
+    const file = path + '.codex-status.json', temp = file + '.' + instance
+    while (!signal.aborted) {
+      let ready = false, issue = 'host_unavailable'
+      try { ready = (await native.probe(signal)).ready === true; issue = ready ? '' : 'capability_unavailable' } catch { issue = 'cdp_unavailable' }
+      try {
+        await writeFile(temp, JSON.stringify({ connector_id: pairing.connector_id, checked_at: Date.now(), ready, issue, presentation }), { mode: 0o600 })
+        await rename(temp, file)
+      } catch {}
+      try { await delay(2000, undefined, { signal }) } catch { break }
+    }
+  }
+  try { await Promise.all([heartbeat(), createDispatcher(adapter, adapter.host, bridge, instance, signal).poll(),
+    presentationLoop(Number(values['cdp-port']), lookup, values['bridge-url']!, signal, value => { presentation = value })]) }
+  finally { stop(); clearInterval(timer); await unlock(); process.off('SIGINT', stop); process.off('SIGTERM', stop) }
 }
 main().catch(error => { console.error(String(error)); process.exitCode = 1 })

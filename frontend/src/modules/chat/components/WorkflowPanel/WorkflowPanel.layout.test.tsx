@@ -352,7 +352,7 @@ describe('shared workflow compact layout', () => {
     expect(stop).toHaveBeenCalledOnce();
     fixture.session = { ...fixture.session, status: 'failed' };
     view.rerender(<WorkflowPanel conversationId='layout-test' onStop={stop} />);
-    expect(screen.getByRole('button', { name: '重试' })).toBeEnabled();
+    await waitFor(() => expect(screen.getByRole('button', { name: '重试' })).toBeEnabled());
   });
 
   it.each([
@@ -385,7 +385,7 @@ describe('shared workflow compact layout', () => {
 
 describe('external workflow surface boundary', () => {
   it.each(['automatic-gap', 'delivery-pending', 'review-without-checkpoint', 'interrupted', 'completed-follow-on'] as const)(
-    'keeps native footer controls on the external surface: %s', async scenario => {
+    'uses authoritative external controls while preserving document actions: %s', async scenario => {
       const completed = scenario === 'completed-follow-on';
       const interrupted = scenario === 'interrupted';
       fixture.session.status = completed ? 'completed' : 'waiting';
@@ -405,7 +405,7 @@ describe('external workflow surface boundary', () => {
           id: 'review', step_id: 'prepare', execution_id: 'old-attempt', status: 'pending', version: 1, manifest_hash: 'hash',
         }] : [],
         active_executions: 0, active_execution_ids: [], admission: { can_begin: false },
-        binding: { bound: true, generation: 1 },
+        binding: { bound: true },
         delivery: scenario === 'delivery-pending' ? { kind: 'continue', status: 'accepted' } : null,
         available_actions: ['save', 'continue', 'resume', 'rewind', 'retry', 'confirm', 'confirm_and_continue'],
       } as WorkflowControlView;
@@ -417,10 +417,20 @@ describe('external workflow surface boundary', () => {
       view.rerender(<WorkflowPanel conversationId='layout-test' embedded
         externalPresentation={{ activities: {}, compactEmptyStates: false }}
         controlAdapter={{ control, execute: vi.fn(async () => {}) }} />);
-      expect(footerButtons()).toEqual(native);
-      expect(screen.queryByRole('group', { name: '工作流审批操作' })).not.toBeInTheDocument();
-      expect(screen.queryByRole('button', { name: '保存并继续' })).not.toBeInTheDocument();
-      if (interrupted || completed) expect(screen.getByRole('button', { name: '继续', exact: true })).toBeEnabled();
+      const external = footerButtons();
+      for (const action of native.filter(action => action.label !== '继续')) {
+        expect(external).toContainEqual(action);
+      }
+      if (scenario === 'review-without-checkpoint') {
+        expect(screen.getByRole('group', { name: '工作流审批操作' })).toBeVisible();
+        expect(screen.queryByRole('button', { name: '保存并继续' })).not.toBeInTheDocument();
+      } else if (interrupted || completed) {
+        expect(screen.getByRole('button', { name: '继续' })).toBeEnabled();
+      } else {
+        const button = screen.getByRole('button', { name: '保存并继续' });
+        if (scenario === 'delivery-pending') expect(button).toBeDisabled();
+        else expect(button).toBeEnabled();
+      }
     },
   );
 
@@ -431,7 +441,7 @@ describe('external workflow surface boundary', () => {
     const control = {
       protocol: 'workflow.control.v1', session_id: 'layout-test', state_version: 2,
       continuation: 'awaiting_executor', reviews: [], active_executions: 1, active_execution_ids: ['attempt-1'],
-      admission: { can_begin: false }, binding: { bound: true, generation: 1 }, delivery: null,
+      admission: { can_begin: false }, binding: { bound: true }, delivery: null,
       available_actions: ['stop'],
     } as WorkflowControlView;
     const execute = vi.fn(async () => {});
@@ -454,7 +464,7 @@ describe('external workflow surface boundary', () => {
     const control = {
       protocol: 'workflow.control.v1', session_id: 'layout-test', state_version: 2,
       continuation: 'awaiting_user', reviews: [review], active_executions: 0, active_execution_ids: [],
-      admission: { can_begin: false }, binding: { bound: true, generation: 1 }, delivery: null,
+      admission: { can_begin: false }, binding: { bound: true }, delivery: null,
       available_actions: ['confirm', 'confirm_and_continue', 'rewind'],
     } as WorkflowControlView;
     const execute = vi.fn(async () => {});
@@ -475,7 +485,7 @@ describe('external workflow surface boundary', () => {
     const control = {
       protocol: 'workflow.control.v1', session_id: 'layout-test', state_version: 1,
       continuation: 'completed', reviews: [], active_executions: 0, active_execution_ids: [],
-      admission: { can_begin: false }, binding: { bound: true, generation: 1 }, delivery: null,
+      admission: { can_begin: false }, binding: { bound: true }, delivery: null,
       available_actions: ['rewind'],
     } as WorkflowControlView;
     render(<WorkflowPanel conversationId='layout-test' embedded onRefresh={vi.fn(async () => {})}
@@ -524,7 +534,7 @@ describe('external workflow surface boundary', () => {
     const control = {
       protocol: 'workflow.control.v1', session_id: 'layout-test', state_version: 1,
       continuation: 'completed', reviews: [], active_executions: 0, active_execution_ids: [],
-      admission: { can_begin: false }, binding: { bound: true, generation: 1 }, delivery: null,
+      admission: { can_begin: false }, binding: { bound: true }, delivery: null,
       available_actions: ['rewind'],
     } as WorkflowControlView;
     render(<WorkflowPanel conversationId='layout-test'
@@ -626,7 +636,7 @@ it('keeps saved output visible after execution fails and retries through externa
   const control: WorkflowControlView = {
     protocol: 'workflow.control.v1', session_id: stored.session_id, state_version: 4,
     continuation: 'awaiting_executor', active_executions: 1, active_execution_ids: ['attempt'],
-    reviews: [], binding: { bound: true, generation: 1 }, delivery: null,
+    reviews: [], binding: { bound: true }, delivery: null,
     admission: { can_begin: false }, available_actions: ['stop'],
   };
   const getControl = vi.fn(async () => ({ data: { data: {
@@ -679,4 +689,105 @@ it('keeps saved output visible after execution fails and retries through externa
   expect(fixture.flush.mock.invocationCallOrder[0]).toBeLessThan(write.mock.invocationCallOrder[0]);
   expect(getSession).not.toHaveBeenCalled();
   expect(getProjection).not.toHaveBeenCalled();
+});
+
+it('renders Core review actions without a legacy approval node and sends the exact review', async () => {
+  fixture.session.status = 'waiting';
+  fixture.session.steps = [];
+  fixture.session.slots = [];
+  fixture.session.projection = { past: ['prepare'], ready: ['write_document'], nodes: {} };
+  const review = { id: 'review', step_id: 'prepare', execution_id: 'external-attempt', status: 'pending' as const, version: 3, manifest_hash: 'manifest' };
+  const control: WorkflowControlView = {
+    protocol: 'workflow.control.v1', session_id: 'layout-test', state_version: 11,
+    continuation: 'awaiting_user', reviews: [review], active_executions: 0, active_execution_ids: [],
+    admission: { can_begin: false, reason: 'review_pending' }, binding: { bound: true },
+    delivery: null, available_actions: ['confirm', 'confirm_and_continue'],
+  };
+  const execute = vi.fn(async () => {});
+  render(<WorkflowPanel conversationId='layout-test' embedded externalPresentation={{ activities: {} }} controlAdapter={{ control, execute }} />);
+  fireEvent.click(await screen.findByRole('button', { name: '继续执行' }));
+  await waitFor(() => expect(execute).toHaveBeenCalledWith({ kind: 'confirm_and_continue', review }));
+  expect(execute).toHaveBeenCalledOnce();
+});
+
+it.each(['review', 'continue', 'running', 'failed', 'stopped', 'completed'] as const)(
+  'keeps native and embedded controls identical at the same checkpoint: %s', async phase => {
+    fixture.session.status = phase === 'running' ? 'active' : phase === 'review' || phase === 'continue' ? 'waiting' : phase;
+    fixture.session.current_step_id = 'write_document';
+    fixture.session.steps = [{ ...fixture.session.steps![1], status: phase === 'running' ? 'running' : phase === 'failed' ? 'failed' : phase === 'stopped' ? 'interrupted' : 'succeeded' }];
+    fixture.session.slots = [];
+    fixture.session.projection = { past: phase === 'completed' ? ['write_document'] : [],
+      current: ['running', 'failed', 'stopped'].includes(phase) ? ['write_document'] : [],
+      ready: phase === 'continue' ? ['next'] : [], completed: phase === 'completed',
+      nodes: { write_document: { execution: fixture.session.steps[0].status, requires_approval: phase === 'review',
+        validity: 'effective', reachability: 'reachable', readiness: 'not_applicable', branch: 'active' } } };
+    if (phase === 'completed') fixture.ui.tabs![1].completed_continue_step = 'write_document';
+    const review = { id: 'r', step_id: 'write_document', execution_id: 'e', status: 'pending' as const, version: 2, manifest_hash: 'm' };
+    const control: WorkflowControlView = {
+      protocol: 'workflow.control.v1', session_id: 'layout-test', state_version: 1,
+      continuation: phase === 'review' ? 'awaiting_user' : phase === 'running' ? 'awaiting_executor' : phase,
+      active_executions: phase === 'running' ? 1 : 0, active_execution_ids: phase === 'running' ? ['e'] : [],
+      reviews: phase === 'review' ? [review] : [], delivery: null, admission: { can_begin: phase === 'continue' }, binding: { bound: true },
+      available_actions: phase === 'review' ? ['confirm_and_continue'] : phase === 'continue' ? ['continue']
+        : phase === 'running' ? ['stop'] : phase === 'failed' ? ['retry', 'rewind'] : phase === 'stopped' ? ['resume'] : ['rewind'],
+    };
+    const send = vi.fn(), execute = vi.fn(async () => {});
+    const view = render(<WorkflowPanel conversationId='layout-test' onSendMessage={send} onStop={vi.fn()} />);
+    await screen.findByRole('tab', { name: /成稿/, selected: true });
+    const controls = () => [...view.container.querySelectorAll<HTMLButtonElement>('.workflow-panel__footer button, .workflow-panel__approval-bar button')]
+      .map(button => ({ label: button.textContent, disabled: button.disabled }));
+    const native = controls();
+    expect(native.length).toBeGreaterThan(0);
+    const primary = phase === 'review' ? '继续执行' : phase === 'continue' ? '保存并继续'
+      : phase === 'running' ? '停止' : phase === 'failed' ? '重试' : '继续';
+    if (phase !== 'running') {
+      fireEvent.click(screen.getByRole('button', { name: primary }));
+      await waitFor(() => expect(send).toHaveBeenCalledOnce());
+      expect(send).toHaveBeenCalledWith(phase === 'failed' ? i18n.t('chat.workflowRetry')
+        : phase === 'completed' ? '请重新执行步骤 write_document' : i18n.t('chat.workflowContinue'));
+    }
+    view.rerender(<WorkflowPanel conversationId='layout-test' embedded externalPresentation={{ activities: {} }} controlAdapter={{ control, execute }} />);
+    await waitFor(() => expect(controls()).toEqual(native));
+    fireEvent.click(screen.getByRole('button', { name: primary }));
+    await waitFor(() => expect(execute).toHaveBeenCalledOnce());
+    expect(execute).toHaveBeenCalledWith(phase === 'review' ? { kind: 'confirm_and_continue', review }
+      : phase === 'completed' ? { kind: 'continue', completedStepId: 'write_document' }
+      : phase === 'failed' ? { kind: 'retry', stepId: 'write_document' }
+      : { kind: phase === 'running' ? 'stop' : phase === 'stopped' ? 'resume' : 'continue' });
+  },
+);
+
+it('does not send stale native Continue when execution advances during an editor save', async () => {
+  fixture.session.status = 'waiting';
+  fixture.session.state_version = 10;
+  fixture.session.steps = [{ ...fixture.session.steps![1], status: 'succeeded' }];
+  fixture.session.projection = { ready: ['next'], current: [] };
+  fixture.flush.mockImplementationOnce(async () => {
+    fixture.session = { ...fixture.session, state_version: 11, status: 'active' };
+    return true;
+  });
+  const send = vi.fn();
+  render(<WorkflowPanel conversationId='layout-test' onSendMessage={send} />);
+  await screen.findByText('正文 document');
+  fireEvent.click(screen.getByRole('button', { name: '保存并继续' }));
+  await waitFor(() => expect(fixture.flush).toHaveBeenCalledOnce());
+  await act(async () => {});
+  expect(send).not.toHaveBeenCalled();
+});
+
+it('offers Resume while stopped even when Core retains an unfinished review', async () => {
+  fixture.session.status = 'stopped';
+  fixture.session.steps = [];
+  fixture.session.slots = [];
+  const control: WorkflowControlView = {
+    protocol: 'workflow.control.v1', session_id: 'layout-test', state_version: 12,
+    continuation: 'stopped', active_executions: 0, active_execution_ids: [],
+    reviews: [{ id: 'r', step_id: 'prepare', execution_id: 'e', status: 'pending', version: 1, manifest_hash: 'm' }],
+    admission: { can_begin: false }, available_actions: ['resume'], binding: { bound: true }, delivery: null,
+  };
+  const execute = vi.fn(async () => {});
+  render(<WorkflowPanel conversationId='layout-test' embedded controlAdapter={{ control, execute }} />);
+  fireEvent.click(await screen.findByRole('button', { name: '继续' }));
+  await waitFor(() => expect(execute).toHaveBeenCalledWith({ kind: 'resume' }));
+  expect(screen.queryByRole('group', { name: '工作流审批操作' })).not.toBeInTheDocument();
 });

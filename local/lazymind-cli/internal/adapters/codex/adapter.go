@@ -13,6 +13,7 @@ import (
 
 	"lazymind/agentconnector/internal/agentexec"
 	"lazymind/agentconnector/internal/agentintegration"
+	"lazymind/agentconnector/internal/codexhost"
 	"lazymind/agentconnector/internal/codexplugin"
 	"lazymind/agentconnector/internal/connectorconfig"
 	"lazymind/agentconnector/internal/credentials"
@@ -25,6 +26,8 @@ const (
 	commandTimeout     = 5 * time.Second
 	interactiveTimeout = 2 * time.Minute
 )
+
+var prepareCodexDesktop = codexhost.PrepareDesktop
 
 type Adapter struct {
 	binary         string
@@ -117,6 +120,29 @@ func (a *Adapter) Status(context.Context) agentintegration.Status {
 			status.Message = "Reconnect to upgrade the existing MCP entry to the LazyMind Workflow plugin."
 		}
 	}
+	if status.State == agentintegration.Enabled {
+		store, err := credentials.NewStore(a.home, "")
+		ready := false
+		presentation := "unavailable"
+		issue := "host_unavailable"
+		if err == nil {
+			scope, e := store.AccountScope()
+			if e == nil {
+				if current, statusErr := codexhost.ReadStatus(a.home, scope); statusErr == nil {
+					ready = current.Ready
+					presentation = current.Presentation.Status
+					if current.Issue == "cdp_unavailable" {
+						issue = "cdp_unavailable"
+					}
+				}
+			}
+		}
+		status.Connection = &agentintegration.ConnectionStatus{MCPConfigured: true, MCPEnabled: true, MCPTrusted: true, ControlReady: ready, PresentationStatus: presentation}
+		if !ready {
+			status.Issue = &agentintegration.Issue{Code: issue}
+			status.Message = "Codex CDP control is disconnected. Save work and reconnect using the LazyMind guide; a normal system launch does not preserve CDP startup arguments."
+		}
+	}
 	return status
 }
 
@@ -125,8 +151,19 @@ func (a *Adapter) Connect(ctx context.Context) agentintegration.Status {
 		return agentintegration.Fail(a.Status(ctx), "clean up legacy Codex control configuration: "+err.Error())
 	}
 	status := a.Status(ctx)
-	if status.State != agentintegration.Ready {
+	if status.State != agentintegration.Ready && status.State != agentintegration.Enabled {
 		return status
+	}
+	if status.State == agentintegration.Enabled {
+		if record, e := codexplugin.Read(); e == nil && record.BuildID == codexplugin.BuildID() {
+			if e = codexhost.Configure(a.home, record.Node, record.PairingFile); e != nil {
+				return agentintegration.Fail(status, e.Error())
+			}
+			if e = prepareCodexDesktop(ctx, a.home); e != nil {
+				return agentintegration.Fail(status, e.Error())
+			}
+			return a.Status(ctx)
+		}
 	}
 	// Installation is local and uses the saved account scope. A temporarily
 	// offline Core must not prevent installing the plugin; MCP checks service
@@ -141,6 +178,12 @@ func (a *Adapter) Connect(ctx context.Context) agentintegration.Status {
 	record, err := codexplugin.Install(ctx, a.home, a.self, a.binary, profile, a.hostID)
 	if err != nil {
 		return agentintegration.Fail(status, "install LazyMind Workflow plugin: "+err.Error())
+	}
+	if err := codexhost.Configure(a.home, record.Node, record.PairingFile); err != nil {
+		return agentintegration.Fail(status, err.Error())
+	}
+	if err := prepareCodexDesktop(ctx, a.home); err != nil {
+		return agentintegration.Fail(status, err.Error())
 	}
 	// Migrate only after successful plugin installation. An unrelated MCP entry
 	// was already rejected by Status and is never overwritten.
@@ -169,6 +212,9 @@ func (a *Adapter) Disconnect(ctx context.Context) agentintegration.Status {
 		}
 		if err := workflowhost.Disable(a.home, record.ConnectorID); err != nil {
 			return agentintegration.Fail(status, err.Error())
+		}
+		if err := codexhost.CleanupPresentation(a.home); err != nil {
+			return agentintegration.Fail(status, "remove Codex Workflow panel: "+err.Error())
 		}
 	}
 	if _, exists, err := a.getConfig(); err != nil {
