@@ -1,12 +1,20 @@
-import { object } from '../../workflow-agent-core/src/protocol'
 import type { NativeTurn } from './native'
-/** Only native MCP receipts after the latest user input establish execution ownership. */
-export function workflowTurnOwner(turn: NativeTurn): string | undefined {
+/** Serialized into the renderer as well: keep all runtime helpers inside this function. */
+export function workflowTurnEvidence(turn: NativeTurn) {
+  const object = (value: any): Record<string, any> | undefined =>
+    value && typeof value === 'object' && !Array.isArray(value) ? value : undefined
+  const inputs: Record<string, any>[] = []
   let run: string | undefined
+  // Native items retain invocation order when a pending tool receives its result.
+  // A late completion before the latest input must not restore old ownership.
   for (const value of turn.items ?? []) {
     const item = object(value)
     if (!item) continue
-    if (item.type === 'userMessage') { run = undefined; continue }
+    // Accepted steering can replace the server userMessage with a steered marker.
+    // Pending steering also invalidates ownership until fresh Workflow evidence.
+    if (['userMessage', 'steeringUserMessage', 'steered'].includes(item.type)) {
+      inputs.push(item); run = undefined; continue
+    }
     if (item.type !== 'mcpToolCall' || !['lazymind', 'lazymind-workflow'].includes(String(item.server))
       || !['workflow.start', 'workflow.step.begin', 'workflow.step.claim', 'workflow.step.resume', 'workflow.step.complete'].includes(String(item.tool))
       || item.status !== 'completed' || item.error) continue
@@ -21,5 +29,5 @@ export function workflowTurnOwner(turn: NativeTurn): string | undefined {
     if (['workflow.step.begin', 'workflow.step.claim', 'workflow.step.resume'].includes(String(item.tool)) && typeof execution?.execution_id !== 'string') continue
     run = id
   }
-  return run
+  return { runId: run, inputs }
 }

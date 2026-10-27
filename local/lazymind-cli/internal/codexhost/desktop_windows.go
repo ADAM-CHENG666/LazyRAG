@@ -25,8 +25,7 @@ function Start-CodexDesktop {
         if (-not $process.CloseMainWindow()) { throw 'Close Codex and retry' }
         if (-not $process.WaitForExit(10000)) { throw 'Codex did not exit; quit it from its tray menu or finish its pending dialog and retry' }
     }
-    # LazyMind itself may predate the persistent environment update. Override
-    # the inherited value as Codex reads it before Electron startup.
+    # This explicit installation restart uses the same flags as the persistent shortcuts.
     Start-Process -FilePath $exe -ArgumentList @('--remote-debugging-address=127.0.0.1', ('--remote-debugging-port='+$env:LAZYMIND_CODEX_CDP_PORT))
 }
 `

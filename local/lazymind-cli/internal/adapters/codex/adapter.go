@@ -17,6 +17,7 @@ import (
 	"lazymind/agentconnector/internal/codexplugin"
 	"lazymind/agentconnector/internal/connectorconfig"
 	"lazymind/agentconnector/internal/credentials"
+	"lazymind/agentconnector/internal/integrationstate"
 	"lazymind/agentconnector/internal/mcpbridge"
 	"lazymind/agentconnector/internal/workflowhost"
 )
@@ -87,7 +88,18 @@ func New(binary, self string, bridge *mcpbridge.Bridge) (*Adapter, error) {
 	}, nil
 }
 
-func (a *Adapter) Status(context.Context) agentintegration.Status {
+var startupHealth = codexhost.StartupHealth
+var disableStartup = codexhost.DisableStartup
+
+func (a *Adapter) Status(ctx context.Context) agentintegration.Status {
+	status := agentintegration.ApplyPreference(a.home, "codex", a.status(ctx))
+	if status.Enabled != nil && *status.Enabled && status.State == agentintegration.Enabled {
+		agentintegration.SetRuntimeIssue(&status, startupHealth(ctx, a.home))
+	}
+	return status
+}
+
+func (a *Adapter) status(context.Context) agentintegration.Status {
 	desktop, err := codexDesktopState()
 	if err != nil {
 		return agentintegration.Fail(agentintegration.Status{Agent: "codex", DisplayName: "Codex"}, err.Error())
@@ -140,19 +152,23 @@ func (a *Adapter) Status(context.Context) agentintegration.Status {
 		status.Connection = &agentintegration.ConnectionStatus{MCPConfigured: true, MCPEnabled: true, MCPTrusted: true, ControlReady: ready, PresentationStatus: presentation}
 		if !ready {
 			status.Issue = &agentintegration.Issue{Code: issue}
-			status.Message = "Codex CDP control is disconnected. Save work and reconnect using the LazyMind guide; a normal system launch does not preserve CDP startup arguments."
+			status.Message = "Codex control is disconnected. Turn its LazyMind switch off and on again; save current work before restarting Codex."
 		}
 	}
 	return status
 }
 
-func (a *Adapter) Connect(ctx context.Context) agentintegration.Status {
+func (a *Adapter) Connect(ctx context.Context) (result agentintegration.Status) {
+	defer func() { result = agentintegration.ApplyPreference(a.home, "codex", result) }()
 	if err := CleanupLegacyControl(); err != nil {
 		return agentintegration.Fail(a.Status(ctx), "clean up legacy Codex control configuration: "+err.Error())
 	}
 	status := a.Status(ctx)
-	if status.State != agentintegration.Ready && status.State != agentintegration.Enabled {
+	if status.State != agentintegration.Ready && status.State != agentintegration.Enabled && !(status.Enabled != nil && *status.Enabled && status.State != agentintegration.Conflict && !agentintegration.MissingRequirement(status.Requirements)) {
 		return status
+	}
+	if err := integrationstate.Set(a.home, "codex", true); err != nil {
+		return agentintegration.Fail(status, err.Error())
 	}
 	if status.State == agentintegration.Enabled {
 		if record, e := codexplugin.Read(); e == nil && record.BuildID == codexplugin.BuildID() {
@@ -198,20 +214,27 @@ func (a *Adapter) Connect(ctx context.Context) agentintegration.Status {
 	return a.Status(ctx)
 }
 
-func (a *Adapter) Disconnect(ctx context.Context) agentintegration.Status {
+func (a *Adapter) Disconnect(ctx context.Context) (result agentintegration.Status) {
+	defer func() { result = agentintegration.ApplyPreference(a.home, "codex", result) }()
+	if err := integrationstate.Set(a.home, "codex", false); err != nil {
+		return agentintegration.Fail(a.Status(ctx), err.Error())
+	}
+	if err := disableStartup(ctx, a.home); err != nil {
+		return agentintegration.Fail(a.Status(ctx), err.Error())
+	}
 	if err := CleanupLegacyControl(); err != nil {
 		return agentintegration.Fail(a.Status(ctx), "clean up legacy Codex control configuration: "+err.Error())
 	}
 	status := a.Status(ctx)
-	if status.State == agentintegration.Conflict || status.State == agentintegration.Failed {
+	if status.State == agentintegration.Conflict || status.State == agentintegration.Failed && !status.CanDisconnect {
 		return status
 	}
 	if record, err := codexplugin.Read(); err == nil && record.Home == a.home {
-		if _, err := a.run(ctx, "plugin", "remove", codexplugin.Name+"@"+record.Marketplace, "--json"); err != nil {
-			return agentintegration.Fail(status, "remove Codex Workflow plugin: "+err.Error())
-		}
 		if err := workflowhost.Disable(a.home, record.ConnectorID); err != nil {
 			return agentintegration.Fail(status, err.Error())
+		}
+		if _, err := a.run(ctx, "plugin", "remove", codexplugin.Name+"@"+record.Marketplace, "--json"); err != nil {
+			return agentintegration.Fail(status, "remove Codex Workflow plugin: "+err.Error())
 		}
 		if err := codexhost.CleanupPresentation(a.home); err != nil {
 			return agentintegration.Fail(status, "remove Codex Workflow panel: "+err.Error())

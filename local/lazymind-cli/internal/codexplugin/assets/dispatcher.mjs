@@ -215,20 +215,21 @@ async function dispatcherLock(pairingFile, instanceId) {
 }
 
 //#endregion
-//#region ../workflow-agent-core/src/protocol.ts
-function object(value) {
-	return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
-}
-
-//#endregion
 //#region src/ownership.ts
-/** Only native MCP receipts after the latest user input establish execution ownership. */
-function workflowTurnOwner(turn) {
+/** Serialized into the renderer as well: keep all runtime helpers inside this function. */
+function workflowTurnEvidence(turn) {
+	const object = (value) => value && typeof value === "object" && !Array.isArray(value) ? value : void 0;
+	const inputs = [];
 	let run;
 	for (const value of turn.items ?? []) {
 		const item = object(value);
 		if (!item) continue;
-		if (item.type === "userMessage") {
+		if ([
+			"userMessage",
+			"steeringUserMessage",
+			"steered"
+		].includes(item.type)) {
+			inputs.push(item);
 			run = void 0;
 			continue;
 		}
@@ -252,7 +253,10 @@ function workflowTurnOwner(turn) {
 		].includes(String(item.tool)) && typeof execution?.execution_id !== "string") continue;
 		run = id;
 	}
-	return run;
+	return {
+		runId: run,
+		inputs
+	};
 }
 
 //#endregion
@@ -329,16 +333,15 @@ var CodexAdapter = class {
 	cancel() {
 		throw new AdmissionRejected("Stop requires a Workflow-owned turn");
 	}
-	async owns(turn, run, thread) {
-		const owner = workflowTurnOwner(turn);
+	async owns(evidence, turnId, run, thread) {
+		const { runId: owner, inputs } = evidence;
 		if (owner) return owner === run;
-		const inputs = turn.items.filter((item) => item.type === "userMessage");
-		if (inputs.length !== 1) return false;
+		if (inputs.length !== 1 || inputs[0].type !== "userMessage") return false;
 		const text = inputs[0].content?.find((part) => part.type === "text")?.text;
 		const id = typeof text === "string" ? /^\[LazyMind action_id=([^\]\n]+)\]/.exec(text)?.[1] : void 0;
 		if (!id) return false;
 		const receipt = await this.receipts.read(id);
-		return receipt?.kind === "continue" && receipt.runId === run && receipt.threadId === thread && receipt.clientId === inputs[0].clientId && (!receipt.turnId || receipt.turnId === turn.id);
+		return receipt?.kind === "continue" && receipt.runId === run && receipt.threadId === thread && receipt.clientId === inputs[0].clientId && (!receipt.turnId || receipt.turnId === turnId);
 	}
 	async cancelOwned(thread, claim) {
 		this.claims.delete(claim.action.id);
@@ -348,8 +351,10 @@ var CodexAdapter = class {
 		const active = state.turns.filter((turn) => turn.status === "inProgress");
 		if (!active.length && !state.active) return;
 		const target = active[0];
+		if (active.length !== 1 || !target.id) throw new AdmissionRejected("Current Codex work is not the target of this Stop");
+		const evidence = workflowTurnEvidence(target), expectedOwnership = JSON.stringify(evidence);
 		const stoppedAt = Date.parse(claim.action.created_at ?? "");
-		if (active.length !== 1 || !target.id || !await this.owns(target, claim.action.session_id, thread) || !Number.isFinite(stoppedAt) || !Number.isFinite(target.startedAt) || target.startedAt > stoppedAt) throw new AdmissionRejected("Current Codex work is not the target of this Stop");
+		if (!await this.owns(evidence, target.id, claim.action.session_id, thread) || !Number.isFinite(stoppedAt) || !Number.isFinite(target.startedAt) || target.startedAt > stoppedAt) throw new AdmissionRejected("Current Codex work is not the target of this Stop");
 		this.validate(thread, await this.bridge.action(claim.action.id, this.signal), "cancel");
 		await this.receipts.write({
 			actionId: claim.action.id,
@@ -359,7 +364,9 @@ var CodexAdapter = class {
 			turnId: target.id,
 			status: "sending"
 		});
-		if ((await this.native.interrupt(thread, target.id, this.signal)).interruptedTurnId !== target.id) throw new Error("The target turn interruption was not confirmed");
+		const result = await this.native.interrupt(thread, target.id, expectedOwnership, this.signal);
+		if (result?.rejected) throw new AdmissionRejected(result.rejected);
+		if (result.interruptedTurnId !== target.id) throw new Error("The target turn interruption was not confirmed");
 		await this.receipts.write({
 			actionId: claim.action.id,
 			runId: claim.action.session_id,
@@ -468,7 +475,7 @@ function windowCdp(port, id) {
 //#endregion
 //#region src/native.ts
 /** Runs inside the existing desktop renderer, never in a new App Server. */
-async function codexOperation(input) {
+async function codexOperation(input, readEvidence = workflowTurnEvidence) {
 	const host = globalThis;
 	const capable = (value) => {
 		try {
@@ -585,16 +592,20 @@ async function codexOperation(input) {
 	if (input.kind === "interrupt") {
 		const target = snapshot().turns.find((turn) => turn.id === input.turnId);
 		if (!target || target.status !== "inProgress") return { interruptedTurnId: null };
+		if (manager.getStreamRole?.(input.threadId)?.role !== "owner" || JSON.stringify(readEvidence(target)) !== input.expectedOwnership) return { rejected: "Codex execution ownership changed; no interruption was sent" };
 		return { interruptedTurnId: await manager.interruptConversation(input.threadId, "user-stop", input.turnId) ?? null };
 	}
 	throw new Error("Unknown Codex operation");
+}
+function nativeExpression(input) {
+	return `(input => (${codexOperation.toString()})(input, ${workflowTurnEvidence.toString()}))(${JSON.stringify(input)})`;
 }
 var CodexNative = class {
 	constructor(port) {
 		this.port = port;
 	}
 	evaluate(id, input, signal) {
-		return windowCdp(this.port, id).evaluate(`(${codexOperation.toString()})(${JSON.stringify(input)})`, signal);
+		return windowCdp(this.port, id).evaluate(nativeExpression(input), signal);
 	}
 	async probe(signal) {
 		const windows = await codexTargets(this.port, signal);
@@ -633,11 +644,12 @@ var CodexNative = class {
 			message
 		}, signal);
 	}
-	interrupt(threadId, turnId, signal) {
+	interrupt(threadId, turnId, expectedOwnership, signal) {
 		return this.mutate({
 			kind: "interrupt",
 			threadId,
-			turnId
+			turnId,
+			expectedOwnership
 		}, signal);
 	}
 };

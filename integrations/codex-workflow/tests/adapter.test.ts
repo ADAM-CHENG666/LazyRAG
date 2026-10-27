@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { CodexAdapter } from '../src/adapter'
 import { NativeReceipts } from '../src/receipts'
 import { selectCodexTarget } from '../src/native'
+import { AdmissionRejected } from '../../workflow-agent-core/src/adapter'
 const thread = '01a12f01-e372-7ef3-aaae-4a0a295d6700'
 const claim = (kind = 'continue') => ({ action: { id: 'action-1', session_id: 'run-1', native_session_id: thread,
   kind, status: 'dispatching', created_at: '2026-10-26T00:00:10Z' }, control: { session_id: 'run-1', continuation: kind === 'cancel' ? 'stopped' : 'continue',
@@ -40,7 +41,7 @@ describe('CDP Workflow admission and interruption', () => {
    type:'mcpToolCall',server:'lazymind',tool:'workflow.start',status:'completed',result:{structuredContent:{session_id:'run-1'}}
   }]}]})
   await adapter.host.cancelSession(thread,action)
-  expect(native.interrupt).toHaveBeenCalledWith(thread,'turn-owned',expect.any(AbortSignal))
+  expect(native.interrupt).toHaveBeenCalledWith(thread,'turn-owned',JSON.stringify({runId:'run-1',inputs:[]}),expect.any(AbortSignal))
  })
  it('refuses Stop against a new user turn or work started after Stop',async()=>{
   const {adapter,native}=await fixture()
@@ -49,6 +50,66 @@ describe('CDP Workflow admission and interruption', () => {
    await expect(adapter.host.cancelSession(thread,claim('cancel'))).rejects.toThrow('not the target')
   }
   expect(native.interrupt).not.toHaveBeenCalled()
+ })
+ it.each([
+  {type:'userMessage',id:'new-input',content:[{type:'text',text:'work on another task'}]},
+  {type:'steeringUserMessage',id:'steer',status:'pending',targetTurnId:'turn-owned'},
+  {type:'steeringUserMessage',id:'steer',status:'accepted',targetTurnId:'turn-owned',serverUserMessageId:'new-input'},
+  {type:'steered',id:'new-input'},
+ ])('invalidates old ownership and notification receipts for $type/$status',async(input)=>{
+  for(const withToolReceipt of [false,true]) {
+   const {adapter,native,receipts}=await fixture()
+   await receipts.write({actionId:'continue-1',runId:'run-1',threadId:thread,kind:'continue',clientId:'client-1',turnId:'turn-owned',status:'accepted'})
+   native.read.mockResolvedValue({id:thread,active:true,turns:[{id:'turn-owned',status:'inProgress',startedAt:Date.parse('2026-10-26T00:00:00Z'),items:[
+    {type:'userMessage',id:'original',clientId:'client-1',content:[{type:'text',text:'[LazyMind action_id=continue-1]\ncontinue'}]},
+    ...(withToolReceipt?[{type:'mcpToolCall',server:'lazymind',tool:'workflow.start',status:'completed',result:{structuredContent:{session_id:'run-1'}}}]:[]),
+    input,
+   ]}]})
+   await expect(adapter.host.cancelSession(thread,claim('cancel'))).rejects.toBeInstanceOf(AdmissionRejected)
+   expect(native.interrupt).not.toHaveBeenCalled()
+  }
+ })
+ it('can stop an unsteered continuation using its durable notification receipt',async()=>{
+  const {adapter,native,bridge,receipts}=await fixture();const action=claim('cancel');bridge.action.mockResolvedValue(action)
+  await receipts.write({actionId:'continue-1',runId:'run-1',threadId:thread,kind:'continue',clientId:'client-1',turnId:'turn-owned',status:'accepted'})
+  native.read.mockResolvedValue({id:thread,active:true,turns:[{id:'turn-owned',status:'inProgress',startedAt:Date.parse('2026-10-26T00:00:00Z'),items:[
+   {type:'userMessage',id:'original',clientId:'client-1',content:[{type:'text',text:'[LazyMind action_id=continue-1]\ncontinue'}]},
+  ]}]})
+  await adapter.host.cancelSession(thread,action)
+  expect(native.interrupt).toHaveBeenCalledOnce()
+ })
+ it.each([
+  {tool:'workflow.step.begin',run:'run-1',allowed:true},
+  {tool:'workflow.step.begin',run:'run-2',allowed:false},
+  {tool:'workflow.state',run:'run-1',allowed:false},
+ ])('requires a fresh acquisition for the same run after steering: $tool/$run',async({tool,run,allowed})=>{
+  const {adapter,native,bridge}=await fixture();const action=claim('cancel');bridge.action.mockResolvedValue(action)
+  native.read.mockResolvedValue({id:thread,active:true,turns:[{id:'turn-owned',status:'inProgress',startedAt:Date.parse('2026-10-26T00:00:00Z'),items:[
+   {type:'mcpToolCall',server:'lazymind',tool:'workflow.start',status:'completed',result:{structuredContent:{session_id:'run-1'}}},
+   {type:'steeringUserMessage',id:'steer',status:'accepted',targetTurnId:'turn-owned',serverUserMessageId:'new-input'},
+   {type:'steered',id:'new-input'},
+   {type:'mcpToolCall',server:'lazymind',tool,status:'completed',arguments:{session_id:run},result:{structuredContent:{session_id:run,execution:{execution_id:'execution-1'}}}},
+   {type:'commandExecution',id:'ordinary-work',status:'inProgress'},
+  ]}]})
+  if(allowed) {await adapter.host.cancelSession(thread,action);expect(native.interrupt).toHaveBeenCalledOnce()}
+  else {await expect(adapter.host.cancelSession(thread,action)).rejects.toBeInstanceOf(AdmissionRejected);expect(native.interrupt).not.toHaveBeenCalled()}
+ })
+ it('does not regain ownership when an earlier invocation completes after steering',async()=>{
+  const {adapter,native}=await fixture()
+  const tool:any={type:'mcpToolCall',server:'lazymind',tool:'workflow.step.begin',status:'inProgress',arguments:{session_id:'run-1'}}
+  const items=[tool,{type:'steeringUserMessage',id:'steer',status:'accepted',targetTurnId:'turn-owned'}]
+  tool.status='completed';tool.result={structuredContent:{session_id:'run-1',execution:{execution_id:'execution-1'}}}
+  native.read.mockResolvedValue({id:thread,active:true,turns:[{id:'turn-owned',status:'inProgress',startedAt:Date.parse('2026-10-26T00:00:00Z'),items}]})
+  await expect(adapter.host.cancelSession(thread,claim('cancel'))).rejects.toBeInstanceOf(AdmissionRejected)
+  expect(native.interrupt).not.toHaveBeenCalled()
+ })
+ it('reports a renderer ownership rejection as definitely not interrupted',async()=>{
+  const {adapter,native,bridge}=await fixture();const action=claim('cancel');bridge.action.mockResolvedValue(action)
+  native.read.mockResolvedValue({id:thread,active:true,turns:[{id:'turn-owned',status:'inProgress',startedAt:Date.parse('2026-10-26T00:00:00Z'),items:[
+   {type:'mcpToolCall',server:'lazymind',tool:'workflow.start',status:'completed',result:{structuredContent:{session_id:'run-1'}}},
+  ]}]})
+  native.interrupt.mockResolvedValue({rejected:'Codex execution ownership changed'} as any)
+  await expect(adapter.host.cancelSession(thread,action)).rejects.toBeInstanceOf(AdmissionRejected)
  })
  it('selects the Codex renderer and rejects ambiguity',()=>{
   expect(selectCodexTarget([{type:'page',url:'app://-/index.html'},{type:'page',url:'https://example.test'}]).url).toBe('app://-/index.html')

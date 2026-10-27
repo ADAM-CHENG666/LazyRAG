@@ -17,8 +17,8 @@ import (
 	"strconv"
 	"time"
 
-	"lazymind/agentconnector/internal/agentexec"
 	"lazymind/agentconnector/internal/codexplugin"
+	"lazymind/agentconnector/internal/integrationstate"
 	"lazymind/agentconnector/internal/workflowhost"
 )
 
@@ -102,7 +102,7 @@ func CheckConnection(ctx context.Context, home string) error {
 			return nil
 		}
 	}
-	return errors.New("Codex CDP is disconnected. Save current work, then reconnect Codex from the LazyMind assistant guide to restart it with CDP. A normal system launch does not preserve these startup arguments")
+	return errors.New("Codex control is disconnected. Turn its LazyMind switch off and on again; save current work before the installation guide restarts Codex")
 }
 
 var localChatRoute = regexp.MustCompile(`(?i)^/local/[a-f0-9-]{36}$`)
@@ -136,6 +136,9 @@ func DesktopReady(ctx context.Context, port int) (bool, error) {
 	return true, nil
 }
 func PrepareDesktop(ctx context.Context, home string) error {
+	if err := ConfigureStartup(ctx, home); err != nil {
+		return err
+	}
 	c, err := readConfig(home)
 	if err != nil {
 		return err
@@ -145,7 +148,7 @@ func PrepareDesktop(ctx context.Context, home string) error {
 		return err
 	}
 	if !ready {
-		application, err := agentexec.FindDesktopApplication(agentexec.DesktopApplication{BindingTarget: agentexec.CodexDesktop, DisplayNames: []string{"ChatGPT", "Codex"}, ExecutableNames: []string{"ChatGPT.exe", "Codex.exe"}})
+		application, err := desktopApplication()
 		if err != nil {
 			return err
 		}
@@ -188,7 +191,7 @@ func Supervise(ctx context.Context, home, bridgeURL string, account func() (stri
 		scope, scopeErr := account()
 		c, p, err := Load(home, scope)
 		next := c.Node + "|" + c.PairingFile + "|" + strconv.Itoa(c.Port) + "|" + scope + "|" + p.Token
-		if scopeErr != nil || err != nil || !p.Enabled {
+		if scopeErr != nil || err != nil || !p.Enabled || !integrationstate.Allowed(home, "codex") {
 			if current != nil {
 				stop()
 			}

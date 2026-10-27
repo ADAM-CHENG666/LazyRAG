@@ -1,10 +1,11 @@
 import { codexTargets, windowCdp } from './windows'
+import { workflowTurnEvidence } from './ownership'
 export { selectCodexTarget } from './windows'
 export interface NativeTurn { id: string; status: string; startedAt?: number; items: any[] }
 export interface NativeThread { id: string; turns: NativeTurn[]; active: boolean; owner?: boolean }
 
 /** Runs inside the existing desktop renderer, never in a new App Server. */
-export async function codexOperation(input: any): Promise<any> {
+export async function codexOperation(input: any, readEvidence = workflowTurnEvidence): Promise<any> {
   const host = globalThis as any
   const capable = (value: any) => { try { return value && typeof value === 'object'
     && ['getHostId', 'getConversation', 'startTurn', 'interruptConversation'].every(key => typeof value[key] === 'function')
@@ -91,16 +92,26 @@ export async function codexOperation(input: any): Promise<any> {
   if (input.kind === 'interrupt') {
     const target = snapshot().turns.find((turn: any) => turn.id === input.turnId)
     if (!target || target.status !== 'inProgress') return { interruptedTurnId: null }
+    // Recheck on the owner immediately before admission, after all Bridge/disk/CDP
+    // awaits. A follower's cached history cannot fence new input in another window.
+    if (manager.getStreamRole?.(input.threadId)?.role !== 'owner'
+      || JSON.stringify(readEvidence(target)) !== input.expectedOwnership) {
+      return { rejected: 'Codex execution ownership changed; no interruption was sent' }
+    }
     const interrupted = await manager.interruptConversation(input.threadId, 'user-stop', input.turnId)
     return { interruptedTurnId: interrupted ?? null }
   }
   throw new Error('Unknown Codex operation')
 }
 
+export function nativeExpression(input: object) {
+  return `(input => (${codexOperation.toString()})(input, ${workflowTurnEvidence.toString()}))(${JSON.stringify(input)})`
+}
+
 export class CodexNative {
   constructor(private port: number) {}
   private evaluate(id:string,input:object,signal:AbortSignal):Promise<any> {
-    return windowCdp(this.port,id).evaluate(`(${codexOperation.toString()})(${JSON.stringify(input)})`,signal)
+    return windowCdp(this.port,id).evaluate(nativeExpression(input),signal)
   }
   async probe(signal:AbortSignal) {
     const windows=await codexTargets(this.port,signal)
@@ -118,11 +129,11 @@ export class CodexNative {
     return selected
   }
   async read(threadId:string,signal:AbortSignal):Promise<NativeThread> {return (await this.locate(threadId,signal)).state}
-  private async mutate(input:{kind:string;threadId:string;clientId?:string;message?:string;turnId?:string},signal:AbortSignal) {
+  private async mutate(input:{kind:string;threadId:string;clientId?:string;message?:string;turnId?:string;expectedOwnership?:string},signal:AbortSignal) {
     const target=await this.locate(input.threadId,signal)
     // Never retry a mutation in another window after an uncertain response.
     return this.evaluate(target.id,input,signal)
   }
   start(threadId:string,clientId:string,message:string,signal:AbortSignal) {return this.mutate({kind:'start',threadId,clientId,message},signal)}
-  interrupt(threadId:string,turnId:string,signal:AbortSignal) {return this.mutate({kind:'interrupt',threadId,turnId},signal)}
+  interrupt(threadId:string,turnId:string,expectedOwnership:string,signal:AbortSignal) {return this.mutate({kind:'interrupt',threadId,turnId,expectedOwnership},signal)}
 }

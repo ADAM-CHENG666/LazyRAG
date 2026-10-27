@@ -33,7 +33,7 @@ export default function WorkBuddyInstallationGuide({ status, onConnect, onStatus
       const result = await onConnect();
       if (!mounted.current) return;
       if (result?.state !== "enabled" || !result.connection?.mcp_configured) {
-        setError(result?.issue ? workbuddyErrorMessage(result, t) : result?.message || text("installFailedDescription"));
+        setError(result?.issue ? (agent === "workbuddy" ? workbuddyErrorMessage(result, t) : text("installFailedDescription")) : result?.message || text("installFailedDescription"));
         setStage("installFailed"); return;
       }
       // Connect includes restart and installation checks. Trust is a separate step.
@@ -75,7 +75,6 @@ export default function WorkBuddyInstallationGuide({ status, onConnect, onStatus
   else if (stage === "entry") primary = <Button type="primary" onClick={() => setStage(agent === "codex" ? "enable" : "trust")}>{text("next")}</Button>;
   else if (stage === "trust") primary = <Button type="primary" onClick={() => setStage("enable")}>{text("trustConfirmation")}</Button>;
   else if (stage === "enable") primary = <Button type="primary" onClick={() => setStage("verify")}>{text("enabledConfirmation")}</Button>;
-  else if (stage === "notReady" && agent === "codex") primary = <Button type="primary" onClick={() => setStage("prepare")}>{t("agentIntegration.retryConnection")}</Button>;
   else if (stage === "verify" || stage === "notReady") primary = <Button type="primary" onClick={() => void check()}>{text(stage === "notReady" ? "retryCheck" : "check")}</Button>;
   else if (stage === "success") primary = <Button type="primary" onClick={onClose}>{text("done")}</Button>;
   else primary = <Button type="primary" loading disabled>{text(installing ? "installing" : "checking")}</Button>;

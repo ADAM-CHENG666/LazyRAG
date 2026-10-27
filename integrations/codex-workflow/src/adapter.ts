@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import { AdmissionRejected, type RuntimeAdapter } from '../../workflow-agent-core/src/adapter'
 import type { ActionClaim, HostTransport } from '../../workflow-agent-core/src/transport'
-import { CodexNative, type NativeTurn } from './native'
+import { CodexNative } from './native'
 import { NativeReceipts } from './receipts'
-import { workflowTurnOwner } from './ownership'
+import { workflowTurnEvidence } from './ownership'
 
 export class CodexAdapter implements RuntimeAdapter<string> {
   readonly cancellation = 'session' as const
@@ -52,17 +52,16 @@ export class CodexAdapter implements RuntimeAdapter<string> {
     } catch (error) { receipt.status = 'unknown'; await this.receipts.write(receipt); throw error }
   }
   cancel(): never { throw new AdmissionRejected('Stop requires a Workflow-owned turn') }
-  private async owns(turn: NativeTurn, run: string, thread: string) {
-    const owner = workflowTurnOwner(turn)
+  private async owns(evidence: ReturnType<typeof workflowTurnEvidence>, turnId: string, run: string, thread: string) {
+    const { runId: owner, inputs } = evidence
     if (owner) return owner === run
-    const inputs = turn.items.filter(item => item.type === 'userMessage')
-    if (inputs.length !== 1) return false
+    if (inputs.length !== 1 || inputs[0].type !== 'userMessage') return false
     const text = inputs[0].content?.find((part: any) => part.type === 'text')?.text
     const id = typeof text === 'string' ? /^\[LazyMind action_id=([^\]\n]+)\]/.exec(text)?.[1] : undefined
     if (!id) return false
     const receipt = await this.receipts.read(id)
     return receipt?.kind === 'continue' && receipt.runId === run && receipt.threadId === thread
-      && receipt.clientId === inputs[0].clientId && (!receipt.turnId || receipt.turnId === turn.id)
+      && receipt.clientId === inputs[0].clientId && (!receipt.turnId || receipt.turnId === turnId)
   }
   private async cancelOwned(thread: string, claim: ActionClaim) {
     this.claims.delete(claim.action.id)
@@ -72,15 +71,18 @@ export class CodexAdapter implements RuntimeAdapter<string> {
     const active = state.turns.filter(turn => turn.status === 'inProgress')
     if (!active.length && !state.active) return
     const target = active[0]
+    if (active.length !== 1 || !target.id) throw new AdmissionRejected('Current Codex work is not the target of this Stop')
+    const evidence = workflowTurnEvidence(target), expectedOwnership = JSON.stringify(evidence)
     const stoppedAt = Date.parse(claim.action.created_at ?? '')
-    if (active.length !== 1 || !target.id || !await this.owns(target, claim.action.session_id, thread)
+    if (!await this.owns(evidence, target.id, claim.action.session_id, thread)
       || !Number.isFinite(stoppedAt) || !Number.isFinite(target.startedAt) || target.startedAt! > stoppedAt) {
       throw new AdmissionRejected('Current Codex work is not the target of this Stop')
     }
     this.validate(thread, await this.bridge.action(claim.action.id, this.signal), 'cancel')
     await this.receipts.write({ actionId: claim.action.id, runId: claim.action.session_id, threadId: thread,
       kind: 'cancel', turnId: target.id, status: 'sending' })
-    const result = await this.native.interrupt(thread, target.id, this.signal)
+    const result = await this.native.interrupt(thread, target.id, expectedOwnership, this.signal)
+    if (result?.rejected) throw new AdmissionRejected(result.rejected)
     if (result.interruptedTurnId !== target.id) throw new Error('The target turn interruption was not confirmed')
     await this.receipts.write({ actionId: claim.action.id, runId: claim.action.session_id, threadId: thread,
       kind: 'cancel', turnId: target.id, status: 'accepted' })

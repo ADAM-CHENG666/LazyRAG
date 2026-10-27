@@ -239,6 +239,48 @@ export default function AgentIntegrationPage() {
     };
   }, [refresh]);
 
+  // Configuration health changes after an external app exits/restarts. Poll only
+  // while this page is visible, without overwriting a newer installation action.
+  useEffect(() => {
+    let stopped = false;
+    let inFlight = false;
+    const markUnavailable = () => setStatuses(current => {
+      const next = { ...current };
+      for (const agent of ["codex", "workbuddy"] as const) {
+        const status = next[agent];
+        if (!status || !(status.enabled ?? status.state === "enabled")) continue;
+        next[agent] = { ...status, issue: { code: "host_unavailable" }, message: "Connection status is unavailable.",
+          connection: { ...status.connection, mcp_configured: status.connection?.mcp_configured ?? false,
+            control_ready: false, presentation_status: "host-offline", runtime_state: "unavailable" } };
+      }
+      return next;
+    });
+    const check = async () => {
+      if (stopped || inFlight || document.visibilityState !== "visible" || pendingAgentActions.current.size || refreshInFlight.current) return;
+      inFlight = true;
+      const version = refreshVersion.current;
+      try {
+        const result = await agentIntegrationStatuses();
+        if (!stopped && version === refreshVersion.current && !pendingAgentActions.current.size) {
+          if (result.ok) setStatuses(result.data); else markUnavailable();
+        }
+      } catch {
+        if (!stopped && version === refreshVersion.current && !pendingAgentActions.current.size) markUnavailable();
+      }
+      finally { inFlight = false; }
+    };
+    const timer = window.setInterval(() => void check(), 5000);
+    const onFocus = () => void check();
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
+    };
+  }, []);
+
   useEffect(() => {
     const loginAgent = pendingLoginAgent || runningLoginAgent;
     const pendingAgent = loginAgent || externalConfigurationAgent;
@@ -533,6 +575,9 @@ function executablePathPlaceholderKey(target: DesktopAgentBindingTarget | null):
 }
 
 function integrationErrorMessage(agent: DesktopAgent, status: DesktopAgentIntegrationStatus, t: TFunction): string {
+  if (["codex", "workbuddy"].includes(agent) && status.issue && ["startup_unavailable", "installation_unavailable", "cdp_unavailable"].includes(status.issue.code)) {
+    return t(`agentIntegration.connectionErrors.${status.issue.code}`);
+  }
   if (agent === "codex" && status.issue && !status.connection?.control_ready) return t("agentIntegration.codexInstallGuide.controlUnavailableDescription");
   if (agent === "workbuddy" && status.state !== "conflict") return workbuddyErrorMessage(status, t);
   if (agent !== "deepseek-harness") return status.message || "";
@@ -600,7 +645,7 @@ function AgentCard({
   const detectionComplete = mcpPrepared && (!executorSupported || executorPrepared);
   const mcpEnabled = mcpState === "enabled";
   const detected = mcpInstalled || mcpEnabled;
-  const mcpChecked = mcpEnabled || Boolean(mcpStatus?.can_disconnect);
+  const mcpChecked = mcpStatus?.enabled ?? (mcpEnabled || Boolean(mcpStatus?.can_disconnect));
   const mcpCanToggle = mcpState === "ready" || mcpChecked || Boolean(mcpStatus?.can_connect);
 
   return (
@@ -882,7 +927,7 @@ function AgentConfigurationFlow({
   const mcpRequirements = mcpStatus?.requirements || [];
   const mcpPrepared = mcpRequirements.length > 0 && mcpRequirements.every((item) => item.satisfied);
   const mcpEnabled = mcpState === "enabled";
-  const mcpChecked = mcpEnabled || Boolean(mcpStatus?.can_disconnect);
+  const mcpChecked = mcpStatus?.enabled ?? (mcpEnabled || Boolean(mcpStatus?.can_disconnect));
   const mcpCanToggle = mcpState === "ready" || mcpChecked || Boolean(mcpStatus?.can_connect);
   const retryDisconnect = mcpStatus?.retry_action === "disconnect" && Boolean(mcpStatus?.can_disconnect);
   const mcpBindingConfigured = Boolean(agent.mcpBindingTarget && bindings[agent.mcpBindingTarget]);
@@ -1159,8 +1204,10 @@ function AgentConfigurationFlow({
                 {t(`agentIntegration.${agent.id === "codex" ? "codexInstallGuide" : "workbuddyInstallGuide"}.entry`)}
               </Button>
             ) : undefined}
-            status={mcpCapabilityStatus(mcpState, t)}
-            ready={mcpEnabled}
+            status={mcpStatus?.connection?.runtime_state === "waiting" ? t("agentIntegration.waitingForApplication")
+              : mcpChecked && mcpStatus?.issue ? t("agentIntegration.configurationIssue")
+                : mcpStatus?.enabled ? t("agentIntegration.enabled") : mcpCapabilityStatus(mcpState, t)}
+            ready={mcpEnabled && !mcpStatus?.issue && mcpStatus?.connection?.runtime_state !== "waiting"}
             disabled={!mcpCanToggle}
             loading={busyAction === `${agent.id}:connect` || busyAction === `${agent.id}:disconnect`}
             checked={mcpChecked}
@@ -1186,11 +1233,13 @@ function AgentConfigurationFlow({
             />
           )}
         </div>
+        {mcpChecked && mcpStatus?.connection?.runtime_state === "waiting" && (
+          <div className="agent-integration-stage-hint" role="status"><InfoCircleFilled />{t("agentIntegration.waitingForApplicationDescription", { agent: agent.name })}</div>
+        )}
         {mcpStatus?.message && (["error", "conflict"].includes(mcpState) || ["workbuddy", "codex"].includes(agent.id) && mcpStatus.issue) && (
           <div className="agent-integration-stage-hint is-error" role="alert">
             <WarningOutlined />
             {integrationErrorMessage(agent.id, mcpStatus, t)}
-            {agent.id === "codex" && !mcpStatus.connection?.control_ready && <Button size="small" disabled={Boolean(busyAction)} onClick={() => void onMCPAction("codex", "connect")}>{t("agentIntegration.retryConnection")}</Button>}
           </div>
         )}
         {agent.id === "deepseek-harness" && mcpState !== "enabled" && (

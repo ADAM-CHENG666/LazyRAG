@@ -1,5 +1,6 @@
 import {afterEach,describe,it,expect,vi} from 'vitest'
-import {codexOperation,selectCodexTarget} from '../src/native'
+import {codexOperation,nativeExpression,selectCodexTarget} from '../src/native'
+import {workflowTurnEvidence} from '../src/ownership'
 afterEach(()=>vi.unstubAllGlobals())
 describe('Codex renderer native API mapping',()=>{
  it('discovers the manager held by a desktop signal client ref',async()=>{
@@ -26,9 +27,32 @@ describe('Codex renderer native API mapping',()=>{
   expect(manager.startTurn).toHaveBeenCalledWith('thread',expect.objectContaining({request:expect.objectContaining({threadId:'thread',clientUserMessageId:'client'}),context:expect.objectContaining({inheritThreadSettings:true,useUserMessageAdmission:false})}))
  })
  it('passes the expected turn to the native interrupt method',async()=>{
-  const manager={getHostId:()=> 'local',getConversation:()=>({id:'thread',turns:[{turnId:'target',status:'inProgress',items:[]}]}),startTurn:vi.fn(),interruptConversation:vi.fn().mockResolvedValue('target')}
+  const manager={getHostId:()=> 'local',getStreamRole:()=>({role:'owner'}),getConversation:()=>({id:'thread',turns:[{turnId:'target',status:'inProgress',items:[]}]}),startTurn:vi.fn(),interruptConversation:vi.fn().mockResolvedValue('target')}
   vi.stubGlobal('__lazymindCodexManager',manager)
-  expect(await codexOperation({kind:'interrupt',threadId:'thread',turnId:'target'})).toEqual({interruptedTurnId:'target'})
+  expect(await codexOperation({kind:'interrupt',threadId:'thread',turnId:'target',expectedOwnership:JSON.stringify({inputs:[]})})).toEqual({interruptedTurnId:'target'})
   expect(manager.interruptConversation).toHaveBeenCalledWith('thread','user-stop','target')
  })
+ it.each(['steering', 'other-workflow', 'follower', 'ordinary-tool'])(
+  'rechecks ownership in the serialized renderer operation after %s changes',async(change)=>{
+   const turn={id:'target',turnId:'target',status:'inProgress',items:[
+    {type:'userMessage',id:'original',content:[{type:'text',text:'start workflow'}]},
+    {type:'mcpToolCall',id:'start',server:'lazymind',tool:'workflow.start',status:'completed',result:{structuredContent:{session_id:'run-1'}}},
+   ] as any[]}
+   const input={kind:'interrupt',threadId:'thread',turnId:'target',expectedOwnership:JSON.stringify(workflowTurnEvidence(turn))}
+   if(change==='steering')turn.items.push({type:'steeringUserMessage',id:'steer',status:'pending',input:[{type:'text',text:'another task'}]})
+   if(change==='other-workflow')turn.items.push({type:'mcpToolCall',id:'start-other',server:'lazymind',tool:'workflow.start',status:'completed',result:{structuredContent:{session_id:'run-2'}}})
+   if(change==='ordinary-tool')turn.items.push({type:'commandExecution',id:'shell',status:'inProgress'})
+   const manager={getHostId:()=> 'local',getStreamRole:()=>({role:change==='follower'?'follower':'owner'}),
+    getConversation:()=>({id:'thread',turnHistory:{kind:'canonical',history:{islands:[{entries:[{value:'target'}]}],entitiesByKey:{target:turn}}}}),
+    startTurn:vi.fn(),interruptConversation:vi.fn().mockResolvedValue('target')}
+   vi.stubGlobal('__lazymindCodexManager',manager)
+   const result=await (0,eval)(nativeExpression(input))
+   if(change==='ordinary-tool') {
+    expect(result).toEqual({interruptedTurnId:'target'})
+    expect(manager.interruptConversation).toHaveBeenCalledOnce()
+   } else {
+    expect(result.rejected).toContain('ownership changed')
+    expect(manager.interruptConversation).not.toHaveBeenCalled()
+   }
+  })
 })
