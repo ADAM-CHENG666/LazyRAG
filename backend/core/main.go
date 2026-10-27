@@ -885,6 +885,7 @@ func run(ctx context.Context) error {
 	doc.RegisterPDFTranslationJobs()
 	workflow.RegisterWorkflowDraftGenerateJob()
 	workflow.RegisterExternalWorkflowTaskJob()
+	workflow.RegisterDocumentPublicationJob()
 	workflowHosts := workflowexecutor.DefaultHostRegistry
 	workflowHosts.RegisterHost("lazymind", workflowexecutor.HostRegistration{
 		AllowAllCapabilities: true,
@@ -928,6 +929,7 @@ func run(ctx context.Context) error {
 			LockTTL:         asyncConfig.LockTTL,
 		})
 		backgroundDone = append(backgroundDone, runner.Done())
+		backgroundDone = append(backgroundDone, workflow.StartDocumentImageExportCleanup(runtimeCtx))
 		directoryRunner := asyncjob.Start(runtimeCtx, store.DB(), asyncjob.Options{JobTypes: []string{documentdirectory.PlanJob, documentdirectory.OrganizeJob}, SerializeResources: true, Concurrency: 2, PollInterval: asyncConfig.PollInterval, LockTTL: asyncConfig.LockTTL})
 		backgroundDone = append(backgroundDone, directoryRunner.Done(), documentdirectory.StartCleanup(runtimeCtx, store.DB()))
 		backgroundDone = append(backgroundDone, resourceupdate.StartIdle(runtimeCtx, store.DB(), store.State(), resourceupdate.DefaultConfig(), resourceupdate.EnabledFromEnv()))
