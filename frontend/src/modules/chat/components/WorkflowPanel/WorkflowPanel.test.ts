@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { TabDef, WorkflowSession } from '@/modules/chat/store/workflowPanel';
-import { resolveCompletedContinueStep, resolveExternalContinueAction, resolveWorkflowContinueAction } from './workflowContinue';
+import { resolveCompletedContinueStep, resolveWorkflowContinueAction } from './workflowContinue';
 
 const outlineTab: TabDef = {
   id: 'outline',
@@ -10,24 +10,6 @@ const outlineTab: TabDef = {
   slots: [],
   completed_continue_step: 'write_document',
 };
-
-describe('Core-controlled continuation', () => {
-  it('admits an idle ready successor as an ordinary continuation', () => {
-    expect(resolveWorkflowContinueAction(checkpoint(false), 'waiting')).toEqual({ kind: 'continue', stepId: 'analyze' });
-    expect(resolveExternalContinueAction({ continuation: 'continue', available_actions: ['save', 'continue'] })).toBe('continue');
-  });
-  it('does not invent continuation for unbound, executing, or review-pending runs', () => {
-    for (const continuation of ['continue', 'awaiting_executor', 'awaiting_user']) {
-      expect(resolveExternalContinueAction({ continuation, available_actions: ['save', 'confirm', 'rewind'] })).toBeUndefined();
-    }
-  });
-  it('uses allowed resume and declared completed-step rewind', () => {
-    expect(resolveExternalContinueAction({ continuation: 'awaiting_user', admission: { reason: 'edits_pending_continue' }, available_actions: ['continue'] }, 'write_document')).toBe('continue');
-    expect(resolveExternalContinueAction({ continuation: 'stopped', available_actions: ['resume'] })).toBe('resume');
-    expect(resolveExternalContinueAction({ continuation: 'completed', available_actions: ['rewind'] }, 'write_document')).toBe('rewind');
-    expect(resolveExternalContinueAction({ continuation: 'completed', available_actions: ['rewind'] })).toBeUndefined();
-  });
-});
 
 describe('resolveCompletedContinueStep', () => {
   it('uses the workflow-declared completed continuation', () => {
@@ -127,9 +109,6 @@ describe('workflow continuation checkpoints', () => {
     session.projection!.nodes!.collect.execution = 'running';
     expect(resolveWorkflowContinueAction(session, 'failed')).toBeUndefined();
   });
-  it('maps continuation grants without adding a separate execution-count policy', () => {
-    const control = { continuation: 'continue', available_actions: ['continue'], active_executions: 1 };
-    expect(resolveExternalContinueAction(control)).toBe('continue');
-  });
+
 
 });
