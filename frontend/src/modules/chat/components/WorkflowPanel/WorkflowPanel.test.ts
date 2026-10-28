@@ -50,19 +50,19 @@ describe('workflow continuation checkpoints', () => {
     expect(resolveWorkflowContinueAction(checkpoint(false), 'failed')).toBeUndefined();
     expect(resolveWorkflowContinueAction(checkpoint(false, 'interrupted'), 'failed')).toBeUndefined();
   });
-  it('offers continue after yielding with a ready successor without approving it', () => {
+  it('hides continue between automatic steps even when a later step requires approval', () => {
     const session = checkpoint(false);
-    expect(resolveWorkflowContinueAction(session, 'waiting')).toEqual({ kind: 'continue', stepId: 'analyze' });
+    expect(resolveWorkflowContinueAction(session, 'waiting')).toBeUndefined();
     session.projection!.ready = [];
     expect(resolveWorkflowContinueAction(session, 'waiting')).toBeUndefined();
   });
 
-  it('offers ordinary continuation after approval is skipped', () => {
+  it('only offers approval after the approval step succeeds, and hides it after skipping approval', () => {
     const session = checkpoint(true);
     expect(resolveWorkflowContinueAction(session, 'waiting')).toEqual({ kind: 'approval', stepId: 'analyze' });
     session.projection!.nodes!.analyze.requires_approval = false;
     session.projection!.display = { status: 'failed', reason: 'no_advance', approval_step_id: '' };
-    expect(resolveWorkflowContinueAction(session, 'waiting')).toEqual({ kind: 'continue', stepId: 'analyze' });
+    expect(resolveWorkflowContinueAction(session, 'waiting')).toBeUndefined();
   });
 
   it.each(['pending', 'queued', 'claimed', 'running'])('hides stale approval when the next step is %s', (execution) => {
@@ -99,16 +99,4 @@ describe('workflow continuation checkpoints', () => {
     session.projection!.display = { status: 'failed', reason: 'no_advance', approval_step_id: '' };
     expect(resolveWorkflowContinueAction(session, 'waiting')).toBeUndefined();
   });
-  it('recovers a no_advance stall without retrying successful work', () => {
-    const session = checkpoint(false);
-    session.projection!.display = { status: 'failed', reason: 'no_advance', approval_step_id: '' };
-    expect(resolveWorkflowContinueAction(session, 'failed')).toEqual({ kind: 'continue', stepId: 'analyze' });
-    session.projection!.display.reason = 'execution_failed';
-    expect(resolveWorkflowContinueAction(session, 'failed')).toBeUndefined();
-    session.projection!.display.reason = 'no_advance';
-    session.projection!.nodes!.collect.execution = 'running';
-    expect(resolveWorkflowContinueAction(session, 'failed')).toBeUndefined();
-  });
-
-
 });

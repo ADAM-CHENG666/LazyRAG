@@ -742,31 +742,32 @@ describe('shared workflow compact layout', () => {
 
 describe('external workflow surface boundary', () => {
   it.each(['pending', 'dispatching', 'accepted', 'unknown'])(
-    'does not add a host delivery lock to native continuation: %s', async status => {
+    'does not add a host delivery lock to native approval: %s', async status => {
       fixture.session.status = 'waiting';
       fixture.session.projection = {
-        display: { status: 'failed', reason: 'no_advance', approval_step_id: '' },
+        display: { status: 'waiting', reason: 'approval_required', approval_step_id: 'write_document' },
         current: [], ready: ['next'], nodes: {
           next: { execution: 'none', validity: 'effective', requires_approval: false, reachability: 'reachable', readiness: 'ready', branch: 'active' },
         },
       };
+      const review = { id: 'review', step_id: 'write_document', execution_id: 'attempt', status: 'pending' as const, version: 1, manifest_hash: 'hash' };
       const control: WorkflowControlView = {
         protocol: 'workflow.control.v1', session_id: 'layout-test', state_version: 8,
-        continuation: 'continue', reviews: [], active_executions: 0, active_execution_ids: [],
+        continuation: 'awaiting_user', reviews: [review], active_executions: 0, active_execution_ids: [],
         binding: { bound: true }, admission: { can_begin: true },
         delivery: { id: 'previous-notification', kind: 'continue', status }, available_actions: [],
       };
       const execute = vi.fn(async () => {});
       const view = render(<WorkflowPanel conversationId='layout-test' />);
       await screen.findByRole('button', { name: '发布' });
-      const buttons = () => within(screen.getByRole('group', { name: '工作流会话操作' })).getAllByRole('button')
+      const buttons = () => ['工作流会话操作', '工作流审批操作'].flatMap(name => within(screen.getByRole('group', { name })).getAllByRole('button'))
         .map(button => ({ label: button.textContent, disabled: (button as HTMLButtonElement).disabled, title: button.title }));
       const native = buttons();
       view.rerender(<WorkflowPanel conversationId='layout-test' embedded controlAdapter={panelAdapter(control, execute)} />);
       expect(buttons()).toEqual(native);
-      expect(screen.getByRole('button', { name: '保存并继续' })).toBeEnabled();
-      fireEvent.click(screen.getByRole('button', { name: '保存并继续' }));
-      await waitFor(() => expect(execute).toHaveBeenCalledWith({ kind: 'continue' }));
+      expect(screen.getByRole('button', { name: '继续执行' })).toBeEnabled();
+      fireEvent.click(screen.getByRole('button', { name: '继续执行' }));
+      await waitFor(() => expect(execute).toHaveBeenCalledWith({ kind: 'confirm_and_continue', stepId: 'write_document', review }));
     },
   );
 
@@ -1302,7 +1303,7 @@ describe('workflow follow and session presentation', () => {
 });
 
 
-it('continues a no_advance run without retrying its successful step', async () => {
+it.each([false, true])('preserves mainline no_advance controls without adding continuation (external=%s)', async external => {
   fixture.session.status = 'waiting';
   fixture.session.projection = {
     display: { status: 'failed', reason: 'no_advance', approval_step_id: '' },
@@ -1312,13 +1313,14 @@ it('continues a no_advance run without retrying its successful step', async () =
     },
   };
   const send = vi.fn(async (_message: string) => true);
-  render(<WorkflowPanel conversationId='layout-test' onSendMessage={send} />);
-  const button = await screen.findByRole('button', { name: '保存并继续' });
-  expect(button).toBeEnabled();
+  const execute = vi.fn(async () => {});
+  render(<WorkflowPanel conversationId='layout-test' onSendMessage={send} controlAdapter={external ? { execute } : undefined} />);
+  expect(await screen.findByRole('button', { name: '重试' })).toBeEnabled();
+  expect(screen.queryByRole('button', { name: '保存并继续' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: '继续' })).not.toBeInTheDocument();
   expect(screen.queryByRole('group', { name: '工作流审批操作' })).not.toBeInTheDocument();
-  fireEvent.click(button);
-  await waitFor(() => expect(send).toHaveBeenCalledOnce());
-  expect(send.mock.calls[0][0]).toBe(i18n.t('chat.workflowContinue'));
+  expect(send).not.toHaveBeenCalled();
+  expect(execute).not.toHaveBeenCalled();
 });
 
 it.each(['awaiting_user', 'stopped'] as const)('uses the shared approval step despite host continuation %s', async continuation => {

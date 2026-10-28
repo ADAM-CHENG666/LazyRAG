@@ -63,7 +63,6 @@ import { WorkflowTabActions } from './actions/WorkflowTabActions';
 import { WorkflowPanelTabActiveContext, SlotEditingContext } from './slotEditingContext';
 import { findWriterArtifactStream } from './writerArtifactStream';
 import { resolveCompletedContinueStep, resolveWorkflowContinueAction } from './workflowContinue';
-import { resolvePendingApprovalStep } from './workflowApproval';
 import { moveSelectedCompositePages, sameCompositePageOrder } from './compositePageReorder';
 import type { WorkflowPanelActionIntent } from '@/modules/chat/utils/workflowControl';
 import {
@@ -1990,7 +1989,7 @@ export function WorkflowPanel({
   // Every surface uses the same projection and button rules. The adapter only
   // transports the selected action; host delivery is not workflow execution.
   const sessionBusy = displayStatus === 'active' || displayStatus === 'loading';
-  const approvalStepId = resolvePendingApprovalStep(session, displayStatus);
+  const approvalStepId = display?.status === 'waiting' ? display.approval_step_id : undefined;
   const displayStatusKey = workflowDisplayLabel(display?.status);
   // A native Chat submission can outlive this panel (it moves to the new reply).
   // Keep controls locked until that turn ends, even before workflow events arrive.
@@ -2003,7 +2002,7 @@ export function WorkflowPanel({
     tabs[visibleActiveTabIdx],
   );
   const continueAction = resolveWorkflowContinueAction(session, displayStatus, tabs[visibleActiveTabIdx]);
-  const showContinue = !sessionBusy && Boolean(continueAction);
+  const showContinue = Boolean(continueAction);
   const showStepRollback =
     (session.status === 'completed' || session.status === 'failed')
     && Boolean(session.steps && session.steps.length > 0);
@@ -2029,8 +2028,14 @@ export function WorkflowPanel({
   const continueDisabled = buttonsDisabled || currentStepStatus === 'failed';
 
   async function refreshBeforeAction() {
-    if (controlAdapter) await refresh();
-    else await useWorkflowStore.getState().loadActiveSession(conversationId);
+    if (controlAdapter) {
+      try { await refresh(); }
+      catch (error) {
+        antdMessage.error(getLocalizedErrorMessage(error));
+        return false;
+      }
+    } else await useWorkflowStore.getState().loadActiveSession(conversationId);
+    return true;
   }
 
   async function runFooterAction(action: () => void | Promise<void>, flushKey?: string, flush = true, allowBusy = false) {
@@ -2065,9 +2070,9 @@ export function WorkflowPanel({
       ? `${t('chat.workflowRollbackPrefix')}${completedContinueStepId}`
       : t('chat.workflowContinue');
     void runFooterAction(async () => {
+      if (!await refreshBeforeAction()) return;
+      if (!isContinuationCurrent()) return;
       try {
-        await refreshBeforeAction();
-        if (!isContinuationCurrent()) return;
         if (controlAdapter) {
           await controlAdapter.execute(completedContinueStepId
             ? { kind: 'continue', completedStepId: completedContinueStepId }
@@ -2104,9 +2109,9 @@ export function WorkflowPanel({
     if (!session || !approvalStepId || !isContinuationCurrent()) return;
     const sessionId = session.session_id;
     void runFooterAction(async () => {
+      if (!await refreshBeforeAction()) return;
+      if (!isContinuationCurrent()) return;
       try {
-        await refreshBeforeAction();
-        if (!isContinuationCurrent()) return;
         if (controlAdapter) {
           await controlAdapter.execute({ kind: 'approve', stepId: approvalStepId,
             ...(scope ? { preferenceScope: scope } : {}) });
@@ -2131,7 +2136,7 @@ export function WorkflowPanel({
     const sessionId = session.session_id;
     void runFooterAction(async () => {
       try {
-        await refreshBeforeAction();
+        if (!await refreshBeforeAction()) return;
         const latest = useWorkflowStore.getState().sessionByConversation[conversationId];
         if (!latest || latest.session_id !== sessionId
           || latest.projection?.display?.status !== display?.status) return;
@@ -2155,7 +2160,7 @@ export function WorkflowPanel({
     const sessionId = session.session_id;
     void runFooterAction(async () => {
       try {
-        await refreshBeforeAction();
+        if (!await refreshBeforeAction()) return;
         const latest = useWorkflowStore.getState().sessionByConversation[conversationId];
         if (!latest || latest.session_id !== sessionId) return;
         if (controlAdapter) {
@@ -2173,7 +2178,7 @@ export function WorkflowPanel({
     ? t('chat.workflowContinueExecution')
     : continueAction?.kind === 'resume'
       ? t('chat.workflowContinue')
-    : (continueAction?.kind === 'continue' || displayStatus === 'waiting')
+    : displayStatus === 'waiting'
       ? t('chat.workflowSaveAndContinue')
     : t('chat.workflowContinue');
 
