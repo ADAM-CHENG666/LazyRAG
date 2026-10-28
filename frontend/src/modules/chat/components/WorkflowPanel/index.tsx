@@ -1989,13 +1989,16 @@ export function WorkflowPanel({
     : display?.status === 'paused' ? 'stopped' : display?.status ?? 'loading';
   const externalControl = controlAdapter?.control;
   const availableActions = new Set(externalControl?.available_actions ?? []);
-  const pendingReview = externalControl?.reviews.find(review => review.status === 'pending');
-  const approvalStepId = display?.status === 'waiting' ? display.approval_step_id : undefined;
+  const pendingReview = externalControl && externalControl.continuation !== 'stopped' && externalControl.active_executions === 0
+    ? externalControl.reviews.find(review => review.status === 'pending') : undefined;
+  const approvalStepId = externalControl ? pendingReview?.step_id
+    : display?.status === 'waiting' ? display.approval_step_id : undefined;
   const displayStatusKey = workflowDisplayLabel(display?.status);
   // A native Chat submission can outlive this panel (it moves to the new reply).
   // Keep controls locked until that turn ends, even before workflow events arrive.
   // Dirty editors do not disable retry — click flushes saves first, then proceeds.
-  const sessionBusy = displayStatus === 'active' || displayStatus === 'loading';
+  const sessionBusy = externalControl ? externalControl.active_executions > 0
+    : displayStatus === 'active' || displayStatus === 'loading';
   const externalDeliveryBusy = externalControl ? deliveryPending(externalControl) : false;
   const buttonsDisabled = sessionBusy || chatBusy || actionPending || externalDeliveryBusy;
   const dismissDisabled = dismissing || anySlotEditing || actionPending;
@@ -2005,10 +2008,10 @@ export function WorkflowPanel({
     tabs[visibleActiveTabIdx],
   );
   const continueAction = resolveWorkflowContinueAction(session, displayStatus, tabs[visibleActiveTabIdx]);
-  // Control capabilities constrain an existing UI action; they must not invent
-  // a checkpoint/button that the native panel would not render for this run.
-  const showContinue = Boolean(continueAction) && (!externalControl
-    || Boolean(resolveExternalContinueAction(externalControl, completedContinueStepId)));
+  // Hosted runs use Core capabilities directly; a legacy graph checkpoint
+  // must not hide a valid review or continuation grant.
+  const externalContinueAction = externalControl && resolveExternalContinueAction(externalControl, completedContinueStepId);
+  const showContinue = externalControl ? Boolean(externalContinueAction) : Boolean(continueAction);
   const showStepRollback =
     (session.status === 'completed' || session.status === 'failed')
     && Boolean(session.steps && session.steps.length > 0)
@@ -2032,7 +2035,7 @@ export function WorkflowPanel({
     && all.findIndex((candidate) => candidate.step_id === step.step_id && candidate.validity !== 'stale') === index) : [];
   const stepLabel = (stepId: string) => tabs.find(tab => getTabStepId(tab) === stepId)?.label
     ?? tabs.find(tab => tab.status_step_ids?.includes(stepId))?.label ?? stepId;
-  const continueDisabled = buttonsDisabled || currentStepStatus === 'failed';
+  const continueDisabled = buttonsDisabled || !externalControl && currentStepStatus === 'failed';
   const activeControlTab = tabs[visibleActiveTabIdx];
   const activeControlStepId = (activeControlTab
     ? resolveWorkflowTabStepId(activeControlTab, session.steps)
@@ -2184,9 +2187,9 @@ export function WorkflowPanel({
 
   const continueLabel = approvalStepId
     ? t('chat.workflowContinueExecution')
-    : continueAction?.kind === 'resume'
+    : (externalContinueAction === 'resume' || continueAction?.kind === 'resume')
       ? t('chat.workflowContinue')
-    : displayStatus === 'waiting'
+    : (externalContinueAction === 'continue' || continueAction?.kind === 'continue' || displayStatus === 'waiting')
       ? t('chat.workflowSaveAndContinue')
     : t('chat.workflowContinue');
 
@@ -2480,7 +2483,7 @@ export function WorkflowPanel({
               {stopping ? ` · ${t('chat.workflowStoppingHint')}` : ''}
             </span>
           )}
-          {displayStatus === 'active' && (controlAdapter ? supportsExternal('stop') : session.controller_host === 'lazymind') && (
+          {(externalControl ? externalControl.active_executions > 0 && supportsExternal('stop') : displayStatus === 'active' && session.controller_host === 'lazymind') && (
             <button
               type='button'
               className='workflow-panel__action-btn workflow-panel__action-btn--danger'
@@ -2525,7 +2528,7 @@ export function WorkflowPanel({
               aria-disabled={continueDisabled}
               onClick={handleContinue}
               title={
-                currentStepStatus === 'failed'
+                !externalControl && currentStepStatus === 'failed'
                   ? t('chat.workflowContinueDisabledFailed')
                   : actionPending
                     ? t('chat.workflowSavingBeforeAction')

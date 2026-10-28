@@ -735,7 +735,7 @@ describe('shared workflow compact layout', () => {
 
 describe('external workflow surface boundary', () => {
   it.each(['automatic-gap', 'delivery-pending', 'review-without-checkpoint', 'interrupted', 'completed-follow-on'] as const)(
-    'keeps native footer controls on the external surface: %s', async scenario => {
+    'uses hosted capabilities and preserves document controls: %s', async scenario => {
       const completed = scenario === 'completed-follow-on';
       const interrupted = scenario === 'interrupted';
       fixture.session.status = completed ? 'completed' : 'waiting';
@@ -770,9 +770,20 @@ describe('external workflow surface boundary', () => {
       view.rerender(<WorkflowPanel conversationId='layout-test' embedded
         externalPresentation={{ activities: {}, compactEmptyStates: false }}
         controlAdapter={{ control, execute: vi.fn(async () => {}) }} />);
-      expect(footerButtons()).toEqual(native);
-      expect(screen.queryByRole('group', { name: '工作流审批操作' })).not.toBeInTheDocument();
-      expect(screen.queryByRole('button', { name: '保存并继续' })).not.toBeInTheDocument();
+      const external = footerButtons();
+      expect(external.filter(button => !['继续', '保存并继续'].includes(button.label ?? '')))
+        .toEqual(native.filter(button => !['继续', '保存并继续'].includes(button.label ?? '')));
+      if (scenario === 'review-without-checkpoint') {
+        expect(screen.getByRole('group', { name: '工作流审批操作' })).toBeVisible();
+        expect(screen.queryByRole('button', { name: '保存并继续' })).not.toBeInTheDocument();
+      } else {
+        expect(screen.queryByRole('group', { name: '工作流审批操作' })).not.toBeInTheDocument();
+        if (!interrupted && !completed) {
+          const button = screen.getByRole('button', { name: '保存并继续' });
+          if (scenario === 'delivery-pending') expect(button).toBeDisabled();
+          else expect(button).toBeEnabled();
+        }
+      }
       if (interrupted || completed) expect(screen.getByRole('button', { name: '继续' })).toBeEnabled();
     },
   );
@@ -1176,4 +1187,41 @@ describe('workflow follow and session presentation', () => {
     view.rerender(<WorkflowPanel conversationId='layout-test' />);
     await screen.findByRole('button', { name: '缩小工作流面板' });
   });
+});
+
+
+it('continues a no_advance run without retrying its successful step', async () => {
+  fixture.session.status = 'waiting';
+  fixture.session.projection = {
+    display: { status: 'failed', reason: 'no_advance', approval_step_id: '' },
+    ready: ['next'], current: [], nodes: {
+      write_document: { execution: 'succeeded', validity: 'effective', requires_approval: false, reachability: 'reachable', readiness: 'not_applicable', branch: 'active' },
+      next: { execution: 'none', validity: 'effective', requires_approval: true, reachability: 'reachable', readiness: 'ready', branch: 'active' },
+    },
+  };
+  const send = vi.fn(async (_message: string) => true);
+  render(<WorkflowPanel conversationId='layout-test' onSendMessage={send} />);
+  const button = await screen.findByRole('button', { name: '保存并继续' });
+  expect(button).toBeEnabled();
+  expect(screen.queryByRole('group', { name: '工作流审批操作' })).not.toBeInTheDocument();
+  fireEvent.click(button);
+  await waitFor(() => expect(send).toHaveBeenCalledOnce());
+  expect(send.mock.calls[0][0]).toBe(i18n.t('chat.workflowContinue'));
+});
+
+it.each(['review', 'paused-review'] as const)('uses the current hosted %s grant without a legacy checkpoint', async phase => {
+  fixture.session.status = 'waiting';
+  fixture.session.projection!.display = { status: 'waiting', reason: 'approval_required', approval_step_id: 'write_document' };
+  const review = { id: 'review', step_id: 'prepare', execution_id: 'attempt', status: 'pending' as const, version: 3, manifest_hash: 'manifest' };
+  const execute = vi.fn(async () => {});
+  const control: WorkflowControlView = {
+    protocol: 'workflow.control.v1', session_id: 'layout-test', state_version: 8,
+    continuation: phase === 'review' ? 'awaiting_user' : 'stopped', reviews: [review], active_executions: 0, active_execution_ids: [],
+    binding: { bound: true }, admission: { can_begin: false }, delivery: null, available_actions: phase === 'review' ? ['confirm_and_continue'] : ['resume'],
+  };
+  render(<WorkflowPanel conversationId='layout-test' embedded controlAdapter={{ control, execute }} />);
+  fireEvent.click(await screen.findByRole('button', { name: phase === 'review' ? '继续执行' : '继续' }));
+  await waitFor(() => expect(execute).toHaveBeenCalledOnce());
+  expect(execute).toHaveBeenCalledWith(phase === 'review' ? { kind: 'confirm_and_continue', review } : { kind: 'resume' });
+  if (phase !== 'review') expect(screen.queryByRole('group', { name: '工作流审批操作' })).not.toBeInTheDocument();
 });
