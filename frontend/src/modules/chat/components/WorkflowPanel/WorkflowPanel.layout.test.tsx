@@ -321,8 +321,26 @@ describe('shared workflow compact layout', () => {
     view.rerender(<WorkflowPanel conversationId='layout-test' embedded
       externalPresentation={{ activities: {}, compactEmptyStates: false }} />);
     expect(view.container.querySelector('.workflow-panel__body')!.innerHTML).toBe(nativeContent);
-    expect(view.container.querySelector('.workflow-panel__slot-placeholder')).toHaveTextContent('—');
+    expect(view.container.querySelector('.workflow-panel__slot-placeholder')).toBeNull();
     expect(view.container.querySelector('.workflow-panel__slot-collapse')).toBeNull();
+  });
+
+  it.each(['list', 'composite'] as const)('hides missing components in %s tabs and reveals arriving output', async layout => {
+    fixture.ui.tabs![1].layout = layout;
+    fixture.session.slots![0].sort_order = 1;
+    fixture.ui.tabs![1].slots.push({ id: 'template_content_brief', label: '模板内容要求', type: 'text' });
+    const view = render(<WorkflowPanel conversationId='layout-test' />);
+    await screen.findByRole('tab', { name: '成稿' });
+    expect(screen.getByText('正文 document')).toBeVisible();
+    expect(screen.queryByText('模板内容要求')).not.toBeInTheDocument();
+    expect(view.container.querySelector('.workflow-panel__slot-placeholder')).toBeNull();
+    fixture.session = { ...fixture.session, slots: [...fixture.session.slots!, {
+      slot_id: 'template-brief', slot: 'template_content_brief', step_id: 'write_document',
+      selected: true, revision: 1, sort_order: 1, artifact_value: { text: '模板内容' },
+    }] } as WorkflowSession;
+    view.rerender(<WorkflowPanel conversationId='layout-test' />);
+    expect(screen.getByText('模板内容要求')).toBeVisible();
+    expect(screen.getByText('正文 template_content_brief')).toBeVisible();
   });
 
   it.each(['active', 'waiting', 'failed', 'completed'] as const)(
@@ -426,6 +444,9 @@ describe('shared workflow compact layout', () => {
       { id: 'main', label: '主文档', type: 'text', widget: { widgetType: 'writer-document' } },
       { id: 'evidence', label: '证据清单', type: 'text' },
     ];
+    fixture.session.slots = ['main', 'evidence'].map(slot => ({
+      ...fixture.session.slots![0], slot_id: slot, slot, step_id: 'step6',
+    }));
     render(<WorkflowPanel conversationId='layout-test' />);
     const first = await screen.findByRole('tab', { name: '阶段 1' });
     first.focus();
@@ -929,11 +950,12 @@ describe('external presentation opt-in', () => {
     await waitFor(() => expect(screen.getByText('步骤执行失败')).toBeVisible());
     view.rerender(<WorkflowPanel conversationId='layout-test' />);
     expect(screen.queryByText('步骤执行失败')).not.toBeInTheDocument();
-    expect(view.container.querySelector('.workflow-panel__slot-placeholder')).toHaveTextContent('—');
+    expect(view.container.querySelector('.workflow-panel__slot-placeholder')).toBeNull();
   });
 
   it('auto-expands an empty external slot when content arrives and respects an explicit collapse', async () => {
     fixture.session.slots = [];
+    fixture.ui.tabs![1].composite_behavior = { hide_empty_columns: false };
     fixture.ui.tabs![1].slots[0].widget = { widgetType: 'text-markdown', collapseWhenEmpty: true };
     const view = render(<WorkflowPanel conversationId='layout-test' externalPresentation={{ activities: {}, compactEmptyStates: true }} />);
     await screen.findByRole('tab', { name: /成稿/ });

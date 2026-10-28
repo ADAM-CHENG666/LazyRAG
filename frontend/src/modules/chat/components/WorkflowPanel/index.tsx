@@ -391,14 +391,13 @@ function getPresentSlotIds(
 
 /**
  * Resolve which slot ids should be visible for a tab from `composite_behavior`.
- * Returns null when no behavior is declared (show all configured columns/slots).
+ * Empty slots are hidden by default; explicit false retains authoring placeholders.
  */
 function resolveVisibleSlotIds(
   tab: TabDef,
   session: WorkflowSession,
 ): Set<string> | null {
-  const behavior = tab.composite_behavior;
-  if (!behavior) return null;
+  const behavior = tab.composite_behavior ?? {};
 
   const scope = behavior.empty_column_scope === 'tab' ? 'tab' : 'selected';
   const present = getPresentSlotIds(tab, session, scope);
@@ -417,7 +416,7 @@ function resolveVisibleSlotIds(
     }
   }
 
-  if (behavior.hide_empty_columns) {
+  if (behavior.hide_empty_columns !== false) {
     for (const id of [...allowed]) {
       if (!present.has(id)) allowed.delete(id);
     }
@@ -842,7 +841,7 @@ function CompositeSlotGrid({
     buildColumns(tab),
     resolveVisibleSlotIds(tab, session),
   );
-  const hideEmptyCells = Boolean(tab.composite_behavior?.hide_empty_columns);
+  const hideEmptyCells = tab.composite_behavior?.hide_empty_columns !== false;
   const hideImageMutationActions = ['result', 'generate_image', 'enhance_image'].includes(tab.id);
 
   // Compute total weight for flex proportions.
@@ -1588,7 +1587,7 @@ function TabSlotGrid({
     && getTabSlotRevisions(session, tab, process.result_slot).some(revision => revision.selected)
     && findWriterArtifactStream(session, getTabStepId(tab), process.result_slot, tasks)?.state !== 'streaming';
   const processSlots = resultReady ? visibleSlots.filter(slot => slot.id !== process.result_slot && process.slots.includes(slot.id)) : [];
-  const allHidden = visibleSlots.length === 0 || Boolean(tab.composite_behavior?.hide_empty_columns)
+  const allHidden = visibleSlots.length === 0 || tab.composite_behavior?.hide_empty_columns !== false
     && visibleSlots.every(def => getTabSlotRevisions(session, tab, def.id).length === 0
       && !findWriterArtifactStream(session, getTabStepId(tab), def.id, tasks));
   if (compactEmptyStates && allHidden) return <div className='workflow-panel__empty' role='status'>
@@ -1603,7 +1602,7 @@ function TabSlotGrid({
       slotDef.id,
       tasks,
     );
-    const hideEmpty = Boolean(tab.composite_behavior?.hide_empty_columns);
+    const hideEmpty = tab.composite_behavior?.hide_empty_columns !== false;
     if (hideEmpty && revisions.length === 0 && !artifactStream) {
       return null;
     }
