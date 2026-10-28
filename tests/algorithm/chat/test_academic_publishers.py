@@ -18,9 +18,11 @@ def publisher(tmp_path, monkeypatch):
     namespace = functions['academic_submit_relations'].__globals__
 
     class Module:
-        """Expose the loaded namespace for attribute patching and restoration."""
+        """Replace HTTP in the actual loaded namespace."""
 
     module = Module()
+    # Keep attributes in the real namespace so monkeypatch can inspect and
+    # restore them, including pytest versions that use static attribute lookup.
     module.__dict__ = namespace
     body = {'user_instruction': 'read actual evidence', 'candidate_directions': ['agents'],
             'selected_directions': ['agents'], 'papers': [
