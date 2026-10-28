@@ -879,6 +879,9 @@ describe('external workflow surface boundary', () => {
       };
       const view = render(<WorkflowPanel conversationId='layout-test' />);
       await screen.findByText('正文 document');
+      // Footer actions register in an effect after the document appears. Compare
+      // both surfaces only once the native footer has finished registering.
+      await screen.findByRole('button', { name: '发布' });
       const controls = () => within(screen.getByRole('group', { name: '工作流会话操作' }))
         .getAllByRole('button').map(button => ({ label: button.textContent, disabled: (button as HTMLButtonElement).disabled }));
       const native = controls();
