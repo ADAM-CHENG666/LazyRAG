@@ -127,8 +127,9 @@ describe('workflow continuation checkpoints', () => {
     session.projection!.nodes!.collect.execution = 'running';
     expect(resolveWorkflowContinueAction(session, 'failed')).toBeUndefined();
   });
-  it('does not offer a hosted continuation while an execution is active', () => {
-    expect(resolveExternalContinueAction({ continuation: 'continue', available_actions: ['continue'], active_executions: 1 })).toBeUndefined();
+  it('maps continuation grants without adding a separate execution-count policy', () => {
+    const control = { continuation: 'continue', available_actions: ['continue'], active_executions: 1 };
+    expect(resolveExternalContinueAction(control)).toBe('continue');
   });
 
 });

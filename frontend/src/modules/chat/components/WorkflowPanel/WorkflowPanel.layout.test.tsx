@@ -773,18 +773,50 @@ describe('external workflow surface boundary', () => {
       const external = footerButtons();
       expect(external.filter(button => !['继续', '保存并继续'].includes(button.label ?? '')))
         .toEqual(native.filter(button => !['继续', '保存并继续'].includes(button.label ?? '')));
-      if (scenario === 'review-without-checkpoint') {
-        expect(screen.getByRole('group', { name: '工作流审批操作' })).toBeVisible();
-        expect(screen.queryByRole('button', { name: '保存并继续' })).not.toBeInTheDocument();
-      } else {
-        expect(screen.queryByRole('group', { name: '工作流审批操作' })).not.toBeInTheDocument();
-        if (!interrupted && !completed) {
-          const button = screen.getByRole('button', { name: '保存并继续' });
-          if (scenario === 'delivery-pending') expect(button).toBeDisabled();
-          else expect(button).toBeEnabled();
-        }
-      }
+      // A running/preparing projection blocks continuation and approval on both
+      // surfaces, even before an attempt exists or while capabilities refresh.
+      expect(screen.queryByRole('group', { name: '工作流审批操作' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: '保存并继续' })).not.toBeInTheDocument();
       if (interrupted || completed) expect(screen.getByRole('button', { name: '继续' })).toBeEnabled();
+    },
+  );
+
+  it.each(['preparing', 'executing', 'pausing'] as const)(
+    'shares the native running controls during hosted %s, including before dispatch', async reason => {
+      fixture.session.status = reason === 'pausing' ? 'pausing' : 'active';
+      fixture.session.projection = { display: { status: 'running', reason, approval_step_id: '' } };
+      fixture.session.steps = [];
+      let finishStop!: () => void;
+      const execute = vi.fn(() => new Promise<void>(resolve => { finishStop = resolve; }));
+      const control: WorkflowControlView = {
+        protocol: 'workflow.control.v1', session_id: 'layout-test', state_version: 8,
+        continuation: 'continue', reviews: [], active_executions: reason === 'executing' ? 1 : 0,
+        active_execution_ids: reason === 'executing' ? ['attempt'] : [],
+        binding: { bound: true }, admission: { can_begin: reason === 'preparing' },
+        delivery: reason === 'preparing' ? { id: 'start', kind: 'continue', status: 'pending' } : null,
+        available_actions: ['stop', 'save', 'continue'],
+      };
+      const view = render(<WorkflowPanel conversationId='layout-test' />);
+      await screen.findByText('正文 document');
+      const controls = () => within(screen.getByRole('group', { name: '工作流会话操作' }))
+        .getAllByRole('button').map(button => ({ label: button.textContent, disabled: (button as HTMLButtonElement).disabled }));
+      const native = controls();
+      view.rerender(<WorkflowPanel conversationId='layout-test' embedded controlAdapter={{ control, execute }} />);
+      expect(controls()).toEqual(native);
+      expect(screen.queryByRole('button', { name: '保存并继续' })).not.toBeInTheDocument();
+      if (reason === 'pausing') {
+        expect(screen.getByRole('button', { name: String(i18n.t('chat.workflowStopping')) })).toBeDisabled();
+        return;
+      }
+      const stop = screen.getByRole('button', { name: '停止' });
+      expect(stop).toBeEnabled();
+      fireEvent.click(stop);
+      await waitFor(() => expect(execute).toHaveBeenCalledWith({ kind: 'stop' }));
+      fireEvent.click(screen.getByRole('button', { name: String(i18n.t('chat.workflowStopping')) }));
+      expect(execute).toHaveBeenCalledOnce();
+      expect(fixture.flush).not.toHaveBeenCalled();
+      expect(fixture.pause).not.toHaveBeenCalled();
+      await act(async () => finishStop());
     },
   );
 

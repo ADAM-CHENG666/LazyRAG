@@ -18,15 +18,10 @@ def publisher(tmp_path, monkeypatch):
     namespace = functions['academic_submit_relations'].__globals__
 
     class Module:
-        """Replace HTTP in the actual loaded namespace."""
-
-        def __getattr__(self, name):
-            return namespace[name]
-
-        def __setattr__(self, name, value):
-            namespace[name] = value
+        """Expose the loaded namespace for attribute patching and restoration."""
 
     module = Module()
+    module.__dict__ = namespace
     body = {'user_instruction': 'read actual evidence', 'candidate_directions': ['agents'],
             'selected_directions': ['agents'], 'papers': [
                 {'paper': {'paper_id': 'a', 'title': 'model title'}, 'is_seed': False, 'is_important': False}]}

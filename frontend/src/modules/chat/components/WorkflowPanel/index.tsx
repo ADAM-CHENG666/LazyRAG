@@ -1989,7 +1989,10 @@ export function WorkflowPanel({
     : display?.status === 'paused' ? 'stopped' : display?.status ?? 'loading';
   const externalControl = controlAdapter?.control;
   const availableActions = new Set(externalControl?.available_actions ?? []);
-  const pendingReview = externalControl && externalControl.continuation !== 'stopped' && externalControl.active_executions === 0
+  // Both surfaces use Core's display projection, including preparation before
+  // the first attempt exists. Host capabilities only map the permitted commands.
+  const sessionBusy = displayStatus === 'active' || displayStatus === 'loading';
+  const pendingReview = externalControl && externalControl.continuation !== 'stopped' && !sessionBusy
     ? externalControl.reviews.find(review => review.status === 'pending') : undefined;
   const approvalStepId = externalControl ? pendingReview?.step_id
     : display?.status === 'waiting' ? display.approval_step_id : undefined;
@@ -1997,8 +2000,6 @@ export function WorkflowPanel({
   // A native Chat submission can outlive this panel (it moves to the new reply).
   // Keep controls locked until that turn ends, even before workflow events arrive.
   // Dirty editors do not disable retry — click flushes saves first, then proceeds.
-  const sessionBusy = externalControl ? externalControl.active_executions > 0
-    : displayStatus === 'active' || displayStatus === 'loading';
   const externalDeliveryBusy = externalControl ? deliveryPending(externalControl) : false;
   const buttonsDisabled = sessionBusy || chatBusy || actionPending || externalDeliveryBusy;
   const dismissDisabled = dismissing || anySlotEditing || actionPending;
@@ -2011,7 +2012,7 @@ export function WorkflowPanel({
   // Hosted runs use Core capabilities directly; a legacy graph checkpoint
   // must not hide a valid review or continuation grant.
   const externalContinueAction = externalControl && resolveExternalContinueAction(externalControl, completedContinueStepId);
-  const showContinue = externalControl ? Boolean(externalContinueAction) : Boolean(continueAction);
+  const showContinue = !sessionBusy && (externalControl ? Boolean(externalContinueAction) : Boolean(continueAction));
   const showStepRollback =
     (session.status === 'completed' || session.status === 'failed')
     && Boolean(session.steps && session.steps.length > 0)
@@ -2483,7 +2484,7 @@ export function WorkflowPanel({
               {stopping ? ` · ${t('chat.workflowStoppingHint')}` : ''}
             </span>
           )}
-          {(externalControl ? externalControl.active_executions > 0 && supportsExternal('stop') : displayStatus === 'active' && session.controller_host === 'lazymind') && (
+          {displayStatus === 'active' && (controlAdapter ? supportsExternal('stop') : session.controller_host === 'lazymind') && (
             <button
               type='button'
               className='workflow-panel__action-btn workflow-panel__action-btn--danger'

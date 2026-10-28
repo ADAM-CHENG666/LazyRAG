@@ -3,10 +3,9 @@ import { resolvePendingApprovalStep } from './workflowApproval';
 
 /** Resolve the permitted protocol command after the shared UI checkpoint check. */
 export function resolveExternalContinueAction(
-  control: { continuation: string; available_actions: string[]; admission?: { reason?: string }; active_executions?: number },
+  control: { continuation: string; available_actions: string[]; admission?: { reason?: string } },
   completedStep?: string,
 ): 'continue' | 'resume' | 'rewind' | undefined {
-  if ((control.active_executions ?? 0) > 0) return undefined;
   const action = control.continuation === 'stopped' ? 'resume'
     : completedStep && control.admission?.reason !== 'edits_pending_continue' ? 'rewind' : 'continue';
   return control.available_actions.includes(action) ? action : undefined;
