@@ -103,6 +103,25 @@ func (s *DocumentService) EnsureDocumentParsed(r *http.Request, req EnsureDocume
 	} else if artifact != nil {
 		return EnsureDocumentParsedResult{Status: "parsed"}, nil
 	}
+	if rec.lazy != nil {
+		status := strings.ToUpper(strings.TrimSpace(rec.lazy.UploadStatus))
+		if status == "SUCCESS" || status == "SUCCEEDED" {
+			// Check current service artifacts before historical Core task states:
+			// a retry can succeed while an older task still says FAILED or WORKING.
+			roots, rootsErr := s.ListDocumentChunks(r.Context(), DocumentChunksRequest{
+				UserID: req.UserID, DatasetID: req.DatasetID, DocumentID: req.DocumentID,
+				PageSize: 1, SegmentGroup: RootNodeGroup, Caller: req.Caller,
+			})
+			if rootsErr != nil || len(roots.Chunks) == 0 {
+				// The parsing service can publish its terminal task status shortly
+				// before the root nodes become visible. Do not expose a false
+				// "parsed" state to consumers that require those nodes.
+				return EnsureDocumentParsedResult{Status: "parsing"}, nil
+			}
+			_ = s.updateParseState(r, req.DatasetID, req.DocumentID, "succeeded", "", "")
+			return EnsureDocumentParsedResult{Status: "parsed"}, nil
+		}
+	}
 	if rec.processing.ParseStatus == "failed" || NormalizeTaskStateForUI(rec.taskStat) == "FAILED" {
 		diagnostic := rec.diagnostic
 		if diagnostic == nil {
@@ -119,22 +138,6 @@ func (s *DocumentService) EnsureDocumentParsed(r *http.Request, req EnsureDocume
 		status := strings.ToUpper(strings.TrimSpace(rec.lazy.UploadStatus))
 		taskStatus := strings.ToUpper(strings.TrimSpace(rec.taskStat))
 		switch status {
-		case "SUCCESS", "SUCCEEDED":
-			// The document service is authoritative for the current document
-			// artifact. A previous Core task may still be FAILED after a later
-			// retry succeeds, so do not let that stale task mask valid roots.
-			roots, rootsErr := s.ListDocumentChunks(r.Context(), DocumentChunksRequest{
-				UserID: req.UserID, DatasetID: req.DatasetID, DocumentID: req.DocumentID,
-				PageSize: 1, SegmentGroup: RootNodeGroup, Caller: req.Caller,
-			})
-			if rootsErr != nil || len(roots.Chunks) == 0 {
-				// The parsing service can publish its terminal task status shortly
-				// before the root nodes become visible. Do not expose a false
-				// "parsed" state to consumers that require those nodes.
-				return EnsureDocumentParsedResult{Status: "parsing"}, nil
-			}
-			_ = s.updateParseState(r, req.DatasetID, req.DocumentID, "succeeded", "", "")
-			return EnsureDocumentParsedResult{Status: "parsed"}, nil
 		case "FAILED", "ERROR":
 			return EnsureDocumentParsedResult{Status: "failed", Error: rec.diagnostic}, nil
 		default:
