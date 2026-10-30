@@ -2,7 +2,7 @@ const path = require("node:path");
 
 // All privileged work stays in Electron's main process. The local renderer can
 // only confirm/dismiss the request currently displayed by this controller.
-function createAgentRecovery({ BrowserWindow, ipcMain, screen, wait, dismiss, reconnect, check, finishView, locale = () => "en", log = () => {}, retryMs = 5000, successMs = 1200, checkMs = 1000 }) {
+function createAgentRecovery({ BrowserWindow, ipcMain, screen, wait, dismiss, reconnect, check, finishView, platform = process.platform, locale = () => "en", log = () => {}, retryMs = 5000, successMs = 1200, checkMs = 1000 }) {
   let running = false;
   let generation = 0;
   let lifetime;
@@ -133,10 +133,15 @@ function createAgentRecovery({ BrowserWindow, ipcMain, screen, wait, dismiss, re
     owned.setPosition(Math.round(area.x + (area.width - 440) / 2), Math.round(area.y + (area.height - 300) / 2));
     owned.setAlwaysOnTop(true, "floating");
     // skipTransformProcessType avoids changing LazyMind's Dock identity.
-    if (process.platform === "darwin") owned.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
+    if (platform === "darwin") owned.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
     try {
       await owned.loadFile(path.join(__dirname, "agent-recovery.html"));
-      if (revision === generation && !owned.isDestroyed()) owned.showInactive();
+      if (revision === generation && !owned.isDestroyed()) {
+        // Windows can leave an inactive recovery window unpainted/behind Codex.
+        // This window follows an explicit Workflow operation and needs attention.
+        if (platform === "win32") { owned.show(); owned.focus(); }
+        else owned.showInactive();
+      }
       void refreshRequest();
       if(check&&finishView)void observePresentation();
       await closed;

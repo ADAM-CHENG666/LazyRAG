@@ -23,6 +23,8 @@ function fixture(reconnect = async () => {}, options = {}) {
     setVisibleOnAllWorkspaces() {}
     async loadFile() {}
     showInactive() { this.shown = true; }
+    show() { this.shown = true; this.activeShow = true; }
+    focus() { this.focused = true; }
     isDestroyed() { return this.destroyed; }
     close() {
       let prevented = false; this.emit("close", { preventDefault: () => { prevented = true; } });
@@ -45,7 +47,7 @@ function fixture(reconnect = async () => {}, options = {}) {
   return { controller, windows, dismissed, waits, invoke };
 }
 
-test("shows one inactive window, dismisses without restarting, and waits for a new request", async () => {
+test("shows one recovery window, dismisses without restarting, and waits for a new request", async () => {
   let restarts = 0;
   const f = fixture(async () => { restarts++; });
   f.controller.start(); f.controller.start();
@@ -64,6 +66,19 @@ test("shows one inactive window, dismisses without restarting, and waits for a n
   assert.equal(f.windows.length, 1);
   f.controller.stop();
 });
+
+for (const platform of ["win32", "darwin"]) {
+  test(`recovery visibility uses the ${platform} presentation policy without restarting`, async () => {
+    let restarts = 0;
+    const f = fixture(async () => { restarts++; }, { platform });
+    f.controller.start(); f.waits.shift()({ request }); await tick();
+    assert.equal(f.windows[0].shown, true);
+    assert.equal(Boolean(f.windows[0].focused), platform === "win32");
+    assert.equal(Boolean(f.windows[0].activeShow), platform === "win32");
+    assert.equal(restarts, 0);
+    await f.controller.stop();
+  });
+}
 
 test("only the dedicated main frame can confirm; duplicate clicks never duplicate restart", async () => {
   let restarts = 0, complete;
