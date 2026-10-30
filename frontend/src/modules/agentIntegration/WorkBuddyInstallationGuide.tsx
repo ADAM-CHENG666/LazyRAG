@@ -84,6 +84,8 @@ export default function WorkBuddyInstallationGuide({ status, onConnect, onStatus
   const imageURL = agent === "codex" ? "/installation-guides/codex/enable.png"
     : `/installation-guides/workbuddy/${imageStage}.${imageStage === "trust" ? "png" : "jpg"}`;
   const imageAlt = text(`${imageStage}ImageAlt`);
+  const showInstructions = ["entry", "trust", "enable"].includes(stage)
+    || agent === "codex" && ["prepare", "installing", "installFailed", "notReady"].includes(stage);
   return <><Modal open centered width={640} className="agent-integration-installation-guide"
     title={text("title")} onCancel={onClose} closable={!installing && !checking}
     maskClosable={false} keyboard={!installing && !checking}
@@ -100,8 +102,10 @@ export default function WorkBuddyInstallationGuide({ status, onConnect, onStatus
       {stage === "prepare" && <Typography.Paragraph>{text("saveDescription")}</Typography.Paragraph>}
       {(installing || checking) && <Space direction="vertical" align="center" className="agent-integration-installation-progress"><Spin /><Typography.Text>{text(installing ? "installingDescription" : "checkingDescription")}</Typography.Text></Space>}
       {stage === "installFailed" && <Alert type="error" showIcon message={text("installFailedTitle")} description={error} />}
-      {(stage === "entry" || stage === "trust" || stage === "enable") && <>
+      {(stage === "entry" || stage === "trust" || stage === "enable") &&
         <Alert type="success" showIcon message={text("installedTitle")} description={text("installedDescription")} />
+      }
+      {showInstructions && <>
         <Typography.Title level={5}>{text(`${imageStage}Title`)}</Typography.Title>
         <Typography.Paragraph>{text(`${imageStage}Description`)}</Typography.Paragraph>
         <button type="button" className="agent-integration-installation-image" aria-label={text("enlargeImage")} onClick={() => setZoomed(true)}><img src={imageURL} alt={imageAlt} /></button>

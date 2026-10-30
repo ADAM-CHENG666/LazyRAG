@@ -1382,12 +1382,13 @@ describe("AgentIntegrationPage", () => {
     const card = expandAgent("codex");
     fireEvent.click(await within(card).findByRole("switch", { name: "Codex 桌面端使用 LazyMind" }));
     const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByRole("img", { name: tr("enableImageAlt") })).toHaveAttribute("src", "/installation-guides/codex/enable.png");
     fireEvent.click(within(dialog).getByRole("button", { name: tr("saveAndContinue") }));
     const guide = await within(dialog).findByRole("img", { name: tr("enableImageAlt") });
     expect(guide).toHaveAttribute("src", "/installation-guides/codex/enable.png");
     expect(within(dialog).queryByRole("button", { name: tr("next") })).not.toBeInTheDocument();
     expect(within(dialog).queryByRole("button", { name: tr("back") })).not.toBeInTheDocument();
-    fireEvent.click(within(dialog).getByRole("button", { name: tr("enabledConfirmation") }));
+    fireEvent.click(await within(dialog).findByRole("button", { name: tr("enabledConfirmation") }));
     mocks.statuses.mockResolvedValue({ ok: true, data: { codex: installed } });
     fireEvent.click(within(dialog).getByRole("button", { name: tr("check") }));
     expect(await within(dialog).findByText(tr("successTitle"))).toBeInTheDocument();
