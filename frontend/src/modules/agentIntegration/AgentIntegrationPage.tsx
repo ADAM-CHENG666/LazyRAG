@@ -1205,9 +1205,10 @@ function AgentConfigurationFlow({
               </Button>
             ) : undefined}
             status={mcpStatus?.connection?.runtime_state === "waiting" ? t("agentIntegration.waitingForApplication")
+              : mcpStatus?.connection?.runtime_state === "connection_required" ? t("agentIntegration.connectionRequired")
               : mcpChecked && mcpStatus?.issue ? t("agentIntegration.configurationIssue")
                 : mcpStatus?.enabled ? t("agentIntegration.enabled") : mcpCapabilityStatus(mcpState, t)}
-            ready={mcpEnabled && !mcpStatus?.issue && mcpStatus?.connection?.runtime_state !== "waiting"}
+            ready={mcpEnabled && !mcpStatus?.issue && !["waiting", "connection_required"].includes(mcpStatus?.connection?.runtime_state || "")}
             disabled={!mcpCanToggle}
             loading={busyAction === `${agent.id}:connect` || busyAction === `${agent.id}:disconnect`}
             checked={mcpChecked}
@@ -1235,6 +1236,9 @@ function AgentConfigurationFlow({
         </div>
         {mcpChecked && mcpStatus?.connection?.runtime_state === "waiting" && (
           <div className="agent-integration-stage-hint" role="status"><InfoCircleFilled />{t("agentIntegration.waitingForApplicationDescription", { agent: agent.name })}</div>
+        )}
+        {mcpChecked && mcpStatus?.connection?.runtime_state === "connection_required" && (
+          <div className="agent-integration-stage-hint" role="status"><InfoCircleFilled />{t("agentIntegration.codexInstallGuide.controlUnavailableDescription")}</div>
         )}
         {mcpStatus?.message && (["error", "conflict"].includes(mcpState) || ["workbuddy", "codex"].includes(agent.id) && mcpStatus.issue) && (
           <div className="agent-integration-stage-hint is-error" role="alert">

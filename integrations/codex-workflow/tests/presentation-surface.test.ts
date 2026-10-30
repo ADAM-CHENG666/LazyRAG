@@ -11,7 +11,8 @@ it('registers the native guest, forwards only its exact URL/run/mount, and relea
  const guest:any=document.createElement('div');let currentURL='about:blank'
  guest.getURL=()=>currentURL
  guest.loadURL=vi.fn(async(url:string)=>{currentURL=url})
- guest.executeJavaScript=vi.fn(async(code:string)=>code.includes('.drain()')?events.splice(0):undefined)
+ let snapshot:any
+ guest.executeJavaScript=vi.fn(async(code:string)=>code.includes('.drain()')?events.splice(0):code.includes('.status()')?snapshot:undefined)
  const unregister=vi.fn(), native={webview:guest,container:document.createElement('div'),isRegistered:true,
   listenForDidRegister:vi.fn(()=>unregister),sync:vi.fn(),browserHostService:{syncView:vi.fn(async()=>true)}}
  const browser={pages:{getWebview:vi.fn(()=>native),disposeHost:vi.fn()}}
@@ -22,12 +23,17 @@ it('registers the native guest, forwards only its exact URL/run/mount, and relea
  await Promise.resolve()
  expect(browser.pages.getWebview).toHaveBeenCalledWith('thread',target.mount_id,'',{hostKind:'right-panel'})
  expect(currentURL).toContain('native=1')
+ snapshot={type:'lazymind.workflow.frame-status',status:'ready',sessionId:'other',bridgeId:target.mount_id}
+ expect(await surface.probeStatus()).toBeUndefined()
+ snapshot={...snapshot,sessionId:'run'}
+ expect(await surface.probeStatus()).toMatchObject({status:'ready',sessionId:'run'})
  events.push({type:'lazymind.workflow.toggle-collapse',sessionId:'other',bridgeId:target.mount_id},{type:'lazymind.workflow.toggle-collapse',sessionId:'run',bridgeId:target.mount_id})
  await vi.advanceTimersByTimeAsync(150)
  expect(receive).toHaveBeenCalledTimes(1)
  surface.reply({type:'lazymind.workflow.collapse',collapsed:true})
  expect(guest.executeJavaScript).toHaveBeenLastCalledWith(expect.stringContaining('.receive('))
  currentURL='https://other.example/'
+ expect(await surface.probeStatus()).toBeUndefined()
  const calls=guest.executeJavaScript.mock.calls.length
  surface.reply({type:'lazymind.workflow.expansion',expanded:true})
  await vi.advanceTimersByTimeAsync(150)

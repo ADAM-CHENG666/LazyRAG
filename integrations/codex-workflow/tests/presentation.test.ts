@@ -27,7 +27,7 @@ function fixture() {
   const target = {session_id:threadA,run_id:'run-a',epoch:current.epoch,frame_url:'http://127.0.0.1:19091/v1/codex/frame',mount_id:crypto.randomUUID()}
   let receive = (_data:any)=>{}
   const element=document.createElement('div'), nativeFrame=document.createElement('iframe');element.append(nativeFrame)
-  const surface={element,reply:vi.fn(),sync:vi.fn(),setExpanded:vi.fn(),dispose:()=>element.remove()}
+  const surface={element,reply:vi.fn(),sync:vi.fn(),setExpanded:vi.fn(),probeStatus:vi.fn(async()=>({type:'lazymind.workflow.frame-status',status:'ready',sessionId:'run-a',bridgeId:target.mount_id})),dispose:()=>element.remove()}
   const factory=vi.fn((_target:any,_url:any,handler:any)=>{receive=handler;return surface})
   expect(mountPresentation(target,undefined,undefined,factory).status).toBe('mounted')
   const frame = document.querySelector('iframe')!, post = surface.reply
@@ -42,6 +42,21 @@ it('keeps one live iframe after new messages and before composer clearance',asyn
   expect(document.querySelector('iframe')).toBe(f.frame)
   expect(panel.previousElementSibling).toBe(document.querySelector('[data-thread-user-message-navigation-content]'))
   expect(panel.nextElementSibling?.className).toBe('sticky')
+})
+it('confirms a loaded page even when its queued ready event has not been forwarded',async()=>{
+ const f=fixture(),panel=f.window.__lazymindCodexWorkflowTail
+ expect(panel.status().page_status).toBe('loading')
+ expect(await panel.probeStatus()).toMatchObject({status:'mounted',page_status:'ready',session_id:threadA,run_id:'run-a'})
+ expect(f.surface.probeStatus).toHaveBeenCalledOnce()
+})
+it('rejects a ready probe resolved after switching conversations',async()=>{
+ const f=fixture(),panel=f.window.__lazymindCodexWorkflowTail
+ let resolve!:(value:any)=>void
+ f.surface.probeStatus.mockImplementationOnce(()=>new Promise(r=>{resolve=r}))
+ const pending=panel.probeStatus()
+ f.props.conversationId=threadB;readPresentationSession()
+ resolve({type:'lazymind.workflow.frame-status',status:'ready',sessionId:'run-a',bridgeId:f.target.mount_id})
+ expect(await pending).toBeUndefined()
 })
 it('keeps iframe and URL through collapse/expand and rejects foreign messages',()=>{
   const f=fixture(), url=f.frame.src

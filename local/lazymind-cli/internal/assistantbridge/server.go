@@ -39,6 +39,7 @@ const (
 )
 
 type Server struct {
+	codexRecovery       codexRecoveryBroker
 	workbuddyIdentities workbuddyhost.Broker
 	address             string
 	bridge              *mcpbridge.Bridge
@@ -91,7 +92,7 @@ func Start(ctx context.Context, address string) (map[string]any, error) {
 		if err := validateBridgeIdentity(status, self); err != nil {
 			return nil, err
 		}
-		if status["version"] == "v4" {
+		if status["version"] == "v8" {
 			return status, nil
 		}
 		if err := Stop(ctx, address); err != nil {
@@ -277,7 +278,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /v1/health", func(writer http.ResponseWriter, _ *http.Request) {
 		executable, _ := os.Executable()
 		writeJSON(writer, http.StatusOK, map[string]any{
-			"ok": true, "pid": os.Getpid(), "version": "v4",
+			"ok": true, "pid": os.Getpid(), "version": "v8",
 			"platform": runtime.GOOS, "executable": executable,
 		})
 	})
@@ -285,6 +286,12 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /v1/workbuddy/presentation", s.handleWorkBuddyPresentation)
 	mux.HandleFunc("GET /v1/workbuddy/frame", s.handleWorkBuddyFrame)
 	mux.HandleFunc("GET /v1/codex/presentation", s.handleCodexPresentation)
+	mux.HandleFunc("POST /v1/codex/recovery", s.handleCodexRecovery)
+	mux.HandleFunc("POST /v1/codex/recovery/{request}/accepted/{intent}", s.handleCodexRecovery)
+	mux.HandleFunc("POST /v1/codex/recovery/{request}/complete", s.handleCodexRecovery)
+	mux.HandleFunc("POST /v1/codex/recovery/{request}/view-complete", s.handleCodexRecovery)
+	mux.HandleFunc("GET /v1/codex/recovery", s.handleCodexRecovery)
+	mux.HandleFunc("DELETE /v1/codex/recovery/{request}", s.handleCodexRecovery)
 	mux.HandleFunc("GET /v1/codex/frame", s.handleCodexFrame)
 	mux.HandleFunc("POST /v1/workbuddy/resolve", s.handleWorkBuddyResolve)
 	mux.HandleFunc("GET /v1/workbuddy/identity-requests", s.handleWorkBuddyIdentities)

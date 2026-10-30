@@ -10,7 +10,7 @@ export interface PresentationStatus { status: string; page_status?: string; chec
 
 /** Serialized with its two helpers; mutates presentation only. */
 export function mountPresentation(target: PresentationTarget, readView = readCodexView, followTail = installTailFollow, makeSurface = createCodexSurface) {
-  const host = window as any, key = '__lazymindCodexWorkflowTail', version = 'codex-tail-v2-native'
+  const host = window as any, key = '__lazymindCodexWorkflowTail', version = 'codex-tail-v3-ready'
   const gate = host.__lazymindCodexPresentationSession
   if (!gate || gate.read().epoch !== target.epoch || gate.read().session_id !== target.session_id) return { status: 'stale' }
   const previous = host[key]
@@ -118,7 +118,15 @@ export function mountPresentation(target: PresentationTarget, readView = readCod
     panel.remove()
     if (host[key]?.dispose === dispose) delete host[key]
   }
-  host[key] = { version, session: target.session_id, run: target.run_id, origin: url.origin, sync, status, dispose }
+  async function probeStatus() {
+    if(disposed||!current())return undefined
+    const latest=await surface.probeStatus()
+    if(disposed||!current())return undefined
+    if(latest)receive(latest)
+    sync()
+    return status()
+  }
+  host[key] = { version, session: target.session_id, run: target.run_id, origin: url.origin, sync, status, probeStatus, dispose }
   window.addEventListener('resize', sync); initialScroller.addEventListener('scroll', sync, {passive:true})
   size(); sync()
   return status()

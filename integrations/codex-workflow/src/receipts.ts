@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto'
 
 interface Receipt {
   actionId: string; runId: string; threadId: string; kind: 'continue' | 'cancel'
-  clientId?: string; turnId?: string; status: 'sending' | 'accepted' | 'unknown'
+  clientId?: string; turnId?: string; status: 'sending' | 'accepted' | 'unknown' | 'rejected'
 }
 const threadPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
 

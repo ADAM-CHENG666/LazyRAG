@@ -13,14 +13,22 @@ export class CodexAdapter implements RuntimeAdapter<string> {
     cancelSession: (thread: string, claim: ActionClaim) => this.cancelOwned(thread, claim),
   }
   constructor(private native: Pick<CodexNative, 'read' | 'start' | 'interrupt'>,
-    private receipts: NativeReceipts, private bridge: HostTransport, private signal: AbortSignal) {}
+    private receipts: NativeReceipts, private bridge: HostTransport, private signal: AbortSignal,
+    private recovery?: { available(): void; unavailable(thread?: string): Promise<void> }) {}
   id(thread: string) { return thread }
   warn(message: string) { console.warn(message) }
   async resolve(thread: string) {
     return /^[a-f0-9-]{36}$/i.test(thread) ? { agent: thread } : { error: 'A Codex thread UUID is required' }
   }
   async ready(thread: string, signal: AbortSignal) {
-    try { return !(await this.native.read(thread, signal)).active } catch { return false }
+    try {
+      const state = await this.native.read(thread, signal)
+      this.recovery?.available()
+      return state.ready !== false && !state.active
+    } catch {
+      if (!signal.aborted) await this.recovery?.unavailable(thread)
+      return false
+    }
   }
   private validate(thread: string, claim: ActionClaim, kind: 'continue' | 'cancel') {
     const { action, control } = claim

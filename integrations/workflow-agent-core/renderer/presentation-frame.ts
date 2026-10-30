@@ -5,6 +5,7 @@ export function startPresentationFrame() {
   const native = parent === window && params.get('native') === '1'
   if (!/^[a-zA-Z0-9_-]{1,256}$/.test(run) || !/^[a-zA-Z0-9-]{20,80}$/.test(bridgeId) || parent === window && !native) return
   const events: object[] = []
+  let currentStatus = 'loading'
   const emit = (data: object) => {
     if (native) { if (events.length < 100) events.push(data) }
     else parent.postMessage(data, '*')
@@ -29,7 +30,8 @@ export function startPresentationFrame() {
   let closed = false, loading = false, navigating = false
   let retryTimer: number | undefined, loadTimer: number | undefined
   let probe: AbortController | undefined
-  const report = (status: string) => emit({ type: 'lazymind.workflow.frame-status', status, sessionId: run, bridgeId })
+  const snapshot = () => ({ type: 'lazymind.workflow.frame-status', status: currentStatus, sessionId: run, bridgeId })
+  const report = (status: string) => { currentStatus = status; emit(snapshot()) }
   function show(status: string, text: string, canRetry: boolean) {
     notice.hidden = false; notice.textContent = text
     if (retry) retry.hidden = !canRetry
@@ -69,7 +71,7 @@ export function startPresentationFrame() {
     }
   }
   if (native) (window as any).__lazymindWorkflowFrame = {
-    drain: () => events.splice(0), receive: receiveHost,
+    drain: () => events.splice(0), receive: receiveHost, status: snapshot,
   }
   window.addEventListener('message', event => {
     const data = event.data

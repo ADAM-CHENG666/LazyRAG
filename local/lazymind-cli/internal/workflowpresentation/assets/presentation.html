@@ -9,6 +9,7 @@ html,body{height:100%;margin:0;overflow:hidden;background:transparent}iframe{dis
 	const native = parent === window && params.get("native") === "1";
 	if (!/^[a-zA-Z0-9_-]{1,256}$/.test(run) || !/^[a-zA-Z0-9-]{20,80}$/.test(bridgeId) || parent === window && !native) return;
 	const events = [];
+	let currentStatus = "loading";
 	const emit = (data) => {
 		if (native) {
 			if (events.length < 100) events.push(data);
@@ -30,12 +31,16 @@ html,body{height:100%;margin:0;overflow:hidden;background:transparent}iframe{dis
 	let closed = false, loading = false, navigating = false;
 	let retryTimer, loadTimer;
 	let probe;
-	const report = (status) => emit({
+	const snapshot = () => ({
 		type: "lazymind.workflow.frame-status",
-		status,
+		status: currentStatus,
 		sessionId: run,
 		bridgeId
 	});
+	const report = (status) => {
+		currentStatus = status;
+		emit(snapshot());
+	};
 	function show(status, text, canRetry) {
 		notice.hidden = false;
 		notice.textContent = text;
@@ -87,7 +92,8 @@ html,body{height:100%;margin:0;overflow:hidden;background:transparent}iframe{dis
 	}
 	if (native) window.__lazymindWorkflowFrame = {
 		drain: () => events.splice(0),
-		receive: receiveHost
+		receive: receiveHost,
+		status: snapshot
 	};
 	window.addEventListener("message", (event) => {
 		const data = event.data;

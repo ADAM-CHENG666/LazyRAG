@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"syscall"
 	"time"
 
 	"lazymind/agentconnector/internal/codexplugin"
@@ -94,17 +95,6 @@ func ReadStatus(home, account string) (Status, error) {
 }
 func Ready(home, account string) bool { s, e := ReadStatus(home, account); return e == nil && s.Ready }
 
-func CheckConnection(ctx context.Context, home string) error {
-	c, err := readConfig(home)
-	if err == nil {
-		ready, e := DesktopReady(ctx, c.Port)
-		if e == nil && ready {
-			return nil
-		}
-	}
-	return errors.New("Codex control is disconnected. Turn its LazyMind switch off and on again; save current work before the installation guide restarts Codex")
-}
-
 var localChatRoute = regexp.MustCompile(`(?i)^/local/[a-f0-9-]{36}$`)
 
 func DesktopReady(ctx context.Context, port int) (bool, error) {
@@ -112,7 +102,10 @@ func DesktopReady(ctx context.Context, port int) (bool, error) {
 	client := &http.Client{Timeout: 2 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("CDP redirect refused") }}
 	response, err := client.Do(req)
 	if err != nil {
-		return false, nil
+		if errors.Is(err, syscall.ECONNREFUSED) {
+			return false, nil
+		}
+		return false, fmt.Errorf("Codex CDP endpoint is unavailable: %w", err)
 	}
 	defer response.Body.Close()
 	var targets []struct {
@@ -135,36 +128,48 @@ func DesktopReady(ctx context.Context, port int) (bool, error) {
 	}
 	return true, nil
 }
+
+var prepareDesktopLaunch = launchDesktop
+
 func PrepareDesktop(ctx context.Context, home string) error {
-	if err := ConfigureStartup(ctx, home); err != nil {
-		return err
+	if !integrationstate.Allowed(home, "codex") {
+		return connectionIssue("CODEX_INTEGRATION_DISABLED", "Codex connection is disabled", false)
 	}
 	c, err := readConfig(home)
 	if err != nil {
 		return err
 	}
-	ready, err := DesktopReady(ctx, c.Port)
+	application, err := startupApplication()
 	if err != nil {
 		return err
 	}
+	ready, err := startupDesktopReady(ctx, c.Port)
+	if err != nil {
+		return err
+	}
+	if ready && !startupListenerMatches(ctx, application, c.Port) {
+		return errors.New("CODEX_CDP_UNAVAILABLE: the debugging port is not owned by Codex; resolve the port conflict before reconnecting")
+	}
 	if !ready {
-		application, err := desktopApplication()
-		if err != nil {
+		reportRecovery(ctx, "closing")
+		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := launchDesktop(ctx, application, c.Port); err != nil {
+		if err := prepareDesktopLaunch(ctx, application, c.Port); err != nil {
 			return err
 		}
 	}
+	reportRecovery(ctx, "connecting")
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		if ok, _ := DesktopReady(ctx, c.Port); ok {
+		connectionErr := CheckConnection(ctx, home)
+		if connectionErr == nil {
 			return nil
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return fmt.Errorf("Codex connection did not become ready: %w: %v", ctx.Err(), connectionErr)
 		case <-ticker.C:
 		}
 	}

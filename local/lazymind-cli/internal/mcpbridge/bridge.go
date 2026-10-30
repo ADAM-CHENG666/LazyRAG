@@ -179,7 +179,7 @@ func (b *Bridge) RunStdio(ctx context.Context) error {
 		workflowClient.ResolveDriver = func(_ context.Context, request *mcp.CallToolRequest, fallback string) (string, error) {
 			return workflowmcp.CodexDriver(request, fallback)
 		}
-		workflowClient.EnsureHostReady = func(ctx context.Context) error { return codexhost.CheckConnection(ctx, b.home) }
+		workflowClient.EnsureHostReady = func(ctx context.Context) error { return codexhost.EnsureConnection(ctx, b.home) }
 	}
 	if b.sourceProvider == "workbuddy" && workflowClient.RequireHostBinding {
 		workflowClient.BindController = b.bindWorkBuddyController
@@ -191,6 +191,9 @@ func (b *Bridge) RunStdio(ctx context.Context) error {
 		}
 	}
 	workflowmcp.Register(server, workflowClient)
+	if b.sourceProvider == "codex" && workflowClient.RequireHostBinding {
+		server.AddReceivingMiddleware(b.codexRecoveryMiddleware)
+	}
 	for _, name := range workflowmcp.ToolNames {
 		readOnlyTools[name] = workflowmcp.IsReadOnlyTool(name)
 	}

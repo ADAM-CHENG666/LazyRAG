@@ -37,6 +37,21 @@ type Client struct {
 	EnsureHostReady    func(context.Context) error
 }
 
+type executionReadinessKey struct{}
+
+// A check belongs to this execution request, never to a previous run or process.
+// Begin may call Claim internally; propagate its successful check only through
+// that call chain so no state is advanced before the first check succeeds.
+func (c *Client) executionContext(ctx context.Context) (context.Context, error) {
+	if c.EnsureHostReady == nil || ctx.Value(executionReadinessKey{}) == c {
+		return ctx, nil
+	}
+	if err := c.EnsureHostReady(ctx); err != nil {
+		return ctx, err
+	}
+	return context.WithValue(ctx, executionReadinessKey{}, c), nil
+}
+
 type Projection struct {
 	AgentInstruction string         `json:"agent_instruction,omitempty"`
 	Control          map[string]any `json:"control,omitempty"`
@@ -419,10 +434,10 @@ func (c *Client) Start(ctx context.Context, input StartInput) (StartResult, erro
 	if input.WorkflowID == "" {
 		return StartResult{}, errors.New("workflow_id is required")
 	}
-	if c.EnsureHostReady != nil {
-		if err := c.EnsureHostReady(ctx); err != nil {
-			return StartResult{}, err
-		}
+	var err error
+	ctx, err = c.executionContext(ctx)
+	if err != nil {
+		return StartResult{}, err
 	}
 	if (c.HostProvider == "codex" || c.HostProvider == "workbuddy") && c.RequireHostBinding {
 		if !codexThreadPattern.MatchString(input.DriverSessionID) {
@@ -517,6 +532,11 @@ func (c *Client) Start(ctx context.Context, input StartInput) (StartResult, erro
 }
 
 func (c *Client) Begin(ctx context.Context, input BeginInput) (BeginResult, error) {
+	var err error
+	ctx, err = c.executionContext(ctx)
+	if err != nil {
+		return BeginResult{}, err
+	}
 	state, err := c.State(ctx, input.SessionID)
 	if err != nil {
 		return BeginResult{}, err
@@ -583,6 +603,11 @@ func (c *Client) Resume(ctx context.Context, input ResumeInput) (BeginResult, er
 func (c *Client) begin(ctx context.Context, sessionID, executionID string, resume bool) (BeginResult, error) {
 	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(executionID) == "" {
 		return BeginResult{}, errors.New("session_id and execution_id are required")
+	}
+	var err error
+	ctx, err = c.executionContext(ctx)
+	if err != nil {
+		return BeginResult{}, err
 	}
 	action := ":begin"
 	if resume {

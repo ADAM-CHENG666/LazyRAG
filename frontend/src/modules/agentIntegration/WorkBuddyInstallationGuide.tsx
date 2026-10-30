@@ -16,7 +16,7 @@ export default function WorkBuddyInstallationGuide({ status, onConnect, onStatus
 }) {
   const { t } = useTranslation();
   const text = (key: string) => t(`agentIntegration.${agent === "codex" ? "codexInstallGuide" : "workbuddyInstallGuide"}.${key}`);
-  const [stage, setStage] = useState<Stage>(status?.state === "enabled" && status.connection?.mcp_configured && (agent !== "codex" || status.connection.control_ready) ? "entry" : "prepare");
+  const [stage, setStage] = useState<Stage>(status?.state === "enabled" && status.connection?.mcp_configured && (agent !== "codex" || status.connection.control_ready && !status.issue) ? "entry" : "prepare");
   const [error, setError] = useState("");
   const [zoomed, setZoomed] = useState(false);
   const [controlUnavailable, setControlUnavailable] = useState(false);
@@ -55,9 +55,9 @@ export default function WorkBuddyInstallationGuide({ status, onConnect, onStatus
       if (current) onStatus(current);
       const connection = current?.connection;
       const configured = current?.state === "enabled" && connection?.mcp_configured;
-      const ready = configured && connection?.mcp_enabled && (agent === "codex" ? connection.control_ready : connection.mcp_trusted);
+      const ready = configured && connection?.mcp_enabled && (agent === "codex" ? connection.control_ready && !current?.issue : connection.mcp_trusted);
       setControlUnavailable(Boolean(ready && (!connection?.control_ready || current?.issue)));
-      setControlError(current?.issue ? workbuddyErrorMessage(current, t) : "");
+      setControlError(current?.issue ? (agent === "codex" ? text("controlUnavailableDescription") : workbuddyErrorMessage(current, t)) : "");
       if (!ready && agent === "codex") setError(text("controlUnavailableDescription"));
       else if (!ready && current?.issue) setError(workbuddyErrorMessage(current, t));
       else if (!ready) setError(text(!configured ? "configurationMissingDescription"
@@ -89,7 +89,7 @@ export default function WorkBuddyInstallationGuide({ status, onConnect, onStatus
       <Button onClick={onClose} disabled={installing || checking}>{text(stage === "prepare" ? "cancel" : stage === "success" ? "close" : "later")}</Button>
       <Space wrap key={stage}>
         {(stage === "trust" || stage === "enable") && <Button onClick={() => setStage(stage === "trust" || agent === "codex" ? "entry" : "trust")}>{text("back")}</Button>}
-        {["verify", "notReady"].includes(stage) && <Button onClick={() => setStage(agent === "codex" ? "enable" : "trust")}>{text("viewEnableSteps")}</Button>}
+        {["verify", "notReady"].includes(stage) && <Button onClick={() => setStage(agent === "codex" ? stage === "notReady" ? "prepare" : "enable" : "trust")}>{text("viewEnableSteps")}</Button>}
         {primary}
       </Space>
     </div>}>

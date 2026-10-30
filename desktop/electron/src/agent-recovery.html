@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LazyMind · Codex</title>
+  <link rel="stylesheet" href="agent-recovery.css">
+  <script src="agent-recovery-renderer.js" defer></script>
+</head>
+<body>
+  <main>
+    <div class="brand">LazyMind · Codex</div>
+    <h1 id="title"></h1>
+    <p id="description" role="status" aria-live="polite"></p>
+    <p id="error" role="alert" hidden></p>
+    <footer>
+      <button id="cancel" type="button"></button>
+      <button id="confirm" class="primary" type="button"></button>
+    </footer>
+  </main>
+</body>
+</html>

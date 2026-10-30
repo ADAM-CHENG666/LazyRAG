@@ -1,8 +1,9 @@
 import { codexTargets, windowCdp } from './windows'
 import { workflowTurnEvidence } from './ownership'
+import { sessionExpression } from './presentation'
 export { selectCodexTarget } from './windows'
 export interface NativeTurn { id: string; status: string; startedAt?: number; items: any[] }
-export interface NativeThread { id: string; turns: NativeTurn[]; active: boolean; owner?: boolean }
+export interface NativeThread { id: string; turns: NativeTurn[]; active: boolean; owner?: boolean; ready?: boolean }
 
 /** Runs inside the existing desktop renderer, never in a new App Server. */
 export async function codexOperation(input: any, readEvidence = workflowTurnEvidence): Promise<any> {
@@ -72,10 +73,13 @@ export async function codexOperation(input: any, readEvidence = workflowTurnEvid
       : state?.turns ?? []
     const turns = records.map((turn: any) => ({ id: turn.turnId ?? turn.id, status: turn.status,
       startedAt: turn.turnStartedAtMs ?? turn.startedAtMs, items: turn.items ?? [] }))
-    return { id: state.id, turns, owner: manager.getStreamRole?.(input.threadId)?.role === 'owner', active: state.threadRuntimeStatus?.type === 'active' || turns.some((turn: any) => turn.status === 'inProgress') }
+    const role = manager.getStreamRole?.(input.threadId)?.role
+    const ready = state.resumeState === 'resumed' && ['owner','follower'].includes(role) && manager.isConversationStreaming?.(input.threadId) === true
+    return { id: state.id, turns, ready, owner: role === 'owner', active: state.threadRuntimeStatus?.type === 'active' || turns.some((turn: any) => turn.status === 'inProgress') }
   }
   if (input.kind === 'read') return snapshot()
   if (input.kind === 'start') {
+    if (!snapshot().ready) return { rejected: 'Codex conversation is still restoring; no message was sent', retryable: true }
     if (snapshot().active) return { rejected: 'Codex chat is busy; no message was sent' }
     const result = await manager.startTurn(input.threadId, {
       request: { threadId: input.threadId, clientUserMessageId: input.clientId,
@@ -111,7 +115,7 @@ export function nativeExpression(input: object) {
 export class CodexNative {
   constructor(private port: number) {}
   private evaluate(id:string,input:object,signal:AbortSignal):Promise<any> {
-    return windowCdp(this.port,id).evaluate(nativeExpression(input),signal)
+    return windowCdp(this.port,id).evaluate(nativeExpression(input),signal,(input as any).kind==='start'?30000:8000)
   }
   async probe(signal:AbortSignal) {
     const windows=await codexTargets(this.port,signal)
@@ -129,6 +133,17 @@ export class CodexNative {
     return selected
   }
   async read(threadId:string,signal:AbortSignal):Promise<NativeThread> {return (await this.locate(threadId,signal)).state}
+  async visible(threadId:string,signal:AbortSignal):Promise<boolean> {
+    const windows=await codexTargets(this.port,signal)
+    const results=await Promise.allSettled(windows.map(window=>windowCdp(this.port,window.id).evaluate<{session_id?:string}>(sessionExpression(),signal)))
+    return results.some(result=>result.status==='fulfilled'&&result.value?.session_id===threadId)
+  }
+  async presented(threadId:string,signal:AbortSignal):Promise<boolean> {
+    const windows=await codexTargets(this.port,signal)
+    const expression=`(async()=>{const panel=window.__lazymindCodexWorkflowTail;if(panel?.session!==${JSON.stringify(threadId)})return false;const state=await panel.probeStatus?.();return window.__lazymindCodexWorkflowTail===panel&&panel.session===${JSON.stringify(threadId)}&&state?.session_id===${JSON.stringify(threadId)}&&state?.status==='mounted'&&state?.page_status==='ready'})()`
+    const results=await Promise.allSettled(windows.map(window=>windowCdp(this.port,window.id).evaluate<boolean>(expression,signal)))
+    return results.some(result=>result.status==='fulfilled'&&result.value===true)
+  }
   private async mutate(input:{kind:string;threadId:string;clientId?:string;message?:string;turnId?:string;expectedOwnership?:string},signal:AbortSignal) {
     const target=await this.locate(input.threadId,signal)
     // Never retry a mutation in another window after an uncertain response.

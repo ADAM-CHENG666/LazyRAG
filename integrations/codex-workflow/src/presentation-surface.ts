@@ -85,7 +85,13 @@ export function createCodexSurface(target: {session_id:string;run_id:string;moun
       for (const data of events) if (data?.sessionId===target.run_id&&data.bridgeId===target.mount_id) receive(data)
     } catch {} finally {draining=false}
   },150)
-  return {element,reply,sync,setExpanded,
+  async function probeStatus() {
+    if (!valid()) return undefined
+    const status=await guest.executeJavaScript('window.__lazymindWorkflowFrame?.status()')
+    if (!valid() || status?.type!=='lazymind.workflow.frame-status' || status.sessionId!==target.run_id || status.bridgeId!==target.mount_id) return undefined
+    return status
+  }
+  return {element,reply,sync,setExpanded,probeStatus,
     dispose:()=>{
       if(disposed)return;disposed=true;clearInterval(timer);unregister();guest.removeEventListener('dom-ready',ready)
       setExpanded(false);browser.pages.disposeHost(target.session_id,tab,'closed');element.remove()

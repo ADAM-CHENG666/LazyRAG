@@ -34,6 +34,23 @@ func TestDesktopReadyAcceptsChatWindowsAndExcludesAuxiliaryWindows(t *testing.T)
 		}
 	}
 }
+
+func TestDesktopReadyDistinguishesBrokenListenerFromClosedPort(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		connection, _, err := w.(http.Hijacker).Hijack()
+		if err == nil {
+			_ = connection.Close()
+		}
+	}))
+	port := server.Listener.Addr().(*net.TCPAddr).Port
+	if ready, err := DesktopReady(context.Background(), port); ready || err == nil {
+		t.Fatalf("broken listener was treated as a missing CDP flag: ready=%v err=%v", ready, err)
+	}
+	server.Close()
+	if ready, err := DesktopReady(context.Background(), port); ready || err != nil {
+		t.Fatalf("closed port was not recognized: ready=%v err=%v", ready, err)
+	}
+}
 func TestStatusRejectsStaleHeartbeatAndRevokedPairing(t *testing.T) {
 	home := t.TempDir()
 	pair, err := workflowhost.EnsureForProvider(home, "codex", filepath.Join(home, "profile"), "account")

@@ -89,7 +89,6 @@ func New(binary, self string, bridge *mcpbridge.Bridge) (*Adapter, error) {
 }
 
 var startupHealth = codexhost.StartupHealth
-var disableStartup = codexhost.DisableStartup
 
 func (a *Adapter) Status(ctx context.Context) agentintegration.Status {
 	status := agentintegration.ApplyPreference(a.home, "codex", a.status(ctx))
@@ -152,7 +151,7 @@ func (a *Adapter) status(context.Context) agentintegration.Status {
 		status.Connection = &agentintegration.ConnectionStatus{MCPConfigured: true, MCPEnabled: true, MCPTrusted: true, ControlReady: ready, PresentationStatus: presentation}
 		if !ready {
 			status.Issue = &agentintegration.Issue{Code: issue}
-			status.Message = "Codex control is disconnected. Turn its LazyMind switch off and on again; save current work before restarting Codex."
+			status.Message = "Codex control is disconnected. Open its installation guide in LazyMind; save current work before confirming a connection or restart."
 		}
 	}
 	return status
@@ -217,9 +216,6 @@ func (a *Adapter) Connect(ctx context.Context) (result agentintegration.Status) 
 func (a *Adapter) Disconnect(ctx context.Context) (result agentintegration.Status) {
 	defer func() { result = agentintegration.ApplyPreference(a.home, "codex", result) }()
 	if err := integrationstate.Set(a.home, "codex", false); err != nil {
-		return agentintegration.Fail(a.Status(ctx), err.Error())
-	}
-	if err := disableStartup(ctx, a.home); err != nil {
 		return agentintegration.Fail(a.Status(ctx), err.Error())
 	}
 	if err := CleanupLegacyControl(); err != nil {

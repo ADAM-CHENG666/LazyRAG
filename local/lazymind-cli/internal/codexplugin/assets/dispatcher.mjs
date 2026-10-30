@@ -270,11 +270,12 @@ var CodexAdapter = class {
 		},
 		cancelSession: (thread, claim) => this.cancelOwned(thread, claim)
 	};
-	constructor(native, receipts, bridge, signal) {
+	constructor(native, receipts, bridge, signal, recovery) {
 		this.native = native;
 		this.receipts = receipts;
 		this.bridge = bridge;
 		this.signal = signal;
+		this.recovery = recovery;
 	}
 	id(thread) {
 		return thread;
@@ -287,8 +288,11 @@ var CodexAdapter = class {
 	}
 	async ready(thread, signal) {
 		try {
-			return !(await this.native.read(thread, signal)).active;
+			const state = await this.native.read(thread, signal);
+			this.recovery?.available();
+			return state.ready !== false && !state.active;
 		} catch {
+			if (!signal.aborted) await this.recovery?.unavailable(thread);
 			return false;
 		}
 	}
@@ -387,8 +391,8 @@ var CdpClient = class {
 		this.selectTarget = selectTarget;
 		if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid CDP port");
 	}
-	async evaluate(expression, signal) {
-		const bounded = AbortSignal.any([signal, AbortSignal.timeout(8e3)]);
+	async evaluate(expression, signal, timeoutMs = 8e3) {
+		const bounded = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]);
 		const response = await fetch(`http://127.0.0.1:${this.port}/json/list`, {
 			signal: bounded,
 			redirect: "error"
@@ -471,223 +475,6 @@ async function codexTargets(port, signal) {
 function windowCdp(port, id) {
 	return new CdpClient(port, (targets) => selectCodexTarget(targets, id));
 }
-
-//#endregion
-//#region src/native.ts
-/** Runs inside the existing desktop renderer, never in a new App Server. */
-async function codexOperation(input, readEvidence = workflowTurnEvidence) {
-	const host = globalThis;
-	const capable = (value) => {
-		try {
-			return value && typeof value === "object" && [
-				"getHostId",
-				"getConversation",
-				"startTurn",
-				"interruptConversation"
-			].every((key) => typeof value[key] === "function") && value.getHostId() === "local";
-		} catch {
-			return false;
-		}
-	};
-	let manager = host.__lazymindCodexManager;
-	if (!capable(manager)) {
-		const roots = [];
-		if (host.__codexRoot?._internalRoot?.current) roots.push(host.__codexRoot._internalRoot.current);
-		for (const element of Array.from(document.querySelectorAll("#root, #app, body > div"))) for (const key of Object.keys(element)) if (key.startsWith("__reactContainer$") || key.startsWith("__reactFiber$")) roots.push(element[key]);
-		const fibers = /* @__PURE__ */ new Set(), values = /* @__PURE__ */ new Set();
-		const find = (value, depth) => {
-			try {
-				if (!value || typeof value !== "object" || values.has(value) || values.size > 2e4) return null;
-				values.add(value);
-				if (capable(value)) return value;
-				const bindings = value.node?.familyBindings;
-				if (bindings instanceof Map) {
-					for (const family of bindings.values()) {
-						if (!(family instanceof Map)) continue;
-						for (const binding of family.values()) {
-							const cell = binding?.value;
-							if (cell?.atom && cell.store && typeof cell.get === "function") try {
-								const current = cell.get();
-								if (capable(current)) return current;
-							} catch {}
-						}
-					}
-					return null;
-				}
-				if (!depth || value instanceof Node || value.$$typeof || "tag" in value && "memoizedState" in value) return null;
-				const entries = value instanceof Map ? Array.from(value.values()) : Object.values(Object.getOwnPropertyDescriptors(value)).flatMap((d) => "value" in d ? [d.value] : []);
-				for (const entry of entries) {
-					const found = find(entry, depth - 1);
-					if (found) return found;
-				}
-			} catch {}
-			return null;
-		};
-		while (roots.length && fibers.size < 3e4 && !manager) {
-			const fiber = roots.pop();
-			if (!fiber || fibers.has(fiber)) continue;
-			fibers.add(fiber);
-			if (fiber.sibling) roots.push(fiber.sibling);
-			if (fiber.child) roots.push(fiber.child);
-			let hook = fiber.memoizedState;
-			for (let i = 0; hook && i < 160 && !manager; i++, hook = hook.next) manager = find(hook.memoizedState, 2);
-			if (!manager) manager = find(fiber.memoizedProps?.value, 2);
-			let dependency = fiber.dependencies?.firstContext;
-			for (let i = 0; dependency && i < 30 && !manager; i++, dependency = dependency.next) manager = find(dependency.memoizedValue, 2);
-		}
-		if (!capable(manager)) throw new Error("Codex native conversation interface is unavailable");
-		host.__lazymindCodexManager = manager;
-	}
-	if (input.kind === "probe") return { ready: true };
-	const raw = manager.getConversation(input.threadId);
-	if (!raw || raw.id !== input.threadId) return { missing: true };
-	const snapshot = () => {
-		const state = manager.getConversation(input.threadId);
-		const history = state?.turnHistory;
-		const turns = (history?.kind === "canonical" ? history.history.islands.flatMap((island) => island.entries.map((entry) => history.history.entitiesByKey[entry.value])).filter(Boolean) : state?.turns ?? []).map((turn) => ({
-			id: turn.turnId ?? turn.id,
-			status: turn.status,
-			startedAt: turn.turnStartedAtMs ?? turn.startedAtMs,
-			items: turn.items ?? []
-		}));
-		return {
-			id: state.id,
-			turns,
-			owner: manager.getStreamRole?.(input.threadId)?.role === "owner",
-			active: state.threadRuntimeStatus?.type === "active" || turns.some((turn) => turn.status === "inProgress")
-		};
-	};
-	if (input.kind === "read") return snapshot();
-	if (input.kind === "start") {
-		if (snapshot().active) return { rejected: "Codex chat is busy; no message was sent" };
-		const result = await manager.startTurn(input.threadId, {
-			request: {
-				threadId: input.threadId,
-				clientUserMessageId: input.clientId,
-				input: [{
-					type: "text",
-					text: input.message,
-					text_elements: []
-				}]
-			},
-			context: {
-				inheritThreadSettings: true,
-				useUserMessageAdmission: false,
-				attachments: [],
-				commentAttachments: []
-			}
-		});
-		const turn = result?.turn ?? result?.result?.turn ?? result?.result?.result?.turn;
-		if (turn?.id || result?.turnId) return {
-			accepted: true,
-			turnId: turn?.id ?? result.turnId
-		};
-		const matches = snapshot().turns.filter((turn$1) => turn$1.items.some((item) => item.type === "userMessage" && item.clientId === input.clientId));
-		if (matches.length !== 1) throw new Error("Native turn receipt is uncertain");
-		return {
-			accepted: true,
-			turnId: matches[0].id
-		};
-	}
-	if (input.kind === "interrupt") {
-		const target = snapshot().turns.find((turn) => turn.id === input.turnId);
-		if (!target || target.status !== "inProgress") return { interruptedTurnId: null };
-		if (manager.getStreamRole?.(input.threadId)?.role !== "owner" || JSON.stringify(readEvidence(target)) !== input.expectedOwnership) return { rejected: "Codex execution ownership changed; no interruption was sent" };
-		return { interruptedTurnId: await manager.interruptConversation(input.threadId, "user-stop", input.turnId) ?? null };
-	}
-	throw new Error("Unknown Codex operation");
-}
-function nativeExpression(input) {
-	return `(input => (${codexOperation.toString()})(input, ${workflowTurnEvidence.toString()}))(${JSON.stringify(input)})`;
-}
-var CodexNative = class {
-	constructor(port) {
-		this.port = port;
-	}
-	evaluate(id, input, signal) {
-		return windowCdp(this.port, id).evaluate(nativeExpression(input), signal);
-	}
-	async probe(signal) {
-		const windows = await codexTargets(this.port, signal);
-		return {
-			ready: (await Promise.allSettled(windows.map((window$1) => this.evaluate(window$1.id, { kind: "probe" }, signal)))).some((result) => result.status === "fulfilled" && result.value?.ready === true),
-			window_count: windows.length
-		};
-	}
-	async locate(threadId, signal) {
-		const windows = await codexTargets(this.port, signal);
-		const matches = (await Promise.allSettled(windows.map(async (window$1) => ({
-			id: window$1.id,
-			state: await this.evaluate(window$1.id, {
-				kind: "read",
-				threadId
-			}, signal)
-		})))).flatMap((result) => result.status === "fulfilled" && !result.value.state?.missing && result.value.state?.id === threadId ? [result.value] : []);
-		const owners = matches.filter((match) => match.state.owner);
-		if (owners.length > 1) throw Error("Codex reports conflicting owners for this chat");
-		const selected = owners[0] ?? matches.sort((a, b) => a.id.localeCompare(b.id))[0];
-		if (!selected) throw Error("Open the original Codex chat before continuing");
-		return selected;
-	}
-	async read(threadId, signal) {
-		return (await this.locate(threadId, signal)).state;
-	}
-	async mutate(input, signal) {
-		const target = await this.locate(input.threadId, signal);
-		return this.evaluate(target.id, input, signal);
-	}
-	start(threadId, clientId, message, signal) {
-		return this.mutate({
-			kind: "start",
-			threadId,
-			clientId,
-			message
-		}, signal);
-	}
-	interrupt(threadId, turnId, expectedOwnership, signal) {
-		return this.mutate({
-			kind: "interrupt",
-			threadId,
-			turnId,
-			expectedOwnership
-		}, signal);
-	}
-};
-
-//#endregion
-//#region src/receipts.ts
-const threadPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
-/** Receipts contain identifiers only. A pre-write prevents replay after process death. */
-var NativeReceipts = class {
-	constructor(directory) {
-		this.directory = directory;
-	}
-	path(id) {
-		return join(this.directory, createHash("sha256").update(id).digest("hex") + ".json");
-	}
-	async read(id) {
-		try {
-			const value = JSON.parse(await readFile(this.path(id), "utf8"));
-			if (value.actionId !== id || !value.runId || !threadPattern.test(value.threadId)) throw new Error("Invalid native receipt");
-			return value;
-		} catch (error) {
-			if (error.code === "ENOENT") return void 0;
-			throw error;
-		}
-	}
-	async write(receipt) {
-		await mkdir(this.directory, {
-			recursive: true,
-			mode: 448
-		});
-		const path = this.path(receipt.actionId), temp = `${path}.${randomUUID()}.tmp`;
-		await writeFile(temp, JSON.stringify(receipt), {
-			mode: 384,
-			flag: "wx"
-		});
-		await rename(temp, path);
-	}
-};
 
 //#endregion
 //#region ../workflow-agent-core/renderer/tail-follow.ts
@@ -1061,11 +848,18 @@ function createCodexSurface(target, url, receive, changed) {
 			draining = false;
 		}
 	}, 150);
+	async function probeStatus() {
+		if (!valid()) return void 0;
+		const status = await guest.executeJavaScript("window.__lazymindWorkflowFrame?.status()");
+		if (!valid() || status?.type !== "lazymind.workflow.frame-status" || status.sessionId !== target.run_id || status.bridgeId !== target.mount_id) return void 0;
+		return status;
+	}
 	return {
 		element,
 		reply,
 		sync,
 		setExpanded,
+		probeStatus,
 		dispose: () => {
 			if (disposed) return;
 			disposed = true;
@@ -1083,7 +877,7 @@ function createCodexSurface(target, url, receive, changed) {
 //#region src/presentation.ts
 /** Serialized with its two helpers; mutates presentation only. */
 function mountPresentation(target, readView = readCodexView, followTail = installTailFollow, makeSurface = createCodexSurface) {
-	const host = window, key = "__lazymindCodexWorkflowTail", version = "codex-tail-v2-native";
+	const host = window, key = "__lazymindCodexWorkflowTail", version = "codex-tail-v3-ready";
 	const gate = host.__lazymindCodexPresentationSession;
 	if (!gate || gate.read().epoch !== target.epoch || gate.read().session_id !== target.session_id) return { status: "stale" };
 	const previous = host[key];
@@ -1312,6 +1106,14 @@ function mountPresentation(target, readView = readCodexView, followTail = instal
 		panel.remove();
 		if (host[key]?.dispose === dispose) delete host[key];
 	}
+	async function probeStatus() {
+		if (disposed || !current()) return void 0;
+		const latest = await surface.probeStatus();
+		if (disposed || !current()) return void 0;
+		if (latest) receive(latest);
+		sync();
+		return status();
+	}
 	host[key] = {
 		version,
 		session: target.session_id,
@@ -1319,6 +1121,7 @@ function mountPresentation(target, readView = readCodexView, followTail = instal
 		origin: url.origin,
 		sync,
 		status,
+		probeStatus,
 		dispose
 	};
 	window.addEventListener("resize", sync);
@@ -1462,6 +1265,396 @@ async function presentationLoop(port, request, bridgeURL, signal, report) {
 }
 
 //#endregion
+//#region src/native.ts
+/** Runs inside the existing desktop renderer, never in a new App Server. */
+async function codexOperation(input, readEvidence = workflowTurnEvidence) {
+	const host = globalThis;
+	const capable = (value) => {
+		try {
+			return value && typeof value === "object" && [
+				"getHostId",
+				"getConversation",
+				"startTurn",
+				"interruptConversation"
+			].every((key) => typeof value[key] === "function") && value.getHostId() === "local";
+		} catch {
+			return false;
+		}
+	};
+	let manager = host.__lazymindCodexManager;
+	if (!capable(manager)) {
+		const roots = [];
+		if (host.__codexRoot?._internalRoot?.current) roots.push(host.__codexRoot._internalRoot.current);
+		for (const element of Array.from(document.querySelectorAll("#root, #app, body > div"))) for (const key of Object.keys(element)) if (key.startsWith("__reactContainer$") || key.startsWith("__reactFiber$")) roots.push(element[key]);
+		const fibers = /* @__PURE__ */ new Set(), values = /* @__PURE__ */ new Set();
+		const find = (value, depth) => {
+			try {
+				if (!value || typeof value !== "object" || values.has(value) || values.size > 2e4) return null;
+				values.add(value);
+				if (capable(value)) return value;
+				const bindings = value.node?.familyBindings;
+				if (bindings instanceof Map) {
+					for (const family of bindings.values()) {
+						if (!(family instanceof Map)) continue;
+						for (const binding of family.values()) {
+							const cell = binding?.value;
+							if (cell?.atom && cell.store && typeof cell.get === "function") try {
+								const current = cell.get();
+								if (capable(current)) return current;
+							} catch {}
+						}
+					}
+					return null;
+				}
+				if (!depth || value instanceof Node || value.$$typeof || "tag" in value && "memoizedState" in value) return null;
+				const entries = value instanceof Map ? Array.from(value.values()) : Object.values(Object.getOwnPropertyDescriptors(value)).flatMap((d) => "value" in d ? [d.value] : []);
+				for (const entry of entries) {
+					const found = find(entry, depth - 1);
+					if (found) return found;
+				}
+			} catch {}
+			return null;
+		};
+		while (roots.length && fibers.size < 3e4 && !manager) {
+			const fiber = roots.pop();
+			if (!fiber || fibers.has(fiber)) continue;
+			fibers.add(fiber);
+			if (fiber.sibling) roots.push(fiber.sibling);
+			if (fiber.child) roots.push(fiber.child);
+			let hook = fiber.memoizedState;
+			for (let i = 0; hook && i < 160 && !manager; i++, hook = hook.next) manager = find(hook.memoizedState, 2);
+			if (!manager) manager = find(fiber.memoizedProps?.value, 2);
+			let dependency = fiber.dependencies?.firstContext;
+			for (let i = 0; dependency && i < 30 && !manager; i++, dependency = dependency.next) manager = find(dependency.memoizedValue, 2);
+		}
+		if (!capable(manager)) throw new Error("Codex native conversation interface is unavailable");
+		host.__lazymindCodexManager = manager;
+	}
+	if (input.kind === "probe") return { ready: true };
+	const raw = manager.getConversation(input.threadId);
+	if (!raw || raw.id !== input.threadId) return { missing: true };
+	const snapshot = () => {
+		const state = manager.getConversation(input.threadId);
+		const history = state?.turnHistory;
+		const turns = (history?.kind === "canonical" ? history.history.islands.flatMap((island) => island.entries.map((entry) => history.history.entitiesByKey[entry.value])).filter(Boolean) : state?.turns ?? []).map((turn) => ({
+			id: turn.turnId ?? turn.id,
+			status: turn.status,
+			startedAt: turn.turnStartedAtMs ?? turn.startedAtMs,
+			items: turn.items ?? []
+		}));
+		const role = manager.getStreamRole?.(input.threadId)?.role;
+		const ready = state.resumeState === "resumed" && ["owner", "follower"].includes(role) && manager.isConversationStreaming?.(input.threadId) === true;
+		return {
+			id: state.id,
+			turns,
+			ready,
+			owner: role === "owner",
+			active: state.threadRuntimeStatus?.type === "active" || turns.some((turn) => turn.status === "inProgress")
+		};
+	};
+	if (input.kind === "read") return snapshot();
+	if (input.kind === "start") {
+		if (!snapshot().ready) return {
+			rejected: "Codex conversation is still restoring; no message was sent",
+			retryable: true
+		};
+		if (snapshot().active) return { rejected: "Codex chat is busy; no message was sent" };
+		const result = await manager.startTurn(input.threadId, {
+			request: {
+				threadId: input.threadId,
+				clientUserMessageId: input.clientId,
+				input: [{
+					type: "text",
+					text: input.message,
+					text_elements: []
+				}]
+			},
+			context: {
+				inheritThreadSettings: true,
+				useUserMessageAdmission: false,
+				attachments: [],
+				commentAttachments: []
+			}
+		});
+		const turn = result?.turn ?? result?.result?.turn ?? result?.result?.result?.turn;
+		if (turn?.id || result?.turnId) return {
+			accepted: true,
+			turnId: turn?.id ?? result.turnId
+		};
+		const matches = snapshot().turns.filter((turn$1) => turn$1.items.some((item) => item.type === "userMessage" && item.clientId === input.clientId));
+		if (matches.length !== 1) throw new Error("Native turn receipt is uncertain");
+		return {
+			accepted: true,
+			turnId: matches[0].id
+		};
+	}
+	if (input.kind === "interrupt") {
+		const target = snapshot().turns.find((turn) => turn.id === input.turnId);
+		if (!target || target.status !== "inProgress") return { interruptedTurnId: null };
+		if (manager.getStreamRole?.(input.threadId)?.role !== "owner" || JSON.stringify(readEvidence(target)) !== input.expectedOwnership) return { rejected: "Codex execution ownership changed; no interruption was sent" };
+		return { interruptedTurnId: await manager.interruptConversation(input.threadId, "user-stop", input.turnId) ?? null };
+	}
+	throw new Error("Unknown Codex operation");
+}
+function nativeExpression(input) {
+	return `(input => (${codexOperation.toString()})(input, ${workflowTurnEvidence.toString()}))(${JSON.stringify(input)})`;
+}
+var CodexNative = class {
+	constructor(port) {
+		this.port = port;
+	}
+	evaluate(id, input, signal) {
+		return windowCdp(this.port, id).evaluate(nativeExpression(input), signal, input.kind === "start" ? 3e4 : 8e3);
+	}
+	async probe(signal) {
+		const windows = await codexTargets(this.port, signal);
+		return {
+			ready: (await Promise.allSettled(windows.map((window$1) => this.evaluate(window$1.id, { kind: "probe" }, signal)))).some((result) => result.status === "fulfilled" && result.value?.ready === true),
+			window_count: windows.length
+		};
+	}
+	async locate(threadId, signal) {
+		const windows = await codexTargets(this.port, signal);
+		const matches = (await Promise.allSettled(windows.map(async (window$1) => ({
+			id: window$1.id,
+			state: await this.evaluate(window$1.id, {
+				kind: "read",
+				threadId
+			}, signal)
+		})))).flatMap((result) => result.status === "fulfilled" && !result.value.state?.missing && result.value.state?.id === threadId ? [result.value] : []);
+		const owners = matches.filter((match) => match.state.owner);
+		if (owners.length > 1) throw Error("Codex reports conflicting owners for this chat");
+		const selected = owners[0] ?? matches.sort((a, b) => a.id.localeCompare(b.id))[0];
+		if (!selected) throw Error("Open the original Codex chat before continuing");
+		return selected;
+	}
+	async read(threadId, signal) {
+		return (await this.locate(threadId, signal)).state;
+	}
+	async visible(threadId, signal) {
+		const windows = await codexTargets(this.port, signal);
+		return (await Promise.allSettled(windows.map((window$1) => windowCdp(this.port, window$1.id).evaluate(sessionExpression(), signal)))).some((result) => result.status === "fulfilled" && result.value?.session_id === threadId);
+	}
+	async presented(threadId, signal) {
+		const windows = await codexTargets(this.port, signal);
+		const expression = `(async()=>{const panel=window.__lazymindCodexWorkflowTail;if(panel?.session!==${JSON.stringify(threadId)})return false;const state=await panel.probeStatus?.();return window.__lazymindCodexWorkflowTail===panel&&panel.session===${JSON.stringify(threadId)}&&state?.session_id===${JSON.stringify(threadId)}&&state?.status==='mounted'&&state?.page_status==='ready'})()`;
+		return (await Promise.allSettled(windows.map((window$1) => windowCdp(this.port, window$1.id).evaluate(expression, signal)))).some((result) => result.status === "fulfilled" && result.value === true);
+	}
+	async mutate(input, signal) {
+		const target = await this.locate(input.threadId, signal);
+		return this.evaluate(target.id, input, signal);
+	}
+	start(threadId, clientId, message, signal) {
+		return this.mutate({
+			kind: "start",
+			threadId,
+			clientId,
+			message
+		}, signal);
+	}
+	interrupt(threadId, turnId, expectedOwnership, signal) {
+		return this.mutate({
+			kind: "interrupt",
+			threadId,
+			turnId,
+			expectedOwnership
+		}, signal);
+	}
+};
+
+//#endregion
+//#region src/receipts.ts
+const threadPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+/** Receipts contain identifiers only. A pre-write prevents replay after process death. */
+var NativeReceipts = class {
+	constructor(directory) {
+		this.directory = directory;
+	}
+	path(id) {
+		return join(this.directory, createHash("sha256").update(id).digest("hex") + ".json");
+	}
+	async read(id) {
+		try {
+			const value = JSON.parse(await readFile(this.path(id), "utf8"));
+			if (value.actionId !== id || !value.runId || !threadPattern.test(value.threadId)) throw new Error("Invalid native receipt");
+			return value;
+		} catch (error) {
+			if (error.code === "ENOENT") return void 0;
+			throw error;
+		}
+	}
+	async write(receipt) {
+		await mkdir(this.directory, {
+			recursive: true,
+			mode: 448
+		});
+		const path = this.path(receipt.actionId), temp = `${path}.${randomUUID()}.tmp`;
+		await writeFile(temp, JSON.stringify(receipt), {
+			mode: 384,
+			flag: "wx"
+		});
+		await rename(temp, path);
+	}
+};
+
+//#endregion
+//#region src/connection-recovery.ts
+function connectionRecovery(base, pairing, signal) {
+	let reported = false;
+	return {
+		available() {
+			reported = false;
+		},
+		async unavailable(thread) {
+			if (reported || signal.aborted) return;
+			reported = true;
+			try {
+				await setTimeout$1(350, void 0, { signal });
+				if (!(await fetch(new URL("/v1/codex/recovery", base), {
+					method: "POST",
+					redirect: "error",
+					signal: AbortSignal.any([signal, AbortSignal.timeout(12e3)]),
+					headers: {
+						Authorization: `Bearer ${pairing.token}`,
+						"X-LazyMind-Connector-Id": pairing.connector_id,
+						"Content-Type": "application/json"
+					},
+					body: JSON.stringify({
+						code: "CODEX_CONNECTION_CHECK",
+						thread_id: thread
+					})
+				})).ok) reported = false;
+			} catch {
+				reported = false;
+			}
+		}
+	};
+}
+
+//#endregion
+//#region src/recovery-delivery.ts
+const threadID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+const identifier = /^[a-f0-9]{32}$/;
+const tools = new Set([
+	"workflow.start",
+	"workflow.step.begin",
+	"workflow.step.claim",
+	"workflow.step.resume"
+]);
+function recoveryMessage(request, intent) {
+	if (!identifier.test(request) || !identifier.test(intent.id ?? "") || !threadID.test(intent.thread_id) || !tools.has(intent.tool ?? "") || !intent.arguments || typeof intent.arguments !== "object" || Array.isArray(intent.arguments)) throw Error("Invalid saved Codex recovery operation");
+	const args = intent.arguments;
+	if (intent.tool === "workflow.start" && (typeof args.idempotency_key !== "string" || args.idempotency_key.length < 16 || args.driver_session_id !== intent.thread_id || typeof args.workflow_id !== "string")) throw Error("Missing stable Workflow start identity");
+	if (intent.tool === "workflow.step.begin" && (typeof args.command_id !== "string" || !args.command_id)) throw Error("Missing stable Workflow command identity");
+	return `[LazyMind recovery_id=${request} operation_id=${intent.id}]\nThe user requested the operation below before Codex session control was unavailable, then chose Restart and connect in LazyMind. LazyMind saved this operation BEFORE any Workflow execution mutation. The restart ended the old MCP call; this is its recovery handoff, not a new user task. Continue in this original conversation. Do not ask the user to type Continue again. Preserve every supplied identifier and argument.
+Saved operation (JSON data): ${JSON.stringify({
+		tool: intent.tool,
+		arguments: args
+	})}\n` + (intent.tool === "workflow.start" ? "Retry workflow.start with these exact arguments and the SAME idempotency_key. Use the returned existing/new session. Do not create a second run or invent another retry key. " : "Read workflow.state for the saved session_id first. Reconcile the saved execution/command with current state; use an existing successful result instead of executing it again. For workflow.step.begin, proceed only when current control admission permits it and the saved step is ready or retryable; keep the SAME command_id. For workflow.step.claim or workflow.step.resume, use the SAME execution_id, never begin a replacement execution. ") + "Continue using the existing Workflow skill and returned execution contract. The bound panel appears automatically. Keep normal review rules: yield when awaiting_user, stopped, completed, failed or otherwise not admitted; restarting is not approval of a Workflow review.";
+}
+/** One-shot, invoked only by the LazyMind recovery child after the user's click.
+* Write before native admission; an uncertain send is reconciled, never replayed.
+*/
+async function deliverRecovery(request, intent, native, receipts, signal, pause = (signal$1) => setTimeout$1(250, void 0, { signal: signal$1 }), authorize = async () => {}, stage = (_stage) => {}) {
+	if (!identifier.test(request) || !threadID.test(intent.thread_id)) throw Error("Invalid Codex recovery target");
+	const message = intent.tool ? recoveryMessage(request, intent) : void 0;
+	const actionId = `recovery:${request}:${intent.id}`;
+	const saved = message ? await receipts.read(actionId) : void 0;
+	const previous = saved?.status === "rejected" ? void 0 : saved;
+	if (previous && (previous.threadId !== intent.thread_id || previous.runId !== request)) throw Error("Recovery receipt does not match this conversation");
+	let state;
+	stage("waiting-chat");
+	for (;;) {
+		signal.throwIfAborted();
+		try {
+			if (!message) {
+				stage("showing-panel");
+				if (await native.presented(intent.thread_id, signal)) return { accepted: true };
+				await pause(signal);
+				continue;
+			}
+			if (!await native.visible(intent.thread_id, signal)) {
+				await pause(signal);
+				continue;
+			}
+			state = await native.read(intent.thread_id, signal);
+		} catch (error) {
+			if (signal.aborted) throw error;
+			await pause(signal);
+			continue;
+		}
+		if (previous?.status === "accepted") return { accepted: true };
+		if (state.ready === false) {
+			await pause(signal);
+			continue;
+		}
+		if (previous) {
+			const matches = state.turns.filter((turn) => turn.items.some((item) => item.type === "userMessage" && item.clientId === previous.clientId));
+			if (matches.length === 1) {
+				await receipts.write({
+					...previous,
+					turnId: matches[0].id,
+					status: "accepted"
+				});
+				return { accepted: true };
+			}
+			throw Error("Recovery delivery is uncertain; no duplicate request was sent");
+		}
+		if (!state.active) break;
+		stage("waiting-idle");
+		await pause(signal);
+	}
+	const receipt = {
+		actionId,
+		runId: request,
+		threadId: intent.thread_id,
+		kind: "continue",
+		clientId: randomUUID(),
+		status: "sending",
+		turnId: void 0
+	};
+	signal.throwIfAborted();
+	await authorize();
+	signal.throwIfAborted();
+	await receipts.write(receipt);
+	let retrying = false;
+	try {
+		stage("resuming");
+		const result = await native.start(intent.thread_id, receipt.clientId, message, signal);
+		if (result?.rejected) {
+			receipt.status = "rejected";
+			if (result.retryable) {
+				await receipts.write(receipt);
+				stage("waiting-chat");
+				await pause(signal);
+				retrying = true;
+				return await deliverRecovery(request, intent, native, receipts, signal, pause, authorize, stage);
+			}
+			throw Error(result.rejected);
+		}
+		if (!result?.accepted || !result.turnId || state.turns.some((turn) => turn.id === result.turnId)) throw Error("Recovery delivery receipt is uncertain");
+		receipt.turnId = result.turnId;
+		receipt.status = "accepted";
+		await receipts.write(receipt);
+		return { accepted: true };
+	} catch (error) {
+		if (retrying) throw error;
+		if (receipt.status !== "rejected") receipt.status = "unknown";
+		await receipts.write(receipt);
+		throw error;
+	}
+}
+
+//#endregion
+//#region src/recovery-result.ts
+async function finishRecovery(result) {
+	await new Promise((resolve, reject) => {
+		process.stdout.write(JSON.stringify(result) + "\n", (error) => error ? reject(error) : resolve());
+	});
+	process.exit(0);
+}
+
+//#endregion
 //#region src/main.ts
 async function main() {
 	const { values } = parseArgs({ options: {
@@ -1475,12 +1668,59 @@ async function main() {
 		"cleanup-only": {
 			type: "boolean",
 			default: false
+		},
+		"probe-only": {
+			type: "boolean",
+			default: false
+		},
+		"presentation-probe-only": {
+			type: "boolean",
+			default: false
+		},
+		"thread-id": { type: "string" },
+		"recover-intent": {
+			type: "boolean",
+			default: false
 		}
 	} });
+	if (values["presentation-probe-only"]) {
+		const thread = values["thread-id"] ?? "";
+		if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(thread)) throw Error("Invalid presentation target");
+		return finishRecovery({ ready: await new CodexNative(Number(values["cdp-port"])).presented(thread, AbortSignal.timeout(5e3)) });
+	}
+	if (values["probe-only"]) {
+		console.log(JSON.stringify(await new CodexNative(Number(values["cdp-port"])).probe(AbortSignal.timeout(4e3))));
+		return;
+	}
 	const path = values["pairing-file"];
 	if (!path) throw new Error("pairing-file is required");
 	const pairing = JSON.parse(await readFile(path, "utf8"));
 	if (pairing.provider !== "codex" || !pairing.enabled && !values["cleanup-only"]) throw new Error("Codex pairing is disabled");
+	if (values["recover-intent"]) {
+		const chunks = [];
+		let size = 0;
+		for await (const chunk of process.stdin) {
+			size += chunk.length;
+			if (size > 256 * 1024) throw Error("Recovery operation is too large");
+			chunks.push(Buffer.from(chunk));
+		}
+		const input = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+		const signal$1 = AbortSignal.timeout(6e4);
+		const authorize = async () => {
+			const response = await fetch(new URL("/v1/codex/recovery?wait=0", values["bridge-url"]), {
+				signal: AbortSignal.any([signal$1, AbortSignal.timeout(5e3)]),
+				redirect: "error",
+				headers: {
+					Authorization: `Bearer ${pairing.token}`,
+					"X-LazyMind-Connector-Id": pairing.connector_id
+				}
+			});
+			if (!response.ok) throw Error("Codex recovery authorization is no longer valid");
+			const latest = await response.json();
+			if (latest.request?.id !== input.request_id || !latest.request.intents?.some((intent) => intent.id === input.intent.id && intent.thread_id === input.intent.thread_id && intent.tool === input.intent.tool && JSON.stringify(intent.arguments) === JSON.stringify(input.intent.arguments))) throw Error("Codex recovery request expired");
+		};
+		return finishRecovery(await deliverRecovery(input.request_id, input.intent, new CodexNative(Number(values["cdp-port"])), new NativeReceipts(join(dirname(path), pairing.connector_id + ".recovery-receipts")), signal$1, void 0, authorize, (stage) => console.log(JSON.stringify({ stage }))));
+	}
 	if (values["cleanup-only"]) {
 		const deadline = Date.now() + 3e3;
 		let release;
@@ -1504,7 +1744,7 @@ async function main() {
 	process.once("SIGTERM", stop);
 	const instance = randomUUID(), unlock = await dispatcherLock(path, instance);
 	const bridge = new HostBridge(values["bridge-url"], pairing);
-	const adapter = new CodexAdapter(native, new NativeReceipts(join(dirname(path), pairing.connector_id + ".receipts")), bridge, signal);
+	const adapter = new CodexAdapter(native, new NativeReceipts(join(dirname(path), pairing.connector_id + ".receipts")), bridge, signal, connectionRecovery(values["bridge-url"], pairing, signal));
 	let presentation = {
 		status: "starting",
 		checked_at: Date.now()

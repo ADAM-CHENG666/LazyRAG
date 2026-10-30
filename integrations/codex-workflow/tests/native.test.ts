@@ -21,10 +21,21 @@ describe('Codex renderer native API mapping',()=>{
   expect(()=>selectCodexTarget([main,{...main,id:'another'}])).toThrow()
  })
  it('uses the desktop admission path and accepts its native turnId receipt',async()=>{
-  const manager={getHostId:()=> 'local',getConversation:()=>({id:'thread',turns:[]}),startTurn:vi.fn().mockResolvedValue({turnId:'real-turn'}),interruptConversation:vi.fn()}
+  const manager={getHostId:()=> 'local',getStreamRole:()=>({role:'owner'}),isConversationStreaming:()=>true,getConversation:()=>({id:'thread',resumeState:'resumed',turns:[]}),startTurn:vi.fn().mockResolvedValue({turnId:'real-turn'}),interruptConversation:vi.fn()}
   vi.stubGlobal('__lazymindCodexManager',manager)
   expect(await codexOperation({kind:'start',threadId:'thread',clientId:'client',message:'continue'})).toEqual({accepted:true,turnId:'real-turn'})
   expect(manager.startTurn).toHaveBeenCalledWith('thread',expect.objectContaining({request:expect.objectContaining({threadId:'thread',clientUserMessageId:'client'}),context:expect.objectContaining({inheritThreadSettings:true,useUserMessageAdmission:false})}))
+ })
+ it('does not treat an idle placeholder displayed before native resume as ready',async()=>{
+  let resumed=false
+  const manager={getHostId:()=> 'local',getStreamRole:()=>resumed?{role:'owner'}:null,isConversationStreaming:()=>resumed,
+   getConversation:()=>({id:'thread',resumeState:resumed?'resumed':null,turns:[],threadRuntimeStatus:{type:'idle'}}),startTurn:vi.fn().mockResolvedValue({turnId:'accepted'}),interruptConversation:vi.fn()}
+  vi.stubGlobal('__lazymindCodexManager',manager)
+  expect(await codexOperation({kind:'read',threadId:'thread'})).toMatchObject({active:false,ready:false})
+  expect(await codexOperation({kind:'start',threadId:'thread',clientId:'client',message:'resume'})).toMatchObject({retryable:true})
+  expect(manager.startTurn).not.toHaveBeenCalled()
+  resumed=true
+  expect(await codexOperation({kind:'start',threadId:'thread',clientId:'client',message:'resume'})).toEqual({accepted:true,turnId:'accepted'})
  })
  it('passes the expected turn to the native interrupt method',async()=>{
   const manager={getHostId:()=> 'local',getStreamRole:()=>({role:'owner'}),getConversation:()=>({id:'thread',turns:[{turnId:'target',status:'inProgress',items:[]}]}),startTurn:vi.fn(),interruptConversation:vi.fn().mockResolvedValue('target')}

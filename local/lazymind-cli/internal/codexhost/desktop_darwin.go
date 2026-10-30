@@ -59,8 +59,24 @@ end run`
 			}
 		}
 	}
-	if output, err := exec.CommandContext(ctx, "/usr/bin/open", "-n", "-a", application, "--args", "--remote-debugging-address=127.0.0.1", "--remote-debugging-port="+strconv.Itoa(port)).CombinedOutput(); err != nil {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	reportRecovery(ctx, "starting")
+	args := append([]string{"-n", "-a", application, "--args"}, desktopLaunchArguments(ctx, port)...)
+	if output, err := exec.CommandContext(ctx, "/usr/bin/open", args...).CombinedOutput(); err != nil {
 		return fmt.Errorf("start Codex: %s: %w", output, err)
+	}
+	return nil
+}
+
+func openDesktopThread(ctx context.Context, application, thread string) error {
+	link, err := threadLink(thread)
+	if err != nil {
+		return err
+	}
+	if output, err := exec.CommandContext(ctx, "/usr/bin/open", "-a", application, link).CombinedOutput(); err != nil {
+		return fmt.Errorf("open original Codex conversation: %s: %w", output, err)
 	}
 	return nil
 }

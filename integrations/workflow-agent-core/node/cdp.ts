@@ -3,8 +3,8 @@ export class CdpClient {
   constructor(private port: number, private selectTarget: (targets: any[]) => any) {
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid CDP port')
   }
-  async evaluate<T>(expression: string, signal: AbortSignal): Promise<T> {
-    const bounded = AbortSignal.any([signal, AbortSignal.timeout(8000)])
+  async evaluate<T>(expression: string, signal: AbortSignal, timeoutMs = 8000): Promise<T> {
+    const bounded = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
     const response = await fetch(`http://127.0.0.1:${this.port}/json/list`, { signal: bounded, redirect: 'error' })
     if (!response.ok) throw new Error('CDP discovery failed')
     const page = this.selectTarget(await response.json() as any[])

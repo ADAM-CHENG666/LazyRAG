@@ -14,6 +14,10 @@ it('relays native guest controls only from its own frontend and validates host r
  expect(new URL(frame.src).searchParams.get('hostOrigin')).toBe('http://127.0.0.1:19091')
  expect(new URL(frame.src).searchParams.has('downloadHostOrigin')).toBe(false)
  const post=vi.spyOn(frame.contentWindow!,'postMessage'),bridge=window.__lazymindWorkflowFrame
+ frame.dispatchEvent(new window.Event('load'))
+ expect(bridge.drain().some((event:any)=>event.status==='ready')).toBe(true)
+ // Draining the notification must not erase readiness for a late probe.
+ expect(bridge.status()).toMatchObject({status:'ready',sessionId:'run',bridgeId:mount})
  const data={type:'lazymind.workflow.toggle-collapse',sessionId:'run'}
  window.dispatchEvent(new window.MessageEvent('message',{source:frame.contentWindow,origin:'https://other.example',data}))
  window.dispatchEvent(new window.MessageEvent('message',{source:frame.contentWindow,origin:'http://localhost:8090',data}))
