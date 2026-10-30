@@ -16,7 +16,8 @@ export default function WorkBuddyInstallationGuide({ status, onConnect, onStatus
 }) {
   const { t } = useTranslation();
   const text = (key: string) => t(`agentIntegration.${agent === "codex" ? "codexInstallGuide" : "workbuddyInstallGuide"}.${key}`);
-  const [stage, setStage] = useState<Stage>(status?.state === "enabled" && status.connection?.mcp_configured && (agent !== "codex" || status.connection.control_ready && !status.issue) ? "entry" : "prepare");
+  const confirmationStage = agent === "codex" ? "enable" : "entry";
+  const [stage, setStage] = useState<Stage>(status?.state === "enabled" && status.connection?.mcp_configured && (agent !== "codex" || status.connection.control_ready && !status.issue) ? confirmationStage : "prepare");
   const [error, setError] = useState("");
   const [zoomed, setZoomed] = useState(false);
   const [controlUnavailable, setControlUnavailable] = useState(false);
@@ -37,7 +38,7 @@ export default function WorkBuddyInstallationGuide({ status, onConnect, onStatus
         setStage("installFailed"); return;
       }
       // Connect includes restart and installation checks. Trust is a separate step.
-      setStage("entry");
+      setStage(confirmationStage);
     } catch {
       if (mounted.current) { setError(text("installFailedDescription")); setStage("installFailed"); }
     } finally { busy.current = false; }
@@ -80,7 +81,8 @@ export default function WorkBuddyInstallationGuide({ status, onConnect, onStatus
   else primary = <Button type="primary" loading disabled>{text(installing ? "installing" : "checking")}</Button>;
 
   const imageStage = stage === "entry" ? "entry" : stage === "trust" ? "trust" : "enable";
-  const imageURL = `/installation-guides/${agent}/${imageStage}.${agent === "codex" ? "svg" : imageStage === "trust" ? "png" : "jpg"}`;
+  const imageURL = agent === "codex" ? "/installation-guides/codex/enable.png"
+    : `/installation-guides/workbuddy/${imageStage}.${imageStage === "trust" ? "png" : "jpg"}`;
   const imageAlt = text(`${imageStage}ImageAlt`);
   return <><Modal open centered width={640} className="agent-integration-installation-guide"
     title={text("title")} onCancel={onClose} closable={!installing && !checking}
@@ -88,7 +90,7 @@ export default function WorkBuddyInstallationGuide({ status, onConnect, onStatus
     footer={<div className="agent-integration-installation-footer">
       <Button onClick={onClose} disabled={installing || checking}>{text(stage === "prepare" ? "cancel" : stage === "success" ? "close" : "later")}</Button>
       <Space wrap key={stage}>
-        {(stage === "trust" || stage === "enable") && <Button onClick={() => setStage(stage === "trust" || agent === "codex" ? "entry" : "trust")}>{text("back")}</Button>}
+        {agent === "workbuddy" && (stage === "trust" || stage === "enable") && <Button onClick={() => setStage(stage === "trust" ? "entry" : "trust")}>{text("back")}</Button>}
         {["verify", "notReady"].includes(stage) && <Button onClick={() => setStage(agent === "codex" ? stage === "notReady" ? "prepare" : "enable" : "trust")}>{text("viewEnableSteps")}</Button>}
         {primary}
       </Space>

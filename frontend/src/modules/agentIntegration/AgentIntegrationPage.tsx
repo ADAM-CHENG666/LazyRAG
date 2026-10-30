@@ -72,7 +72,7 @@ const AGENTS: AgentDefinition[] = [
   {
     id: "workbuddy", name: "WorkBuddy", icon: "/assistant-icons/workbuddy.svg",
     installURL: "https://www.workbuddy.cn",
-    executorName: "WorkBuddy", executorLoginURL: "workbuddy://home",
+    executorName: "WorkBuddy CLI", executorLoginURL: "workbuddy://home",
     mcpBindingTarget: "workbuddy-desktop",
   },
   {
@@ -850,8 +850,8 @@ function CompactIntegrationControls({
 }) {
   const methods = [{
     id: "mcp",
-    title: t(agent.id === "workbuddy" ? "agentIntegration.workbuddyModeTitle" : "agentIntegration.mcpModeTitle", { agent: mcpClientName }),
-    description: t(agent.id === "workbuddy" ? "agentIntegration.workbuddyModeDescription" : "agentIntegration.mcpModeDescription", { agent: mcpClientName }),
+    title: t(agent.id === "workbuddy" ? "agentIntegration.workbuddyModeTitle" : agent.id === "codex" ? "agentIntegration.codexModeTitle" : "agentIntegration.mcpModeTitle", { agent: mcpClientName }),
+    description: t(agent.id === "workbuddy" ? "agentIntegration.workbuddyModeDescription" : agent.id === "codex" ? "agentIntegration.codexModeDescription" : "agentIntegration.mcpModeDescription", { agent: mcpClientName }),
     checked: mcpChecked,
     disabled: !mcpChecked && !mcpCanToggle,
     loading: busyAction === `${agent.id}:connect` || busyAction === `${agent.id}:disconnect`,
@@ -964,7 +964,7 @@ function AgentConfigurationFlow({
     if (!target) return null;
     return (
       <>
-        {(missing || target === "codex-cli") && (
+        {missing && (
           <Button
             size="small"
             icon={<FolderOpenOutlined />}
@@ -974,11 +974,9 @@ function AgentConfigurationFlow({
           >
             {t(manualExecutableBinding
               ? "agentIntegration.enterExecutablePath"
-              : target === "codex-cli" && !missing
-                ? "agentIntegration.reselectCLI"
-                : target.endsWith("-cli")
-                  ? "agentIntegration.locateCLI"
-                  : "agentIntegration.locateApplication")}
+              : target.endsWith("-cli")
+                ? "agentIntegration.locateCLI"
+                : "agentIntegration.locateApplication")}
           </Button>
         )}
         {configured && (
@@ -1157,13 +1155,6 @@ function AgentConfigurationFlow({
               },
             ]}
           />
-          {executorPolicy?.cli_path && (
-            <div className="agent-integration-stage-hint">
-              <span>{t("agentIntegration.selectedCLI")}</span>
-              <Typography.Text code>{executorPolicy.cli_path}</Typography.Text>
-              {executorPolicy.cli_source && <Tag>{t(`agentIntegration.cliSources.${executorPolicy.cli_source}`)}</Tag>}
-            </div>
-          )}
           {!executorReady && executorPolicy?.unavailable_reason && (
             <Typography.Paragraph type="secondary">{executorPolicy.unavailable_reason}</Typography.Paragraph>
           )}
@@ -1191,8 +1182,8 @@ function AgentConfigurationFlow({
       >
         <div className="agent-integration-methods">
           <IntegrationMethod
-            title={t(agent.id === "workbuddy" ? "agentIntegration.workbuddyModeTitle" : "agentIntegration.mcpModeTitle", { agent: mcpClientName })}
-            description={t(agent.id === "workbuddy" ? "agentIntegration.workbuddyModeDescription" : "agentIntegration.mcpModeDescription", { agent: mcpClientName })}
+            title={t(agent.id === "workbuddy" ? "agentIntegration.workbuddyModeTitle" : agent.id === "codex" ? "agentIntegration.codexModeTitle" : "agentIntegration.mcpModeTitle", { agent: mcpClientName })}
+            description={t(agent.id === "workbuddy" ? "agentIntegration.workbuddyModeDescription" : agent.id === "codex" ? "agentIntegration.codexModeDescription" : "agentIntegration.mcpModeDescription", { agent: mcpClientName })}
             help={["workbuddy", "codex"].includes(agent.id) ? (
               <Button
                 type="text"

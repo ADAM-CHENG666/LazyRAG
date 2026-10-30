@@ -50,8 +50,6 @@
 
 第二阶段落地：Codex 的普通 iframe 会被主页面 CSP 拦截，因此使用宿主已有的原生浏览器服务注册容器，显示共用 Workflow 页面。CDP 负责注册、聊天位置同步和界面消息传递，不修改 Codex 安装文件，也不关闭主页面 CSP。页面加载、滚动跟随和绑定查询与 WorkBuddy 共用。
 
-第二阶段验收见[操作说明](../development/codex-panel-acceptance.md)。
-
 ## 开发约束
 
 - 遵守[外部 Agent 交互协议](external-agent-workflow-protocol-draft.md)：Core 决定步骤和授权，CDP 负责控制原聊天，Panel 打开或切换不会改变绑定。
