@@ -67,9 +67,10 @@ function createAgentRecovery({ BrowserWindow, ipcMain, screen, wait, dismiss, re
 	  view_only: request.view_only === true,
       has_task: Boolean(request.thread_id || request.intents?.length), busy: false, stage: "confirm", error: "" };
     window = new BrowserWindow({
-      width: 440, height: 300, useContentSize: true, show: false, resizable: false, minimizable: false,
-      maximizable: false, fullscreenable: false, skipTaskbar: true,
+      width: 400, height: 240, useContentSize: true, show: false, resizable: false, minimizable: false,
+      maximizable: false, fullscreenable: false, skipTaskbar: platform !== "win32",
       autoHideMenuBar: true, title: "LazyMind · Codex",
+      icon: path.join(__dirname, "lazymind-logo.png"),
       webPreferences: {
         preload: path.join(__dirname, "agent-recovery-preload.js"),
         contextIsolation: true, sandbox: true, nodeIntegration: false,
@@ -130,17 +131,29 @@ function createAgentRecovery({ BrowserWindow, ipcMain, screen, wait, dismiss, re
     owned.webContents.on("will-navigate", event => event.preventDefault());
     const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
     const area = display.workArea;
-    owned.setPosition(Math.round(area.x + (area.width - 440) / 2), Math.round(area.y + (area.height - 300) / 2));
-    owned.setAlwaysOnTop(true, "floating");
+    owned.setPosition(Math.round(area.x + (area.width - 400) / 2), Math.round(area.y + (area.height - 240) / 2));
+    const topmostLevel = platform === "win32" ? "pop-up-menu" : "floating";
+    owned.setAlwaysOnTop(true, topmostLevel);
     // skipTransformProcessType avoids changing LazyMind's Dock identity.
     if (platform === "darwin") owned.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
     try {
+      log(`recovery ${request.id} loading window on ${platform}`);
       await owned.loadFile(path.join(__dirname, "agent-recovery.html"));
+      log(`recovery ${request.id} window loaded`);
       if (revision === generation && !owned.isDestroyed()) {
         // Windows can leave an inactive recovery window unpainted/behind Codex.
         // This window follows an explicit Workflow operation and needs attention.
-        if (platform === "win32") { owned.show(); owned.focus(); }
+        if (platform === "win32") {
+          owned.show();
+          // Avoid Windows' below-taskbar positioning used by "floating".
+          owned.setAlwaysOnTop(true, topmostLevel);
+          owned.moveTop();
+          owned.focus();
+          owned.flashFrame(true);
+          owned.once("focus", () => { if (!owned.isDestroyed()) owned.flashFrame(false); });
+        }
         else owned.showInactive();
+        log(`recovery ${request.id} window shown: visible=${owned.isVisible()} topmost=${owned.isAlwaysOnTop()}`);
       }
       void refreshRequest();
       if(check&&finishView)void observePresentation();

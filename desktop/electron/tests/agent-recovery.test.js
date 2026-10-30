@@ -19,13 +19,17 @@ function fixture(reconnect = async () => {}, options = {}) {
       windows.push(this);
     }
     setPosition() {}
-    setAlwaysOnTop(value) { this.topmost = value; }
+    setAlwaysOnTop(value, level) { this.topmost = value; this.topmostLevel = level; }
     setVisibleOnAllWorkspaces() {}
     async loadFile() {}
     showInactive() { this.shown = true; }
-    show() { this.shown = true; this.activeShow = true; }
+    show() { this.shown = true; this.activeShow = true; this.topmost = false; }
     focus() { this.focused = true; }
+    moveTop() { this.raised = true; }
+    flashFrame(value) { this.flashing = value; }
     isDestroyed() { return this.destroyed; }
+    isVisible() { return Boolean(this.shown); }
+    isAlwaysOnTop() { return Boolean(this.topmost); }
     close() {
       let prevented = false; this.emit("close", { preventDefault: () => { prevented = true; } });
       if (!prevented) this.destroy();
@@ -55,7 +59,7 @@ test("shows one recovery window, dismisses without restarting, and waits for a n
   f.waits.shift()({ request }); await tick();
   const window = f.windows[0];
   assert.equal(window.shown, true); assert.equal(window.topmost, true);
-  assert.equal(window.options.skipTaskbar, true);
+  assert.equal(window.options.skipTaskbar, process.platform !== "win32");
   assert.equal(window.options.webPreferences.nodeIntegration, false);
   assert.equal(window.options.webPreferences.sandbox, true);
   assert.equal(window.openHandler().action, "deny");
@@ -75,6 +79,15 @@ for (const platform of ["win32", "darwin"]) {
     assert.equal(f.windows[0].shown, true);
     assert.equal(Boolean(f.windows[0].focused), platform === "win32");
     assert.equal(Boolean(f.windows[0].activeShow), platform === "win32");
+    assert.equal(f.windows[0].topmost, true);
+    assert.equal(f.windows[0].topmostLevel, platform === "win32" ? "pop-up-menu" : "floating");
+    assert.equal(f.windows[0].options.skipTaskbar, platform !== "win32");
+    if (platform === "win32") {
+      assert.equal(f.windows[0].raised, true);
+      assert.equal(f.windows[0].flashing, true);
+      f.windows[0].emit("focus");
+      assert.equal(f.windows[0].flashing, false);
+    }
     assert.equal(restarts, 0);
     await f.controller.stop();
   });
@@ -245,4 +258,20 @@ test("cancelling the desktop listener cancels its recovery child", async () => {
   const child = commandFixture(), abort = new AbortController();
   const done = runRecoveryCommand({ spawn: () => child, executable: "connector", id: request.id, onStage: () => {}, signal: abort.signal });
   abort.abort(); await assert.rejects(done, /cancelled/); assert.equal(child.kills, 1);
+});
+
+test("a verified panel clears a reconnect failure without another restart", async () => {
+ let ready = false, restarts = 0, completed = 0;
+ const f = fixture(async () => { restarts++; throw Error("CODEX_CDP_UNAVAILABLE"); }, {
+  check: async () => ({ready}), finishView: async () => { completed++; }, checkMs: 5, successMs: 1000,
+ });
+ try {
+  f.controller.start(); f.waits.shift()({request: {...request, view_only: true}}); await tick();
+  await f.invoke("Confirm"); assert.equal(f.invoke("State").stage, "failed");
+  ready = true;
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(f.invoke("State").stage, "connected");
+  assert.equal(f.invoke("State").error, "");
+  assert.equal(restarts, 1); assert.equal(completed, 1);
+ } finally { await f.controller.stop(); }
 });
