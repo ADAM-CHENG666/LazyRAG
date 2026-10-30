@@ -780,7 +780,13 @@ function createCodexSurface(target, url, receive, changed) {
 		if (!valid()) navigate();
 	}
 	guest.addEventListener("dom-ready", ready);
-	const unregister = native.listenForDidRegister(changed);
+	let registered = native.isRegistered;
+	const registrationTimer = typeof native.listenForDidRegister === "function" ? void 0 : setInterval(() => {
+		if (disposed || registered === native.isRegistered) return;
+		registered = native.isRegistered;
+		changed();
+	}, 100);
+	const unregister = typeof native.listenForDidRegister === "function" ? native.listenForDidRegister(changed) : () => clearInterval(registrationTimer);
 	function sync(bounds, clip, visible) {
 		if (disposed) return;
 		const state = {

@@ -42,3 +42,26 @@ it('registers the native guest, forwards only its exact URL/run/mount, and relea
  expect(unregister).toHaveBeenCalledOnce()
  expect(browser.pages.disposeHost).toHaveBeenCalledWith('thread',target.mount_id,'closed')
 })
+
+it('observes Windows registration when the listener API is absent and stops observing on disposal',async()=>{
+ vi.useFakeTimers()
+ dom=new JSDOM('<body></body>',{url:'app://-/index.html'})
+ vi.stubGlobal('window',dom.window);vi.stubGlobal('document',dom.window.document)
+ const guest:any=document.createElement('div')
+ guest.getURL=()=> 'about:blank'
+ const native={webview:guest,container:document.createElement('div'),isRegistered:false}
+ ;(window as any).__lazymindCodexBrowser={pages:{getWebview:()=>native,disposeHost:vi.fn()}}
+ const changed=vi.fn()
+ const surface=createCodexSurface({session_id:'thread',run_id:'run',mount_id:crypto.randomUUID()},new URL('http://127.0.0.1:19091/v1/codex/frame'),vi.fn(),changed)
+ cleanup=surface.dispose
+ await vi.advanceTimersByTimeAsync(100)
+ expect(changed).not.toHaveBeenCalled()
+ native.isRegistered=true
+ await vi.advanceTimersByTimeAsync(100)
+ expect(changed).toHaveBeenCalledOnce()
+ surface.dispose()
+ native.isRegistered=false
+ await vi.advanceTimersByTimeAsync(200)
+ expect(changed).toHaveBeenCalledOnce()
+ expect(vi.getTimerCount()).toBe(0)
+})

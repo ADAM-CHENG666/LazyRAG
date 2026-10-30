@@ -42,7 +42,16 @@ export function createCodexSurface(target: {session_id:string;run_id:string;moun
   }
   function ready() { if (!valid()) void navigate() }
   guest.addEventListener('dom-ready',ready)
-  const unregister = native.listenForDidRegister(changed)
+  // Newer Windows desktops expose registration state without a listener API.
+  // Watch that transition so an initially hidden guest can finish mounting.
+  let registered = native.isRegistered
+  const registrationTimer = typeof native.listenForDidRegister === 'function' ? undefined : setInterval(() => {
+    if (disposed || registered === native.isRegistered) return
+    registered = native.isRegistered
+    changed()
+  }, 100)
+  const unregister = typeof native.listenForDidRegister === 'function'
+    ? native.listenForDidRegister(changed) : () => clearInterval(registrationTimer)
   function sync(bounds: {x:number;y:number;width:number;height:number}, clip: {x:number;y:number;width:number;height:number}, visible: boolean) {
     if (disposed) return
     const state = {bounds,isVisible:visible,clipBounds:clip,scale:1,windowZoom:1,shouldPaint:true,mountGeneration:1}
