@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
-	"syscall"
 	"time"
 
 	"lazymind/agentconnector/internal/codexplugin"
@@ -102,7 +101,7 @@ func DesktopReady(ctx context.Context, port int) (bool, error) {
 	client := &http.Client{Timeout: 2 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("CDP redirect refused") }}
 	response, err := client.Do(req)
 	if err != nil {
-		if errors.Is(err, syscall.ECONNREFUSED) {
+		if errors.Is(err, connectionRefused) {
 			return false, nil
 		}
 		return false, fmt.Errorf("Codex CDP endpoint is unavailable: %w", err)
