@@ -80,11 +80,33 @@ function createAgentRecovery({ BrowserWindow, ipcMain, screen, wait, dismiss, re
     const closedSignal=new AbortController();
     const signal=AbortSignal.any([lifetime.signal,closedSignal.signal]);
     currentSignal=signal;
-    let checkTimer;
+    let checkTimer, refreshTimer;
+    async function refreshRequest() {
+      if (signal.aborted || current !== viewRequest || viewRequest.stage === "connected") return;
+      try {
+        // The outer listener waits for this window to close. Keep its existing
+        // request current while later failures are merged by Assistant Bridge.
+        const { request: latest } = await wait(signal);
+        if (signal.aborted || current !== viewRequest || viewRequest.stage === "connected") return;
+        if (latest?.id === viewRequest.id) {
+          const changed = viewRequest.code !== latest.code || viewRequest.can_restart !== latest.can_restart;
+          viewRequest.code = latest.code;
+          viewRequest.can_restart = latest.can_restart;
+          viewRequest.view_only = latest.view_only === true;
+          viewRequest.has_task = Boolean(latest.thread_id || latest.intents?.length);
+          if (changed && !viewRequest.busy) {
+            viewRequest.stage = "confirm";
+            viewRequest.error = "";
+          }
+          publish();
+        }
+      } catch { /* A transient read failure must not replace the current diagnosis. */ }
+      if (!signal.aborted) refreshTimer = setTimeout(refreshRequest, checkMs);
+    }
     async function observePresentation() {
       if(signal.aborted||current!==viewRequest||viewRequest.stage==="connected")return;
       try {
-        const result=await check(request.id,signal);
+        const result=viewRequest.view_only ? await check(request.id,signal) : undefined;
         if(!signal.aborted&&current===viewRequest&&result?.ready){
           // Atomically refuse completion if an execution was queued meanwhile.
           await finishView(request.id);
@@ -100,7 +122,7 @@ function createAgentRecovery({ BrowserWindow, ipcMain, screen, wait, dismiss, re
     const closed = new Promise(resolve => { resolveClosed = resolve; });
     owned.on("close", event => { if (current?.busy && running) event.preventDefault(); });
     owned.once("closed", () => {
-      closedSignal.abort();clearTimeout(checkTimer);
+      closedSignal.abort();clearTimeout(checkTimer);clearTimeout(refreshTimer);
       if (window === owned) { clearTimeout(successTimer); window = undefined; current = undefined; }
       resolveClosed();
     });
@@ -115,7 +137,8 @@ function createAgentRecovery({ BrowserWindow, ipcMain, screen, wait, dismiss, re
     try {
       await owned.loadFile(path.join(__dirname, "agent-recovery.html"));
       if (revision === generation && !owned.isDestroyed()) owned.showInactive();
-      if(request.view_only&&check&&finishView)void observePresentation();
+      void refreshRequest();
+      if(check&&finishView)void observePresentation();
       await closed;
     } finally {
       if (!owned.isDestroyed()) owned.destroy();

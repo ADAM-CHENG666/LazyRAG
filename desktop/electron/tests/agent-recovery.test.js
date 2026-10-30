@@ -160,6 +160,56 @@ function commandFixture() {
   child.kills = 0; child.kill = () => { child.kills++; };
   return child;
 }
+
+test("an open window refreshes restart eligibility in both directions without restarting automatically", async () => {
+  const unavailable = { ...request, code: "CODEX_CONTROL_UNAVAILABLE", can_restart: false };
+  for (const [initial, latest] of [[unavailable, request], [request, unavailable]]) {
+    let restarts = 0;
+    const f = fixture(async () => { restarts++; });
+    try {
+      f.controller.start(); f.waits.shift()({ request: initial }); await tick();
+      assert.equal(f.invoke("State").can_restart, initial.can_restart);
+      f.waits.shift()({ request: latest }); await tick();
+      assert.equal(f.windows.length, 1);
+      assert.equal(f.invoke("State").code, latest.code);
+      assert.equal(f.invoke("State").can_restart, latest.can_restart);
+      assert.equal(f.windows[0].messages.at(-1).can_restart, latest.can_restart);
+      assert.equal(restarts, 0);
+      await f.invoke("Confirm");
+      assert.equal(restarts, latest.can_restart ? 1 : 0);
+    } finally { await f.controller.stop(); }
+  }
+});
+
+test("a diagnosis refresh preserves active recovery progress", async () => {
+  let complete;
+  const f = fixture(async (_id, stage) => {
+    stage("connecting"); await new Promise(resolve => { complete = resolve; });
+  });
+  f.controller.start(); f.waits.shift()({ request }); await tick();
+  const pending = f.invoke("Confirm");
+  f.waits.shift()({ request: { ...request, code: "CODEX_CONTROL_UNAVAILABLE", can_restart: false } }); await tick();
+  assert.equal(f.invoke("State").stage, "connecting");
+  assert.equal(f.invoke("State").busy, true);
+  complete(); await pending;
+  assert.equal(f.invoke("State").stage, "connected");
+  await f.controller.stop();
+});
+
+test("refresh ignores a different request and responses arriving after logout", async () => {
+  for (const stop of [false, true]) {
+    const f = fixture();
+    f.controller.start(); f.waits.shift()({ request }); await tick();
+    const refresh = f.waits.shift();
+    const window = f.windows[0], messageCount = window.messages.length;
+    if (stop) await f.controller.stop();
+    refresh({ request: { ...request, id: stop ? request.id : "b".repeat(32), can_restart: false } }); await tick();
+    assert.equal(window.messages.length, messageCount);
+    if (!stop) assert.equal(f.invoke("State").can_restart, true);
+    assert.equal(f.windows.length, 1);
+    await f.controller.stop();
+  }
+});
 test("progress is streamed but only a successful completed command counts as recovery", async () => {
   for (const success of [true, false]) {
     const child = commandFixture(), stages = [];

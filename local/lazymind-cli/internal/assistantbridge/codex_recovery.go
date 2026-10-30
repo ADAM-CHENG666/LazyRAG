@@ -133,8 +133,10 @@ func (b *codexRecoveryBroker) request(connector string, issue codexhost.Connecti
 		if _, err := rand.Read(nonce[:]); err != nil {
 			return nil, err
 		}
-		next = &codexhost.RecoveryRequest{ID: hex.EncodeToString(nonce[:]), ConnectionIssue: issue}
+		next = &codexhost.RecoveryRequest{ID: hex.EncodeToString(nonce[:])}
 	}
+	// Coalesce saved operations, but always use the latest connection diagnosis.
+	next.ConnectionIssue = issue
 	for _, input := range submissions {
 		if !input.ViewOnly {
 			next.ViewOnly = false

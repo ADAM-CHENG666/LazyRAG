@@ -143,6 +143,52 @@ func TestCodexRecoveryPersistsOperationsAndCompletesOnlyAfterEveryHandoff(t *tes
 	}
 }
 
+func TestCodexRecoveryRefreshesIssueWithoutLosingSavedOperations(t *testing.T) {
+	issues := []codexhost.ConnectionIssue{
+		{Code: "CODEX_CONTROL_UNAVAILABLE", Message: "still loading", CanRestart: false},
+		{Code: "CODEX_CONNECTION_REQUIRED", Message: "restart to connect", CanRestart: true},
+	}
+	for _, reverse := range []bool{false, true} {
+		firstIssue, latestIssue := issues[0], issues[1]
+		if reverse {
+			firstIssue, latestIssue = latestIssue, firstIssue
+		}
+		t.Run(latestIssue.Code, func(t *testing.T) {
+			home := t.TempDir()
+			var broker codexRecoveryBroker
+			if err := broker.bindStorage(home, "connector:token"); err != nil {
+				t.Fatal(err)
+			}
+			intent := codexhost.RecoveryIntent{ID: strings.Repeat("a", 32), Fingerprint: strings.Repeat("b", 64), ThreadID: "11111111-2222-3333-4444-555555555555"}
+			first, err := broker.request("connector", firstIssue, codexhost.RecoverySubmission{ThreadID: intent.ThreadID, Intent: &intent})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, changed := broker.current("connector")
+			latest, err := broker.request("connector", latestIssue)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if latest.ID != first.ID || latest.ThreadID != first.ThreadID || len(latest.Intents) != 1 || latest.Intents[0].ID != intent.ID {
+				t.Fatalf("lost saved request: %+v", latest)
+			}
+			select {
+			case <-changed:
+			default:
+				t.Fatal("listeners were not notified")
+			}
+			var restored codexRecoveryBroker
+			if err := restored.bindStorage(home, "connector:token"); err != nil {
+				t.Fatal(err)
+			}
+			saved, _ := restored.current("connector")
+			if latest.ConnectionIssue != latestIssue || saved == nil || saved.ConnectionIssue != latestIssue {
+				t.Fatalf("latest diagnosis was not returned and persisted: latest=%+v saved=%+v", latest, saved)
+			}
+		})
+	}
+}
+
 func TestViewCompletionCannotConsumeAnExecutionQueuedDuringItsProbe(t *testing.T) {
 	var broker codexRecoveryBroker
 	view, err := broker.request("connector", codexhost.ConnectionIssue{Code: "CODEX_CONNECTION_REQUIRED"}, codexhost.RecoverySubmission{ViewOnly: true, ThreadID: "11111111-2222-3333-4444-555555555555"})
