@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"time"
@@ -86,7 +85,7 @@ func runProbe(ctx context.Context, home string, c Config, args ...string) (bool,
 	if err := localfile.Write(script, bundle, 0600); err != nil {
 		return false, err
 	}
-	cmd := exec.CommandContext(ctx, c.Node, append([]string{script, "--cdp-port", strconv.Itoa(c.Port)}, args...)...)
+	cmd := backgroundCommand(ctx, c.Node, append([]string{script, "--cdp-port", strconv.Itoa(c.Port)}, args...)...)
 	cmd.WaitDelay = time.Second
 	// No ambient Node preloads may execute inside the trusted read-only probe.
 	cmd.Env = agentexec.SafeEnvironment()

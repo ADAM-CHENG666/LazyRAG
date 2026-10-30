@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -181,7 +180,7 @@ func deliverRecovery(ctx context.Context, home, request string, intent RecoveryI
 	if err != nil {
 		return err
 	}
-	command := exec.CommandContext(ctx, c.Node, script, "--recover-intent", "--pairing-file", c.PairingFile, "--cdp-port", strconv.Itoa(c.Port), "--bridge-url", "http://"+address)
+	command := backgroundCommand(ctx, c.Node, script, "--recover-intent", "--pairing-file", c.PairingFile, "--cdp-port", strconv.Itoa(c.Port), "--bridge-url", "http://"+address)
 	command.Env = agentexec.SafeEnvironment()
 	command.Stdin = bytes.NewReader(body)
 	command.WaitDelay = time.Second

@@ -9,7 +9,11 @@ import (
 )
 
 func desktopApplication() (string, error) {
-	return agentexec.FindDesktopApplication(agentexec.DesktopApplication{BindingTarget: agentexec.CodexDesktop, DisplayNames: []string{"ChatGPT", "Codex"}, ExecutableNames: []string{"ChatGPT.exe", "Codex.exe"}, Protocols: []string{"codex"}})
+	return agentexec.FindDesktopApplication(desktopApplicationSpec())
+}
+
+func desktopApplicationSpec() agentexec.DesktopApplication {
+	return agentexec.DesktopApplication{BindingTarget: agentexec.CodexDesktop, PackageNames: []string{"OpenAI.Codex"}, DisplayNames: []string{"ChatGPT", "Codex"}, ExecutableNames: []string{"ChatGPT.exe", "Codex.exe"}, Protocols: []string{"codex"}}
 }
 
 var startupApplication = desktopApplication

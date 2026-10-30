@@ -213,7 +213,7 @@ func Supervise(ctx context.Context, home, bridgeURL string, account func() (stri
 						log, e := os.OpenFile(filepath.Join(home, "logs", "codex-workflow.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 						if e == nil {
 							child, closeChild := context.WithCancel(ctx)
-							cmd := exec.CommandContext(child, c.Node, script, "--pairing-file", c.PairingFile, "--bridge-url", bridgeURL, "--cdp-port", strconv.Itoa(c.Port), "--parent-pid", strconv.Itoa(os.Getpid()))
+							cmd := backgroundCommand(child, c.Node, script, "--pairing-file", c.PairingFile, "--bridge-url", bridgeURL, "--cdp-port", strconv.Itoa(c.Port), "--parent-pid", strconv.Itoa(os.Getpid()))
 							cmd.Stdout, cmd.Stderr = log, log
 							cmd.WaitDelay = 3 * time.Second
 							if e = cmd.Start(); e == nil {
@@ -270,6 +270,6 @@ func CleanupPresentation(home string) error {
 	if err := os.WriteFile(script, bundle, 0600); err != nil {
 		return err
 	}
-	command := exec.CommandContext(ctx, c.Node, script, "--pairing-file", c.PairingFile, "--cdp-port", strconv.Itoa(c.Port), "--cleanup-only")
+	command := backgroundCommand(ctx, c.Node, script, "--pairing-file", c.PairingFile, "--cdp-port", strconv.Itoa(c.Port), "--cleanup-only")
 	return command.Run()
 }
