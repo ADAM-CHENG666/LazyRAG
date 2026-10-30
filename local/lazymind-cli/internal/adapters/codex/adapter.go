@@ -275,6 +275,7 @@ func codexDesktopState() (agentexec.DesktopApplicationState, error) {
 func codexDesktopApplication() agentexec.DesktopApplication {
 	return agentexec.DesktopApplication{
 		BindingTarget:   agentexec.CodexDesktop,
+		PackageNames:    []string{"OpenAI.Codex"},
 		ExecutableNames: []string{"ChatGPT.exe", "Codex.exe"},
 		Protocols:       []string{"chatgpt", "codex"},
 		DisplayNames:    []string{"ChatGPT", "Codex"},
