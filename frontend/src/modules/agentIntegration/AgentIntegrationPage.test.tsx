@@ -129,7 +129,7 @@ vi.mock("react-i18next", () => ({
         "agentIntegration.workbuddyRuntimeMissing": "未找到 WorkBuddy 内置 CLI",
         "agentIntegration.workbuddySignInReused": "CLI 已复用 WorkBuddy 桌面端登录",
         "agentIntegration.workbuddySignInRequired": "请打开 WorkBuddy 完成登录",
-        "agentIntegration.workbuddyRuntimeUnavailable": "WorkBuddy 当前不可用",
+        "agentIntegration.workbuddyRuntimeUnavailable": "WorkBuddy CLI 当前不可用",
         "agentIntegration.interactiveLoginHint": `${agent} 不提供独立的自动登录命令；请输入 /login`,
         "agentIntegration.continueInAgent": `前往 ${agent} 完成`,
         "agentIntegration.executorDetectionReady": "本机 Agent 检测服务已就绪",
@@ -1484,6 +1484,43 @@ describe("AgentIntegrationPage", () => {
       expect(within(card).getByText(zhCN.agentIntegration.connectionErrors.startup_unavailable)).toBeInTheDocument();
     });
     expect(within(card).getByRole("switch",{name:"Codex 桌面端使用 LazyMind"})).toBeChecked();
+    expect(mocks.action).not.toHaveBeenCalled();
+  });
+
+  it.each(["waiting", "unavailable", "missing"])("preserves WorkBuddy enablement when health is %s", async (scenario) => {
+    const status = { agent: "workbuddy", display_name: "WorkBuddy", state: scenario === "missing" ? "ready" : "enabled", enabled: true,
+      can_disconnect: true, message: scenario === "waiting" ? "" : "unavailable",
+      requirements: [{ id: "workbuddy_desktop", satisfied: true }, { id: "workbuddy_desktop_initialized", satisfied: true }],
+      issue: scenario === "waiting" ? undefined : { code: scenario === "missing" ? "installation_unavailable" : "cdp_unavailable" },
+      connection: { mcp_configured: true, control_ready: false, presentation_status: "host-offline", runtime_state: scenario === "waiting" ? "waiting" : "unavailable" } };
+    mocks.statuses.mockResolvedValue({ ok: true, data: { workbuddy: status } });
+    mocks.executors.mockResolvedValue({ data: { data: { executors: [{ id: "workbuddy", installed: true, host_online: true, available: true }] } } });
+    mocks.executorPolicies.mockResolvedValue({ ok: true, data: { workbuddy: { provider: "workbuddy", enabled: false, installed: true, ready: true } } });
+    render(<AgentIntegrationPage />);
+    await waitFor(() => expect(screen.getByTestId("agent-panel-workbuddy")).toHaveTextContent("已安装"));
+    const card = expandAgent("workbuddy");
+    expect(within(card).getByRole("switch", { name: "WorkBuddy 使用 LazyMind" })).toBeChecked();
+    if (scenario === "waiting") {
+      expect(within(card).getByText(zhCN.agentIntegration.waitingForApplication)).toBeInTheDocument();
+      expect(within(card).queryByRole("alert")).not.toBeInTheDocument();
+    } else expect(within(card).getByText(zhCN.agentIntegration.connectionErrors[scenario === "missing" ? "installation_unavailable" : "cdp_unavailable"])).toBeInTheDocument();
+    expect(mocks.action).not.toHaveBeenCalled();
+  });
+
+  it("refreshes WorkBuddy health on focus without resetting its enabled choice", async () => {
+    const installed = { agent: "workbuddy", display_name: "WorkBuddy", state: "enabled", enabled: true,
+      requirements: [{ id: "workbuddy_desktop", satisfied: true }, { id: "workbuddy_desktop_initialized", satisfied: true }],
+      connection: { mcp_configured: true, control_ready: true, presentation_status: "mounted", runtime_state: "connected" } };
+    mocks.statuses.mockResolvedValue({ ok: true, data: { workbuddy: installed } });
+    render(<AgentIntegrationPage />);
+    await screen.findByText("外部 Agent 集成");
+    const card = expandAgent("workbuddy");
+    await waitFor(() => expect(within(card).getByRole("switch", { name: "WorkBuddy 使用 LazyMind" })).toBeChecked());
+    mocks.statuses.mockResolvedValue({ ok: true, data: { workbuddy: { ...installed, message: "startup missing", issue: { code: "startup_unavailable" },
+      connection: { ...installed.connection, control_ready: false, runtime_state: "unavailable" } } } });
+    fireEvent.focus(window);
+    await within(card).findByText(zhCN.agentIntegration.connectionErrors.startup_unavailable);
+    expect(within(card).getByRole("switch", { name: "WorkBuddy 使用 LazyMind" })).toBeChecked();
     expect(mocks.action).not.toHaveBeenCalled();
   });
 

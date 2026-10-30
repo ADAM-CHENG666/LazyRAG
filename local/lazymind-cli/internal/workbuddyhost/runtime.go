@@ -38,6 +38,7 @@ func Supervise(ctx context.Context, home, bridgeURL string, account func() (stri
 	var stop context.CancelFunc
 	var done chan error
 	var fingerprint string
+	startupMigrationChecked := false
 	cleanup := func() {
 		if stop != nil {
 			stop()
@@ -66,12 +67,18 @@ func Supervise(ctx context.Context, home, bridgeURL string, account func() (stri
 			if worker != nil {
 				cleanup()
 			}
-
 		} else {
+			if !startupMigrationChecked {
+				// Retry a failed migration on the next Bridge startup, not every
+				// supervisor tick. Temporary account failures never reach this path.
+				startupMigrationChecked = true
+				if err := migrateDesktopStartup(ctx, home, scope); err != nil {
+					log.Printf("WorkBuddy startup migration: %v", err)
+				}
+			}
 			if worker != nil && current != fingerprint {
 				cleanup()
 			}
-
 			if worker == nil {
 				var node string
 				var nodeErr error

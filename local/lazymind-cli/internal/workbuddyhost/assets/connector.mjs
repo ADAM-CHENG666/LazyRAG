@@ -453,8 +453,8 @@ var CdpClient = class {
 		this.selectTarget = selectTarget;
 		if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid CDP port");
 	}
-	async evaluate(expression, signal) {
-		const bounded = AbortSignal.any([signal, AbortSignal.timeout(8e3)]);
+	async evaluate(expression, signal, timeoutMs = 8e3) {
+		const bounded = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]);
 		const response = await fetch(`http://127.0.0.1:${this.port}/json/list`, {
 			signal: bounded,
 			redirect: "error"

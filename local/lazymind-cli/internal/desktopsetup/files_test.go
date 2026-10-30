@@ -3,6 +3,7 @@ package desktopsetup
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -76,5 +77,34 @@ func TestFilesRecoverMissingManagedFile(t *testing.T) {
 	}
 	if err := f.Check(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestFilesCheckLauncherPermissions(t *testing.T) {
+	root := t.TempDir()
+	f, err := Load(filepath.Join(root, "ownership.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "launcher")
+	if err := f.Put(path, []byte("launch"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0600); err != nil {
+		t.Fatal(err)
+	}
+	err = f.Check()
+	if runtime.GOOS == "windows" {
+		if err != nil {
+			t.Fatalf("Windows launcher rejected for POSIX permissions: %v", err)
+		}
+	} else if err == nil {
+		t.Fatal("non-executable POSIX launcher passed")
+	}
+	if err := f.Put(path, []byte("launch"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Check(); err != nil {
+		t.Fatalf("repaired launcher rejected: %v", err)
 	}
 }

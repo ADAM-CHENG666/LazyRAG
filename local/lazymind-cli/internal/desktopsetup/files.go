@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"lazymind/agentconnector/internal/localfile"
 )
@@ -91,7 +92,8 @@ func (f *Files) Check() error {
 		if !bytes.Equal(body, expected.After) {
 			return fmt.Errorf("startup configuration changed: %s", path)
 		}
-		if expected.Mode&0111 != 0 {
+		// Windows does not expose POSIX executable permission bits through Stat.
+		if runtime.GOOS != "windows" && expected.Mode&0111 != 0 {
 			info, err := os.Stat(path)
 			if err != nil {
 				return err

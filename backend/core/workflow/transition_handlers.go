@@ -20,6 +20,7 @@ import (
 	"lazymind/core/subagent"
 	"lazymind/core/workflow/attempt"
 	"lazymind/core/workflow/controlstore"
+	"lazymind/core/workflow/displaystate"
 	"lazymind/core/workflow/executor"
 	"lazymind/core/workflow/graphengine"
 	workflowstore "lazymind/core/workflow/store"
@@ -627,6 +628,21 @@ func applyWorkflowTransition(ctx context.Context, tx *gorm.DB, sessionID string,
 			return snapshotErr
 		}
 		projection := projectSessionWithApprovalPreferences(tx.WithContext(ctx), session, graph, snapshot)
+		if session.Status == "pausing" {
+			return rejectTransition(req.CommandID, &session, projection, http.StatusConflict, "WORKFLOW_PAUSING", "wait for execution to stop before continuing", false, nil)
+		}
+		if !controlstore.Controlled(session) {
+			display, err := displaystate.Read(tx, session)
+			if err != nil {
+				return err
+			}
+			if display.Status == "waiting" {
+				return rejectTransition(req.CommandID, &session, projection, http.StatusConflict, "WORKFLOW_APPROVAL_REQUIRED", "approve the completed step from the workflow controls before continuing", false, nil)
+			}
+			if display.Status == "paused" {
+				return rejectTransition(req.CommandID, &session, projection, http.StatusConflict, "WORKFLOW_PAUSED", "resume the workflow explicitly before starting another attempt", false, nil)
+			}
+		}
 		if req.ExpectedStateVersion != session.StateVersion {
 			return rejectTransition(req.CommandID, &session, projection, http.StatusConflict, "STATE_VERSION_CONFLICT", "plugin session state changed; use the returned projection", true, map[string]any{"expected": req.ExpectedStateVersion, "actual": session.StateVersion})
 		}
@@ -640,7 +656,7 @@ func applyWorkflowTransition(ctx context.Context, tx *gorm.DB, sessionID string,
 			applyRecoveryIntent(session.IntentContext, &targets[0])
 		}
 		var postStepCheckpoint *executor.PostStepCheckpoint
-		if req.Operation == "retry" {
+		if req.Operation == "retry" || req.Operation == "rewind" {
 			var latest orm.WorkflowSessionStep
 			if err := tx.Where("session_id = ? AND step_id = ? AND validity = ?", session.ID,
 				targets[0].TargetStepID, "effective").Order("attempt DESC").First(&latest).Error; err != nil {
@@ -651,23 +667,24 @@ func applyWorkflowTransition(ctx context.Context, tx *gorm.DB, sessionID string,
 				Error      string                       `json:"error"`
 				Checkpoint *executor.PostStepCheckpoint `json:"post_step_checkpoint"`
 			}
-			if latest.Status == StepStatusFailed && json.Unmarshal([]byte(latest.ResultJSON), &failedResult) == nil &&
+			if req.Operation == "retry" && latest.Status == StepStatusFailed && json.Unmarshal([]byte(latest.ResultJSON), &failedResult) == nil &&
 				strings.Contains(failedResult.Error+failedResult.Summary, "MEDIA_CAPABILITY_DEPENDENCY_MISSING") &&
 				failedResult.Checkpoint != nil && failedResult.Checkpoint.WorkflowRevision == session.WorkflowRevisionID {
 				postStepCheckpoint = failedResult.Checkpoint
 			}
-			var automaticAttempts int64
-			if err := tx.Model(&orm.WorkflowTransitionCommand{}).
-				Where("session_id = ? AND target_step_id = ? AND operation IN ? AND retry_origin = ? AND status = ?",
-					session.ID, latest.StepID, []string{"execute", "retry"}, "automatic", "accepted").
-				Count(&automaticAttempts).Error; err != nil {
-				return err
+			automaticAttempts, countErr := workflowstore.New(tx).AutomaticAttemptCount(ctx, session.ID, latest.StepID)
+			if countErr != nil {
+				return countErr
 			}
-			if req.RetryOrigin != "user" && automaticAttempts >= workflowstore.MaxAutomaticWorkflowStepAttempts {
+			automaticLimit, limitErr := workflowstore.AutomaticWorkflowStepAttemptLimit(ctx, tx, session.ID, latest.StepID)
+			if limitErr != nil {
+				return limitErr
+			}
+			if req.RetryOrigin != "user" && (req.Operation == "retry" || automaticLimit < workflowstore.MaxAutomaticWorkflowStepAttempts) && automaticAttempts >= int64(automaticLimit) {
 				return rejectTransition(req.CommandID, &session, projection, http.StatusConflict,
 					"WORKFLOW_AUTOMATIC_RETRY_LIMIT_EXCEEDED", "AI automatic retry limit was reached; the user may still retry explicitly", false,
 					map[string]any{"step_id": latest.StepID, "automatic_attempts": automaticAttempts,
-						"max_automatic_attempts": workflowstore.MaxAutomaticWorkflowStepAttempts,
+						"max_automatic_attempts": automaticLimit,
 						"user_retry_available":   true})
 			}
 		}
