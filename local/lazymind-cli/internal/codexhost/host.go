@@ -159,12 +159,22 @@ func PrepareDesktop(ctx context.Context, home string) error {
 		}
 	}
 	reportRecovery(ctx, "connecting")
+	return waitForConnection(ctx, home)
+}
+
+// Startup can briefly invalidate a successful probe while windows are restored.
+// Retry only read-only checks; never restart or duplicate a recovery handoff.
+func waitForConnection(ctx context.Context, home string) error {
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		connectionErr := CheckConnection(ctx, home)
 		if connectionErr == nil {
 			return nil
+		}
+		var issue *ConnectionIssue
+		if errors.As(connectionErr, &issue) && (issue.Code == "CODEX_INTEGRATION_DISABLED" || issue.Code == "CODEX_CONFIGURATION_UNAVAILABLE") {
+			return connectionErr
 		}
 		select {
 		case <-ctx.Done():

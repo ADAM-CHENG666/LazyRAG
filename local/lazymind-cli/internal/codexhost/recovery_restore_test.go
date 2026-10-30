@@ -98,3 +98,36 @@ func TestRecoveryReturnsToOriginalChatAndAcknowledgesOnlyAcceptedHandoff(t *test
 		})
 	}
 }
+
+func TestRecoveryRetriesTransientVerificationAfterStartup(t *testing.T) {
+	home, _, _ := recoveryFixture(t)
+	request := RecoveryRequest{ID: strings.Repeat("c", 32), ThreadID: "11111111-2222-3333-4444-555555555555", ViewOnly: true, ConnectionIssue: ConnectionIssue{CanRestart: true}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			json.NewEncoder(w).Encode(RecoveryResponse{Request: &request})
+			return
+		}
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+	t.Setenv("LAZYMIND_ASSISTANT_BRIDGE_URL", server.URL)
+	open, deliver, matches := recoveryOpenThread, recoveryDeliver, startupListenerMatches
+	t.Cleanup(func() { recoveryOpenThread, recoveryDeliver, startupListenerMatches = open, deliver, matches })
+	calls, opened, delivered := 0, 0, 0
+	startupListenerMatches = func(context.Context, string, int) bool {
+		calls++
+		// PrepareDesktop verifies ownership three times. The following read-only
+		// check during restoration must tolerate a transient failed observation.
+		return calls != 4
+	}
+	recoveryOpenThread = func(context.Context, string, string) error { opened++; return nil }
+	recoveryDeliver = func(context.Context, string, string, RecoveryIntent) error { delivered++; return nil }
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := ReconnectRequest(ctx, home, request.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if calls < 6 || opened != 1 || delivered != 1 {
+		t.Fatalf("checks=%d opens=%d deliveries=%d", calls, opened, delivered)
+	}
+}

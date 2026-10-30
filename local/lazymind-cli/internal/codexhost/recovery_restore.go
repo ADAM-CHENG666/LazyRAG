@@ -91,7 +91,7 @@ func ReconnectRequest(ctx context.Context, home, id string, progress func(string
 				if _, err := threadLink(thread); err != nil {
 					return err
 				}
-				if err := CheckConnection(ctx, home); err != nil {
+				if err := waitForConnection(ctx, home); err != nil {
 					return err
 				}
 				application, err := startupApplication()
