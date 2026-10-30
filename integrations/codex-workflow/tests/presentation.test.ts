@@ -100,3 +100,29 @@ it('rejects hidden or ambiguous main-chat layouts',()=>{
   other.getBoundingClientRect=()=>({width:0} as DOMRect)
   expect(readCodexView()?.session).toBe(threadA)
 })
+it('moves scroll listeners with a replacement scroller while preserving the panel',async()=>{
+  const f=fixture(), next=f.scroller.cloneNode(true) as HTMLElement
+  next.querySelector('[data-lazymind-workflow-tail]')?.remove()
+  next.getBoundingClientRect=f.scroller.getBoundingClientRect
+  ;(next as any).__reactFiber$fixture={memoizedProps:f.props}
+  Object.defineProperties(next,{scrollHeight:{get:()=>1600},clientHeight:{get:()=>800}})
+  next.scrollTop=800
+  f.scroller.replaceWith(next)
+  const current=readPresentationSession()
+  mountPresentation({...f.target,epoch:current.epoch},undefined,undefined,f.factory)
+  await Promise.resolve();await Promise.resolve()
+  expect(document.querySelector('iframe')).toBe(f.frame)
+  expect(f.factory).toHaveBeenCalledOnce()
+  f.surface.sync.mockClear()
+  f.scroller.dispatchEvent(new dom.window.Event('scroll'))
+  expect(f.surface.sync).not.toHaveBeenCalled()
+  next.dispatchEvent(new dom.window.WheelEvent('wheel',{deltaY:-50}))
+  next.scrollTop=300
+  next.dispatchEvent(new dom.window.Event('scroll'))
+  expect(next.scrollTop).toBe(300)
+  expect(f.surface.sync).toHaveBeenCalledOnce()
+  f.window.__lazymindCodexWorkflowTail.dispose()
+  f.surface.sync.mockClear()
+  next.dispatchEvent(new dom.window.Event('scroll'))
+  expect(f.surface.sync).not.toHaveBeenCalled()
+})

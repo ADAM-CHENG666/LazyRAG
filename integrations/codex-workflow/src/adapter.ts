@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { setTimeout as delay } from 'node:timers/promises'
 import { AdmissionRejected, type RuntimeAdapter } from '../../workflow-agent-core/src/adapter'
 import type { ActionClaim, HostTransport } from '../../workflow-agent-core/src/transport'
 import { CodexNative } from './native'
@@ -47,17 +48,30 @@ export class CodexAdapter implements RuntimeAdapter<string> {
     if (before.active) throw new AdmissionRejected('Codex chat became busy; no message was sent')
     signal.throwIfAborted()
     const receipt = { actionId: input.actionId, runId: claim.action.session_id, threadId: thread,
-      kind: 'continue' as const, clientId: randomUUID(), status: 'sending' as 'sending' | 'accepted' | 'unknown', turnId: undefined as string | undefined }
+      kind: 'continue' as const, clientId: randomUUID(), status: 'sending' as 'sending' | 'accepted' | 'unknown' | 'rejected', turnId: undefined as string | undefined }
     await this.receipts.write(receipt)
     try {
-      const result = await this.native.start(thread, receipt.clientId, `[LazyMind action_id=${input.actionId}]\n${input.message}`, signal)
-      if (result?.rejected) throw new AdmissionRejected(result.rejected)
+      const message = `[LazyMind action_id=${input.actionId}]\n${input.message}`
+      let result = await this.native.start(thread, receipt.clientId, message, signal)
+      // Retry only an explicit, definitely unsent readiness rejection. A lost
+      // response must never cause another send, and retries keep the same ID.
+      for (let retries = 0; result?.rejected && result.retryable === true && retries < 2; retries++) {
+        receipt.status = 'rejected'
+        await this.receipts.write(receipt)
+        await delay(250, undefined, { signal })
+        this.validate(thread, await this.bridge.action(input.actionId, signal), 'continue')
+        signal.throwIfAborted()
+        receipt.status = 'sending'
+        await this.receipts.write(receipt)
+        result = await this.native.start(thread, receipt.clientId, message, signal)
+      }
+      if (result?.rejected) { receipt.status = 'rejected'; throw new AdmissionRejected(result.rejected) }
       if (!result?.accepted || !result.turnId || before.turns.some(turn => turn.id === result.turnId)) throw new Error('Native message receipt is uncertain')
       receipt.turnId = result.turnId
       receipt.status = 'accepted'
       await this.receipts.write(receipt)
       return 0
-    } catch (error) { receipt.status = 'unknown'; await this.receipts.write(receipt); throw error }
+    } catch (error) { if (receipt.status !== 'rejected') receipt.status = 'unknown'; await this.receipts.write(receipt); throw error }
   }
   cancel(): never { throw new AdmissionRejected('Stop requires a Workflow-owned turn') }
   private async owns(evidence: ReturnType<typeof workflowTurnEvidence>, turnId: string, run: string, thread: string) {

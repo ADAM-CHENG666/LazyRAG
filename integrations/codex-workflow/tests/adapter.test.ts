@@ -6,6 +6,7 @@ import { CodexAdapter } from '../src/adapter'
 import { NativeReceipts } from '../src/receipts'
 import { selectCodexTarget } from '../src/native'
 import { AdmissionRejected } from '../../workflow-agent-core/src/adapter'
+import { createDispatcher } from '../../workflow-agent-core/src/dispatcher'
 const thread = '01a12f01-e372-7ef3-aaae-4a0a295d6700'
 const claim = (kind = 'continue') => ({ action: { id: 'action-1', session_id: 'run-1', native_session_id: thread,
   kind, status: 'dispatching', created_at: '2026-10-26T00:00:10Z' }, control: { session_id: 'run-1', continuation: kind === 'cancel' ? 'stopped' : 'continue',
@@ -34,6 +35,51 @@ describe('CDP Workflow admission and interruption', () => {
   adapter.host.cacheClaim(claim());await expect(adapter.prompt(thread,{actionId:'action-1',message:'continue'},new AbortController().signal)).rejects.toThrow()
   adapter.host.cacheClaim(claim());await expect(adapter.prompt(thread,{actionId:'action-1',message:'continue'},new AbortController().signal)).rejects.toThrow('already attempted')
   expect(native.start).toHaveBeenCalledTimes(1)
+ })
+ it('settles a temporarily unready notification after bounded retries with the same identity',async()=>{
+  const {adapter,native,bridge,receipts}=await fixture(), action=claim()
+  bridge.claim=vi.fn().mockResolvedValue({...action,dispatch_token:'lease'})
+  bridge.action.mockResolvedValue(action);bridge.settle=vi.fn().mockResolvedValue(undefined)
+  native.start.mockResolvedValueOnce({rejected:'still restoring',retryable:true})
+    .mockResolvedValueOnce({rejected:'still restoring',retryable:true})
+  const signal=new AbortController().signal
+  await createDispatcher(adapter,adapter.host,bridge,'instance',signal).deliver({...action.action,status:'pending'})
+  expect(native.start).toHaveBeenCalledTimes(3)
+  expect(native.start.mock.calls[1]).toEqual(native.start.mock.calls[0])
+  expect(native.start.mock.calls[2]).toEqual(native.start.mock.calls[0])
+  expect(bridge.settle).toHaveBeenCalledWith('action-1','instance','lease','accepted',0,'',signal)
+  expect(await receipts.read('action-1')).toMatchObject({status:'accepted',turnId:'turn-new'})
+ })
+ it.each([true,false])('bounds retries and records definite rejection (retryable=%s)',async(retryable)=>{
+  const {adapter,native,bridge,receipts}=await fixture()
+  adapter.host.cacheClaim(claim());bridge.action.mockResolvedValue(claim())
+  native.start.mockResolvedValue({rejected:'not ready',retryable})
+  await expect(adapter.prompt(thread,{actionId:'action-1',message:'continue'},new AbortController().signal)).rejects.toBeInstanceOf(AdmissionRejected)
+  expect(native.start).toHaveBeenCalledTimes(retryable?3:1)
+  expect(await receipts.read('action-1')).toMatchObject({status:'rejected'})
+ })
+ it('does not retry an uncertain send after a definite rejection',async()=>{
+  const {adapter,native,bridge,receipts}=await fixture()
+  adapter.host.cacheClaim(claim());bridge.action.mockResolvedValue(claim())
+  native.start.mockResolvedValueOnce({rejected:'still restoring',retryable:true}).mockRejectedValueOnce(Error('CDP disconnected'))
+  await expect(adapter.prompt(thread,{actionId:'action-1',message:'continue'},new AbortController().signal)).rejects.toThrow('CDP disconnected')
+  expect(native.start).toHaveBeenCalledTimes(2)
+  expect(await receipts.read('action-1')).toMatchObject({status:'unknown'})
+ })
+ it('does not resend when cancellation occurs during the retry wait',async()=>{
+  const {adapter,native,bridge}=await fixture(), controller=new AbortController()
+  adapter.host.cacheClaim(claim())
+  native.start.mockImplementationOnce(async()=>{controller.abort();return {rejected:'still restoring',retryable:true}})
+  await expect(adapter.prompt(thread,{actionId:'action-1',message:'continue'},controller.signal)).rejects.toThrow()
+  expect(native.start).toHaveBeenCalledOnce();expect(bridge.action).not.toHaveBeenCalled()
+ })
+ it('revalidates a consumed action before retrying the native send',async()=>{
+  const {adapter,native,bridge}=await fixture(), current=claim()
+  adapter.host.cacheClaim(claim());current.action.consumed_at='2026-10-26T00:00:11Z'
+  bridge.action.mockResolvedValue(current)
+  native.start.mockResolvedValueOnce({rejected:'still restoring',retryable:true})
+  await expect(adapter.prompt(thread,{actionId:'action-1',message:'continue'},new AbortController().signal)).rejects.toBeInstanceOf(AdmissionRejected)
+  expect(native.start).toHaveBeenCalledOnce()
  })
  it('interrupts the exact Workflow-owned turn',async()=>{
   const {adapter,native,bridge}=await fixture();const action=claim('cancel');bridge.action.mockResolvedValue(action)

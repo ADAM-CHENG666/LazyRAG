@@ -321,15 +321,29 @@ var CodexAdapter = class {
 		};
 		await this.receipts.write(receipt);
 		try {
-			const result = await this.native.start(thread, receipt.clientId, `[LazyMind action_id=${input.actionId}]\n${input.message}`, signal);
-			if (result?.rejected) throw new AdmissionRejected(result.rejected);
+			const message = `[LazyMind action_id=${input.actionId}]\n${input.message}`;
+			let result = await this.native.start(thread, receipt.clientId, message, signal);
+			for (let retries = 0; result?.rejected && result.retryable === true && retries < 2; retries++) {
+				receipt.status = "rejected";
+				await this.receipts.write(receipt);
+				await setTimeout$1(250, void 0, { signal });
+				this.validate(thread, await this.bridge.action(input.actionId, signal), "continue");
+				signal.throwIfAborted();
+				receipt.status = "sending";
+				await this.receipts.write(receipt);
+				result = await this.native.start(thread, receipt.clientId, message, signal);
+			}
+			if (result?.rejected) {
+				receipt.status = "rejected";
+				throw new AdmissionRejected(result.rejected);
+			}
 			if (!result?.accepted || !result.turnId || before.turns.some((turn) => turn.id === result.turnId)) throw new Error("Native message receipt is uncertain");
 			receipt.turnId = result.turnId;
 			receipt.status = "accepted";
 			await this.receipts.write(receipt);
 			return 0;
 		} catch (error) {
-			receipt.status = "unknown";
+			if (receipt.status !== "rejected") receipt.status = "unknown";
 			await this.receipts.write(receipt);
 			throw error;
 		}
@@ -904,7 +918,7 @@ function mountPresentation(target, readView = readCodexView, followTail = instal
 	};
 	const initial = locate();
 	if (!initial) return { status: "layout-unavailable" };
-	const initialScroller = initial.scroller;
+	let scroller = initial.scroller;
 	const panel = document.createElement("section");
 	panel.dataset.lazymindWorkflowTail = target.session_id;
 	panel.setAttribute("aria-label", "LazyMind Workflow");
@@ -979,6 +993,12 @@ function mountPresentation(target, readView = readCodexView, followTail = instal
 				});
 			}
 			return;
+		}
+		if (scroller !== view.scroller) {
+			scroller.removeEventListener("scroll", sync);
+			scroller = view.scroller;
+			scroller.addEventListener("scroll", sync, { passive: true });
+			follower?.dispose();
 		}
 		layoutReady = true;
 		panel.hidden = false;
@@ -1107,7 +1127,7 @@ function mountPresentation(target, readView = readCodexView, followTail = instal
 		structure.disconnect();
 		follower?.dispose();
 		window.removeEventListener("resize", sync);
-		initialScroller.removeEventListener("scroll", sync);
+		scroller.removeEventListener("scroll", sync);
 		surface.dispose();
 		panel.remove();
 		if (host[key]?.dispose === dispose) delete host[key];
@@ -1131,7 +1151,7 @@ function mountPresentation(target, readView = readCodexView, followTail = instal
 		dispose
 	};
 	window.addEventListener("resize", sync);
-	initialScroller.addEventListener("scroll", sync, { passive: true });
+	scroller.addEventListener("scroll", sync, { passive: true });
 	size();
 	sync();
 	return status();

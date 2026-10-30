@@ -26,7 +26,7 @@ export function mountPresentation(target: PresentationTarget, readView = readCod
   const locate = () => { const view = readView(); return view?.session === target.session_id ? view : null }
   const initial = locate()
   if (!initial) return { status: 'layout-unavailable' }
-  const initialScroller = initial.scroller
+  let scroller = initial.scroller
   const panel = document.createElement('section')
   panel.dataset.lazymindWorkflowTail = target.session_id
   panel.setAttribute('aria-label', 'LazyMind Workflow')
@@ -60,6 +60,12 @@ export function mountPresentation(target: PresentationTarget, readView = readCod
       layoutReady = false; panel.hidden = true; follower?.dispose(); surface.sync({x:0,y:0,width:0,height:0},{x:0,y:0,width:0,height:0},false)
       if (expanded) { setExpanded(false); reply({ type: 'lazymind.workflow.expansion', expanded }) }
       return
+    }
+    if (scroller !== view.scroller) {
+      scroller.removeEventListener('scroll', sync)
+      scroller = view.scroller
+      scroller.addEventListener('scroll', sync, { passive: true })
+      follower?.dispose()
     }
     layoutReady = true; panel.hidden = false
     const following = follower && followedContent === view.content ? follower.status().following
@@ -113,7 +119,7 @@ export function mountPresentation(target: PresentationTarget, readView = readCod
   function dispose() {
     if (disposed) return
     disposed = true; unsubscribe(); resize?.disconnect(); structure.disconnect(); follower?.dispose()
-    window.removeEventListener('resize', sync); initialScroller.removeEventListener('scroll', sync)
+    window.removeEventListener('resize', sync); scroller.removeEventListener('scroll', sync)
     surface.dispose()
     panel.remove()
     if (host[key]?.dispose === dispose) delete host[key]
@@ -127,7 +133,7 @@ export function mountPresentation(target: PresentationTarget, readView = readCod
     return status()
   }
   host[key] = { version, session: target.session_id, run: target.run_id, origin: url.origin, sync, status, probeStatus, dispose }
-  window.addEventListener('resize', sync); initialScroller.addEventListener('scroll', sync, {passive:true})
+  window.addEventListener('resize', sync); scroller.addEventListener('scroll', sync, {passive:true})
   size(); sync()
   return status()
 }
