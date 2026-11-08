@@ -20,6 +20,7 @@ class KnowledgeSearchRequest(BaseModel):
     query: str = Field(...)
     kb_ids: List[str] = Field(...)
     top_k: int = Field(default=10)
+    mode: str = Field(default='semantic')
     llm_config: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -75,6 +76,7 @@ async def search_knowledge(
             kb_ids=request.kb_ids,
             top_k=request.top_k,
             llm_config=request.llm_config,
+            mode=request.mode,
         )
     except knowledge_search_service.KnowledgeSearchError as exc:
         status = 400 if exc.code == 'INVALID_ARGUMENT' else 503

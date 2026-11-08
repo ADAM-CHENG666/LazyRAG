@@ -29,7 +29,7 @@ import (
 )
 
 const maxPackageBytes = 64 << 20
-const maxResultBytes = 32 << 20
+const maxResultBytes = 36 << 20
 const maxToolExecutionDuration = 5 * time.Minute
 const unresolvedToolGracePeriod = time.Minute
 
@@ -128,7 +128,17 @@ func publicToolError(err error) *ToolError {
 		case capability.InvalidArgument, capability.Unauthenticated, capability.PermissionDenied,
 			capability.NotFound, capability.DeadlineExceeded, capability.Unavailable,
 			capability.ResultTooLarge, capability.Unsupported, capability.Conflict, capability.Internal:
-			return &ToolError{Code: string(capabilityErr.Code), Message: capabilityErr.Message, Retryable: capabilityErr.Retryable}
+			result := &ToolError{Code: string(capabilityErr.Code), Message: capabilityErr.Message, Retryable: capabilityErr.Retryable}
+			if toolCode, ok := capabilityErr.Details["tool_code"].(string); ok && toolCode != "" {
+				result.Details = map[string]any{"tool_code": toolCode}
+				for _, key := range []string{"actual_sha256", "fields", "allowed"} {
+					if value, ok := capabilityErr.Details[key]; ok {
+						result.Details[key] = value
+					}
+				}
+				result.Recovery = capabilityErr.Reason
+			}
+			return result
 		}
 	}
 	return &ToolError{Code: "CAPABILITY_UNAVAILABLE", Message: "Tool execution failed; check the corresponding configuration and dependency in LazyMind, then retry the affected step"}

@@ -120,6 +120,7 @@ def fetch_public_url(
     *,
     timeout: int,
     headers: Dict[str, str],
+    max_bytes: int | None = None,
 ) -> requests.Response:
     current_url = validate_public_http_url(url)
     pdf_max = coerce_web_int(_cfg['url_fetch_pdf_max_bytes'], 100 * 1024 * 1024)
@@ -133,7 +134,7 @@ def fetch_public_url(
         )
 
         if not response.is_redirect:
-            limit = pdf_max if _looks_like_pdf(response, current_url) else _MAX_FETCH_BYTES
+            limit = max_bytes or (pdf_max if _looks_like_pdf(response, current_url) else _MAX_FETCH_BYTES)
             read_limited_response(response, max_bytes=limit)
             return response
 
@@ -251,7 +252,8 @@ def _ingest_fetched_pdf(
     }
 
 
-def fetch_url_content(url: str, offset: int = 0, limit: int | None = None) -> Dict[str, Any]:
+def fetch_url_content(url: str, offset: int = 0, limit: int | None = None,
+                      *, pdf_mode: str = 'workspace') -> Dict[str, Any]:
     if type(offset) is not int or offset < 0:
         raise ValueError('offset must be a non-negative integer')
     if limit is not None and (type(limit) is not int or limit <= 0):
@@ -273,6 +275,7 @@ def fetch_url_content(url: str, offset: int = 0, limit: int | None = None) -> Di
     }
 
     with requests.sessions.Session() as session:
+        session.trust_env = False
         response = fetch_public_url(
             session,
             normalized_url,
@@ -288,6 +291,13 @@ def fetch_url_content(url: str, offset: int = 0, limit: int | None = None) -> Di
     is_html = media_type in {'text/html', 'application/xhtml+xml'}
     is_text = media_type.startswith('text/') or media_type in _TEXT_CONTENT_TYPES
     if _looks_like_pdf(response, final_url):
+        if pdf_mode == 'inline':
+            from lazymind.toolkit.contracts import file_result
+            if response_truncated:
+                raise ValueError('PDF exceeds the url_fetch download size limit')
+            return {'status': 'ok', 'source_status': 'pdf_downloaded', 'url': normalized_url,
+                    'final_url': final_url, 'file': file_result(response.content, 'document.pdf', 'application/pdf'),
+                    'content_type': 'application/pdf', 'content_truncated': False}
         return _ingest_fetched_pdf(
             response,
             normalized_url=normalized_url,

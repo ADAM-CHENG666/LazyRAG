@@ -53,11 +53,13 @@ def test_search_calls_search_kb_without_chat_agent(monkeypatch):
 
     assert calls['session_initialized'] is True
     assert calls['session_cleared'] is True
-    assert calls['injected'] == model_config
+    expected_config = {'embed_main': model_config['embed_main']}
+    assert calls['injected'] == expected_config
+    assert calls['kwargs']['image_retriever'] is None
     assert calls['payload']['user_id'] == 'user-1'
     assert calls['payload']['filters']['kb_id'] == ['kb_backend_901']
     assert calls['payload']['query'] == 'query'
-    assert calls['payload']['llm_config'] == model_config
+    assert calls['payload']['llm_config'] == expected_config
     assert calls['kwargs']['k_max'] == 3
     assert calls['kwargs']['image_topk'] == 0
     assert hits == [
@@ -162,7 +164,8 @@ def test_internal_route_returns_structured_hits(monkeypatch):
     monkeypatch.setattr(routes, 'expected_internal_token', lambda: 'secret-token')
     app = create_search_app()
 
-    def fake_search(user_id, query, kb_ids, top_k, llm_config):
+    def fake_search(user_id, query, kb_ids, top_k, llm_config, mode):
+        assert mode == 'semantic'
         assert user_id == 'user-1'
         assert query == 'q'
         assert kb_ids == ['kb']
@@ -261,7 +264,7 @@ def test_internal_route_offloads_sync_search(monkeypatch):
     assert resp.status_code == 200
     assert calls['func'] is fake_search
     assert calls['kwargs'] == {
-        'user_id': 'user-1', 'query': 'q', 'kb_ids': ['kb'], 'top_k': 2, 'llm_config': {},
+        'user_id': 'user-1', 'query': 'q', 'kb_ids': ['kb'], 'top_k': 2, 'llm_config': {}, 'mode': 'semantic',
     }
 
 
@@ -269,7 +272,6 @@ def test_search_kb_forwards_model_config_to_algorithm_document_calls(monkeypatch
     search_module = importlib.import_module('lazymind.chat.engine.tools.algo.search_kb')
     calls = []
 
-    monkeypatch.setattr(search_module, 'get_vocab_manager', lambda user_id: lambda query: query)
     monkeypatch.setattr(
         search_module,
         'parallel',
@@ -378,3 +380,32 @@ def test_router_internal_proxy_requires_and_replaces_service_token(monkeypatch):
     assert captured['headers'][routes.INTERNAL_TOKEN_HEADER] == 'server-token'
     assert captured['url'] == 'http://child.test/internal/knowledge:search'
     assert captured['client_kwargs']['timeout'] == 30.0
+
+
+def test_keyword_search_uses_shared_store_and_authorizes_documents_without_models(monkeypatch):
+    module = importlib.import_module('lazymind.chat.engine.tools.algo.search_kb')
+    from lazymind.chat.engine.tools.infra import kb_ownership
+    captured = {}
+
+    def retrieve(**kwargs):
+        captured.update(kwargs)
+        return [
+            {'uid': 'chunk', 'kb_id': 'kb', 'doc_id': 'owned', 'content': 'exact phrase'},
+            {'uid': 'stale', 'kb_id': 'kb', 'doc_id': 'deleted', 'content': 'must not return'},
+        ]
+
+    def authorize(path, payload, *, user_id):
+        assert path == '/documents:filterActive' and user_id == 'owner'
+        assert len(payload['items']) == 2
+        return {'response': {'items': [{'knowledge_id': 'kb', 'document_id': 'owned'}]}}
+
+    def forbidden_runtime():
+        pytest.fail('keyword search must not construct model retrievers')
+
+    monkeypatch.setattr(module.DOCUMENT, 'keyword_search', retrieve)
+    monkeypatch.setattr(kb_ownership, 'post_core_api', authorize)
+    monkeypatch.setattr(svc, '_ensure_kb_search_runtime', forbidden_runtime)
+    hits = svc.search('owner', 'exact phrase', ['kb'], 5, mode='keyword')
+    assert captured == {'group': 'block', 'keyword': 'exact phrase', 'kb_id': 'kb',
+                        'phrase': True, 'sort_by': 'score', 'size': 5}
+    assert len(hits) == 1 and hits[0].doc_id == 'owned' and hits[0].text == 'exact phrase'

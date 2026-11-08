@@ -455,22 +455,15 @@ def _reject_content_type(content_type: str) -> None:
 def _probe_remote_image(url: str) -> Tuple[str, int, int, str]:
     headers = {'User-Agent': _USER_AGENT}
     get_headers = {**headers, 'Range': f'bytes=0-{_MAX_PROBE_BYTES - 1}'}
-    resp = requests.get(
-        url,
-        headers=get_headers,
-        timeout=_PROBE_TIMEOUT,
-        stream=True,
-        allow_redirects=True,
-    )
-    if resp.status_code == 416:
-        resp.close()
-        resp = requests.get(
-            url,
-            headers=headers,
-            timeout=_PROBE_TIMEOUT,
-            stream=True,
-            allow_redirects=True,
-        )
+    from lazymind.chat.engine.tools.infra.web_search_support import fetch_public_url
+    with requests.sessions.Session() as session:
+        session.trust_env = False
+        resp = fetch_public_url(session, url, headers=get_headers, timeout=_PROBE_TIMEOUT,
+                                max_bytes=_MAX_PROBE_BYTES)
+        if resp.status_code == 416:
+            resp.close()
+            resp = fetch_public_url(session, url, headers=headers, timeout=_PROBE_TIMEOUT,
+                                    max_bytes=_MAX_PROBE_BYTES)
     try:
         resp.raise_for_status()
         _reject_content_type(resp.headers.get('Content-Type', ''))
@@ -1068,43 +1061,11 @@ def _open_caption_source(image_url: str) -> Any:
     return Image.open(_resolve_local_file(raw))
 
 
-def meme_add_caption(
-    image_url: str,
-    caption: str,
-    caption_box: List[float] | None = None,
-    text_color: str = '#FFFFFF',
-    stroke_color: str = '#000000',
-    stroke_width_ratio: float = 0.08,
-) -> dict[str, Any]:
-    """Deterministically center a caption inside a normalized rectangle on a meme.
-
-    This is a meme-only postprocessor. Call it after image_generator/image_editor
-    for a static meme, or after video_to_gif for an animated meme. The default
-    caption rectangle is [0.15, 0.75, 0.85, 0.93], matching a centered lower
-    banner. The rectangle is used only for layout calculation and is not drawn.
-    Font size and line wrapping are calculated to fit; the result is centered
-    horizontally and vertically. Chinese captions require a CJK-capable font.
-
-    Args:
-        image_url: Local path, signed /static-files/ URL, or HTTP(S) image/GIF.
-        caption: Exact text to render. Do not translate or rewrite it.
-        caption_box: Optional [left, top, right, bottom] values normalized to 0..1.
-        text_color: Pillow-compatible text color, default white.
-        stroke_color: Pillow-compatible outline color, default black.
-        stroke_width_ratio: Outline width divided by font size, from 0.01 to 0.25.
-
-    Returns:
-        Result containing local_path, signed image_url, calculated font size,
-        pixel caption box, text bounding box, and final wrapped text.
-    """
+def render_caption_file(source, output_path, caption, caption_box=None,
+                        text_color='#FFFFFF', stroke_color='#000000', stroke_width_ratio=0.08):
+    """Render already-authorized image pixels; shared by Chat, Workflow and MCP."""
     from PIL import Image
-
-    source = _open_caption_source(image_url)
-    output_dir = Path(_upload_root()).resolve() / 'ai_generated'
-    output_dir.mkdir(parents=True, exist_ok=True)
     animated = bool(getattr(source, 'is_animated', False) and getattr(source, 'n_frames', 1) > 1)
-    suffix = '.gif' if animated else '.png'
-    output_path = output_dir / f'{uuid.uuid4().hex}_captioned{suffix}'
     layout: dict[str, Any] | None = None
 
     if animated:
@@ -1136,6 +1097,48 @@ def meme_add_caption(
             stroke_width_ratio,
         )
         rendered.save(output_path, format='PNG')
+    if layout is None:
+        raise ValueError('Caption renderer produced no frames')
+    return layout
+
+
+def meme_add_caption(
+    image_url: str,
+    caption: str,
+    caption_box: List[float] | None = None,
+    text_color: str = '#FFFFFF',
+    stroke_color: str = '#000000',
+    stroke_width_ratio: float = 0.08,
+) -> dict[str, Any]:
+    """Deterministically center a caption inside a normalized rectangle on a meme.
+
+    This is a meme-only postprocessor. Call it after image_generator/image_editor
+    for a static meme, or after video_to_gif for an animated meme. The default
+    caption rectangle is [0.15, 0.75, 0.85, 0.93], matching a centered lower
+    banner. The rectangle is used only for layout calculation and is not drawn.
+    Font size and line wrapping are calculated to fit; the result is centered
+    horizontally and vertically. Chinese captions require a CJK-capable font.
+
+    Args:
+        image_url: Local path, signed /static-files/ URL, or HTTP(S) image/GIF.
+        caption: Exact text to render. Do not translate or rewrite it.
+        caption_box: Optional [left, top, right, bottom] values normalized to 0..1.
+        text_color: Pillow-compatible text color, default white.
+        stroke_color: Pillow-compatible outline color, default black.
+        stroke_width_ratio: Outline width divided by font size, from 0.01 to 0.25.
+
+    Returns:
+        Result containing local_path, signed image_url, calculated font size,
+        pixel caption box, text bounding box, and final wrapped text.
+    """
+    source = _open_caption_source(image_url)
+    output_dir = Path(_upload_root()).resolve() / 'ai_generated'
+    output_dir.mkdir(parents=True, exist_ok=True)
+    animated = bool(getattr(source, 'is_animated', False) and getattr(source, 'n_frames', 1) > 1)
+    suffix = '.gif' if animated else '.png'
+    output_path = output_dir / f'{uuid.uuid4().hex}_captioned{suffix}'
+    layout = render_caption_file(source, output_path, caption, caption_box,
+                                 text_color, stroke_color, stroke_width_ratio)
     source.close()
 
     if layout is None or not output_path.is_file() or output_path.stat().st_size == 0:

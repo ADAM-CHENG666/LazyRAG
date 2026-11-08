@@ -467,6 +467,8 @@ class ToolConfig:
     label_en: str = ''
     description_en: str = ''
     model_role: str | None = None
+    layer: str = ''
+    shared: bool = False
     capability_id: str = ''
     equivalence_scope: str = 'infrastructure'
     provider_id: str = ''
@@ -995,6 +997,11 @@ DEFAULT_TOOLS: list[ToolConfig] = [
         description_en='Create, inspect, update, cancel, and trigger recurring schedules.',
     ),
 ]
+
+# Both native Chat and external tool.list/tool.call consume this exact registry.
+from lazymind.toolkit.registry import register_shared_tools  # noqa: E402
+register_shared_tools(ToolConfig, DEFAULT_TOOLS)
+
 
 
 def _tool_summary(tool: Any) -> str:

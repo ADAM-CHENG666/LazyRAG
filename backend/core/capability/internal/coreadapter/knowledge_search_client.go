@@ -19,6 +19,7 @@ const (
 )
 
 type KnowledgeSearchBackendRequest struct {
+	Mode      string
 	UserID    string
 	Query     string
 	KBIDs     []string
@@ -65,7 +66,7 @@ func NewHTTPKnowledgeSearchBackendClient(baseURL, token string, httpClient *http
 func (c *HTTPKnowledgeSearchBackendClient) Search(ctx context.Context, input KnowledgeSearchBackendRequest) (KnowledgeSearchBackendResponse, error) {
 	payload, err := json.Marshal(map[string]any{
 		"user_id": input.UserID, "query": input.Query, "kb_ids": input.KBIDs,
-		"top_k": input.TopK, "llm_config": input.LLMConfig,
+		"top_k": input.TopK, "llm_config": input.LLMConfig, "mode": searchMode(input.Mode),
 	})
 	if err != nil {
 		return KnowledgeSearchBackendResponse{}, capability.NewError(capability.Internal, "knowledge.search.client", "encode search request failed", false, err)
@@ -118,4 +119,11 @@ func (c *HTTPKnowledgeSearchBackendClient) Search(ctx context.Context, input Kno
 		})
 	}
 	return result, nil
+}
+
+func searchMode(mode string) string {
+	if mode == "" {
+		return "semantic"
+	}
+	return mode
 }

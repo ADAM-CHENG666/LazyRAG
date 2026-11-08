@@ -88,3 +88,16 @@ func TestWorkflowToolPublicCapabilityErrorPreservesRemediationOnly(t *testing.T)
 		t.Fatalf("unreviewed error was exposed: %+v", hidden)
 	}
 }
+
+func TestWorkflowSharedToolErrorKeepsOnlyPublicRepairFields(t *testing.T) {
+	failure := capability.NewError(capability.Conflict, "tool.call", "Document changed", false, nil)
+	failure.Details = map[string]any{"tool_code": "VERSION_CONFLICT", "actual_sha256": "current", "credential": "private"}
+	failure.Reason = "Read the current document and recompute the edit."
+	result := publicToolError(failure)
+	if result.Code != "CONFLICT" || result.Details["actual_sha256"] != "current" || result.Recovery != failure.Reason {
+		t.Fatalf("lost shared repair information: %#v", result)
+	}
+	if result.Details["credential"] != nil {
+		t.Fatal("private diagnostics escaped")
+	}
+}

@@ -66,7 +66,9 @@ class ImageWorkflowSearchValidationTests(unittest.TestCase):
                 raise OSError('Truncated File Read')
             return 1600, 1200, 'JPEG'
 
-        with mock.patch.object(self.tools.requests, 'get', return_value=response), mock.patch.object(
+        with mock.patch(
+            'lazymind.chat.engine.tools.infra.web_search_support.fetch_public_url', return_value=response,
+        ), mock.patch.object(
             self.tools, '_probe_image_dimensions', side_effect=dimensions,
         ):
             result = self.tools._probe_remote_image(
@@ -197,7 +199,8 @@ class ImageWorkflowSearchValidationTests(unittest.TestCase):
             ):
                 result = self.tools.select_image_material_route(routing)
                 self.assertEqual(result['control']['next_step'], expected)
-        state = yaml.safe_load((_repo_root() / 'workflows/image-workflow/scenario/state.yml').read_text(encoding='utf-8'))
+        state_path = _repo_root() / 'workflows/image-workflow/scenario/state.yml'
+        state = yaml.safe_load(state_path.read_text(encoding='utf-8'))
         self.assertEqual(state['steps']['analyze_subject']['terminal_tools'], ['select_image_material_route'])
 
     def test_direct_edit_routes_and_static_meme_sources(self):
@@ -211,7 +214,8 @@ class ImageWorkflowSearchValidationTests(unittest.TestCase):
             ('CREATE_ANIMATED_MEME', 'video_generator,ffmpeg', 'generate_image'),
             ('CREATE_MEME_PACK', 'image_editor', 'generate_image'),
         ]
-        state = yaml.safe_load((_repo_root() / 'workflows/image-workflow/scenario/state.yml').read_text(encoding='utf-8'))
+        state_path = _repo_root() / 'workflows/image-workflow/scenario/state.yml'
+        state = yaml.safe_load(state_path.read_text(encoding='utf-8'))
         targets = {edge['to'] for edge in state['transitions']['optimize_prompt']}
         for route, required, expected in cases:
             with self.subTest(route=route, required=required):

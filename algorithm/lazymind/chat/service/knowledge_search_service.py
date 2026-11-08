@@ -53,7 +53,7 @@ def search_kb(*args, **kwargs):
 
 
 def search(user_id: str, query: str, kb_ids: List[str], top_k: int,
-           llm_config: Optional[Dict[str, Any]] = None) -> List[KnowledgeSearchHit]:
+           llm_config: Optional[Dict[str, Any]] = None, mode: str = 'semantic') -> List[KnowledgeSearchHit]:
     user_id = (user_id or '').strip()
     query = (query or '').strip()
     kb_ids = [str(kb_id).strip() for kb_id in kb_ids or [] if str(kb_id).strip()]
@@ -72,10 +72,18 @@ def search(user_id: str, query: str, kb_ids: List[str], top_k: int,
     if top_k > 50:
         top_k = 50
 
+    if mode not in {'semantic', 'keyword'}:
+        raise KnowledgeSearchError('INVALID_ARGUMENT', 'mode must be semantic or keyword')
+    llm_config = {key: value for key, value in (llm_config or {}).items() if key in {'embed_main', 'reranker'}}
     init_session()
     try:
         require_component('rag')
-        inject_model_config(llm_config)
+        inject_model_config(llm_config if mode == 'semantic' else {})
+        if mode == 'keyword':
+            from lazymind.chat.engine.tools.algo.search_kb import keyword_search
+            from lazymind.chat.engine.tools.kb import _store_dict_to_result
+            rows = keyword_search({'query': query, 'filters': {'kb_id': kb_ids}, 'user_id': user_id}, top_k)
+            return _hits_from_serialized([_store_dict_to_result(row) for row in rows], kb_ids, top_k)
         retrievers, reranker, image_retriever = _ensure_kb_search_runtime()
         raw = search_kb(
             {
@@ -86,7 +94,7 @@ def search(user_id: str, query: str, kb_ids: List[str], top_k: int,
             },
             retrievers=retrievers,
             reranker=reranker,
-            image_retriever=image_retriever,
+            image_retriever=None,
             retriever_topk=max(_DEFAULT_RETRIEVER_TOPK, top_k),
             rerank_topk=max(_DEFAULT_RERANK_TOPK, top_k),
             k_max=top_k,

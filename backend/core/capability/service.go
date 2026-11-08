@@ -556,7 +556,14 @@ func (s *Service) SearchKnowledge(ctx context.Context, call InvocationContext, i
 	if topK < 1 || topK > maxSearchTopK {
 		return SearchKnowledgeResult{}, NewError(InvalidArgument, operation, "top_k must be between 1 and 50", false, nil)
 	}
-	result, err := s.search.SearchKnowledge(ctx, call, SearchKnowledgeInput{Query: query, KnowledgeIDs: knowledgeIDs, TopK: topK})
+	mode := strings.TrimSpace(input.Mode)
+	if mode == "" {
+		mode = "semantic"
+	}
+	if mode != "semantic" && mode != "keyword" {
+		return SearchKnowledgeResult{}, NewError(InvalidArgument, operation, "mode must be semantic or keyword", false, nil)
+	}
+	result, err := s.search.SearchKnowledge(ctx, call, SearchKnowledgeInput{Query: query, KnowledgeIDs: knowledgeIDs, TopK: topK, Mode: mode})
 	if err != nil {
 		return SearchKnowledgeResult{}, err
 	}
@@ -577,8 +584,12 @@ func ensureResultSize(operation string, result any) error {
 	if err != nil {
 		return NewError(Internal, operation, "cannot encode result", false, err)
 	}
-	if len(encoded) > maxToolResultBytes {
-		return NewError(ResultTooLarge, operation, "result exceeds 1 MiB", false, nil)
+	limit := maxToolResultBytes
+	if operation == "tool.call" {
+		limit = 36 << 20
+	}
+	if len(encoded) > limit {
+		return NewError(ResultTooLarge, operation, "result exceeds the operation's transport limit", false, nil)
 	}
 	return nil
 }

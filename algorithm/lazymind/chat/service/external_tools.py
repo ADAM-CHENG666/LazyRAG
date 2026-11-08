@@ -17,6 +17,7 @@ from lazyllm.tools import ToolManager
 from lazymind.chat.engine.tool_auth import inject_tool_config
 from lazymind.chat.service.component.tool_registry import DEFAULT_TOOLS, _instance_is_active, tool_is_active
 from lazymind.model_config import inject_model_config
+from lazymind.toolkit.contracts import ToolError
 
 
 LOG = logging.getLogger(__name__)
@@ -30,7 +31,7 @@ _CONTEXT_REQUIREMENTS = {
     'data_sources': 'user data-source context', 'external_db': 'user database context',
     'writer_create': 'artifact workspace', 'writer_revision': 'artifact workspace',
     'multimodal': 'authorized input files',
-    'video_to_gif': 'authorized input files', 'vocab_learn': 'user vocabulary context',
+    'vocab_learn': 'user vocabulary context',
     'memory': 'user memory context', 'skill_editor': 'skill workspace',
     'local_fs': 'authorized filesystem workspace', 'cloud_files': 'cloud account context',
     'mail': 'mail account and approval context', 'schedule': 'user scheduling context',
@@ -131,6 +132,7 @@ def run_external_tools(payload: dict, *, execute: bool = False) -> dict:
                 'name': config.name, 'description': config.description,
                 'input_schema': schema, 'available': not reason, 'reason': reason,
                 'model_role': getattr(config, 'model_role', None),
+                'layer': getattr(config, 'layer', ''),
             })
         return {'items': items}
     except Exception as exc:
@@ -162,12 +164,28 @@ def _execute(payload):
         raise ValueError('Unknown tool method or invalid arguments')
     tool = manager.tools_info[method]
     if not tool.validate_parameters(arguments):
+        if getattr(config, 'shared', False):
+            from pydantic import ValidationError
+            try:
+                tool.params_schema.model_validate(arguments)
+            except ValidationError as exc:
+                raise ToolError('INVALID_ARGUMENT', 'Input does not match the tool schema.', details={
+                    'fields': [{'path': list(item['loc']), 'message': item['msg']} for item in exc.errors()]
+                }) from None
         raise ValueError('Invalid tool arguments')
     with _media_arguments(name, arguments) as resolved:
         result = manager.execute_with_records(
             [{'type': 'function', 'function': {'name': method, 'arguments': resolved}}],
             allowed_tool_names={method},
         ).results[0]
+    if (getattr(config, 'shared', False) and isinstance(result, dict)
+            and result.get('ok') is True and 'value' in result):
+        result = result['value']
+    if (getattr(config, 'shared', False) and isinstance(result, dict)
+            and result.get('ok') is False and isinstance(result.get('error'), dict)):
+        error = result['error']
+        raise ToolError(error['code'], error['message'], details=error.get('details'),
+                        recovery=error.get('recovery', ''), retryable=bool(error.get('retryable')))
     if isinstance(result, dict) and (result.get('ok') is False or result.get('isError') is True):
         LOG.error('External tool failed tool=%s stage=execution', config.name)
         raise RuntimeError('Tool execution failed; check its connection and arguments')

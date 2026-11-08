@@ -58,7 +58,7 @@ func decode(w http.ResponseWriter, r *http.Request, value any) (string, bool) {
 		reply(w, http.StatusUnprocessableEntity, nil, &ToolError{Code: "CONTRACT_VERSION_UNSUPPORTED", Message: "Supported version is workflow.v1"})
 		return "", false
 	}
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<20))
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxResultBytes))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(value); err != nil {
 		reply(w, http.StatusUnprocessableEntity, nil, &ToolError{Code: "INVALID_TOOL_CALL", Message: "Invalid tool request"})

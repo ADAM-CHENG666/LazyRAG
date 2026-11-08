@@ -81,6 +81,7 @@ type InvokeExternalModelResult struct {
 }
 
 type ExternalToolSummary struct {
+	Layer       string         `json:"layer,omitempty"`
 	ID          string         `json:"id"`
 	Name        string         `json:"name"`
 	ServerName  string         `json:"server_name"`
@@ -386,6 +387,7 @@ type GetKnowledgeDocumentResult struct {
 }
 
 type SearchKnowledgeInput struct {
+	Mode         string   `json:"mode,omitempty" jsonschema:"semantic (default, requires embeddings) or keyword (model-free exact phrase search)"`
 	Query        string   `json:"query" jsonschema:"search query to retrieve from LazyMind knowledge bases"`
 	KnowledgeIDs []string `json:"knowledge_ids" jsonschema:"one to twenty accessible LazyMind knowledge base IDs"`
 	TopK         int      `json:"top_k,omitempty" jsonschema:"maximum number of retrieval hits, from 1 to 50"`

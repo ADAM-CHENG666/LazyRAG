@@ -625,6 +625,14 @@ func LoadToolConfigForCapabilities(
 	allowed := make(map[string]struct{}, len(capabilities))
 	for _, capability := range capabilities {
 		name := strings.ToLower(strings.TrimSpace(capability))
+		switch name {
+		case "image.search":
+			name = "web_search"
+		case "academic.search":
+			name = "academic_search"
+		case "github.pr.list":
+			name = "github_prs"
+		}
 		if name != "" {
 			allowed[name] = struct{}{}
 		}

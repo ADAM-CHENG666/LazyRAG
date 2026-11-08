@@ -6,7 +6,6 @@ from lazyllm.tools.rag.rank_fusion.reciprocal_rank_fusion import RRFFusion
 
 from lazymind.chat.engine.tools.algo.kb_adaptive_topk import AdaptiveKComponent
 from lazymind.chat.engine.tools.algo.kb_context_expansion import ContextExpansionComponent
-from lazymind.chat.engine.tools.infra import get_vocab_manager
 from lazymind.config import config as _cfg
 from lazymind.chat.engine.tools.infra.kb_ownership import filter_active_nodes
 
@@ -63,7 +62,8 @@ def search_kb(
     image_topk: int = 3,
 ):
     query = payload['query']
-    expanded = get_vocab_manager(payload['user_id'])(query)
+    # Query formulation belongs to the Agent; retrieval never invokes a chat LLM.
+    expanded = query
 
     def _kb_retrieve(expanded: str):
         filters = payload.get('filters') or {}
@@ -90,3 +90,21 @@ def search_kb(
         list(image_retriever(query, **image_kwargs) or []), user_id=payload['user_id'],
     )
     return list(text_nodes or []) + image_nodes[:image_topk]
+
+
+def keyword_search(payload: dict, top_k: int = 10):
+    """Model-free retrieval over explicitly authorized KBs, shared by Chat and MCP."""
+    filters = payload['filters']
+    if set(filters) - {'kb_id', 'file_name', 'docid', 'doc_id'}:
+        raise ValueError('Keyword search supports kb_id, file_name and doc_id filters only')
+    selection = {}
+    if filters.get('file_name'):
+        selection['file_name'] = filters['file_name']
+    if filters.get('doc_id') or filters.get('docid'):
+        selection['doc_id'] = filters.get('doc_id') or filters['docid']
+    items = []
+    for kb_id in filters['kb_id']:
+        rows = DOCUMENT.keyword_search(group='block', keyword=payload['query'], kb_id=kb_id,
+                                       phrase=True, sort_by='score', size=top_k, **selection)
+        items.extend(filter_active_nodes(rows, user_id=payload['user_id']))
+    return items[:top_k]

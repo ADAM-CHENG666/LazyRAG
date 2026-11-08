@@ -10,7 +10,7 @@ import (
 	"lazymind/core/modelconfig"
 )
 
-var retrievalModelRoles = [...]string{"llm", "embed_main", "reranker", "embed_image"}
+var retrievalModelRoles = [...]string{"embed_main", "reranker"}
 
 type RetrievalModelConfigLoader interface {
 	LoadRetrievalModelConfig(context.Context, string) (map[string]any, error)
@@ -26,13 +26,13 @@ func NewDBBackedRetrievalModelConfigLoader(db *gorm.DB) (*DBBackedRetrievalModel
 }
 
 func (l *DBBackedRetrievalModelConfigLoader) LoadRetrievalModelConfig(ctx context.Context, userID string) (map[string]any, error) {
-	config, err := modelconfig.LoadLLMConfig(ctx, l.db, strings.TrimSpace(userID))
+	config, err := modelconfig.LoadOwnedToolModels(ctx, l.db, strings.TrimSpace(userID), retrievalModelRoles[:])
 	if err != nil {
 		return nil, capability.NewError(capability.Unavailable, "knowledge.search.models", "load retrieval model configuration failed", true, err)
 	}
 	filtered := filterRetrievalModelConfig(config)
-	if len(filtered) == 0 {
-		return nil, capability.NewError(capability.Unavailable, "knowledge.search.models", "retrieval model configuration is unavailable", false, nil)
+	if filtered["embed_main"] == nil {
+		return nil, capability.NewError(capability.Unavailable, "knowledge.search.models", "semantic retrieval requires an embedding model; configure it or use mode=keyword", false, nil)
 	}
 	return filtered, nil
 }

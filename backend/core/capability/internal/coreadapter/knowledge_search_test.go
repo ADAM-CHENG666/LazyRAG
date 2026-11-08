@@ -31,9 +31,13 @@ func (c *fakeKnowledgeSearchBackendClient) Search(_ context.Context, request Kno
 	return c.response, nil
 }
 
-type fakeRetrievalModelConfigLoader struct{ config map[string]any }
+type fakeRetrievalModelConfigLoader struct {
+	config map[string]any
+	calls  int
+}
 
 func (l *fakeRetrievalModelConfigLoader) LoadRetrievalModelConfig(context.Context, string) (map[string]any, error) {
+	l.calls++
 	return l.config, nil
 }
 
@@ -125,10 +129,38 @@ func TestFilterRetrievalModelConfigAllowsOnlyExistingSearchRoles(t *testing.T) {
 	}
 
 	filtered := filterRetrievalModelConfig(input)
-	if len(filtered) != 4 || filtered["llm"] == nil || filtered["embed_main"] == nil || filtered["reranker"] == nil || filtered["embed_image"] == nil {
+	if len(filtered) != 2 || filtered["embed_main"] == nil || filtered["reranker"] == nil {
 		t.Fatalf("filtered retrieval config = %#v", filtered)
 	}
-	if filtered["evo_llm"] != nil || filtered["vlm"] != nil {
+	if filtered["evo_llm"] != nil || filtered["vlm"] != nil || filtered["llm"] != nil || filtered["embed_image"] != nil {
 		t.Fatalf("non-retrieval roles leaked: %#v", filtered)
+	}
+}
+
+func TestKeywordKnowledgeSearchPreservesScopeAndDoesNotLoadModels(t *testing.T) {
+	scope := &fakeKnowledgeScopeResolver{scope: KnowledgeScope{
+		DatasetIDToKBID: map[string]string{"owned": "kb-owned"}, KBIDToDatasetID: map[string]string{"kb-owned": "owned"},
+	}}
+	client := &fakeKnowledgeSearchBackendClient{response: KnowledgeSearchBackendResponse{Hits: []KnowledgeSearchBackendHit{
+		{KBID: "kb-owned", DocID: "doc-backend", Text: "owned text"},
+		{KBID: "foreign", DocID: "doc-backend", Text: "must not escape"},
+	}}}
+	mapper := &fakeDocumentIDMapper{mapping: map[documentMapKey]string{{DatasetID: "owned", LazyDocID: "doc-backend"}: "doc"}}
+	models := &fakeRetrievalModelConfigLoader{}
+	searcher, err := NewKnowledgeSearcher(scope, client, mapper, models)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := searcher.SearchKnowledge(t.Context(), capability.InvocationContext{Principal: capability.Principal{UserID: "owner"}}, capability.SearchKnowledgeInput{
+		Query: "phrase", KnowledgeIDs: []string{"owned"}, TopK: 5, Mode: "keyword",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if models.calls != 0 || len(client.request.LLMConfig) != 0 || client.request.Mode != "keyword" {
+		t.Fatalf("unexpected model invocation: %#v", client.request)
+	}
+	if len(result.Hits) != 1 || result.Hits[0].DocumentID != "doc" {
+		t.Fatalf("bad scope: %#v", result)
 	}
 }

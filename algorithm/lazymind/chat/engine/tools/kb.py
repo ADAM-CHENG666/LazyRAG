@@ -425,6 +425,7 @@ class KBToolkit:
         image_topk: Optional[int] = None,
         filters: Optional[Dict[str, Any]] = None,
         kb_ids: Optional[List[str]] = None,
+        mode: Literal['semantic', 'keyword'] = 'semantic',
     ) -> Any:
         """Search the knowledge base and return text and image retrieval results.
 
@@ -442,6 +443,7 @@ class KBToolkit:
         query="Kafka", rather than a single call with query="Redis Kafka".
 
         Args:
+            mode: semantic uses configured retrieval models; keyword is model-free exact phrase search.
             query: A SINGLE natural language query for retrieval. Do NOT put
                 multiple unrelated keywords in this field.
             retriever_topk: Candidate count used by each retriever route before
@@ -457,7 +459,6 @@ class KBToolkit:
         """
         agentic_config = lazyllm.globals['agentic_config']
         selected_ids = self._kb_ids(kb_ids)
-        retrievers, reranker, image_retriever = _ensure_kb_search_runtime()
         effective_filters = dict(filters or agentic_config.get('filters') or {})
         effective_filters['kb_id'] = selected_ids
         payload = {
@@ -466,6 +467,12 @@ class KBToolkit:
             'user_id': agentic_config.get('user_id', ''),
         }
 
+        if mode == 'keyword':
+            from lazymind.chat.engine.tools.algo.search_kb import keyword_search
+            return {'items': [_store_dict_to_result(row) for row in keyword_search(payload, k_max or _DEFAULT_K_MAX)]}
+        if mode != 'semantic':
+            raise ToolExecutionError('mode must be semantic or keyword')
+        retrievers, reranker, image_retriever = _ensure_kb_search_runtime()
         result = search_kb(
             payload,
             retrievers=retrievers,

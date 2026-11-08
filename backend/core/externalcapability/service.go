@@ -115,6 +115,7 @@ type modelRow struct {
 }
 
 type toolRow struct {
+	Layer             string          `gorm:"-"`
 	ID                string          `gorm:"column:id"`
 	Name              string          `gorm:"column:tool_name"`
 	Description       string          `gorm:"column:description"`
@@ -344,7 +345,7 @@ func (s *Service) ListExternalTools(ctx context.Context, call capability.Invocat
 		}
 		schema := map[string]any{}
 		_ = json.Unmarshal(row.InputSchema, &schema)
-		items = append(items, capability.ExternalToolSummary{ID: row.ID, Name: row.Name, ServerName: row.ServerName, Description: row.Description, InputSchema: schema})
+		items = append(items, capability.ExternalToolSummary{ID: row.ID, Name: row.Name, ServerName: row.ServerName, Description: row.Description, InputSchema: schema, Layer: row.Layer})
 	}
 	return capability.ListExternalToolsResult{Items: items}, nil
 }
@@ -464,13 +465,17 @@ func (s *Service) InvokeExternalTool(ctx context.Context, call capability.Invoca
 		raw, toolName, err = mcp.CallAuthorizedTool(ctx, s.db, call.Principal.UserID, input.ToolID, input.Arguments)
 	}
 	if err != nil {
-		if code, ok := capability.CodeOf(err); ok && code == capability.InvalidArgument {
+		if _, ok := capability.CodeOf(err); ok {
 			return result, err
 		}
 		return result, capability.NewError(capability.Unavailable, op, "tool execution failed; check the tool connection and authorization in Settings", false, err)
 	}
-	if len(raw) > maxProxyBytes {
-		return result, capability.NewError(capability.ResultTooLarge, op, "tool result exceeds 2 MiB", false, nil)
+	limit := maxProxyBytes
+	if row.Builtin {
+		limit = maxSharedToolBytes
+	}
+	if len(raw) > limit {
+		return result, capability.NewError(capability.ResultTooLarge, op, "tool result exceeds the transport limit", false, nil)
 	}
 	if err := json.Unmarshal(raw, &result.Result); err != nil {
 		return result, capability.NewError(capability.Unavailable, op, "tool returned an invalid JSON result; check the tool connection in Settings", false, err)
@@ -548,6 +553,7 @@ func (s *Service) loadBuiltinTools(ctx context.Context, userID, name string) ([]
 	var catalog struct {
 		Items []struct {
 			Name        string          `json:"name"`
+			Layer       string          `json:"layer"`
 			Description string          `json:"description"`
 			InputSchema json.RawMessage `json:"input_schema"`
 			Available   bool            `json:"available"`
@@ -577,7 +583,7 @@ func (s *Service) loadBuiltinTools(ctx context.Context, userID, name string) ([]
 			ID: builtinToolPrefix + item.Name, Name: item.Name,
 			Description: item.Description, InputSchema: item.InputSchema,
 			ServerName: "LazyMind", Enabled: item.Available, IsVerified: item.Available,
-			Builtin: true, UnavailableReason: item.Reason,
+			Builtin: true, UnavailableReason: item.Reason, Layer: item.Layer,
 		})
 	}
 	return rows, nil
@@ -622,15 +628,37 @@ func (s *Service) requestBuiltinTools(ctx context.Context, userID, endpoint, nam
 		return nil, fmt.Errorf("load built-in tool model: %w", err)
 	}
 	if endpoint == "/api/chat/tools/execute" {
+		arguments, err = s.resolveSharedFiles(ctx, userID, name, arguments)
+		if err != nil {
+			if _, ok := capability.CodeOf(err); ok {
+				return nil, err
+			}
+			return nil, capability.NewError(capability.InvalidArgument, "tool.call", err.Error(), false, nil)
+		}
 		arguments, err = s.resolveMediaInputs(ctx, userID, name, arguments)
 		if err != nil {
 			return nil, capability.NewError(capability.InvalidArgument, "tool.call", "Media inputs must use resource:<id> for your imported immutable images. Import the image with workflow.input.import and retry; local paths and remote URLs are not accepted.", false, err)
 		}
 	}
 	toolConfig := map[string]any{}
+	credentialName := name
+	switch name {
+	case "image.search":
+		credentialName = "web_search"
+	case "academic.search":
+		credentialName = "academic_search"
+	case "github.pr.list":
+		config, err := modelconfig.LoadToolConfigForCapabilities(ctx, s.db, userID, []string{"github_prs"})
+		if err != nil {
+			return nil, errors.New("cannot load GitHub connection")
+		}
+		for key, value := range config {
+			toolConfig[key] = value
+		}
+	}
 	// External calls must not inherit another user's shared or unverified provider.
 	for category, capabilityName := range map[string]string{"search": "web_search", "datasource": "academic_search"} {
-		if name != "" && name != capabilityName {
+		if credentialName != "" && credentialName != capabilityName {
 			continue
 		}
 		var count int64
@@ -670,11 +698,14 @@ func (s *Service) requestBuiltinTools(ctx context.Context, userID, endpoint, nam
 		return nil, errors.New("built-in tool service is unreachable")
 	}
 	defer resp.Body.Close()
-	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, maxProxyBytes+1))
-	if readErr != nil || len(raw) > maxProxyBytes {
-		return nil, errors.New("built-in tool result could not be read or exceeded 2 MiB")
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, maxSharedToolBytes+1))
+	if readErr != nil || len(raw) > maxSharedToolBytes {
+		return nil, errors.New("built-in tool result could not be read or exceeded 36 MiB")
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		if err := sharedToolError(raw); err != nil {
+			return nil, err
+		}
 		return nil, fmt.Errorf("built-in tool request failed (%d)", resp.StatusCode)
 	}
 	return raw, nil

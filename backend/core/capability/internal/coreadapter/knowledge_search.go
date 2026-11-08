@@ -63,12 +63,15 @@ func (s *KnowledgeSearcher) SearchKnowledge(ctx context.Context, call capability
 	for _, datasetID := range input.KnowledgeIDs {
 		kbIDs = append(kbIDs, scope.DatasetIDToKBID[datasetID])
 	}
-	modelConfig, err := s.models.LoadRetrievalModelConfig(ctx, userID)
-	if err != nil {
-		return capability.SearchKnowledgeResult{}, err
+	modelConfig := map[string]any{}
+	if input.Mode != "keyword" {
+		modelConfig, err = s.models.LoadRetrievalModelConfig(ctx, userID)
+		if err != nil {
+			return capability.SearchKnowledgeResult{}, err
+		}
 	}
 	response, err := s.client.Search(ctx, KnowledgeSearchBackendRequest{
-		UserID: userID, Query: input.Query, KBIDs: kbIDs, TopK: input.TopK, LLMConfig: modelConfig,
+		UserID: userID, Query: input.Query, KBIDs: kbIDs, TopK: input.TopK, LLMConfig: modelConfig, Mode: input.Mode,
 	})
 	if err != nil {
 		return capability.SearchKnowledgeResult{}, err

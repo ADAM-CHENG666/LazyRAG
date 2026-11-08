@@ -87,10 +87,12 @@ async def list_chat_tools(
 async def _external_tool_request(payload, token, *, execute=False):
     from lazymind.chat.api.knowledge_search_routes import require_internal_token
     require_internal_token(token)
-    await _chat_service()
     from lazymind.chat.service.external_tools import run_external_tools
+    from lazymind.toolkit.contracts import ToolError
     try:
         return await asyncio.to_thread(run_external_tools, payload, execute=execute)
+    except ToolError as exc:
+        raise HTTPException(status_code=400 if not exc.error['retryable'] else 503, detail=exc.error) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail='tool unavailable or invalid arguments') from exc
     except Exception as exc:

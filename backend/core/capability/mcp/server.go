@@ -14,7 +14,7 @@ import (
 	"lazymind/core/capability"
 )
 
-const DefaultMaxRequestBodyBytes = 64 << 10
+const DefaultMaxRequestBodyBytes = 36 << 20 // Inline files; resource IDs avoid uploading bytes repeatedly.
 
 type HandlerConfig struct {
 	ManagementOnly      bool

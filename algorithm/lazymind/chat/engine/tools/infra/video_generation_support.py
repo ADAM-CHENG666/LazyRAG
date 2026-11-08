@@ -211,6 +211,8 @@ def run_video_to_gif(
     width: int = _DEFAULT_GIF_WIDTH,
     start: Optional[float] = None,
     duration: Optional[float] = None,
+    output_path: Optional[str] = None,
+    input_format: Optional[str] = None,
 ) -> Dict[str, Any]:
     src = Path(str(video_path or '').strip())
     if not src.is_file():
@@ -227,9 +229,9 @@ def run_video_to_gif(
     if out_width < 16:
         raise ToolExecutionError('width must be at least 16')
 
-    dest_dir = Path(_upload_root()).resolve() / _UPLOAD_SUBDIR
+    dest_dir = Path(output_path).parent if output_path else Path(_upload_root()).resolve() / _UPLOAD_SUBDIR
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / f'{uuid.uuid4().hex}.gif'
+    dest = Path(output_path) if output_path else dest_dir / f'{uuid.uuid4().hex}.gif'
     palette = dest_dir / f'{uuid.uuid4().hex}_palette.png'
 
     ffmpeg_bin, _ffprobe_bin = resolve_ffmpeg_binaries()
@@ -246,6 +248,10 @@ def run_video_to_gif(
         input_opts.extend(['-ss', str(float(start))])
     if duration is not None:
         input_opts.extend(['-t', str(float(duration))])
+    if input_format is not None:
+        if input_format != 'mov':
+            raise ValueError('Explicit input_format currently supports self-contained MP4/MOV only')
+        input_opts.extend(['-f', 'mov', '-protocol_whitelist', 'file,pipe', '-enable_drefs', '0'])
     input_opts.extend(['-i', str(src)])
 
     with _GIF_SEMAPHORE:
@@ -274,8 +280,11 @@ def run_video_to_gif(
                 palette.unlink(missing_ok=True)
 
         local_path = str(dest)
-        _register_generated_image_paths([local_path])
-        payload = _build_image_payload(local_path, label=basename_from_path(local_path) or 'converted gif')
+        if output_path:
+            payload = {'local_path': local_path}
+        else:
+            _register_generated_image_paths([local_path])
+            payload = _build_image_payload(local_path, label=basename_from_path(local_path) or 'converted gif')
         return {
             'source': str(src),
             'fps': out_fps,

@@ -32,7 +32,7 @@ retry the affected step.
 
 `workflow.tool.list` and `workflow.tool.call` provide a narrower surface for an
 active external execution. They require its current execution handle and only
-permit tools in its pinned step contract. The external Agent identity is taken
+permit registered tools available to that execution; step capability descriptions are not a tool-name allowlist. The external Agent identity is taken
 from the persisted host binding. Calls reserve a stable command ID before invoking
 the provider, replay completed receipts and reject conflicting arguments. Stop or
 reclaim fences late results. This surface does not publish artifacts or complete
@@ -85,3 +85,6 @@ across the complete matching history rather than only the displayed page.
 
 The user-facing setup and operation guide is available in
 [`docs/external-agent-capabilities.CN.md`](../external-agent-capabilities.CN.md).
+
+L1/L2 shared operations, file contracts and supported formats are documented in
+[Shared Workflow tools](shared-workflow-tools.md).
