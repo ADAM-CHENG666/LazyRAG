@@ -28,7 +28,7 @@ type ExecutionToolCallInput struct {
 
 func registerExecutionTools(server *mcp.Server, client *Client) {
 	registerTool(server, &mcp.Tool{Name: "workflow.tool.list", Title: "List tools for a Workflow execution",
-		Description: "Discover registered package adapters and user-authorized global tools, including optional image/video models. Steps declare capabilities and output requirements, not fixed tool names. The root may execute itself or proxy optional workers; it retains the handle. Choose host capabilities or an available MCP tool that satisfies the shared contract.", Annotations: annotations(true)},
+		Description: "Discover registered package adapters and user-authorized global tools, including optional image/video models. Source warnings identify unavailable catalog sections; other returned tools remain usable. Steps declare capabilities and output requirements, not fixed tool names. The root may execute itself or proxy optional workers; it retains the handle. Choose host capabilities or an available MCP tool that satisfies the shared contract.", Annotations: annotations(true)},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input ExecutionToolsInput) (*mcp.CallToolResult, map[string]any, error) {
 			value, err := client.ListExecutionTools(ctx, input)
 			return nil, value, err

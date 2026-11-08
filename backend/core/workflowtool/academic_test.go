@@ -240,7 +240,7 @@ func TestAcademicToolsRejectContextInjectionAndUnauditedBinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, tool := range list {
+	for _, tool := range list.Tools {
 		if tool.Available {
 			t.Fatal("invalid binding advertised ready")
 		}

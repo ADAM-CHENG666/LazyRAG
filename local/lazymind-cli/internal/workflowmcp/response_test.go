@@ -2,9 +2,12 @@ package workflowmcp
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"lazymind/agentconnector/internal/coreapi"
@@ -27,6 +30,84 @@ func harnessClient(t *testing.T, handler http.HandlerFunc) *Client {
 		t.Fatal(err)
 	}
 	return &Client{api: api}
+}
+
+func TestOversizedPublicationRetainsLocalRepairDiagnostic(t *testing.T) {
+	var calls atomic.Int32
+	client := harnessClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		t.Error("oversized request reached Core")
+	})
+	_, err := client.Publish(t.Context(), PublishInput{SessionID: "run", ExecutionID: "attempt", ExecutionHandle: "private-handle"}, map[string]any{
+		"slot": "report", "seq": 1, "content_type": "text", "value": strings.Repeat("x", 32<<20),
+	})
+	var problem *coreapi.Error
+	if calls.Load() != 0 || !errors.As(err, &problem) || problem.Code != "REQUEST_NOT_SENT" || !strings.Contains(problem.Message, "32 MiB") || problem.Fields["outcome"] != "not_sent" || problem.Fields["recovery"] == nil {
+		t.Fatalf("local rejection became an uncertain write: calls=%d error=%+v", calls.Load(), err)
+	}
+	operation := problem.Fields["operation"].(map[string]any)
+	if operation["session_id"] != "run" || operation["execution_id"] != "attempt" || operation["slot"] != "report" || operation["seq"] != 1 || operation["execution_handle"] != nil {
+		t.Fatalf("wrong recovery identity: %+v", operation)
+	}
+}
+
+func TestMutationRetainsUnknownOutcomeAfterResponseLoss(t *testing.T) {
+	for _, failure := range []string{"disconnect", "decode"} {
+		t.Run(failure, func(t *testing.T) {
+			var writes atomic.Int32
+			client := harnessClient(t, func(w http.ResponseWriter, r *http.Request) {
+				if _, err := io.Copy(io.Discard, r.Body); err != nil {
+					t.Error(err)
+				}
+				writes.Add(1)
+				if failure == "decode" {
+					_, _ = w.Write([]byte(`{"ok":true,"result":{"execution_id":123}}`))
+					return
+				}
+				connection, _, err := w.(http.Hijacker).Hijack()
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				_ = connection.Close()
+			})
+			result := inputToolCall(t, inputToolSession(t, client), "workflow.step.complete", map[string]any{
+				"session_id": "run", "execution_id": "attempt", "execution_handle": "private-handle", "outcome": "succeeded",
+			})
+			raw, _ := json.Marshal(result.StructuredContent)
+			var value struct {
+				Error map[string]any `json:"error"`
+			}
+			if err := json.Unmarshal(raw, &value); err != nil {
+				t.Fatal(err)
+			}
+			if !result.IsError || writes.Load() != 1 || value.Error["code"] != "REQUEST_OUTCOME_UNKNOWN" || value.Error["outcome"] != "unknown" || value.Error["recovery"] == nil || strings.Contains(string(raw), "private-handle") {
+				t.Fatalf("uncertain write was misclassified or repeated: writes=%d result=%s", writes.Load(), raw)
+			}
+			operation := value.Error["operation"].(map[string]any)
+			if operation["session_id"] != "run" || operation["execution_id"] != "attempt" {
+				t.Fatalf("lost recovery identity: %s", raw)
+			}
+		})
+	}
+}
+
+func TestPartialToolCatalogWarningsReachMCP(t *testing.T) {
+	client := harnessClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"tools":[{"name":"knowledge_list_documents","available":true}],"warnings":[{"source":"package","error":{"code":"CAPABILITY_UNAVAILABLE","message":"Package discovery offline"}}]}}`))
+	})
+	result := inputToolCall(t, inputToolSession(t, client), "workflow.tool.list", map[string]any{"session_id": "run", "execution_id": "attempt", "execution_handle": "handle"})
+	raw, _ := json.Marshal(result.StructuredContent)
+	var value struct {
+		Tools    []map[string]any `json:"tools"`
+		Warnings []map[string]any `json:"warnings"`
+	}
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError || len(value.Tools) != 1 || value.Tools[0]["name"] != "knowledge_list_documents" || len(value.Warnings) != 1 || value.Warnings[0]["source"] != "package" {
+		t.Fatalf("partial catalog lost: %s", raw)
+	}
 }
 
 func TestCoreDiagnosticsReachMCPWithReceiptAndFutureFields(t *testing.T) {

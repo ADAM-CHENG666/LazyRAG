@@ -175,7 +175,7 @@ func TestWorkflowToolListUsesRegisteredCatalogWithoutStepNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	list, err := service.List(t.Context(), "owner", "run", "attempt", "lease")
-	if err != nil || len(list) != 2 || list[0].Name != "inspect_output" || list[0].Source != "package" || !list[0].Available {
+	if err != nil || len(list.Tools) != 2 || list.Tools[0].Name != "inspect_output" || list.Tools[0].Source != "package" || !list.Tools[0].Available || len(list.Warnings) != 0 {
 		t.Fatalf("registered catalog was not forwarded: %+v %v", list, err)
 	}
 }
@@ -188,7 +188,7 @@ func TestWorkflowToolListRetainsUnavailableAdapter(t *testing.T) {
 		t.Fatal(err)
 	}
 	list, err := service.List(t.Context(), "owner", "run", "attempt", "lease")
-	if err != nil || len(list) != 1 || list[0].Available || list[0].Reason == "" {
+	if err != nil || len(list.Tools) != 1 || list.Tools[0].Available || list.Tools[0].Reason == "" {
 		t.Fatalf("unavailable adapter was advertised ready: %+v %v", list, err)
 	}
 }

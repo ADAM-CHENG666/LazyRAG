@@ -92,8 +92,23 @@ func (s WorkflowControlService) execute(ctx context.Context, owner, sessionID st
 		}
 		var saved orm.WorkflowCommand
 		if err := tx.Where("command_id = ?", command.CommandID).First(&saved).Error; err == nil {
-			if saved.OwnerUserID != owner || saved.SessionID != sessionID || saved.RequestHash != digest {
+			if saved.OwnerUserID != owner || saved.SessionID != sessionID {
 				return controlstore.Reject("COMMAND_CONFLICT", "command_id was already used for another operation")
+			}
+			if saved.RequestHash != digest {
+				// Earlier receipts included the first application's state version.
+				// Accept only an exact replay before promoting that verified hash;
+				// later replays can then use a refreshed state version as usual.
+				legacyBody, err := json.Marshal(command)
+				if err != nil {
+					return err
+				}
+				if saved.RequestHash != controlstore.Hash(legacyBody) {
+					return controlstore.Reject("COMMAND_CONFLICT", "command_id was already used for another operation")
+				}
+				if err := tx.Model(&saved).Update("request_hash", digest).Error; err != nil {
+					return err
+				}
 			}
 			if err := json.Unmarshal(saved.ResponseJSON, &result.Receipt); err != nil {
 				return err

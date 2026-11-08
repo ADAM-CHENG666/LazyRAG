@@ -93,9 +93,7 @@ type workflowExecutionStopBody struct {
 type workflowToolListBody struct {
 	ExecutionHandle string `json:"execution_handle"`
 }
-type workflowToolListResult struct {
-	Tools []workflowtool.Tool `json:"tools"`
-}
+type workflowToolListResult workflowtool.ListResult
 type workflowToolListReply struct {
 	ContractVersion string                 `json:"contract_version"`
 	OK              bool                   `json:"ok"`

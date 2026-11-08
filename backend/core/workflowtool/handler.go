@@ -85,7 +85,7 @@ func (h Handler) List(w http.ResponseWriter, r *http.Request) {
 		serviceError(w, err)
 		return
 	}
-	reply(w, http.StatusOK, map[string]any{"tools": result}, nil)
+	reply(w, http.StatusOK, result, nil)
 }
 
 func (h Handler) Call(w http.ResponseWriter, r *http.Request) {

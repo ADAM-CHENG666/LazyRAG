@@ -87,7 +87,7 @@ func knowledgeValue(t *testing.T, result Result) map[string]any {
 func TestKnowledgeSelectedCatalogListAndReadWithoutModels(t *testing.T) {
 	s := knowledgeFixture(t, &executor.KnowledgeScope{DatasetIDs: []string{"selected"}})
 	catalog, err := s.List(t.Context(), "owner", "run", "attempt", "lease")
-	if err != nil || len(catalog) != 7 || catalog[5].Name != "knowledge_list_documents" || catalog[6].Name != "knowledge_read_document" || !catalog[5].Available || !catalog[6].Available {
+	if err != nil || len(catalog.Tools) != 7 || catalog.Tools[5].Name != "knowledge_list_documents" || catalog.Tools[6].Name != "knowledge_read_document" || !catalog.Tools[5].Available || !catalog.Tools[6].Available {
 		t.Fatalf("catalog=%+v err=%v", catalog, err)
 	}
 	first := knowledgeValue(t, knowledgeCall(t, s, "list-1", "knowledge_list_documents", map[string]any{"page_size": 1, "keyword": "report"}))

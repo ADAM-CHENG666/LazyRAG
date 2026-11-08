@@ -42,6 +42,18 @@ type Tool struct {
 	Reason      string         `json:"reason,omitempty"`
 }
 
+// ListResult keeps independent catalogs usable when one discovery source fails.
+// Warnings describe missing catalog sections, never callable placeholder tools.
+type ListResult struct {
+	Tools    []Tool           `json:"tools"`
+	Warnings []CatalogWarning `json:"warnings,omitempty"`
+}
+
+type CatalogWarning struct {
+	Source string     `json:"source"`
+	Error  *ToolError `json:"error"`
+}
+
 type CallInput struct {
 	ExecutionHandle string         `json:"execution_handle"`
 	ToolName        string         `json:"tool_name"`
@@ -139,17 +151,17 @@ func (s *Service) invocation(ctx context.Context, owner, sessionID, attemptID st
 		ConversationID: session.ConversationID, ExecutionKey: attemptID}, nil
 }
 
-func (s *Service) List(ctx context.Context, owner, sessionID, attemptID, handle string) ([]Tool, error) {
+func (s *Service) List(ctx context.Context, owner, sessionID, attemptID, handle string) (ListResult, error) {
 	contract, err := executor.AuthorizeExternalExecution(ctx, s.DB, owner, sessionID, attemptID, handle)
 	if err != nil {
-		return nil, err
+		return ListResult{}, err
 	}
-	result := []Tool{}
+	result := ListResult{Tools: []Tool{}}
 	// Registered adapters remain the execution boundary. A step describes the
 	// required capability, not a second per-step tool allowlist.
 	var entries []orm.WorkflowRevisionEntry
 	if err := s.DB.WithContext(ctx).Where("revision_id = ? AND entry_type = ?", contract.WorkflowRevision, "file").Find(&entries).Error; err != nil {
-		return nil, err
+		return ListResult{}, err
 	}
 	paths := map[string]bool{}
 	for _, entry := range entries {
@@ -160,11 +172,12 @@ func (s *Service) List(ctx context.Context, owner, sessionID, attemptID, handle 
 			Tools []Tool `json:"tools"`
 		}
 		if err := s.packageRequest(ctx, contract, "list", "", nil, &response); err != nil {
-			return nil, err
-		}
-		for _, tool := range response.Tools {
-			tool.Source = "package"
-			result = append(result, tool)
+			result.Warnings = append(result.Warnings, CatalogWarning{Source: "package", Error: publicToolError(err)})
+		} else {
+			for _, tool := range response.Tools {
+				tool.Source = "package"
+				result.Tools = append(result.Tools, tool)
+			}
 		}
 	}
 	for _, group := range []struct {
@@ -185,32 +198,33 @@ func (s *Service) List(ctx context.Context, owner, sessionID, attemptID, handle 
 			if bindingErr != nil {
 				tool.Available, tool.Reason = false, bindingErr.Error()
 			}
-			result = append(result, tool)
+			result.Tools = append(result.Tools, tool)
 		}
 	}
 	var session orm.WorkflowSession
 	if err := s.DB.WithContext(ctx).Where("id = ?", sessionID).First(&session).Error; err != nil {
-		return nil, err
+		return ListResult{}, err
 	}
 	binding, err := controlstore.DecodeBinding(session)
 	if err != nil {
-		return nil, err
+		return ListResult{}, err
 	}
 	if binding.Provider != "" {
 		call, err := s.invocation(ctx, owner, sessionID, attemptID)
-		if err != nil {
-			return nil, err
+		var catalog capability.ListExternalToolsResult
+		if err == nil {
+			catalog, err = externalcapability.New(s.DB, s.client()).ListExternalTools(ctx, call)
 		}
-		catalog, err := externalcapability.New(s.DB, s.client()).ListExternalTools(ctx, call)
 		if err != nil {
-			return nil, publicToolError(err)
-		}
-		for _, tool := range catalog.Items {
-			result = append(result, Tool{Name: tool.ID, Source: "global", Description: tool.Description, InputSchema: tool.InputSchema, Available: true})
+			result.Warnings = append(result.Warnings, CatalogWarning{Source: "global", Error: publicToolError(err)})
+		} else {
+			for _, tool := range catalog.Items {
+				result.Tools = append(result.Tools, Tool{Name: tool.ID, Source: "global", Description: tool.Description, InputSchema: tool.InputSchema, Available: true})
+			}
 		}
 	}
 	if _, err = executor.AuthorizeExternalExecution(ctx, s.DB, owner, sessionID, attemptID, handle); err != nil {
-		return nil, err
+		return ListResult{}, err
 	}
 	return result, nil
 }

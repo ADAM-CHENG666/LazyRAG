@@ -72,7 +72,13 @@ func (c *Client) mutate(ctx context.Context, path string, input, output any, ide
 		return nil
 	}
 	var problem *coreapi.Error
-	if !errors.As(err, &problem) {
+	var notSent *coreapi.RequestNotSentError
+	if errors.As(err, &notSent) {
+		problem = &coreapi.Error{Code: "REQUEST_NOT_SENT", Message: notSent.Error(), Fields: map[string]any{
+			"outcome":  "not_sent",
+			"recovery": "Correct the local request or connection error before retrying; no Workflow write was sent.",
+		}}
+	} else if !errors.As(err, &problem) {
 		problem = &coreapi.Error{Code: "REQUEST_OUTCOME_UNKNOWN", Message: "No confirmed response was received from LazyMind; the operation may have been applied"}
 	} else {
 		clone := *problem

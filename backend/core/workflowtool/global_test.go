@@ -51,7 +51,7 @@ func TestGlobalToolGatewayUsesPersistedAgentAndNoModelConfiguration(t *testing.T
 		t.Fatal(err)
 	}
 	listed, err := service.List(t.Context(), "owner", "run", "attempt", "lease")
-	if err != nil || len(listed) != 1 || !listed[0].Available || listed[0].Name != "builtin:url_fetch" {
+	if err != nil || len(listed.Tools) != 1 || !listed.Tools[0].Available || listed.Tools[0].Name != "builtin:url_fetch" {
 		t.Fatalf("global catalog failed: %+v %v", listed, err)
 	}
 	input.ToolName, input.Arguments = "builtin:url_fetch", map[string]any{"url": "https://example.com"}
