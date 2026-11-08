@@ -29,6 +29,9 @@ type Error struct {
 	Code       string
 	Message    string
 	Retryable  bool
+	// Public server diagnostics are retained verbatim for forward-compatible adapters.
+	Fields map[string]any
+	Result json.RawMessage
 }
 
 func (e *Error) Error() string {
@@ -136,13 +139,9 @@ func (c *Client) DoJSONHeaders(ctx context.Context, method, path string, input, 
 
 func unwrap(status int, body []byte) (json.RawMessage, error) {
 	var value struct {
-		OK     *bool           `json:"ok"`
-		Result json.RawMessage `json:"result"`
-		Error  *struct {
-			Code      string `json:"code"`
-			Message   string `json:"message"`
-			Retryable bool   `json:"retryable"`
-		} `json:"error"`
+		OK      *bool           `json:"ok"`
+		Result  json.RawMessage `json:"result"`
+		Error   map[string]any  `json:"error"`
 		Code    *int            `json:"code"`
 		Message string          `json:"message"`
 		Data    json.RawMessage `json:"data"`
@@ -153,7 +152,10 @@ func unwrap(status int, body []byte) (json.RawMessage, error) {
 	if value.OK != nil {
 		if !*value.OK || status < 200 || status >= 300 {
 			if value.Error != nil {
-				return nil, &Error{StatusCode: status, Code: value.Error.Code, Message: value.Error.Message, Retryable: value.Error.Retryable}
+				code, _ := value.Error["code"].(string)
+				message, _ := value.Error["message"].(string)
+				retryable, _ := value.Error["retryable"].(bool)
+				return nil, &Error{StatusCode: status, Code: code, Message: message, Retryable: retryable, Fields: value.Error, Result: value.Result}
 			}
 			return nil, &Error{StatusCode: status, Message: http.StatusText(status)}
 		}

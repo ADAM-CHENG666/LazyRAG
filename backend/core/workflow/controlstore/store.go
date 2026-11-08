@@ -20,25 +20,56 @@ import (
 	"lazymind/core/workflow/displaystate"
 )
 
+// Error is the public Workflow diagnostic shared by transport adapters.
+// Details contain only deliberate public contract/state data, never internal causes.
 type Error struct {
-	Code    string
-	Message string
+	Code      string         `json:"code"`
+	Message   string         `json:"message"`
+	Retryable bool           `json:"retryable"`
+	Details   map[string]any `json:"details,omitempty"`
+	Recovery  string         `json:"recovery,omitempty"`
 }
 
-// HTTPStatus keeps native and public execution errors consistent.
 func (e *Error) HTTPStatus() int {
 	switch e.Code {
-	case "REQUIRED_OUTPUT_MISSING", "OUTPUT_SLOT_UNDECLARED", "OUTPUT_TYPE_MISMATCH", "INVALID_ARTIFACT", "INVALID_OUTCOME":
-		return http.StatusUnprocessableEntity
-	case "EXECUTION_NOT_FOUND":
+	case "PERMISSION_DENIED", "HOST_AUTH_REQUIRED", "EXECUTOR_MISMATCH":
+		return http.StatusForbidden
+	case "EXECUTION_NOT_FOUND", "WORKFLOW_NOT_FOUND":
 		return http.StatusNotFound
+	case "REQUIRED_OUTPUT_MISSING", "OUTPUT_SLOT_UNDECLARED", "OUTPUT_TYPE_MISMATCH", "INVALID_ARTIFACT", "INVALID_ARTIFACT_FILE", "INVALID_OUTCOME", "INVALID_COMMAND", "INVALID_TOOL_CALL", "INVALID_EXECUTION", "WORKFLOW_REFACTOR_REQUIRED":
+		return http.StatusUnprocessableEntity
 	default:
 		return http.StatusConflict
 	}
 }
 
-func (e *Error) Error() string          { return e.Code + ": " + e.Message }
-func Reject(code, message string) error { return &Error{Code: code, Message: message} }
+func (e *Error) Error() string { return e.Code + ": " + e.Message }
+func Reject(code, message string) error {
+	return &Error{Code: code, Message: message, Recovery: RecoveryFor(code)}
+}
+
+// Recovery describes how to inspect or repair a rejection, not permission to
+// advance. The authoritative control snapshot still determines allowed actions.
+func RecoveryFor(code string) string {
+	switch code {
+	case "REQUIRED_OUTPUT_MISSING":
+		return "Publish the missing output slots under the current valid handle, then complete the same execution."
+	case "INVALID_ARTIFACT", "INVALID_ARTIFACT_FILE", "OUTPUT_SLOT_UNDECLARED", "OUTPUT_TYPE_MISMATCH", "INVALID_OUTCOME", "INVALID_COMMAND", "INVALID_TOOL_CALL", "INVALID_ARGUMENT":
+		return "Correct the indicated input; do not retry the unchanged invalid request."
+	case "WORKFLOW_REFACTOR_REQUIRED":
+		return "Ask the workflow developer to publish a shared step contract; start a new run on that revision."
+	case "COMMAND_CONFLICT":
+		return "Read the existing receipt/state. Replay unchanged requests with the original ID; use a new ID only for an intentional new operation."
+	case "SESSION_STOPPED", "EXECUTION_FENCED", "EXECUTION_NOT_CLAIMABLE", "STEP_NOT_READY", "STATE_VERSION_CONFLICT", "WORKFLOW_ADMISSION_DENIED", "EDITS_PENDING_CONTINUE":
+		return "Read workflow.state. Follow Core admission and available actions; never continue with an expired handle or bypass user review."
+	case "TRANSITION_RESULT_UNKNOWN", "TOOL_CALL_IN_PROGRESS":
+		return "Retain the original command_id and replay the unchanged request to retrieve its receipt. Do not create another operation."
+	case "TOOL_OUTCOME_UNKNOWN":
+		return "Inspect existing provider results before deciding whether a new operation is needed; do not automatically repeat paid work."
+	default:
+		return ""
+	}
+}
 
 type Binding struct {
 	Cancellation   string `json:"cancellation,omitempty"`
@@ -124,7 +155,7 @@ func ValidateExecution(tx *gorm.DB, session orm.WorkflowSession, attemptID, hand
 		return err
 	}
 	if count != 1 {
-		return Reject("EXECUTION_FENCED", "the execution no longer owns this attempt; resume before submitting")
+		return Reject("EXECUTION_FENCED", "the execution handle is expired, replaced, or no longer active")
 	}
 	return nil
 }
@@ -240,7 +271,7 @@ func GuardBegin(tx *gorm.DB, session orm.WorkflowSession) error {
 		}
 	}
 	if !state.Admission.CanBegin {
-		return Reject("WORKFLOW_ADMISSION_DENIED", state.Admission.Reason)
+		return &Error{Code: "WORKFLOW_ADMISSION_DENIED", Message: state.Admission.Reason, Details: map[string]any{"control": state}, Recovery: RecoveryFor("WORKFLOW_ADMISSION_DENIED")}
 	}
 	return nil
 }

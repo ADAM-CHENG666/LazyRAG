@@ -131,7 +131,7 @@ func testWorkflowToolDescriptions(t *testing.T, provider string) {
 	if !containsAll(got["workflow.get"], "inspecting package scripts", "tool_scripts", "compiled_graph") {
 		t.Fatalf("workflow.get description=%q", got["workflow.get"])
 	}
-	if !containsAll(got["workflow.step.begin"], "execution_handle", "executor_host is lazymind", "no handle is issued") {
+	if !containsAll(got["workflow.step.begin"], "execution_handle", "shared contract", "optional subagent") {
 		t.Fatalf("workflow.step.begin description=%q", got["workflow.step.begin"])
 	}
 	for _, name := range []string{"workflow.start", "workflow.step.begin"} {
@@ -171,8 +171,8 @@ func TestReadOnlyClassificationCoversEveryWorkflowTool(t *testing.T) {
 		"workflow.state": true, "workflow.session.list": true,
 		"workflow.artifact.list": true, "workflow.artifact.get": true, "workflow.tool.list": true,
 	}
-	if len(ToolNames) != 18 {
-		t.Fatalf("tool count=%d, want 18", len(ToolNames))
+	if len(ToolNames) != 19 {
+		t.Fatalf("tool count=%d, want 19", len(ToolNames))
 	}
 	for _, name := range ToolNames {
 		if IsReadOnlyTool(name) != readOnly[name] {

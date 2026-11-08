@@ -15,6 +15,7 @@ import (
 	"lazymind/core/common/orm"
 	corestore "lazymind/core/store"
 	workflowcore "lazymind/core/workflow"
+	"lazymind/core/workflow/controlstore"
 	"lazymind/core/workflow/executor"
 	"lazymind/core/workflow/graphengine"
 )
@@ -86,8 +87,20 @@ func TestNativeAndExternalProgressivePublication(t *testing.T) {
 				}
 				return invoke(public.Complete, executor.Completion{ExecutionHandle: grant.ExecutionHandle, Outcome: "succeeded", Summary: "done"})
 			}
-			if rec := finish(); rec.Code == 200 {
-				t.Fatal("missing outputs accepted")
+			rejected := finish()
+			var diagnostic struct {
+				Error *controlstore.Error `json:"error"`
+			}
+			if err := json.Unmarshal(rejected.Body.Bytes(), &diagnostic); err != nil {
+				t.Fatal(err)
+			}
+			if rejected.Code != http.StatusUnprocessableEntity || diagnostic.Error == nil || diagnostic.Error.Code != "REQUIRED_OUTPUT_MISSING" || diagnostic.Error.Recovery == "" {
+				t.Fatalf("missing output diagnostics: %d %s", rejected.Code, rejected.Body.String())
+			}
+			details := diagnostic.Error.Details
+			slots, _ := details["missing_slots"].([]any)
+			if len(slots) != 1 || slots[0] != "report" {
+				t.Fatalf("missing repair target: %s", rejected.Body.String())
 			}
 			for seq := 1; seq <= 40; seq++ {
 				if rec := publish(seq, fmt.Sprint(seq)); rec.Code != 200 {

@@ -21,20 +21,20 @@ type ExecutionToolCallInput struct {
 	ExecutionID     string         `json:"execution_id" jsonschema:"required,Current external execution identifier"`
 	ExecutionHandle string         `json:"execution_handle" jsonschema:"required,Unchanged execution handle held by the root controller; never forward to a worker"`
 	ToolName        string         `json:"tool_name" jsonschema:"required,Exact name returned by workflow.tool.list"`
-	Source          string         `json:"source,omitempty" jsonschema:"Optional package or global source; must match the pinned contract declaration"`
+	Source          string         `json:"source,omitempty" jsonschema:"package or global source from workflow.tool.list; required for opaque global tool IDs"`
 	Arguments       map[string]any `json:"arguments" jsonschema:"required,Arguments matching the advertised input_schema; use resource references instead of Core-local paths"`
 	CommandID       string         `json:"command_id" jsonschema:"required,Stable unique operation ID; reuse unchanged with identical arguments after an uncertain result"`
 }
 
 func registerExecutionTools(server *mcp.Server, client *Client) {
-	mcp.AddTool(server, &mcp.Tool{Name: "workflow.tool.list", Title: "List tools for a Workflow execution",
-		Description: "List tools explicitly allowed by this active execution's pinned external contract, including schemas and availability. The root controller holds the execution_handle and proxies worker requests; workers do not control Workflow state. Missing capabilities must be configured in LazyMind before retrying.", Annotations: annotations(true)},
+	registerTool(server, &mcp.Tool{Name: "workflow.tool.list", Title: "List tools for a Workflow execution",
+		Description: "Discover registered package adapters and user-authorized global tools, including optional image/video models. Steps declare capabilities and output requirements, not fixed tool names. The root may execute itself or proxy optional workers; it retains the handle. Choose host capabilities or an available MCP tool that satisfies the shared contract.", Annotations: annotations(true)},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input ExecutionToolsInput) (*mcp.CallToolResult, map[string]any, error) {
 			value, err := client.ListExecutionTools(ctx, input)
 			return nil, value, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "workflow.tool.call", Title: "Call a tool for a Workflow execution",
-		Description: "The root controller executes one tool explicitly allowed by the pinned external contract on behalf of a worker. Use the listed name and schema, unchanged execution_handle, and a stable command_id for unchanged retries. This does not publish or complete a step. Do not send credentials or arbitrary host filesystem paths. If unavailable, show the LazyMind configuration guidance and yield; do not replace the workflow or silently use a different capability.", Annotations: annotations(false)},
+	registerTool(server, &mcp.Tool{Name: "workflow.tool.call", Title: "Call a tool for a Workflow execution",
+		Description: "The root controller calls a registered and authorized tool for this execution, directly or on behalf of an optional worker. Use the listed name and schema, unchanged execution_handle, and a stable command_id for unchanged retries. This does not publish or complete a step. Do not send credentials or arbitrary host filesystem paths. If unavailable, show the LazyMind configuration guidance and yield; use an equivalent host capability when it satisfies the contract; otherwise report the missing configuration.", Annotations: annotations(false)},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input ExecutionToolCallInput) (*mcp.CallToolResult, map[string]any, error) {
 			value, err := client.CallExecutionTool(ctx, input)
 			return nil, value, err
@@ -75,6 +75,16 @@ func (c *Client) CallExecutionTool(ctx context.Context, input ExecutionToolCallI
 		payload["source"] = input.Source
 	}
 	var result map[string]any
-	err = c.api.DoJSON(ctx, http.MethodPost, path, payload, &result)
+	err = c.mutate(ctx, path, payload, &result, map[string]any{"session_id": input.SessionID, "execution_id": input.ExecutionID, "command_id": input.CommandID})
+	return result, err
+}
+
+func (c *Client) Renew(ctx context.Context, input ExecutionToolsInput) (map[string]any, error) {
+	if strings.TrimSpace(input.SessionID) == "" || strings.TrimSpace(input.ExecutionID) == "" || strings.TrimSpace(input.ExecutionHandle) == "" {
+		return nil, errors.New("session_id, execution_id and execution_handle are required")
+	}
+	var result map[string]any
+	err := c.mutate(ctx, "/workflow-sessions/"+url.PathEscape(input.SessionID)+"/hosted-attempts/"+url.PathEscape(input.ExecutionID)+":renew",
+		map[string]any{"execution_handle": input.ExecutionHandle}, &result, map[string]any{"session_id": input.SessionID, "execution_id": input.ExecutionID})
 	return result, err
 }

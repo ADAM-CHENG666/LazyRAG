@@ -35,8 +35,6 @@ func (loader DBContextLoader) LoadAttemptContext(ctx context.Context, id string)
 		}
 	}
 	value.ContractVersion, value.SessionID, value.AttemptID, value.StepID, value.AttemptNo = attempt.ContractVersion, row.SessionID, row.ID, row.StepID, row.Attempt
-	// External policy is authoritative only in the immutable compiled revision.
-	value.ExternalExecution = nil
 	var session orm.WorkflowSession
 	if err := loader.DB.WithContext(ctx).Where("id = ?", row.SessionID).First(&session).Error; err != nil {
 		return AttemptContext{}, err
@@ -57,6 +55,9 @@ func (loader DBContextLoader) LoadAttemptContext(ctx context.Context, id string)
 		if err := loader.DB.WithContext(ctx).Where("id = ?", session.WorkflowRevisionID).First(&revision).Error; err == nil {
 			var graph graphengine.CompiledStateGraph
 			if json.Unmarshal(revision.CompiledGraph, &graph) == nil {
+				if row.ExecutorHost == "external-agent" && graph.Runtime.ExternalExecution != nil {
+					return AttemptContext{}, controlstore.Reject("WORKFLOW_REFACTOR_REQUIRED", "This revision uses runtime.external_execution. Move its business instructions, acceptance and outputs into the shared steps and publish a new revision.")
+				}
 				for materialID, cardinality := range graph.MaterialCardinalities {
 					listMaterials[materialID] = cardinality == "list"
 				}
@@ -72,11 +73,11 @@ func (loader DBContextLoader) LoadAttemptContext(ctx context.Context, id string)
 					value.TerminalTools = node.TerminalTools
 					value.ToolsOnly = node.ToolsOnly
 					value.TerminalToolsOnly = node.TerminalToolsOnly
-					// Only the persisted external executor may select the new policy.
-					// Native runs of the same revision keep their original contract.
-					value.ExternalExecution = nil
-					if controlstore.Controlled(session) && row.ExecutorHost == "external-agent" {
-						ApplyExternalExecution(&value, node)
+					// Execution mechanics belong to the host; business instructions,
+					// acceptance and required outputs are identical in both modes.
+					if row.ExecutorHost == "external-agent" {
+						value.LegacyTools, value.TerminalTools = nil, nil
+						value.ToolsOnly, value.TerminalToolsOnly = false, false
 					}
 				}
 			}
@@ -86,9 +87,6 @@ func (loader DBContextLoader) LoadAttemptContext(ctx context.Context, id string)
 			}
 			value.OutputCardinality = cardinality
 		}
-	}
-	if err := loadExternalSkillFiles(ctx, loader.DB, &value); err != nil {
-		return AttemptContext{}, err
 	}
 	if controlstore.Controlled(session) && value.Metadata[frozenInputsKey] == "true" {
 		return value, nil

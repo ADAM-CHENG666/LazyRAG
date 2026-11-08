@@ -51,12 +51,31 @@ type CallInput struct {
 }
 
 type ToolError struct {
-	Code      string `json:"code"`
-	Message   string `json:"message"`
-	Retryable bool   `json:"retryable"`
+	Code      string         `json:"code"`
+	Message   string         `json:"message"`
+	Retryable bool           `json:"retryable"`
+	Details   map[string]any `json:"details,omitempty"`
+	Recovery  string         `json:"recovery,omitempty"`
 }
 
 func (e *ToolError) Error() string { return e.Code + ": " + e.Message }
+
+func (e *ToolError) HTTPStatus() int {
+	switch e.Code {
+	case "INVALID_ARGUMENT", "INVALID_TOOL_CALL", "INVALID_PACKAGE", "INVALID_SCOPE", "TOOL_NOT_ALLOWED", "TOOL_ADAPTER_UNAVAILABLE":
+		return http.StatusUnprocessableEntity
+	case "PERMISSION_DENIED":
+		return http.StatusForbidden
+	case "UNAUTHENTICATED":
+		return http.StatusUnauthorized
+	case "NOT_FOUND":
+		return http.StatusNotFound
+	case "UNAVAILABLE", "CAPABILITY_UNAVAILABLE", "DEPENDENCY_MISSING":
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusConflict
+	}
+}
 
 type Result struct {
 	Result any        `json:"result,omitempty"`
@@ -81,11 +100,15 @@ func unavailable(message string) error {
 }
 
 // Capability errors expose a deliberate public message. Preserve actionable
-// input/permission guidance, but never serialize internal causes or details.
+// input/permission guidance, but never serialize internal causes.
 func publicToolError(err error) *ToolError {
 	var toolErr *ToolError
 	if errors.As(err, &toolErr) {
 		return toolErr
+	}
+	var controlled *controlstore.Error
+	if errors.As(err, &controlled) {
+		return &ToolError{Code: controlled.Code, Message: controlled.Message, Retryable: controlled.Retryable, Details: controlled.Details, Recovery: controlled.Recovery}
 	}
 	var capabilityErr *capability.Error
 	if errors.As(err, &capabilityErr) {
@@ -122,65 +145,69 @@ func (s *Service) List(ctx context.Context, owner, sessionID, attemptID, handle 
 		return nil, err
 	}
 	result := []Tool{}
-	if contract.ExternalExecution == nil {
-		return result, nil
+	// Registered adapters remain the execution boundary. A step describes the
+	// required capability, not a second per-step tool allowlist.
+	var entries []orm.WorkflowRevisionEntry
+	if err := s.DB.WithContext(ctx).Where("revision_id = ? AND entry_type = ?", contract.WorkflowRevision, "file").Find(&entries).Error; err != nil {
+		return nil, err
 	}
-	var packageTools map[string]Tool
-	var globalTools map[string]capability.ExternalToolSummary
-	var packageErr, globalErr error
-	for _, declared := range contract.ExternalExecution.Tools {
-		item := Tool{Name: declared.Name, Source: declared.Source}
-		switch declared.Source {
-		case "package":
-			if adapter, ok := academicTool(declared.Name); ok {
-				item = adapter
-				if err := s.validateAcademicBinding(ctx, contract); err != nil {
-					item.Available, item.Reason = false, err.Error()
-				}
-				break
-			}
-			if adapter, ok := knowledgeTool(declared.Name); ok {
-				item = adapter
-				if err := s.validateKnowledgeBinding(ctx, contract); err != nil {
-					item.Available, item.Reason = false, err.Error()
-				}
-				break
-			}
-			if packageTools == nil {
-				packageTools = map[string]Tool{}
-				var response struct {
-					Tools []Tool `json:"tools"`
-				}
-				packageErr = s.packageRequest(ctx, contract, "list", "", nil, &response)
-				for _, tool := range response.Tools {
-					packageTools[tool.Name] = tool
-				}
-			}
-			if tool, ok := packageTools[declared.Name]; ok && packageErr == nil {
-				item.Description, item.InputSchema, item.Available, item.Reason = tool.Description, tool.InputSchema, tool.Available, tool.Reason
-			} else {
-				item.Reason = "Package tool is unavailable; check its adapter and dependencies in LazyMind"
-			}
-		case "global":
-			if globalTools == nil {
-				globalTools = map[string]capability.ExternalToolSummary{}
-				var call capability.InvocationContext
-				call, globalErr = s.invocation(ctx, owner, sessionID, attemptID)
-				if globalErr == nil {
-					var catalog capability.ListExternalToolsResult
-					catalog, globalErr = externalcapability.New(s.DB, s.client()).ListExternalTools(ctx, call)
-					for _, tool := range catalog.Items {
-						globalTools[tool.ID] = tool
-					}
-				}
-			}
-			if tool, ok := globalTools[globalID(declared.Name)]; ok && globalErr == nil {
-				item.Description, item.InputSchema, item.Available = tool.Description, tool.InputSchema, true
-			} else {
-				item.Reason = "Configure and enable this capability for the connected Agent in LazyMind, then retry"
-			}
+	paths := map[string]bool{}
+	for _, entry := range entries {
+		paths[entry.Path] = true
+	}
+	if paths["scripts/external_tools.py"] {
+		var response struct {
+			Tools []Tool `json:"tools"`
 		}
-		result = append(result, item)
+		if err := s.packageRequest(ctx, contract, "list", "", nil, &response); err != nil {
+			return nil, err
+		}
+		for _, tool := range response.Tools {
+			tool.Source = "package"
+			result = append(result, tool)
+		}
+	}
+	for _, group := range []struct {
+		path     string
+		names    []string
+		tool     func(string) (Tool, bool)
+		validate func(context.Context, executor.AttemptContext) error
+	}{
+		{academicBindingPath, []string{"academic_context", "academic_expansion", "academic_search_papers", "academic_read_paper", "academic_resolve_papers"}, academicTool, s.validateAcademicBinding},
+		{knowledgeBindingPath, []string{"knowledge_list_documents", "knowledge_read_document"}, knowledgeTool, s.validateKnowledgeBinding},
+	} {
+		if !paths[group.path] {
+			continue
+		}
+		bindingErr := group.validate(ctx, contract)
+		for _, name := range group.names {
+			tool, _ := group.tool(name)
+			if bindingErr != nil {
+				tool.Available, tool.Reason = false, bindingErr.Error()
+			}
+			result = append(result, tool)
+		}
+	}
+	var session orm.WorkflowSession
+	if err := s.DB.WithContext(ctx).Where("id = ?", sessionID).First(&session).Error; err != nil {
+		return nil, err
+	}
+	binding, err := controlstore.DecodeBinding(session)
+	if err != nil {
+		return nil, err
+	}
+	if binding.Provider != "" {
+		call, err := s.invocation(ctx, owner, sessionID, attemptID)
+		if err != nil {
+			return nil, err
+		}
+		catalog, err := externalcapability.New(s.DB, s.client()).ListExternalTools(ctx, call)
+		if err != nil {
+			return nil, publicToolError(err)
+		}
+		for _, tool := range catalog.Items {
+			result = append(result, Tool{Name: tool.ID, Source: "global", Description: tool.Description, InputSchema: tool.InputSchema, Available: true})
+		}
 	}
 	if _, err = executor.AuthorizeExternalExecution(ctx, s.DB, owner, sessionID, attemptID, handle); err != nil {
 		return nil, err
@@ -205,14 +232,22 @@ func (s *Service) Call(ctx context.Context, owner, sessionID, attemptID string, 
 	if len(strings.TrimSpace(input.CommandID)) < 1 || len(input.CommandID) > 256 || input.ToolName == "" {
 		return Result{}, controlstore.Reject("INVALID_TOOL_CALL", "tool_name and a stable command_id of at most 256 characters are required")
 	}
-	contract, declared, err := executor.AuthorizeExternalToolCall(ctx, s.DB, owner, sessionID, attemptID, input.ExecutionHandle, input.ToolName)
+	contract, err := executor.AuthorizeExternalExecution(ctx, s.DB, owner, sessionID, attemptID, input.ExecutionHandle)
 	if err != nil {
 		return Result{}, err
 	}
-	source := declared.Source
-	if input.Source != "" && input.Source != source {
-		return Result{}, controlstore.Reject("EXTERNAL_TOOL_UNDECLARED", "tool source does not match the pinned contract")
+	source := input.Source
+	if source == "" {
+		source = "package"
+		if strings.HasPrefix(input.ToolName, "builtin:") || globalID(input.ToolName) != input.ToolName {
+			source = "global"
+		}
 	}
+	if source != "package" && source != "global" {
+		return Result{}, controlstore.Reject("INVALID_TOOL_CALL", "source must be package or global, as returned by workflow.tool.list")
+	}
+	// Source only chooses an adapter. Both adapters independently authorize the
+	// registered tool; callers cannot select arbitrary scripts or providers.
 	canonical, err := json.Marshal(map[string]any{"source": source, "tool_name": input.ToolName, "arguments": input.Arguments, "revision": contract.WorkflowRevision})
 	if err != nil {
 		return Result{}, err
@@ -274,7 +309,7 @@ func (s *Service) Call(ctx context.Context, owner, sessionID, attemptID string, 
 	}
 	// Stop/rewind/reclaim invalidates delivery even when an external service
 	// could not be interrupted. No tool may publish Workflow artifacts itself.
-	if _, _, err := executor.AuthorizeExternalToolCall(ctx, s.DB, owner, sessionID, attemptID, input.ExecutionHandle, input.ToolName); err != nil {
+	if _, err := executor.AuthorizeExternalExecution(ctx, s.DB, owner, sessionID, attemptID, input.ExecutionHandle); err != nil {
 		result = Result{Error: &ToolError{Code: "EXECUTION_FENCED", Message: "Execution authorization changed while the tool ran; its result was not delivered"}}
 	}
 	encoded, err := json.Marshal(result)
@@ -363,10 +398,10 @@ func (s *Service) packageRequest(ctx context.Context, contract executor.AttemptC
 			}
 			if failure != nil {
 				switch failure.Code {
-				case "DEPENDENCY_MISSING", "TOOL_ADAPTER_UNAVAILABLE":
-					return &ToolError{Code: failure.Code, Message: "The workflow tool requires a configured capability or installed dependency in LazyMind; configure it, then retry the affected step"}
-				case "INVALID_ARGUMENT", "INVALID_PACKAGE", "TOOL_NOT_ALLOWED":
-					return &ToolError{Code: failure.Code, Message: "The workflow tool rejected the pinned package or arguments; check its contract before retrying"}
+				case "DEPENDENCY_MISSING", "TOOL_ADAPTER_UNAVAILABLE", "INVALID_ARGUMENT", "INVALID_PACKAGE", "TOOL_NOT_ALLOWED":
+					// Audited adapters expose these as public errors. Keep the
+					// repair target instead of replacing it with a generic failure.
+					return failure
 				}
 			}
 		}

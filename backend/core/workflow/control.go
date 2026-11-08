@@ -77,7 +77,11 @@ func (s WorkflowControlService) execute(ctx context.Context, owner, sessionID st
 	if command.CommandID == "" || len(command.CommandID) > 255 {
 		return result, controlstore.Reject("INVALID_COMMAND", "command_id is required and must be at most 255 characters")
 	}
-	body, err := json.Marshal(command)
+	canonical := command
+	// The version is a first-application precondition, not command identity.
+	// A replay after a committed write must return its receipt at the new state.
+	canonical.StateVersion = 0
+	body, err := json.Marshal(canonical)
 	if err != nil {
 		return result, err
 	}
@@ -450,25 +454,23 @@ func confirmWorkflowReview(ctx context.Context, tx *gorm.DB, session *orm.Workfl
 type WorkflowControlHandler struct{ Service WorkflowControlService }
 
 func writeWorkflowControlError(w http.ResponseWriter, err error) {
-	status, code := http.StatusServiceUnavailable, "WORKFLOW_CONTROL_FAILED"
-	var problem *controlstore.Error
+	status := http.StatusServiceUnavailable
+	problem := &controlstore.Error{Code: "WORKFLOW_CONTROL_FAILED", Message: "Workflow control is temporarily unavailable; read state before retrying."}
+	var controlled *controlstore.Error
 	var transition *transitionRejection
-	if errors.As(err, &problem) {
-		code, status = problem.Code, http.StatusConflict
-		if code == "PERMISSION_DENIED" || code == "HOST_AUTH_REQUIRED" {
-			status = http.StatusForbidden
-		}
-		if code == "INVALID_COMMAND" {
-			status = http.StatusUnprocessableEntity
-		}
+	var result any
+	if errors.As(err, &controlled) {
+		problem, status = controlled, controlled.HTTPStatus()
 	} else if errors.As(err, &transition) {
-		code, status = transition.response.Error.Code, transition.status
+		source := transition.response.Error
+		problem = &controlstore.Error{Code: source.Code, Message: source.Message, Retryable: source.Retryable, Details: source.Details, Recovery: controlstore.RecoveryFor(source.Code)}
+		status, result = transition.status, transition.response
 	} else if errors.Is(err, gorm.ErrRecordNotFound) {
-		code, status = "WORKFLOW_NOT_FOUND", http.StatusNotFound
+		problem.Code, problem.Message, status = "WORKFLOW_NOT_FOUND", "Workflow was not found", http.StatusNotFound
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": map[string]any{"code": code, "message": err.Error()}})
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": problem, "result": result})
 }
 
 // IsWorkflowUserControlRequest classifies browser requests; authentication and

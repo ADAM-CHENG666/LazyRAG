@@ -254,7 +254,7 @@ func TestMCPStopResumeSchedulesExactlyOneReplacement(t *testing.T) {
 				}
 				var attempts []orm.WorkflowSessionStep
 				must(db.Where("session_id = ?", "run").Order("attempt").Find(&attempts).Error)
-				if len(attempts) != 2 || attempts[0].Validity != "stale" || attempts[1].ID != state.ExecutionID || attempts[1].Attempt != 2 || attempts[1].ExecutorHost != executor {
+				if len(attempts) != 2 || attempts[0].Validity != "stale" || attempts[1].ID != state.ExecutionID || attempts[1].Attempt != 2 || attempts[1].ExecutorHost != "external-agent" {
 					t.Fatalf("invalid recovery attempts: %+v", attempts)
 				}
 				var session orm.WorkflowSession
@@ -269,10 +269,7 @@ func TestMCPStopResumeSchedulesExactlyOneReplacement(t *testing.T) {
 				must(err)
 				var replacement orm.WorkflowSessionStep
 				must(db.First(&replacement, "id = ?", state.ExecutionID).Error)
-				wantStatus := "queued"
-				if executor == "external-agent" {
-					wantStatus = "failed"
-				}
+				wantStatus := "failed"
 				if replacement.Status != wantStatus {
 					t.Fatalf("failed wakeup changed executor ownership: %+v", replacement)
 				}

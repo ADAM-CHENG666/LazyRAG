@@ -18,14 +18,14 @@ func failedControlledRetryFixture(t *testing.T, tools ...string) (*orm.DB, Workf
 	return db, WorkflowControlService{DB: db.DB}, first
 }
 
-func TestControlledFailedRunNativeRetryPreservesExecutorOwnership(t *testing.T) {
+func TestControlledToolRetryStaysExternal(t *testing.T) {
 	db, svc, first := failedControlledRetryFixture(t, "image_generator")
 	var old orm.WorkflowSessionStep
 	if err := db.First(&old, "id = ?", first.Receipt.ExecutionID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if old.ExecutorHost != "lazymind" {
-		t.Fatalf("fixture must execute internally: %+v", old)
+	if old.ExecutorHost != "external-agent" {
+		t.Fatalf("tool fixture must execute externally: %+v", old)
 	}
 	state := retryControlState(t, db)
 	result, err := svc.Execute(context.Background(), "batch-user", "batch-session", WorkflowControlCommand{CommandID: "native-auto-retry", Kind: "begin", StepID: "branch_b", StateVersion: state.StateVersion})
@@ -36,9 +36,18 @@ func TestControlledFailedRunNativeRetryPreservesExecutorOwnership(t *testing.T) 
 	if err := db.First(&replacement, "id = ?", result.Receipt.ExecutionID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if replacement.ExecutorHost != "lazymind" || replacement.Attempt != 2 || result.Control.Continuation != "awaiting_executor" || result.Control.Admission.CanBegin {
-		t.Fatalf("native retry lost ownership or allowed overlapping work: %+v %+v", replacement, result.Control)
+	if replacement.ExecutorHost != "external-agent" || replacement.Attempt != 2 || result.Control.Continuation != "continue" || result.Control.ActiveExecutions != 1 {
+		t.Fatalf("external retry lost ownership or allowed overlapping work: %+v %+v", replacement, result.Control)
 	}
+	_, err = svc.Execute(t.Context(), "batch-user", "batch-session", WorkflowControlCommand{CommandID: "duplicate-live-step", Kind: "begin", StepID: "branch_b", StateVersion: result.Control.StateVersion})
+	if err == nil {
+		t.Fatal("same running step was begun twice")
+	}
+	replay, err := svc.Execute(t.Context(), "batch-user", "batch-session", WorkflowControlCommand{CommandID: "native-auto-retry", Kind: "begin", StepID: "branch_b", StateVersion: result.Control.StateVersion})
+	if err != nil || replay.Receipt.ExecutionID != replacement.ID {
+		t.Fatalf("fresh state broke replay: %+v %v", replay, err)
+	}
+
 }
 
 func TestControlledFailedRunBudgetIsCheckedForRequestedStep(t *testing.T) {

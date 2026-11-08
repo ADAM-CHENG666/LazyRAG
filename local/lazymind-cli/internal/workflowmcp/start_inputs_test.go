@@ -108,7 +108,7 @@ func TestStartImportsAndBindsFilesForEveryHost(t *testing.T) {
 					}
 					bindings = request.InputBindings
 					prepared++
-					response = map[string]any{"preparation_id": "prep-1"}
+					response = map[string]any{"status": "ready", "preparation_id": "prep-1"}
 				case r.URL.Path == "/api/core/workflow-preparations/prep-1:consume":
 					consumed++
 					response = map[string]any{"session_id": "run-1", "workflow_id": "ppt-workflow", "workflow_revision_id": "revision-1"}
@@ -146,7 +146,7 @@ func TestStartImportsAndBindsFilesForEveryHost(t *testing.T) {
 				t.Fatal(err)
 			}
 			var got []string
-			for _, item := range step.Execution.StepContract.Inputs["uploaded_materials"].([]any) {
+			for _, item := range step.Execution.StepContract["inputs"].(map[string]any)["uploaded_materials"].([]any) {
 				ref := item.(map[string]any)
 				id := ref["resource_id"].(string)
 				got = append(got, id)
@@ -316,7 +316,7 @@ func TestConcurrentStartsKeepConversationFilesSeparate(t *testing.T) {
 				t.Errorf("conversation input mixed: %+v", request)
 			}
 			prepared[request.RequestContext] = request.RequestContext
-			response = map[string]any{"preparation_id": request.RequestContext}
+			response = map[string]any{"status": "ready", "preparation_id": request.RequestContext}
 		case strings.HasSuffix(r.URL.Path, ":consume"):
 			prep := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/core/workflow-preparations/"), ":consume")
 			response = map[string]any{"session_id": prepared[prep], "workflow_id": "wf"}

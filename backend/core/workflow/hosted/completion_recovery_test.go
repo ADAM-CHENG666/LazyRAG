@@ -16,6 +16,7 @@ import (
 	"lazymind/core/store"
 	"lazymind/core/taskcenter"
 	workflowcore "lazymind/core/workflow"
+	"lazymind/core/workflow/execution"
 	"lazymind/core/workflow/executor"
 	workflowstore "lazymind/core/workflow/store"
 )
@@ -37,8 +38,8 @@ func hostedTrackedTask(t *testing.T, db *gorm.DB) orm.TaskCenterTask {
 	return task
 }
 
-func hostedSubmission(outcome string) Submission {
-	submission := Submission{Outcome: outcome, Summary: "provider result"}
+func hostedSubmission(outcome string) testCompletion {
+	submission := testCompletion{Outcome: outcome, Summary: "provider result"}
 	if outcome == "succeeded" {
 		submission.Artifacts = []executor.Artifact{{Slot: "report", ContentType: "text/plain", Seq: 1, Value: json.RawMessage(`{"text":"result"}`)}}
 	}
@@ -53,7 +54,7 @@ func TestHostedOldFailedReplayDoesNotEndReplacement(t *testing.T) {
 			if _, err := service.Begin(t.Context(), "owner", "session-1", "attempt-1"); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := service.Submit(t.Context(), "owner", "session-1", "attempt-1", hostedSubmission("failed")); err != nil {
+			if _, err := publishAndComplete(service, t.Context(), "owner", "session-1", "attempt-1", hostedSubmission("failed")); err != nil {
 				t.Fatal(err)
 			}
 			var session orm.WorkflowSession
@@ -76,7 +77,7 @@ func TestHostedOldFailedReplayDoesNotEndReplacement(t *testing.T) {
 			}
 			version, updatedAt := session.StateVersion, session.UpdatedAt
 			for range 2 {
-				replay, err := service.Submit(t.Context(), "owner", session.ID, "attempt-1", hostedSubmission("failed"))
+				replay, err := publishAndComplete(service, t.Context(), "owner", session.ID, "attempt-1", hostedSubmission("failed"))
 				if err != nil || !replay.AlreadyTerminal {
 					t.Fatalf("old terminal replay: %#v err=%v", replay, err)
 				}
@@ -98,7 +99,7 @@ func TestHostedOldFailedReplayDoesNotEndReplacement(t *testing.T) {
 				t.Fatal(err)
 			}
 			for range 2 {
-				if _, err := service.Submit(t.Context(), "owner", session.ID, "replacement", hostedSubmission(outcome)); err != nil {
+				if _, err := publishAndComplete(service, t.Context(), "owner", session.ID, "replacement", hostedSubmission(outcome)); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -136,7 +137,7 @@ func rejectHostedNotices(t *testing.T, db *gorm.DB) func() {
 }
 
 func hostedServiceWithDB(service *Service, db *gorm.DB) *Service {
-	return &Service{DB: db, Store: workflowstore.New(db), Attempts: service.Attempts.WithDB(db),
+	return &Service{Completion: &execution.Service{DB: db, Store: workflowstore.New(db), Attempts: service.Attempts.WithDB(db), Contexts: executor.DBContextLoader{DB: db}}, DB: db, Store: workflowstore.New(db), Attempts: service.Attempts.WithDB(db),
 		Contexts: executor.DBContextLoader{DB: db}, Artifacts: executor.DBArtifactSink{DB: db}}
 }
 
@@ -151,7 +152,7 @@ func TestHostedNotificationFailurePreservesSessionForRecovery(t *testing.T) {
 				}
 				restore := rejectHostedNotices(t, db)
 				submit := func(tx *gorm.DB) error {
-					_, err := hostedServiceWithDB(service, tx).Submit(t.Context(), "owner", "session-1", "attempt-1", hostedSubmission(outcome))
+					_, err := publishAndComplete(hostedServiceWithDB(service, tx), t.Context(), "owner", "session-1", "attempt-1", hostedSubmission(outcome))
 					if err != nil {
 						return err
 					}
@@ -185,7 +186,7 @@ func TestHostedNotificationFailurePreservesSessionForRecovery(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if _, err := service.Submit(t.Context(), "owner", session.ID, "attempt-1", hostedSubmission(outcome)); err != nil {
+				if _, err := publishAndComplete(service, t.Context(), "owner", session.ID, "attempt-1", hostedSubmission(outcome)); err != nil {
 					t.Fatalf("completion replay while notifications unavailable: %v", err)
 				}
 				if err := db.First(&task, "id = ?", task.ID).Error; err != nil || task.Status != "running" || task.FinishedAt != nil {
@@ -242,7 +243,7 @@ func TestHostedCompletionTimeLookupFailurePreservesSessionForRecovery(t *testing
 				}
 				t.Cleanup(func() { db.Callback().Query().Remove("test:completion-time-query-failure") })
 				submit := func(tx *gorm.DB) error {
-					_, err := hostedServiceWithDB(service, tx).Submit(t.Context(), "owner", "session-1", "attempt-1", hostedSubmission(outcome))
+					_, err := publishAndComplete(hostedServiceWithDB(service, tx), t.Context(), "owner", "session-1", "attempt-1", hostedSubmission(outcome))
 					if err != nil {
 						return err
 					}
@@ -280,7 +281,7 @@ func TestHostedCompletionTimeLookupFailurePreservesSessionForRecovery(t *testing
 						t.Fatal(err)
 					}
 				}
-				if _, err := service.Submit(t.Context(), "owner", session.ID, "attempt-1", hostedSubmission(outcome)); err != nil {
+				if _, err := publishAndComplete(service, t.Context(), "owner", session.ID, "attempt-1", hostedSubmission(outcome)); err != nil {
 					t.Fatal(err)
 				}
 				if err := db.First(&task, "id = ?", task.ID).Error; err != nil {
@@ -371,11 +372,13 @@ func TestHostedFinalizationRechecksAttemptAfterSessionLock(t *testing.T) {
 		t.Skip("requires PostgreSQL row locking")
 	}
 	task := hostedTrackedTask(t, db)
-	execution, err := service.Begin(t.Context(), "owner", "session-1", "attempt-1")
+	_, err := service.Begin(t.Context(), "owner", "session-1", "attempt-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := service.Attempts.Fail(t.Context(), "attempt-1", execution.ExecutionHandle, "TEST_FAILURE", []byte(`{}`)); err != nil {
+	// Stage an already-terminal callback input. The test exercises the
+	// finalizer's concurrent invalidation check, not controlled completion.
+	if err := db.Model(&orm.WorkflowSessionStep{}).Where("id = ?", "attempt-1").Update("status", "failed").Error; err != nil {
 		t.Fatal(err)
 	}
 	mutation := db.Begin()
@@ -444,7 +447,7 @@ func TestHostedNestedCompletionRetriesSQLiteBusy(t *testing.T) {
 	transactions := 0
 	err := common.TransactionWithSQLiteBusyRetry(t.Context(), db, func(tx *gorm.DB) error {
 		transactions++
-		_, err := hostedServiceWithDB(service, tx).Submit(t.Context(), "owner", "session-1", "attempt-1", hostedSubmission("failed"))
+		_, err := publishAndComplete(hostedServiceWithDB(service, tx), t.Context(), "owner", "session-1", "attempt-1", hostedSubmission("failed"))
 		return err
 	})
 	if err != nil {

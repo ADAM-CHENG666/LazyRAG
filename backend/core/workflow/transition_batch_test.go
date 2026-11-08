@@ -578,7 +578,6 @@ func TestControlledStepExecutorRouting(t *testing.T) {
 				node.LegacyTools = []string{"package_tool"}
 				node.TerminalTools = []string{"package_tool"}
 				node.ToolsOnly = true
-				node.ExternalExecution = &graphengine.ExternalStepExecution{Version: "1", ValidationOwner: "external-agent", Prompt: "Create and validate the result externally"}
 				graph.Runtime.PostStepChecks = []graphengine.PostStepCheck{{StepID: "branch_b", Tool: "check_ready"}}
 			}
 			graph.Nodes["branch_b"] = node
@@ -610,25 +609,18 @@ func TestControlledStepExecutorRouting(t *testing.T) {
 			if err := db.Model(&orm.SubAgentTask{}).Where("id = ?", execution.TaskID).Count(&taskCount).Error; err != nil {
 				t.Fatal(err)
 			}
-			wantNative := requirement == "declared_tools" || requirement == "terminal_tools" || requirement == "post_step_check"
-			if wantNative {
-				if execution.ExecutorHost != "lazymind" || taskCount != 1 {
-					t.Fatalf("tool-dependent step must run inside LazyMind: %+v tasks=%d", execution, taskCount)
-				}
-			} else if execution.ExecutorHost != "external-agent" || execution.Status != "queued" || result.Control.Continuation == "awaiting_executor" || taskCount != 0 {
-				t.Fatalf("wrong dispatch: %+v %+v tasks=%d", execution, result.Control, taskCount)
+			if execution.ExecutorHost != "external-agent" || execution.Status != "queued" || result.Control.Continuation == "awaiting_executor" || taskCount != 0 {
+				t.Fatalf("external steps must never launch a native model: %+v %+v tasks=%d", execution, result.Control, taskCount)
 			}
-			if requirement == "external_policy" {
-				contract, err := (executor.DBContextLoader{DB: db.DB}).LoadAttemptContext(t.Context(), execution.ID)
-				if err != nil || contract.ExternalExecution == nil || contract.ToolsOnly || len(contract.LegacyTools) != 0 || strings.Contains(contract.Objective, "native generator") {
-					t.Fatalf("external queue inherited native instructions: %+v %v", contract, err)
-				}
+			contract, err := (executor.DBContextLoader{DB: db.DB}).LoadAttemptContext(t.Context(), execution.ID)
+			if err != nil || contract.ToolsOnly || len(contract.LegacyTools) != 0 || contract.Prompt != node.Prompt {
+				t.Fatalf("common external contract: %+v %v", contract, err)
 			}
 		})
 	}
 }
 
-func TestControlledInternalToolsRunOnLazyMind(t *testing.T) {
+func TestControlledToolsDoNotLaunchNativeAgent(t *testing.T) {
 	db, _ := setupBatchTransitionSession(t)
 	result := beginControlledExternalStep(t, db, []string{"image_generator", "select_image_route"},
 		"tool_scripts:\n  - path: scripts/tools.py\n    functions: [select_image_route]\n")
@@ -640,8 +632,8 @@ func TestControlledInternalToolsRunOnLazyMind(t *testing.T) {
 	if err := db.Model(&orm.SubAgentTask{}).Where("id = ?", execution.TaskID).Count(&taskCount).Error; err != nil {
 		t.Fatal(err)
 	}
-	if execution.ExecutorHost != "lazymind" || taskCount != 1 {
-		t.Fatalf("internal-tool step must run inside LazyMind: %+v tasks=%d", execution, taskCount)
+	if execution.ExecutorHost != "external-agent" || taskCount != 0 {
+		t.Fatalf("tool step must remain external: %+v tasks=%d", execution, taskCount)
 	}
 }
 

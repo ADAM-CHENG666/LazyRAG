@@ -12,7 +12,6 @@ import (
 
 	"lazymind/core/common/orm"
 	"lazymind/core/workflow/executor"
-	"lazymind/core/workflow/graphengine"
 )
 
 func knowledgeFixture(t *testing.T, scope *executor.KnowledgeScope) *Service {
@@ -28,20 +27,7 @@ func knowledgeFixture(t *testing.T, scope *executor.KnowledgeScope) *Service {
 		return &http.Response{StatusCode: 404, Header: make(http.Header), Body: toolResponse(`{"message":"unavailable"}`).Body}, nil
 	})
 	t.Cleanup(func() { http.DefaultTransport = previous })
-	var revision orm.WorkflowRevision
-	if err := service.DB.First(&revision, "id = ?", "pinned-revision").Error; err != nil {
-		t.Fatal(err)
-	}
-	var graph graphengine.CompiledStateGraph
-	if err := json.Unmarshal(revision.CompiledGraph, &graph); err != nil {
-		t.Fatal(err)
-	}
-	node := graph.Nodes["write"]
-	node.ExternalExecution.Tools = []graphengine.ExternalTool{{Name: "knowledge_list_documents", Source: "package"}, {Name: "knowledge_read_document", Source: "package"}}
-	graph.Nodes["write"] = node
-	if err := service.DB.Model(&revision).Update("compiled_graph", graph.JSON()).Error; err != nil {
-		t.Fatal(err)
-	}
+
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(knowledgeBinding)))
 	for _, row := range []any{
 		&orm.WorkflowBlob{Hash: hash, Content: []byte(knowledgeBinding), Size: int64(len(knowledgeBinding))},
@@ -101,7 +87,7 @@ func knowledgeValue(t *testing.T, result Result) map[string]any {
 func TestKnowledgeSelectedCatalogListAndReadWithoutModels(t *testing.T) {
 	s := knowledgeFixture(t, &executor.KnowledgeScope{DatasetIDs: []string{"selected"}})
 	catalog, err := s.List(t.Context(), "owner", "run", "attempt", "lease")
-	if err != nil || len(catalog) != 2 || !catalog[0].Available || !catalog[1].Available {
+	if err != nil || len(catalog) != 7 || catalog[5].Name != "knowledge_list_documents" || catalog[6].Name != "knowledge_read_document" || !catalog[5].Available || !catalog[6].Available {
 		t.Fatalf("catalog=%+v err=%v", catalog, err)
 	}
 	first := knowledgeValue(t, knowledgeCall(t, s, "list-1", "knowledge_list_documents", map[string]any{"page_size": 1, "keyword": "report"}))

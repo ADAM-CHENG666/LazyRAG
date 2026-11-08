@@ -147,6 +147,44 @@ func TestControlHTTPAcceptsMCPTransportAndChecksOwner(t *testing.T) {
 	}
 }
 
+func TestControlHTTPPreservesReadinessDiagnostics(t *testing.T) {
+	input := graphengine.Expression{Material: "source"}
+	graph := graphengine.CompiledStateGraph{StartRoute: "all",
+		Nodes:             map[string]graphengine.CompiledNode{"draft": {ID: "draft", Route: "all", Input: &input}},
+		InputExpressions:  map[string]graphengine.Expression{"draft": input},
+		ControlEdges:      []graphengine.CompiledEdge{{ID: "start", From: "__start__", To: "draft"}},
+		MaterialProducers: map[string]graphengine.ProducerRef{"source": {Kind: "external"}},
+	}
+	db, session := newControllerTestSession(t, "external-agent", graph)
+	body, _ := json.Marshal(WorkflowControlCommand{CommandID: "blocked-begin", StepID: "draft", StateVersion: session.StateVersion})
+	r := mux.SetURLVars(httptest.NewRequest(http.MethodPost, "/executions:begin", bytes.NewReader(body)), map[string]string{"session_id": session.ID})
+	r.Header.Set("X-User-Id", session.CreateUserID)
+	w := httptest.NewRecorder()
+	(WorkflowControlHandler{Service: WorkflowControlService{DB: db.DB}}).Begin(w, r)
+	var response struct {
+		Error  *controlstore.Error       `json:"error"`
+		Result transitionCommandResponse `json:"result"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != http.StatusConflict || response.Error == nil || response.Error.Code != "STEP_NOT_READY" {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	details := response.Error.Details
+	groups, _ := details["missing_groups"].([]any)
+	if len(groups) == 0 || details["blocked"] == nil || response.Error.Recovery == "" {
+		t.Fatalf("missing repair diagnostics: %s", w.Body.String())
+	}
+	if response.Result.CommandID != "blocked-begin" || response.Result.Projection.Nodes["draft"].Readiness != "blocked" {
+		t.Fatalf("missing command result/projection: %s", w.Body.String())
+	}
+	var count int64
+	if err := db.Model(&orm.WorkflowSessionStep{}).Where("session_id = ?", session.ID).Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("rejected begin created an execution: count=%d err=%v", count, err)
+	}
+}
+
 func TestFailedControllerWakeupUsesNativeCleanup(t *testing.T) {
 	for _, scenario := range []string{"idle", "executing", "stopped", "newer-wakeup"} {
 		t.Run(scenario, func(t *testing.T) {

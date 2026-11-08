@@ -4,16 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
-	"fmt"
 	"strings"
 	"time"
 
 	"gorm.io/gorm"
 
-	"lazymind/core/common"
 	"lazymind/core/common/orm"
-	workflowcore "lazymind/core/workflow"
 	"lazymind/core/workflow/attempt"
 	"lazymind/core/workflow/controlstore"
 	"lazymind/core/workflow/execution"
@@ -22,7 +18,6 @@ import (
 )
 
 const HostName = "external-agent"
-const maxArtifactsPerSubmission = 32
 
 type Service struct {
 	Completion *execution.Service
@@ -72,27 +67,10 @@ func (s *Service) begin(ctx context.Context, owner, sessionID, attemptID string,
 	if err := s.DB.WithContext(ctx).Where("id = ?", sessionID).First(&session).Error; err != nil {
 		return Execution{}, err
 	}
-	if controlstore.Controlled(session) {
-		return s.beginControlled(ctx, owner, sessionID, attemptID, resume)
+	if !controlstore.Controlled(session) {
+		return Execution{}, controlstore.Reject("CONTROL_PROTOCOL_REQUIRED", "This session does not use the current external Workflow protocol; start a new run.")
 	}
-	row, err := s.Attempts.Attempt(ctx, attemptID)
-	if err != nil || row.SessionID != sessionID {
-		return Execution{}, &ProtocolError{Code: "EXECUTION_NOT_FOUND", Message: "hosted execution was not found", Cause: err}
-	}
-	claim, err := s.Attempts.ClaimAttemptForHost(ctx, attemptID, executorID(owner), HostName)
-	if err != nil {
-		return Execution{}, &ProtocolError{Code: "EXECUTION_NOT_CLAIMABLE", Message: "hosted execution cannot be claimed or resumed", Cause: err}
-	}
-	contract, err := s.Contexts.LoadAttemptContext(ctx, attemptID)
-	if err != nil {
-		return Execution{}, &ProtocolError{Code: "STEP_CONTRACT_UNAVAILABLE", Message: "step execution contract is unavailable", Cause: err}
-	}
-	// Metadata is useful to trusted workers but contains Runtime bookkeeping
-	// (owner, conversation and task identifiers). It is not part of the public
-	// external-Agent contract.
-	contract.Metadata = nil
-	workflowcore.NotifyWorkflowRuntimeUpdated(ctx, s.DB, sessionID, attemptID, "running")
-	return Execution{ExecutionID: attemptID, ExecutionHandle: claim.LeaseToken, LeaseExpires: claim.LeaseExpiresAt, StepContract: contract}, nil
+	return s.beginControlled(ctx, owner, sessionID, attemptID, resume)
 }
 
 func (s *Service) Resume(ctx context.Context, owner, sessionID, attemptID string) (Execution, error) {
@@ -103,12 +81,19 @@ func (s *Service) authorizeExecution(ctx context.Context, owner, sessionID, atte
 	if err := s.Store.AuthorizeSession(ctx, sessionID, owner); err != nil {
 		return err
 	}
+	var session orm.WorkflowSession
+	if err := s.DB.WithContext(ctx).Where("id = ?", sessionID).First(&session).Error; err != nil {
+		return err
+	}
+	if !controlstore.Controlled(session) {
+		return controlstore.Reject("CONTROL_PROTOCOL_REQUIRED", "Start a run using the current external Workflow protocol")
+	}
 	row, err := s.Attempts.Attempt(ctx, attemptID)
 	if err != nil || row.SessionID != sessionID {
 		return controlstore.Reject("EXECUTION_NOT_FOUND", "execution was not found")
 	}
-	if row.ExecutorHost == "lazymind" {
-		return controlstore.Reject("EXECUTOR_MISMATCH", "LazyMind owns this execution")
+	if row.ExecutorHost != HostName {
+		return controlstore.Reject("EXECUTOR_MISMATCH", "this execution is not owned by the external executor")
 	}
 	return nil
 }
@@ -144,150 +129,23 @@ func (s *Service) Publish(ctx context.Context, owner, sessionID, attemptID strin
 	return s.Artifacts.Save(ctx, contract, input.Artifact)
 }
 
-type Submission struct {
-	Outcome     string              `json:"outcome"`
-	Summary     string              `json:"summary,omitempty"`
-	ErrorCode   string              `json:"error_code,omitempty"`
-	ExecutorRef string              `json:"executor_ref,omitempty"`
-	Artifacts   []executor.Artifact `json:"artifacts,omitempty"`
-	Control     *executor.Control   `json:"control,omitempty"`
-}
-
-type SubmissionResult struct {
-	ExecutionID     string `json:"execution_id"`
-	AttemptStatus   string `json:"attempt_status"`
-	AlreadyTerminal bool   `json:"already_terminal,omitempty"`
-}
-
-func normalizeOutcome(value string) (string, error) {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "success", "succeeded":
-		return "succeeded", nil
-	case "failure", "failed":
-		return "failed", nil
-	case "cancel", "cancelled", "canceled":
-		return "cancelled", nil
-	default:
-		return "", &ProtocolError{Code: "INVALID_OUTCOME", Message: "outcome must be succeeded, failed or cancelled"}
+// Renew reuses the worker lease service under the same session fence as writes.
+// It never reclaims expired authority or changes Workflow progress.
+func (s *Service) Renew(ctx context.Context, owner, sessionID, attemptID, handle string) (time.Time, error) {
+	if err := s.authorizeExecution(ctx, owner, sessionID, attemptID); err != nil {
+		return time.Time{}, err
 	}
-}
-
-func validateArtifacts(contract executor.AttemptContext, values []executor.Artifact) ([]executor.Artifact, error) {
-	if len(values) > maxArtifactsPerSubmission {
-		return nil, &ProtocolError{Code: "TOO_MANY_ARTIFACTS", Message: "one submission may contain at most 32 artifacts"}
-	}
-	outputs := contract.DeclaredOutputs
-	if len(outputs) == 0 {
-		outputs = contract.RequiredOutputs
-	}
-	declared := make(map[string]bool, len(outputs))
-	for _, slot := range outputs {
-		declared[slot] = true
-	}
-	seen := make(map[string]bool, len(values))
-	normalized := make([]executor.Artifact, len(values))
-	copy(normalized, values)
-	for i := range normalized {
-		artifact := &normalized[i]
-		artifact.Slot = strings.TrimSpace(artifact.Slot)
-		if !declared[artifact.Slot] {
-			return nil, &ProtocolError{Code: "OUTPUT_SLOT_UNDECLARED", Message: "artifact slot is not declared by the step: " + artifact.Slot}
+	var expires time.Time
+	err := controlstore.Transaction(ctx, s.DB, sessionID, func(tx *gorm.DB, session *orm.WorkflowSession) error {
+		if !controlstore.Controlled(*session) {
+			return controlstore.Reject("CONTROL_PROTOCOL_REQUIRED", "The current external Workflow protocol is required")
 		}
-		if len(artifact.Value) == 0 || string(artifact.Value) == "null" {
-			return nil, &ProtocolError{Code: "INVALID_ARTIFACT", Message: "artifact value is required: " + artifact.Slot}
+		if err := controlstore.ValidateExecution(tx, *session, attemptID, handle); err != nil {
+			return err
 		}
-		if artifact.Seq < 1 {
-			artifact.Seq = 1
-		}
-		if artifact.ContentType == "" {
-			artifact.ContentType = "application/json"
-		}
-		key := fmt.Sprintf("%s#%d", artifact.Slot, artifact.Seq)
-		if seen[key] {
-			return nil, &ProtocolError{Code: "DUPLICATE_ARTIFACT", Message: "artifact slot and sequence must be unique: " + key}
-		}
-		seen[key] = true
-	}
-	return normalized, nil
-}
-
-func (s *Service) Submit(ctx context.Context, owner, sessionID, attemptID string, submission Submission) (SubmissionResult, error) {
-	if err := s.Store.AuthorizeSession(ctx, sessionID, owner); err != nil {
-		return SubmissionResult{}, err
-	}
-	status, err := normalizeOutcome(submission.Outcome)
-	if err != nil {
-		return SubmissionResult{}, err
-	}
-	row, err := s.Attempts.Attempt(ctx, attemptID)
-	if err != nil || row.SessionID != sessionID {
-		return SubmissionResult{}, &ProtocolError{Code: "EXECUTION_NOT_FOUND", Message: "hosted execution was not found", Cause: err}
-	}
-	if row.Status == "succeeded" || row.Status == "failed" || row.Status == "cancelled" || row.Status == "interrupted" {
-		if row.Status != status {
-			return SubmissionResult{}, &ProtocolError{Code: attempt.CodeAlreadyTerminal, Message: "hosted execution already has another terminal outcome"}
-		}
-		if err := workflowcore.FinalizeHostAttempt(ctx, s.DB, sessionID, row.StepID, attemptID, status); err != nil {
-			if common.IsSQLiteBusy(err) {
-				return SubmissionResult{}, err
-			}
-			return SubmissionResult{}, &ProtocolError{Code: "WORKFLOW_PROJECTION_FAILED", Message: "terminal execution could not update Workflow projection", Cause: err}
-		}
-		workflowcore.NotifyWorkflowRuntimeUpdated(ctx, s.DB, sessionID, attemptID, status)
-		return SubmissionResult{ExecutionID: attemptID, AttemptStatus: status, AlreadyTerminal: true}, nil
-	}
-	if row.LeaseOwner != executorID(owner) {
-		return SubmissionResult{}, &ProtocolError{Code: attempt.CodeLeaseLost, Message: "hosted execution must be begun or resumed before submission"}
-	}
-	if err := s.Attempts.ValidateLease(ctx, attemptID, row.LeaseToken); err != nil {
-		return SubmissionResult{}, &ProtocolError{Code: attempt.CodeLeaseLost, Message: "hosted execution lease expired; resume it before submission", Cause: err}
-	}
-	contract, err := s.Contexts.LoadAttemptContext(ctx, attemptID)
-	if err != nil {
-		return SubmissionResult{}, &ProtocolError{Code: "STEP_CONTRACT_UNAVAILABLE", Message: "step execution contract is unavailable", Cause: err}
-	}
-	artifacts, err := validateArtifacts(contract, submission.Artifacts)
-	if err != nil {
-		return SubmissionResult{}, err
-	}
-	for _, artifact := range artifacts {
-		if err := s.Artifacts.Save(ctx, contract, artifact); err != nil {
-			return SubmissionResult{}, &ProtocolError{Code: "ARTIFACT_WRITE_FAILED", Message: "artifact could not be saved", Cause: err}
-		}
-	}
-	if status == "succeeded" {
-		if err := executor.ValidateRequiredOutputs(ctx, s.DB, contract); err != nil {
-			return SubmissionResult{}, &ProtocolError{Code: "REQUIRED_OUTPUT_MISSING", Message: err.Error(), Cause: err}
-		}
-	}
-	resultJSON, err := json.Marshal(executor.Result{
-		Summary: strings.TrimSpace(submission.Summary), ExecutorRef: strings.TrimSpace(submission.ExecutorRef),
-		Control: submission.Control,
+		var err error
+		expires, err = s.Attempts.WithDB(tx).Heartbeat(ctx, attemptID, handle)
+		return err
 	})
-	if err != nil {
-		return SubmissionResult{}, &ProtocolError{Code: "INVALID_RESULT", Message: "execution result cannot be encoded", Cause: err}
-	}
-	switch status {
-	case "succeeded":
-		err = s.Attempts.Complete(ctx, attemptID, row.LeaseToken, resultJSON)
-	case "failed":
-		code := strings.TrimSpace(submission.ErrorCode)
-		if code == "" {
-			code = "EXTERNAL_AGENT_FAILED"
-		}
-		err = s.Attempts.Fail(ctx, attemptID, row.LeaseToken, code, resultJSON)
-	case "cancelled":
-		err = s.Attempts.Cancel(ctx, attemptID, row.LeaseToken)
-	}
-	if err != nil {
-		return SubmissionResult{}, &ProtocolError{Code: "ATTEMPT_TERMINAL_REJECTED", Message: "execution terminal result was rejected", Cause: err}
-	}
-	if err := workflowcore.FinalizeHostAttempt(ctx, s.DB, sessionID, row.StepID, attemptID, status); err != nil {
-		if common.IsSQLiteBusy(err) {
-			return SubmissionResult{}, err
-		}
-		return SubmissionResult{}, &ProtocolError{Code: "WORKFLOW_PROJECTION_FAILED", Message: "terminal execution could not update Workflow projection", Cause: err}
-	}
-	workflowcore.NotifyWorkflowRuntimeUpdated(ctx, s.DB, sessionID, attemptID, status)
-	return SubmissionResult{ExecutionID: attemptID, AttemptStatus: status}, nil
+	return expires, err
 }

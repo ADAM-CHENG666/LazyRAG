@@ -104,7 +104,7 @@ func (s *Service) Complete(ctx context.Context, owner, sessionID, attemptID stri
 		contract.ExecutionHandle = input.ExecutionHandle
 		if status == "succeeded" {
 			if err := executor.ValidateRequiredOutputs(ctx, tx, contract); err != nil {
-				return controlstore.Reject("REQUIRED_OUTPUT_MISSING", err.Error())
+				return err
 			}
 		}
 		failure := ""

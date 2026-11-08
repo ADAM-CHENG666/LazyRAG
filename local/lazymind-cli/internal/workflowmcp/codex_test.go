@@ -59,7 +59,7 @@ func TestControlledStartBindsBeforeReturningStateAndRetainsRetryIdentity(t *test
 						if body["host_binding_required"] != true || body["host_provider"] != provider || body["origin_ref"] != provider+":"+threadUUID {
 							t.Errorf("wrong preparation: %v", body)
 						}
-						_, _ = w.Write([]byte(`{"preparation_id":"prep-1"}`))
+						_, _ = w.Write([]byte(`{"status":"ready","preparation_id":"prep-1"}`))
 					case "/api/core/workflow-preparations/prep-1:consume":
 						_, _ = w.Write([]byte(`{"session_id":"run-1","workflow_id":"wf-1"}`))
 					case "/api/core/workflow-sessions/run-1/projection":
@@ -93,7 +93,7 @@ func TestControlledStartBindsBeforeReturningStateAndRetainsRetryIdentity(t *test
 				}
 				result, err := client.Start(context.Background(), StartInput{WorkflowID: "wf-1", IdempotencyKey: "retry-1", DriverSessionID: threadUUID})
 				if failBind {
-					if err == nil || !strings.Contains(err.Error(), "idempotency_key=retry-1 and session_id=run-1") || requests != 3 {
+					if err != nil || result.Status != "binding_required" || !result.BindingRequired || result.IdempotencyKey != "retry-1" || result.SessionID != "run-1" || requests != 3 {
 						t.Fatalf("lost retry identity: %v", err)
 					}
 				} else if err != nil || result.SessionID != "run-1" || !strings.Contains(result.State.AgentInstruction, "END this turn") {

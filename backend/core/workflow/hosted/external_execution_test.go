@@ -13,7 +13,7 @@ import (
 
 // This exercises the same revision through native and external grant, artifact
 // and completion boundaries. No model or tool server is configured or started.
-func TestExternalProfileNativeAndExternalLifecycle(t *testing.T) {
+func TestSharedContractNativeAndExternalLifecycle(t *testing.T) {
 	for _, host := range []string{"external-agent", "lazymind"} {
 		t.Run(host, func(t *testing.T) {
 			service, db := hostedTestService(t)
@@ -31,7 +31,6 @@ func TestExternalProfileNativeAndExternalLifecycle(t *testing.T) {
 			}
 			node := graph.Nodes["write"]
 			node.LegacyTools, node.TerminalTools, node.ToolsOnly = []string{"native_generator"}, []string{"native_generator"}, true
-			node.ExternalExecution = &graphengine.ExternalStepExecution{Version: "1", ValidationOwner: "external-agent", Prompt: "Externally generate and validate the report", Tools: []graphengine.ExternalTool{{Name: "inspect", Source: "package"}}}
 			graph.Nodes["write"] = node
 			graph.Runtime.PostStepChecks = []graphengine.PostStepCheck{{StepID: "write", Tool: "native_check"}}
 			graph.Runtime.TransactionalOutputs = true
@@ -56,11 +55,11 @@ func TestExternalProfileNativeAndExternalLifecycle(t *testing.T) {
 				}
 			}
 			grant, err := service.Begin(t.Context(), "owner", "session-1", "attempt-1")
-			if err != nil {
+			if err != nil && host != "lazymind" {
 				t.Fatal(err)
 			}
 			if host == "lazymind" {
-				if grant.ExecutionHandle != "" || grant.ExecutorHost != host {
+				if err == nil || grant.ExecutionHandle != "" {
 					t.Fatal("external agent took ownership of native execution")
 				}
 				claim, err := service.Attempts.ClaimForHost(t.Context(), "native-worker", host)
@@ -68,7 +67,7 @@ func TestExternalProfileNativeAndExternalLifecycle(t *testing.T) {
 					t.Fatal(err)
 				}
 				contract, err := service.Contexts.LoadAttemptContext(t.Context(), claim.AttemptID)
-				if err != nil || contract.ExternalExecution != nil || !contract.ToolsOnly || contract.Prompt != "write report" {
+				if err != nil || !contract.ToolsOnly || contract.Prompt != "write report" {
 					t.Fatalf("native contract: %+v %v", contract, err)
 				}
 				contract.ExecutionHandle = claim.LeaseToken
@@ -85,10 +84,10 @@ func TestExternalProfileNativeAndExternalLifecycle(t *testing.T) {
 				assertSelected(true)
 				return
 			}
-			if grant.ExecutionHandle == "" || grant.StepContract.ExternalExecution == nil || grant.StepContract.ToolsOnly {
+			if grant.ExecutionHandle == "" || grant.StepContract.Prompt != "write report" || grant.StepContract.ToolsOnly {
 				t.Fatalf("external grant: %+v", grant)
 			}
-			if _, _, err := executor.AuthorizeExternalToolCall(t.Context(), db, "owner", "session-1", "attempt-1", grant.ExecutionHandle, "inspect"); err != nil {
+			if _, err := executor.AuthorizeExternalExecution(t.Context(), db, "owner", "session-1", "attempt-1", grant.ExecutionHandle); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := service.Complete(t.Context(), "owner", "session-1", "attempt-1", executor.Completion{ExecutionHandle: grant.ExecutionHandle, Outcome: "succeeded"}); err == nil {

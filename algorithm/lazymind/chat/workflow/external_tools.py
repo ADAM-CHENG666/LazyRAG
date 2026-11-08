@@ -85,15 +85,10 @@ def _selected(request: ExternalToolRequest, *, listing: bool = False) -> dict[st
     files = _decode_package(request)
     try:
         workflow = yaml.safe_load(files['workflow.yaml'])
-        external = workflow['runtime']['external_execution']
-        if str(external['version']) != '1':
-            raise ValueError('unsupported version')
-        step = external['steps'][request.step_id]
-        tools = step.get('tools') or []
         declarations = workflow.get('tool_scripts') or []
     except (AttributeError, KeyError, TypeError, ValueError, yaml.YAMLError) as exc:
-        raise ExternalToolError('INVALID_PACKAGE', 'The pinned step has no supported external tool contract.') from exc
-    if not isinstance(tools, list) or not isinstance(declarations, list):
+        raise ExternalToolError('INVALID_PACKAGE', 'The pinned package has no valid tool declarations.') from exc
+    if not isinstance(declarations, list):
         raise ExternalToolError('INVALID_PACKAGE', 'Tool declarations must be lists.')
     owners: dict[str, str] = {}
     for declaration in declarations:
@@ -107,13 +102,7 @@ def _selected(request: ExternalToolRequest, *, listing: bool = False) -> dict[st
                 raise ExternalToolError('INVALID_PACKAGE', 'Duplicate package tool declaration.')
             owners[name] = declaration.get('path')
     selected = {}
-    for tool in tools:
-        if not isinstance(tool, dict) or tool.get('source') != 'package':
-            # Global capabilities have a separate authenticated service adapter.
-            continue
-        name = tool.get('name')
-        if not isinstance(name, str):
-            raise ExternalToolError('INVALID_PACKAGE', 'Invalid external tool name.')
+    for name in owners:
         entry = _REGISTRY.get(name)
         if entry is None:
             if listing or name != getattr(request, 'tool_name', None):
@@ -148,7 +137,7 @@ def list_external_tools(request: ExternalToolRequest) -> dict[str, Any]:
 def call_external_tool(request: ExternalToolCallRequest) -> dict[str, Any]:
     function = _selected(request).get(request.tool_name)
     if function is None:
-        raise ExternalToolError('TOOL_NOT_ALLOWED', 'This tool is not available to the pinned external step.')
+        raise ExternalToolError('TOOL_NOT_ALLOWED', 'This tool has no registered adapter in the pinned package.')
     try:
         arguments = _arguments_model(function).model_validate(request.arguments).model_dump()
     except ValidationError as exc:

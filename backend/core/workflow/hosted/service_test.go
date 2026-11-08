@@ -11,6 +11,9 @@ import (
 
 	"lazymind/core/common/orm"
 	"lazymind/core/workflow/attempt"
+	"lazymind/core/workflow/controlpolicy"
+	"lazymind/core/workflow/controlstore"
+	"lazymind/core/workflow/execution"
 	"lazymind/core/workflow/executor"
 	"lazymind/core/workflow/graphengine"
 	workflowstore "lazymind/core/workflow/store"
@@ -33,14 +36,14 @@ func TestHostedAttemptBeginResumeSubmitAndReplay(t *testing.T) {
 		t.Fatalf("resume: %+v err=%v", resumed, err)
 	}
 
-	submission := Submission{Outcome: "succeeded", Summary: "done", ExecutorRef: "codex-task-1",
+	submission := testCompletion{Outcome: "succeeded", Summary: "done", ExecutorRef: "codex-task-1",
 		Artifacts: []executor.Artifact{{Slot: "report", ContentType: "text/plain", Seq: 1, Value: json.RawMessage(`{"text":"result"}`)}},
 	}
-	result, err := service.Submit(ctx, "owner", "session-1", "attempt-1", submission)
+	result, err := publishAndComplete(service, ctx, "owner", "session-1", "attempt-1", submission)
 	if err != nil || result.AttemptStatus != "succeeded" || result.AlreadyTerminal {
 		t.Fatalf("submit: %+v err=%v", result, err)
 	}
-	replayed, err := service.Submit(ctx, "owner", "session-1", "attempt-1", submission)
+	replayed, err := publishAndComplete(service, ctx, "owner", "session-1", "attempt-1", submission)
 	if err != nil || !replayed.AlreadyTerminal || replayed.AttemptStatus != "succeeded" {
 		t.Fatalf("terminal replay: %+v err=%v", replayed, err)
 	}
@@ -63,10 +66,10 @@ func TestHostedSubmissionRejectsUndeclaredOutputBeforeWrite(t *testing.T) {
 	if _, err := service.Begin(context.Background(), "owner", "session-1", "attempt-1"); err != nil {
 		t.Fatal(err)
 	}
-	_, err := service.Submit(context.Background(), "owner", "session-1", "attempt-1", Submission{
+	_, err := publishAndComplete(service, context.Background(), "owner", "session-1", "attempt-1", testCompletion{
 		Outcome: "succeeded", Artifacts: []executor.Artifact{{Slot: "secret", Value: json.RawMessage(`{"value":1}`), Seq: 1}},
 	})
-	var protocolErr *ProtocolError
+	var protocolErr *controlstore.Error
 	if !errors.As(err, &protocolErr) || protocolErr.Code != "OUTPUT_SLOT_UNDECLARED" {
 		t.Fatalf("undeclared output error: %v", err)
 	}
@@ -94,12 +97,12 @@ func TestHostedCompletionUpdatesTrackedTaskAndDesktopNotice(t *testing.T) {
 			if _, err := service.Begin(t.Context(), "owner", sessionID, "attempt-1"); err != nil {
 				t.Fatal(err)
 			}
-			submission := Submission{Outcome: outcome, Summary: "private provider diagnostic"}
+			submission := testCompletion{Outcome: outcome, Summary: "private provider diagnostic"}
 			if outcome == "succeeded" {
 				submission.Artifacts = []executor.Artifact{{Slot: "report", ContentType: "text/plain", Seq: 1, Value: json.RawMessage(`{"text":"result"}`)}}
 			}
 			for range 2 {
-				if _, err := service.Submit(t.Context(), "owner", sessionID, "attempt-1", submission); err != nil {
+				if _, err := publishAndComplete(service, t.Context(), "owner", sessionID, "attempt-1", submission); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -128,7 +131,7 @@ func hostedTestService(t *testing.T) (*Service, *gorm.DB) {
 		&orm.WorkflowCommand{}, &orm.WorkflowRevision{}, &orm.WorkflowRevisionEntry{}, &orm.WorkflowBlob{},
 		&orm.WorkflowAttemptInputBinding{}, &orm.WorkflowInputBinding{}, &orm.WorkflowSlotRevision{},
 		&orm.WorkflowHumanArtifact{}, &orm.WorkflowSlotOrder{}, &orm.WorkflowRouteDecision{}, &orm.SubAgentArtifact{},
-		&orm.WorkflowStepIntent{}, &orm.WorkflowApprovalPreference{},
+		&orm.WorkflowStepIntent{}, &orm.WorkflowApprovalPreference{}, &orm.WorkflowReviewCheckpoint{}, &orm.WorkflowHostAction{}, &orm.WorkflowTransitionCommand{},
 		&orm.UserSelectedModel{}, &orm.UserModelProviderGroup{}, &orm.UserModelProviderGroupModel{},
 	}
 	if err := db.AutoMigrate(models...); err != nil {
@@ -152,7 +155,7 @@ func hostedTestService(t *testing.T) (*Service, *gorm.DB) {
 		GraphHash: graph.GraphHash, GraphSchemaVersion: graph.SchemaVersion, CompiledGraph: graph.JSON(), CreatedAt: now}).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Create(&orm.WorkflowSession{ID: "session-1", OriginHost: HostName, ControllerHost: HostName,
+	if err := db.Create(&orm.WorkflowSession{ID: "session-1", ControlProtocol: controlpolicy.Protocol, OriginHost: HostName, ControllerHost: HostName,
 		WorkflowID: "writer", WorkflowRevisionID: "revision-1", GraphHash: graph.GraphHash,
 		GraphSchemaVersion: graph.SchemaVersion, Status: "active", StateVersion: 1,
 		CreateUserID: "owner", CreatedAt: now, UpdatedAt: now}).Error; err != nil {
@@ -164,6 +167,9 @@ func hostedTestService(t *testing.T) (*Service, *gorm.DB) {
 		StepID: "write", AttemptNo: 1, Payload: payload, OwnerUserID: "owner"}); err != nil {
 		t.Fatal(err)
 	}
-	return &Service{DB: db, Store: workflowstore.New(db), Attempts: attempts,
+	if err := db.Model(&orm.WorkflowSessionStep{}).Where("id = ?", "attempt-1").Update("executor_host", HostName).Error; err != nil {
+		t.Fatal(err)
+	}
+	return &Service{Completion: &execution.Service{DB: db, Store: workflowstore.New(db), Attempts: attempts, Contexts: executor.DBContextLoader{DB: db}}, DB: db, Store: workflowstore.New(db), Attempts: attempts,
 		Contexts: executor.DBContextLoader{DB: db}, Artifacts: executor.DBArtifactSink{DB: db}}, db
 }

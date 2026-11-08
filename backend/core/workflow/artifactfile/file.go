@@ -22,6 +22,12 @@ const (
 	maxFileBytes   = 20 << 20
 )
 
+// InputError distinguishes a malformed upload from storage/service failures.
+type InputError struct{ Message string }
+
+func (e *InputError) Error() string     { return e.Message }
+func invalidInput(message string) error { return &InputError{Message: message} }
+
 // Materialize moves an inline file submitted by an external Host into
 // LazyMind-owned storage. The returned directory is non-empty only when this
 // call created files; callers should remove it if their database transaction
@@ -33,26 +39,26 @@ func Materialize(sessionID, artifactID string, raw json.RawMessage) (json.RawMes
 	}
 	encoded := strings.TrimSpace(stringField(value, "content_base64"))
 	if encoded == "" || len(encoded) > base64.StdEncoding.EncodedLen(maxFileBytes) {
-		return nil, "", errors.New("inline artifact content is missing or exceeds 20 MiB")
+		return nil, "", invalidInput("inline artifact content is missing or exceeds 20 MiB")
 	}
 	content, err := base64.StdEncoding.Strict().DecodeString(encoded)
 	if err != nil || len(content) > maxFileBytes {
-		return nil, "", errors.New("inline artifact content is invalid or exceeds 20 MiB")
+		return nil, "", invalidInput("inline artifact content is invalid or exceeds 20 MiB")
 	}
 	name := strings.TrimSpace(stringField(value, "name"))
 	if name == "" {
 		name = strings.TrimSpace(stringField(value, "filename"))
 	}
 	if !validFilename(name) {
-		return nil, "", errors.New("inline artifact filename is invalid")
+		return nil, "", invalidInput("inline artifact filename is invalid")
 	}
 	if size, present := int64Field(value, "size"); present && size != int64(len(content)) {
-		return nil, "", errors.New("inline artifact size does not match content")
+		return nil, "", invalidInput("inline artifact size does not match content")
 	}
 	sum := sha256.Sum256(content)
 	hash := "sha256:" + hex.EncodeToString(sum[:])
 	if expected := strings.TrimSpace(stringField(value, "sha256")); expected != "" && !strings.EqualFold(expected, hash) {
-		return nil, "", errors.New("inline artifact sha256 does not match content")
+		return nil, "", invalidInput("inline artifact sha256 does not match content")
 	}
 
 	scope := sha256.Sum256([]byte(sessionID))

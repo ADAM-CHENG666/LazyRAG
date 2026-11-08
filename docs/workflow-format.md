@@ -33,6 +33,8 @@ workflows/<workflow-id>/
 
 ### 外部 Agent 执行
 
+本节记录旧版外部覆盖层，**不再作为当前外部执行规范**。当前运行使用共同步骤契约，子 Agent 可选；`runtime.external_execution` revision 需要开发者重构后重新发布。请以[外部 Agent 交互协议](architecture/external-agent-workflow-protocol-draft.md)为准。包格式和生成指引的整体更新另行进行。
+
 同一工作流可以同时支持原生 LazyMind 和外部 Agent。原生运行继续使用 `state.yml`、`driver.md` 和已配置的模型；外部运行通过 `runtime.external_execution` 获取独立的执行指令，生成和验证均由外部宿主的 subagent 完成。LazyMind 保存步骤、输入、产物版本、状态和调用回执，不为这种执行启动文本/视觉模型，也不要求服务端语义验证回执。
 
 ```yaml

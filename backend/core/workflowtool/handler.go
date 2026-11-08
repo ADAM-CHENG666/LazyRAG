@@ -16,6 +16,11 @@ import (
 type Handler struct{ Service *Service }
 
 func reply(w http.ResponseWriter, status int, result any, err *ToolError) {
+	if err != nil && err.Recovery == "" {
+		copy := *err
+		copy.Recovery = controlstore.RecoveryFor(copy.Code)
+		err = &copy
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(struct {
@@ -31,9 +36,9 @@ func serviceError(w http.ResponseWriter, err error) {
 	var tool *ToolError
 	switch {
 	case errors.As(err, &controlled):
-		reply(w, controlled.HTTPStatus(), nil, &ToolError{Code: controlled.Code, Message: controlled.Message})
+		reply(w, controlled.HTTPStatus(), nil, &ToolError{Code: controlled.Code, Message: controlled.Message, Retryable: controlled.Retryable, Details: controlled.Details, Recovery: controlled.Recovery})
 	case errors.As(err, &tool):
-		reply(w, http.StatusConflict, nil, tool)
+		reply(w, tool.HTTPStatus(), nil, tool)
 	case errors.Is(err, workflowstore.ErrPermissionDenied):
 		reply(w, http.StatusForbidden, nil, &ToolError{Code: "PERMISSION_DENIED", Message: "Workflow belongs to another owner"})
 	case errors.Is(err, workflowstore.ErrNotFound), errors.Is(err, gorm.ErrRecordNotFound):
@@ -97,7 +102,7 @@ func (h Handler) Call(w http.ResponseWriter, r *http.Request) {
 	}
 	// Failed capability calls are persisted as receipts, but remain MCP errors.
 	if result.Error != nil {
-		reply(w, http.StatusConflict, nil, result.Error)
+		reply(w, result.Error.HTTPStatus(), nil, result.Error)
 		return
 	}
 	reply(w, http.StatusOK, result, nil)

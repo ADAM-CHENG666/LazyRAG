@@ -100,8 +100,8 @@ func TestExecutionToolRejectsIncompleteAuthorityBeforeHTTP(t *testing.T) {
 	}
 }
 
-func TestExternalExecutionContractRoundTripPreservesPinnedSkillsAndExtensions(t *testing.T) {
-	raw := `{"external_execution":{"version":"1","validation_owner":"external-agent","skill_files":[{"path":"skills/design.md","content":"Pinned skill","sha256":"abc"}],"tools":[{"name":"builtin:image_generator","source":"global"}],"future_policy":{"required":false}},"declared_input_transports":{"source":"path"},"declared_output_types":{"deck":"file"}}`
+func TestExternalExecutionContractRoundTripPreservesUnknownCoreFields(t *testing.T) {
+	raw := `{"future_contract_extension":{"version":"1","validation_owner":"external-agent","skill_files":[{"path":"skills/design.md","content":"Pinned skill","sha256":"abc"}],"tools":[{"name":"builtin:image_generator","source":"global"}],"future_policy":{"required":false}},"declared_input_transports":{"source":"path"},"declared_output_types":{"deck":"file"}}`
 	var contract StepContract
 	if err := json.Unmarshal([]byte(raw), &contract); err != nil {
 		t.Fatal(err)
@@ -113,7 +113,7 @@ func TestExternalExecutionContractRoundTripPreservesPinnedSkillsAndExtensions(t 
 	var before, after map[string]any
 	_ = json.Unmarshal([]byte(raw), &before)
 	_ = json.Unmarshal(encoded, &after)
-	for _, key := range []string{"external_execution", "declared_input_transports", "declared_output_types"} {
+	for _, key := range []string{"future_contract_extension", "declared_input_transports", "declared_output_types"} {
 		if !reflect.DeepEqual(before[key], after[key]) {
 			t.Fatalf("contract field %s changed: %s", key, encoded)
 		}
@@ -136,7 +136,7 @@ func TestExternalExecutionContractPassesMCPOutputValidation(t *testing.T) {
 			response = map[string]any{"session_id": "run-1", "control": map[string]any{"protocol": ControlProtocol, "continuation": "awaiting_executor"}}
 		case strings.HasSuffix(r.URL.Path, "/hosted-attempts/attempt-1:begin"), strings.HasSuffix(r.URL.Path, "/hosted-attempts/attempt-1:resume"):
 			response = map[string]any{"execution_id": "attempt-1", "execution_handle": "unchanged-grant", "executor_host": "external-agent",
-				"step_contract": map[string]any{"external_execution": external}}
+				"step_contract": map[string]any{"future_contract_extension": external}}
 		default:
 			t.Errorf("unexpected Core request: %s", r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -179,7 +179,7 @@ func TestExternalExecutionContractPassesMCPOutputValidation(t *testing.T) {
 		}
 		execution := decoded["execution"].(map[string]any)
 		contract := execution["step_contract"].(map[string]any)
-		if execution["execution_handle"] != "unchanged-grant" || !reflect.DeepEqual(contract["external_execution"], external) {
+		if execution["execution_handle"] != "unchanged-grant" || !reflect.DeepEqual(contract["future_contract_extension"], external) {
 			t.Fatalf("%s dropped the handle or extended contract", name)
 		}
 	}

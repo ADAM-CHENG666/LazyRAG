@@ -38,12 +38,7 @@ func workflowToolFixture(t *testing.T, transport transportFunc) (*Service, CallI
 		t.Fatal(err)
 	}
 	now, expires := time.Now().UTC(), time.Now().UTC().Add(time.Hour)
-	graph := graphengine.CompiledStateGraph{Nodes: map[string]graphengine.CompiledNode{"write": {
-		ID: "write", Prompt: "native", ExternalExecution: &graphengine.ExternalStepExecution{
-			Version: "1", ValidationOwner: "external-agent", Prompt: "Generate externally",
-			Skills: []string{"scenario/external.md"}, Tools: []graphengine.ExternalTool{{Name: "inspect_output", Source: "package"}},
-		},
-	}}}
+	graph := graphengine.CompiledStateGraph{Nodes: map[string]graphengine.CompiledNode{"write": {ID: "write", Prompt: "Write a report"}}}
 	for _, row := range []any{
 		&orm.WorkflowRevision{ID: "pinned-revision", WorkflowResourceID: "resource", RevisionNo: 1, CompiledGraph: graph.JSON(), TreeHash: strings.Repeat("a", 64), CreatedAt: now},
 		&orm.WorkflowSession{ID: "run", ConversationID: "chat", WorkflowRevisionID: "pinned-revision", ControllerHost: "external-agent", ControlProtocol: controlpolicy.Protocol, CreateUserID: "owner", Status: "active"},
@@ -130,8 +125,6 @@ func TestWorkflowToolAdmissionPreventsUnauthorizedCalls(t *testing.T) {
 	}{
 		{"owner", "other", "lease", "inspect_output", "", t.Context()},
 		{"lease", "owner", "old-lease", "inspect_output", "", t.Context()},
-		{"tool", "owner", "lease", "native_generator", "", t.Context()},
-		{"source", "owner", "lease", "inspect_output", "global", t.Context()},
 		{"conversation", "owner", "lease", "inspect_output", "", workflowstore.WithConversationScope(t.Context(), "other-chat")},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -148,16 +141,42 @@ func TestWorkflowToolAdmissionPreventsUnauthorizedCalls(t *testing.T) {
 	}
 }
 
-func TestWorkflowToolListShowsOnlyDeclaredTools(t *testing.T) {
+func TestWorkflowToolPreservesPublicAdapterDiagnosticsAndReceipt(t *testing.T) {
+	var calls atomic.Int32
+	service, input := workflowToolFixture(t, func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		response := toolResponse(`{"detail":{"code":"INVALID_ARGUMENT","message":"Offline rendering does not accept script elements.","details":{"field":"html"},"recovery":"Remove script elements before rendering."}}`)
+		response.StatusCode = http.StatusBadRequest
+		return response, nil
+	})
+	for range 2 {
+		result, err := service.Call(t.Context(), "owner", "run", "attempt", input)
+		if err != nil || result.Error == nil {
+			t.Fatalf("missing adapter diagnostic: %+v %v", result, err)
+		}
+		problem := result.Error
+		if problem.Code != "INVALID_ARGUMENT" || problem.Message != "Offline rendering does not accept script elements." || problem.Details["field"] != "html" || problem.Recovery != "Remove script elements before rendering." || problem.Retryable || problem.HTTPStatus() != http.StatusUnprocessableEntity {
+			t.Fatalf("lost repair information: %+v", problem)
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatal("replaying a failed receipt repeated the tool operation")
+	}
+}
+
+func TestWorkflowToolListUsesRegisteredCatalogWithoutStepNames(t *testing.T) {
 	service, _ := workflowToolFixture(t, func(request *http.Request) (*http.Response, error) {
 		if request.URL.Path != "/api/workflow/external-tools/list" {
 			t.Fatal("list attempted execution")
 		}
-		return toolResponse(`{"tools":[{"name":"inspect_output","description":"Inspect only","input_schema":{"type":"object"},"available":true},{"name":"hidden_internal_generator"}]}`), nil
+		return toolResponse(`{"tools":[{"name":"inspect_output","description":"Inspect only","input_schema":{"type":"object"},"available":true},{"name":"another_registered_tool"}]}`), nil
 	})
+	if err := service.DB.Model(&orm.WorkflowRevisionEntry{}).Where("revision_id = ? AND path = ?", "pinned-revision", "scripts/tools.py").Update("path", "scripts/external_tools.py").Error; err != nil {
+		t.Fatal(err)
+	}
 	list, err := service.List(t.Context(), "owner", "run", "attempt", "lease")
-	if err != nil || len(list) != 1 || list[0].Name != "inspect_output" || list[0].Source != "package" || !list[0].Available {
-		t.Fatalf("list exposed undeclared tools: %+v %v", list, err)
+	if err != nil || len(list) != 2 || list[0].Name != "inspect_output" || list[0].Source != "package" || !list[0].Available {
+		t.Fatalf("registered catalog was not forwarded: %+v %v", list, err)
 	}
 }
 
@@ -165,6 +184,9 @@ func TestWorkflowToolListRetainsUnavailableAdapter(t *testing.T) {
 	service, _ := workflowToolFixture(t, func(*http.Request) (*http.Response, error) {
 		return toolResponse(`{"tools":[{"name":"inspect_output","available":false,"reason":"Install the rendering dependency"}]}`), nil
 	})
+	if err := service.DB.Model(&orm.WorkflowRevisionEntry{}).Where("revision_id = ? AND path = ?", "pinned-revision", "scripts/tools.py").Update("path", "scripts/external_tools.py").Error; err != nil {
+		t.Fatal(err)
+	}
 	list, err := service.List(t.Context(), "owner", "run", "attempt", "lease")
 	if err != nil || len(list) != 1 || list[0].Available || list[0].Reason == "" {
 		t.Fatalf("unavailable adapter was advertised ready: %+v %v", list, err)
@@ -246,5 +268,18 @@ func TestWorkflowToolRejectsCorruptPinnedPackage(t *testing.T) {
 	result, err := service.Call(t.Context(), "owner", "run", "attempt", input)
 	if err != nil || result.Error == nil || calls.Load() != 0 {
 		t.Fatalf("corrupt package was sent to tool execution: %+v %v", result, err)
+	}
+}
+
+func TestSelectingGlobalSourceCannotBypassProviderBinding(t *testing.T) {
+	service, input := workflowToolFixture(t, func(*http.Request) (*http.Response, error) { t.Fatal("unauthorized tool executed"); return nil, nil })
+	input.Source = "global"
+	result, err := service.Call(t.Context(), "owner", "run", "attempt", input)
+	if err != nil || result.Error == nil || result.Error.Code != "BINDING_REQUIRED" {
+		t.Fatalf("adapter authorization lost: %+v %v", result, err)
+	}
+	replay, err := service.Call(t.Context(), "owner", "run", "attempt", input)
+	if err != nil || replay.Error == nil || replay.Error.Code != result.Error.Code {
+		t.Fatalf("diagnostic replay lost: %+v %v", replay, err)
 	}
 }

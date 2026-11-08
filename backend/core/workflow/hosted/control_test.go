@@ -371,15 +371,15 @@ func TestNativeExecutionSharesAtomicReviewAndHostContinuation(t *testing.T) {
 				t.Fatal("external host claimed a native execution")
 			}
 			observed, err := service.Begin(ctx, "owner", "session-1", "attempt-1")
-			if err != nil || observed.ExecutorHost != "lazymind" || observed.ExecutionHandle != "" || observed.StepContract.Prompt != "" {
+			if err == nil || observed.ExecutionHandle != "" || observed.StepContract.Prompt != "" {
 				t.Fatalf("native handoff leaked a contract: %+v %v", observed, err)
 			}
 			claim, err := service.Attempts.ClaimForHost(ctx, "native", "lazymind")
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := service.Resume(ctx, "owner", "session-1", "attempt-1"); err != nil {
-				t.Fatal(err)
+			if _, err := service.Resume(ctx, "owner", "session-1", "attempt-1"); err == nil {
+				t.Fatal("external resume accepted a native execution")
 			}
 			if err := service.Attempts.ValidateLease(ctx, claim.AttemptID, claim.LeaseToken); err != nil {
 				t.Fatal("external resume rotated the native lease", err)
@@ -435,12 +435,12 @@ func TestNativeExecutionSharesAtomicReviewAndHostContinuation(t *testing.T) {
 				if settled.Continuation != "completed" || settled.Delivery == nil || settled.Delivery.ExecutionID != claim.AttemptID {
 					t.Fatalf("native completion did not wake driver: %+v", settled)
 				}
-				if _, err := service.Begin(ctx, "owner", session.ID, claim.AttemptID); err != nil {
-					t.Fatal(err)
+				if _, err := service.Begin(ctx, "owner", session.ID, claim.AttemptID); err == nil {
+					t.Fatal("external claim accepted a completed native execution")
 				}
 				db.Model(&orm.WorkflowHostAction{}).Where("consumed_at IS NULL").Count(&count)
-				if count != 0 {
-					t.Fatal("completed execution notification was not consumed")
+				if count != 1 {
+					t.Fatal("rejected external claim consumed the native continuation")
 				}
 			}
 			db.Model(&orm.WorkflowSlotRevision{}).Count(&count)

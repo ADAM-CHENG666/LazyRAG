@@ -831,11 +831,8 @@ func applyWorkflowTransition(ctx context.Context, tx *gorm.DB, sessionID string,
 			handOff := req.HandOff
 			nodeDef := graph.Nodes[target.TargetStepID]
 			taskID := target.TaskID
-			// Tool-dependent steps run inside LazyMind; the session controller stays unchanged.
+			// The run mode selects both roles; tool declarations never select an executor.
 			executorHost := session.ControllerHost
-			if controlstore.Controlled(session) {
-				executorHost = executorHostForStep(session.ControllerHost, nodeDef, graph.Runtime)
-			}
 			if executorHost == "external-agent" {
 				if err := queueHostAttempt(ctx, tx, session, target, nodeDef, now); err != nil {
 					return err
@@ -1017,10 +1014,7 @@ func isBareRetryInput(input string) bool {
 
 func queueHostAttempt(ctx context.Context, tx *gorm.DB, session orm.WorkflowSession, target transitionTarget,
 	node graphengine.CompiledNode, now time.Time) error {
-	objective := workflowStepObjectiveWithRuntimeBoundaries(node.Prompt, target.Objective, target.UserInput, node.Capabilities, node.LegacyTools, node.TerminalTools)
-	if node.ExternalExecution.Supported() {
-		objective = workflowStepObjective(node.ExternalExecution.Prompt, target.Objective, target.UserInput)
-	}
+	objective := workflowStepObjective(node.Prompt, target.Objective, target.UserInput)
 	refOrID := session.WorkflowRef
 	if refOrID == "" {
 		refOrID = session.WorkflowID
@@ -1038,7 +1032,8 @@ func queueHostAttempt(ctx context.Context, tx *gorm.DB, session orm.WorkflowSess
 		WorkflowRevision: session.WorkflowRevisionID, DeclaredOutputs: node.Outputs, DeclaredOutputTypes: outputTypes, RequiredOutputs: node.RequiredOutputs,
 		Capabilities: node.Capabilities, LegacyTools: node.LegacyTools, TerminalTools: node.TerminalTools,
 		ToolsOnly: node.ToolsOnly, TerminalToolsOnly: node.TerminalToolsOnly}
-	executor.ApplyExternalExecution(&value, node)
+	value.LegacyTools, value.TerminalTools = nil, nil
+	value.ToolsOnly, value.TerminalToolsOnly = false, false
 	payload, err := json.Marshal(value)
 	if err != nil {
 		return err

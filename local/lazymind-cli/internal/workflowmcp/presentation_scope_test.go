@@ -22,7 +22,7 @@ func TestPanelURLScopeOnMCPWire(t *testing.T) {
 				var body any
 				switch {
 				case strings.HasSuffix(r.URL.Path, "/workflow-preparations"):
-					body = map[string]any{"preparation_id": "prep-1"}
+					body = map[string]any{"status": "ready", "preparation_id": "prep-1"}
 				case strings.HasSuffix(r.URL.Path, "prep-1:consume"):
 					body = map[string]any{"session_id": "run-1", "workflow_id": "wf-1"}
 				case strings.HasSuffix(r.URL.Path, "/projection"):

@@ -107,6 +107,10 @@ type InputImportResult struct {
 }
 
 type StartResult struct {
+	IdempotencyKey             string           `json:"idempotency_key,omitempty"`
+	StateUnavailable           bool             `json:"state_unavailable,omitempty"`
+	BindingRequired            bool             `json:"binding_required,omitempty"`
+	Warning                    map[string]any   `json:"warning,omitempty"`
 	Status                     string           `json:"status,omitempty"`
 	PreparationID              string           `json:"preparation_id"`
 	SessionID                  string           `json:"session_id,omitempty"`
@@ -158,37 +162,9 @@ type BeginInput struct {
 	RuntimeInstruction string `json:"runtime_instruction,omitempty" jsonschema:"Optional retry or execution note"`
 }
 
-type StepContract struct {
-	ExternalExecution       map[string]any    `json:"external_execution,omitempty"`
-	KnowledgeScope          map[string]any    `json:"knowledge_scope,omitempty"`
-	LaunchRequest           string            `json:"launch_request,omitempty"`
-	UserRequest             string            `json:"user_request,omitempty"`
-	DeclaredInputTypes      map[string]string `json:"declared_input_types,omitempty"`
-	DeclaredInputTransports map[string]string `json:"declared_input_transports,omitempty"`
-	DeclaredOutputTypes     map[string]string `json:"declared_output_types,omitempty"`
-	TerminalTools           []string          `json:"terminal_tools,omitempty"`
-	ToolsOnly               bool              `json:"tools_only,omitempty"`
-	TerminalToolsOnly       bool              `json:"terminal_tools_only,omitempty"`
-	ContractVersion         string            `json:"contract_version"`
-	SessionID               string            `json:"session_id"`
-	AttemptID               string            `json:"attempt_id"`
-	StepID                  string            `json:"step_id"`
-	AttemptNo               int               `json:"attempt_no"`
-	Operation               string            `json:"operation"`
-	Objective               string            `json:"objective,omitempty"`
-	Prompt                  string            `json:"prompt,omitempty"`
-	Acceptance              []string          `json:"acceptance_criteria,omitempty"`
-	Instruction             string            `json:"instruction,omitempty"`
-	PartialSelector         map[string][]int  `json:"partial_selector,omitempty"`
-	WorkflowRevision        string            `json:"workflow_revision"`
-	Inputs                  map[string]any    `json:"inputs,omitempty"`
-	DeclaredOutputs         []string          `json:"declared_outputs,omitempty"`
-	RequiredOutputs         []string          `json:"required_outputs,omitempty"`
-	OutputCardinality       map[string]string `json:"output_cardinality,omitempty"`
-	Capabilities            []string          `json:"capabilities,omitempty"`
-	LegacyTools             []string          `json:"legacy_tools,omitempty"`
-	Metadata                map[string]string `json:"metadata,omitempty"`
-}
+// StepContract is owned by Core. The connector forwards it without maintaining
+// another schema or dropping new business fields.
+type StepContract map[string]any
 
 type Execution struct {
 	ExecutorHost        string       `json:"executor_host,omitempty"`
@@ -201,8 +177,13 @@ type Execution struct {
 }
 
 type BeginResult struct {
-	Execution Execution  `json:"execution"`
-	State     Projection `json:"state"`
+	CommandID        string         `json:"command_id,omitempty"`
+	Receipt          map[string]any `json:"receipt,omitempty"`
+	ClaimRequired    bool           `json:"claim_required,omitempty"`
+	StateUnavailable bool           `json:"state_unavailable,omitempty"`
+	Warning          map[string]any `json:"warning,omitempty"`
+	Execution        Execution      `json:"execution"`
+	State            Projection     `json:"state"`
 }
 
 type ResumeInput struct {
@@ -230,6 +211,7 @@ type CompleteInput struct {
 }
 
 type CompleteResult struct {
+	Warning          map[string]any `json:"warning,omitempty"`
 	Control          map[string]any `json:"control,omitempty"`
 	Receipt          map[string]any `json:"receipt,omitempty"`
 	StateUnavailable bool           `json:"state_unavailable,omitempty"`
@@ -425,31 +407,22 @@ func (c *Client) setSessionStopped(ctx context.Context, sessionID, commandID str
 	}
 	if stopped {
 		var response struct {
+			Receipt map[string]any `json:"receipt"`
 			Control struct {
 				SessionID    string `json:"session_id"`
 				StateVersion int64  `json:"state_version"`
 				Continuation string `json:"continuation"`
 			} `json:"control"`
 		}
-		err := c.api.DoJSON(ctx, http.MethodPost, "/workflow-sessions/"+url.PathEscape(sessionID)+"/executions:stop", map[string]any{"command_id": commandID}, &response)
-		if err == nil {
-			if response.Control.SessionID != sessionID || response.Control.Continuation != "stopped" {
-				return SessionLifecycleResult{}, errors.New("workflow stop acknowledgement is unavailable")
-			}
-			return SessionLifecycleResult{SessionID: sessionID, Status: "stopped", StateVersion: response.Control.StateVersion, CommandID: commandID}, nil
-		}
-		var apiError *coreapi.Error
-		if !errors.As(err, &apiError) || (apiError.StatusCode != 404 && apiError.Code != "CONTROL_PROTOCOL_REQUIRED") {
+		err := c.mutate(ctx, "/workflow-sessions/"+url.PathEscape(sessionID)+"/executions:stop", map[string]any{"command_id": commandID}, &response, map[string]any{"session_id": sessionID, "command_id": commandID})
+		if err != nil {
 			return SessionLifecycleResult{}, err
 		}
-	}
-	action := ":resume"
-	if stopped {
-		action = ":stop"
+		return SessionLifecycleResult{SessionID: sessionID, Status: response.Control.Continuation, StateVersion: response.Control.StateVersion, CommandID: commandID}, nil
 	}
 	var result SessionLifecycleResult
-	err := c.api.DoJSON(ctx, http.MethodPost, "/workflow-sessions/"+url.PathEscape(sessionID)+action,
-		map[string]any{"command_id": commandID}, &result)
+	err := c.mutate(ctx, "/workflow-sessions/"+url.PathEscape(sessionID)+":resume",
+		map[string]any{"command_id": commandID}, &result, map[string]any{"session_id": sessionID, "command_id": commandID})
 	return result, err
 }
 
@@ -563,7 +536,7 @@ func (c *Client) Start(ctx context.Context, input StartInput) (StartResult, erro
 		MissingClarificationFields []string         `json:"missing_clarification_fields"`
 		MissingInputs              []string         `json:"missing_inputs"`
 	}
-	if err := c.api.DoJSON(ctx, http.MethodPost, "/workflow-preparations", request, &prepared); err != nil {
+	if err := c.mutate(ctx, "/workflow-preparations", request, &prepared, map[string]any{"idempotency_key": input.IdempotencyKey, "session_id": input.SessionID}); err != nil {
 		return StartResult{}, err
 	}
 	if strings.TrimSpace(prepared.PreparationID) == "" {
@@ -576,15 +549,13 @@ func (c *Client) Start(ctx context.Context, input StartInput) (StartResult, erro
 			revisionID = input.RevisionID
 		}
 		return StartResult{
-			Status: "needs_input", PreparationID: prepared.PreparationID,
+			Status: "needs_input", IdempotencyKey: input.IdempotencyKey, PreparationID: prepared.PreparationID,
 			WorkflowID: input.WorkflowID, RevisionID: revisionID,
 			Questions: prepared.Questions, ClarificationValues: prepared.ClarificationValues,
 			MissingClarificationFields: prepared.MissingClarificationFields, MissingInputs: prepared.MissingInputs,
 			AgentInstruction: "No Workflow session has been created. Ask the returned questions using their exact field IDs. Merge the returned clarification_values with the user's answers and submit them as clarification_values to workflow.start, preserving request_context and revision_id. Resolve missing_inputs with actual imported sources via inputs or input_bindings. Use a new idempotency_key when answers or inputs change; preserve the key only for unchanged-payload retries. Do not call workflow.step.begin or open a Workflow panel before a session_id is returned.",
 		}, nil
-	case "", "ready":
-		// Older Core versions returned only preparation_id. Keep that contract
-		// working; all explicit non-ready statuses must stop before consumption.
+	case "ready":
 	default:
 		return StartResult{}, fmt.Errorf("Workflow preparation returned unsupported status %q; no session was created", prepared.Status)
 	}
@@ -593,27 +564,32 @@ func (c *Client) Start(ctx context.Context, input StartInput) (StartResult, erro
 		WorkflowID string `json:"workflow_id"`
 		RevisionID string `json:"workflow_revision_id"`
 	}
-	if err := c.api.DoJSON(ctx, http.MethodPost, "/workflow-preparations/"+url.PathEscape(prepared.PreparationID)+":consume",
-		map[string]any{"session_id": input.SessionID}, &consumed); err != nil {
-		return StartResult{}, err
-	}
-	if (c.HostProvider == "codex" || c.HostProvider == "workbuddy") && c.RequireHostBinding {
-		if err := c.BindController(ctx, consumed.SessionID, input.DriverSessionID); err != nil {
-			return StartResult{}, fmt.Errorf("workflow %s was created but controller binding failed: %w; retry workflow.start with idempotency_key=%s and session_id=%s", consumed.SessionID, err, input.IdempotencyKey, consumed.SessionID)
-		}
-	}
-	state, err := c.State(ctx, consumed.SessionID)
-	if err != nil {
+	if err := c.mutate(ctx, "/workflow-preparations/"+url.PathEscape(prepared.PreparationID)+":consume",
+		map[string]any{"session_id": input.SessionID}, &consumed, map[string]any{"idempotency_key": input.IdempotencyKey, "session_id": input.SessionID, "preparation_id": prepared.PreparationID}); err != nil {
 		return StartResult{}, err
 	}
 	workflowID := strings.TrimSpace(consumed.WorkflowID)
 	if workflowID == "" {
 		workflowID = input.WorkflowID
 	}
-	return StartResult{
-		Status: "started", PreparationID: prepared.PreparationID, SessionID: consumed.SessionID, WorkflowID: workflowID,
-		RevisionID: strings.TrimSpace(consumed.RevisionID), State: &state,
-	}, nil
+	result := StartResult{Status: "started", PreparationID: prepared.PreparationID, SessionID: consumed.SessionID,
+		WorkflowID: workflowID, RevisionID: strings.TrimSpace(consumed.RevisionID), IdempotencyKey: input.IdempotencyKey}
+	if (c.HostProvider == "codex" || c.HostProvider == "workbuddy") && c.RequireHostBinding {
+		if err := c.BindController(ctx, consumed.SessionID, input.DriverSessionID); err != nil {
+			result.Status, result.BindingRequired = "binding_required", true
+			result.Warning = diagnostic(err)
+			result.AgentInstruction = "The session exists but is not ready to execute. Retry workflow.start with the same inputs, idempotency_key and session_id to finish controller binding."
+			return result, nil
+		}
+	}
+	state, err := c.State(ctx, consumed.SessionID)
+	if err != nil {
+		result.StateUnavailable, result.Warning = true, diagnostic(err)
+		result.AgentInstruction = "The session was created. Read workflow.state for this session; do not create another run."
+	} else {
+		result.State = &state
+	}
+	return result, nil
 }
 
 func (c *Client) Begin(ctx context.Context, input BeginInput) (BeginResult, error) {
@@ -633,47 +609,25 @@ func (c *Client) Begin(ctx context.Context, input BeginInput) (BeginResult, erro
 			return BeginResult{}, err
 		}
 	}
-	if state.Control != nil {
-		var grant struct {
-			Receipt struct {
-				ExecutionID string `json:"execution_id"`
-			} `json:"receipt"`
-		}
-		if err := c.api.DoJSON(ctx, http.MethodPost, "/workflow-sessions/"+url.PathEscape(input.SessionID)+"/executions:begin", map[string]any{
-			"command_id": input.CommandID, "step_id": input.StepID, "expected_state_version": state.StateVersion,
-			"objective": input.Objective, "runtime_instruction": input.RuntimeInstruction, "retry_origin": input.RetryOrigin,
-		}, &grant); err != nil {
-			return BeginResult{}, err
-		}
-		return c.Claim(ctx, ResumeInput{SessionID: input.SessionID, ExecutionID: grant.Receipt.ExecutionID})
+	var grant struct {
+		Receipt map[string]any `json:"receipt"`
 	}
-	command := map[string]any{
-		"contract_version": contractVersion, "command_id": input.CommandID,
-		"tool": "advance_step_and_hand_off", "session_id": input.SessionID,
-		"expected_state_version": state.StateVersion, "retry_origin": input.RetryOrigin,
-		"steps": []map[string]any{{"step_id": input.StepID, "objective": input.Objective, "runtime_instruction": input.RuntimeInstruction}},
-	}
-	var advanced struct {
-		TaskID string `json:"task_id"`
-		Tasks  []struct {
-			StepID string `json:"step_id"`
-			TaskID string `json:"task_id"`
-		} `json:"tasks"`
-	}
-	if err := c.api.DoJSON(ctx, http.MethodPost, "/workflow-sessions/"+url.PathEscape(input.SessionID)+":advance-step-and-hand-off", command, &advanced); err != nil {
+	if err := c.mutate(ctx, "/workflow-sessions/"+url.PathEscape(input.SessionID)+"/executions:begin", map[string]any{
+		"command_id": input.CommandID, "step_id": input.StepID, "expected_state_version": state.StateVersion,
+		"objective": input.Objective, "runtime_instruction": input.RuntimeInstruction, "retry_origin": input.RetryOrigin,
+	}, &grant, map[string]any{"session_id": input.SessionID, "command_id": input.CommandID}); err != nil {
 		return BeginResult{}, err
 	}
-	executionID := advanced.TaskID
-	for _, task := range advanced.Tasks {
-		if task.StepID == input.StepID {
-			executionID = task.TaskID
-			break
-		}
+	executionID, _ := grant.Receipt["execution_id"].(string)
+	result, err := c.Claim(ctx, ResumeInput{SessionID: input.SessionID, ExecutionID: executionID})
+	result.CommandID, result.Receipt = input.CommandID, grant.Receipt
+	if err != nil {
+		result.Execution.ExecutionID, result.ClaimRequired = executionID, true
+		result.Warning = diagnostic(err)
+		// Begin already committed. Recover this execution, never create another.
+		return result, nil
 	}
-	if executionID == "" {
-		return BeginResult{}, errors.New("LazyMind accepted the step but returned no execution_id")
-	}
-	return c.begin(ctx, input.SessionID, executionID, false)
+	return result, nil
 }
 
 // Claim acquires a previously created recovery grant without advancing the graph again.
@@ -699,12 +653,16 @@ func (c *Client) begin(ctx context.Context, sessionID, executionID string, resum
 		action = ":resume"
 	}
 	var execution Execution
-	if err := c.api.DoJSON(ctx, http.MethodPost, "/workflow-sessions/"+url.PathEscape(sessionID)+
-		"/hosted-attempts/"+url.PathEscape(executionID)+action, map[string]any{}, &execution); err != nil {
+	if err := c.mutate(ctx, "/workflow-sessions/"+url.PathEscape(sessionID)+
+		"/hosted-attempts/"+url.PathEscape(executionID)+action, map[string]any{}, &execution, map[string]any{"session_id": sessionID, "execution_id": executionID}); err != nil {
 		return BeginResult{}, err
 	}
 	state, err := c.State(ctx, sessionID)
-	return BeginResult{Execution: execution, State: state}, err
+	result := BeginResult{Execution: execution, State: state}
+	if err != nil {
+		result.StateUnavailable, result.Warning = true, diagnostic(err)
+	}
+	return result, nil
 }
 
 func (c *Client) Complete(ctx context.Context, input CompleteInput) (CompleteResult, error) {
@@ -716,15 +674,15 @@ func (c *Client) Complete(ctx context.Context, input CompleteInput) (CompleteRes
 		"executor_ref": input.ExecutorRef, "execution_handle": input.ExecutionHandle,
 	}
 	var result CompleteResult
-	err := c.api.DoJSON(ctx, http.MethodPost, "/workflow-sessions/"+url.PathEscape(input.SessionID)+
-		"/hosted-attempts/"+url.PathEscape(input.ExecutionID)+":complete", payload, &result)
+	err := c.mutate(ctx, "/workflow-sessions/"+url.PathEscape(input.SessionID)+
+		"/hosted-attempts/"+url.PathEscape(input.ExecutionID)+":complete", payload, &result, map[string]any{"session_id": input.SessionID, "execution_id": input.ExecutionID})
 	if err != nil {
 		return CompleteResult{}, err
 	}
 	result.State, err = c.State(ctx, input.SessionID)
-	if err != nil && result.Control != nil {
+	if err != nil {
 		// The terminal transaction succeeded. A read outage must not turn it into a failed tool.
-		result.StateUnavailable = true
+		result.StateUnavailable, result.Warning = true, diagnostic(err)
 		result.State = Projection{SessionID: input.SessionID, Control: result.Control}
 		return result, nil
 	}
@@ -792,6 +750,6 @@ func (c *Client) Publish(ctx context.Context, input PublishInput, artifact map[s
 	}
 	payload := map[string]any{"execution_handle": input.ExecutionHandle, "artifact": artifact}
 	var result map[string]any
-	err := c.api.DoJSON(ctx, http.MethodPost, "/workflow-sessions/"+url.PathEscape(input.SessionID)+"/hosted-attempts/"+url.PathEscape(input.ExecutionID)+"/artifacts", payload, &result)
+	err := c.mutate(ctx, "/workflow-sessions/"+url.PathEscape(input.SessionID)+"/hosted-attempts/"+url.PathEscape(input.ExecutionID)+"/artifacts", payload, &result, map[string]any{"session_id": input.SessionID, "execution_id": input.ExecutionID, "slot": artifact["slot"], "seq": artifact["seq"]})
 	return result, err
 }

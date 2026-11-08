@@ -16,7 +16,6 @@ import (
 	"lazymind/core/common/orm"
 	"lazymind/core/state"
 	corestore "lazymind/core/store"
-	"lazymind/core/workflow/graphengine"
 )
 
 func academicJSON(value any) json.RawMessage { raw, _ := json.Marshal(value); return raw }
@@ -53,23 +52,7 @@ func academicToolFixture(t *testing.T) *Service {
 		}
 	})
 	t.Cleanup(func() { http.DefaultTransport = oldTransport })
-	var revision orm.WorkflowRevision
-	if err := service.DB.First(&revision, "id = ?", "pinned-revision").Error; err != nil {
-		t.Fatal(err)
-	}
-	var graph graphengine.CompiledStateGraph
-	if err := json.Unmarshal(revision.CompiledGraph, &graph); err != nil {
-		t.Fatal(err)
-	}
-	node := graph.Nodes["write"]
-	node.ExternalExecution.Tools = nil
-	for _, name := range []string{"academic_context", "academic_expansion", "academic_search_papers", "academic_read_paper", "academic_resolve_papers"} {
-		node.ExternalExecution.Tools = append(node.ExternalExecution.Tools, graphengine.ExternalTool{Name: name, Source: "package"})
-	}
-	graph.Nodes["write"] = node
-	if err := service.DB.Model(&revision).Update("compiled_graph", graph.JSON()).Error; err != nil {
-		t.Fatal(err)
-	}
+
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(academicBinding)))
 	for _, row := range []any{
 		&orm.WorkflowBlob{Hash: hash, Content: []byte(academicBinding), Size: int64(len(academicBinding))},

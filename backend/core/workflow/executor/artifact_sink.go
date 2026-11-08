@@ -153,6 +153,10 @@ func (sink DBArtifactSink) Save(ctx context.Context, attempt AttemptContext, art
 		storedValue, cleanupDirectory, err = artifactfile.Materialize(attempt.SessionID, valueID, artifact.Value)
 	}
 	if err != nil {
+		var invalid *artifactfile.InputError
+		if errors.As(err, &invalid) {
+			return controlstore.Reject("INVALID_ARTIFACT_FILE", invalid.Message)
+		}
 		return err
 	}
 	storedValue = common.CanonicalizeTextArtifactValue(artifact.ContentType, storedValue)
@@ -465,10 +469,14 @@ func ValidateRequiredOutputs(ctx context.Context, db *gorm.DB, attempt AttemptCo
 	for _, row := range rows {
 		seen[row.SlotID] = true
 	}
+	missing := []string{}
 	for _, slot := range attempt.RequiredOutputs {
 		if !seen[slot] {
-			return errors.New("required output missing: " + slot)
+			missing = append(missing, slot)
 		}
+	}
+	if len(missing) > 0 {
+		return &controlstore.Error{Code: "REQUIRED_OUTPUT_MISSING", Message: "Required output slots have not been published", Details: map[string]any{"missing_slots": missing, "execution_id": attempt.AttemptID}, Recovery: controlstore.RecoveryFor("REQUIRED_OUTPUT_MISSING")}
 	}
 	return nil
 }

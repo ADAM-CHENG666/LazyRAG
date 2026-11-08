@@ -58,10 +58,10 @@ type RemoteHandler struct {
 }
 
 type remoteEnvelope struct {
-	ContractVersion string         `json:"contract_version"`
-	OK              bool           `json:"ok"`
-	Data            any            `json:"data,omitempty"`
-	Error           map[string]any `json:"error,omitempty"`
+	ContractVersion string              `json:"contract_version"`
+	OK              bool                `json:"ok"`
+	Data            any                 `json:"data,omitempty"`
+	Error           *controlstore.Error `json:"error,omitempty"`
 }
 
 type attemptInputReadError struct {
@@ -75,9 +75,24 @@ func remoteReply(w http.ResponseWriter, status int, data any, code, message stri
 	w.WriteHeader(status)
 	value := remoteEnvelope{ContractVersion: attempt.ContractVersion, OK: code == "", Data: data}
 	if code != "" {
-		value.Error = map[string]any{"code": code, "message": message}
+		value.Error = &controlstore.Error{Code: code, Message: message, Recovery: controlstore.RecoveryFor(code)}
 	}
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+func remoteServiceError(w http.ResponseWriter, err error, fallback string) {
+	var problem *controlstore.Error
+	if errors.As(err, &problem) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(problem.HTTPStatus())
+		_ = json.NewEncoder(w).Encode(remoteEnvelope{ContractVersion: attempt.ContractVersion, Error: problem})
+		return
+	}
+	status := http.StatusServiceUnavailable
+	if errors.Is(err, attempt.ErrLeaseLost) || errors.Is(err, attempt.ErrAlreadyTerminal) {
+		status = http.StatusConflict
+	}
+	remoteReply(w, status, nil, fallback, err.Error())
 }
 
 func remoteTokenOK(r *http.Request) bool {
@@ -304,28 +319,14 @@ func (h RemoteHandler) SaveArtifact(w http.ResponseWriter, r *http.Request) {
 		remoteReply(w, 503, nil, "ATTEMPT_CONTEXT_FAILED", err.Error())
 		return
 	}
-	declared := false
-	outputs := ctx.DeclaredOutputs
-	if len(outputs) == 0 {
-		outputs = ctx.RequiredOutputs
-	}
-	for _, slot := range outputs {
-		if slot == body.Slot {
-			declared = true
-			break
-		}
-	}
-	if !declared {
-		remoteReply(w, 422, nil, "OUTPUT_SLOT_UNDECLARED", "artifact slot is not declared by the step")
-		return
-	}
-	if err := validateDeclaredArtifactType(ctx, body); err != nil {
-		remoteReply(w, 422, nil, "OUTPUT_TYPE_MISMATCH", err.Error())
+	body, err = NormalizeArtifact(ctx, body)
+	if err != nil {
+		remoteServiceError(w, err, "INVALID_ARTIFACT")
 		return
 	}
 	ctx.ExecutionHandle = r.Header.Get("X-Workflow-Lease-Token")
 	if err := h.Artifacts.Save(r.Context(), ctx, body); err != nil {
-		remoteReply(w, 503, nil, "ARTIFACT_WRITE_FAILED", err.Error())
+		remoteServiceError(w, err, "ARTIFACT_WRITE_FAILED")
 		return
 	}
 	remoteReply(w, 200, map[string]any{"saved": true, "slot": body.Slot, "seq": body.Seq}, "", "")
@@ -427,7 +428,7 @@ func (h RemoteHandler) Complete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.ValidateCompletion(ctx); err != nil {
-		remoteReply(w, 422, nil, "REQUIRED_OUTPUT_MISSING", err.Error())
+		remoteServiceError(w, err, "COMPLETION_VALIDATION_FAILED")
 		return
 	}
 	lease := r.Header.Get("X-Workflow-Lease-Token")
@@ -497,14 +498,7 @@ func (h RemoteHandler) terminal(w http.ResponseWriter, r *http.Request, status s
 	})
 
 	if err != nil {
-		httpStatus, code := http.StatusServiceUnavailable, "ATTEMPT_TERMINAL_REJECTED"
-		var rejection *controlstore.Error
-		if errors.As(err, &rejection) {
-			code, httpStatus = rejection.Code, rejection.HTTPStatus()
-		} else if errors.Is(err, attempt.ErrLeaseLost) || errors.Is(err, attempt.ErrAlreadyTerminal) {
-			httpStatus = http.StatusConflict
-		}
-		remoteReply(w, httpStatus, nil, code, err.Error())
+		remoteServiceError(w, err, "ATTEMPT_TERMINAL_REJECTED")
 		return
 	}
 	remoteReply(w, 200, map[string]any{"attempt_status": status}, "", "")

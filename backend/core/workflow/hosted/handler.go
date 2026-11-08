@@ -8,7 +8,6 @@ import (
 
 	"github.com/gorilla/mux"
 
-	"lazymind/core/workflow/attempt"
 	"lazymind/core/workflow/controlstore"
 	"lazymind/core/workflow/executor"
 	workflowstore "lazymind/core/workflow/store"
@@ -25,11 +24,7 @@ type responseEnvelope struct {
 	Error           *responseError `json:"error,omitempty"`
 }
 
-type responseError struct {
-	Code      string `json:"code"`
-	Message   string `json:"message"`
-	Retryable bool   `json:"retryable"`
-}
+type responseError = controlstore.Error
 
 func reply(w http.ResponseWriter, status int, result any, protocolErr *responseError) {
 	w.Header().Set("Content-Type", "application/json")
@@ -58,7 +53,7 @@ func writeServiceError(w http.ResponseWriter, err error) {
 	var control *controlstore.Error
 	switch {
 	case errors.As(err, &control):
-		reply(w, control.HTTPStatus(), nil, &responseError{Code: control.Code, Message: control.Message})
+		reply(w, control.HTTPStatus(), nil, control)
 	case errors.As(err, &protocol):
 		status := http.StatusConflict
 		if protocol.Code == "INVALID_EXECUTION" {
@@ -66,14 +61,14 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		} else if protocol.Code == "EXECUTION_NOT_FOUND" {
 			status = http.StatusNotFound
 		}
-		retryable := protocol.Code == attempt.CodeLeaseLost || protocol.Code == "EXECUTION_NOT_CLAIMABLE" || protocol.Code == "WORKFLOW_PROJECTION_FAILED"
-		reply(w, status, nil, &responseError{Code: protocol.Code, Message: protocol.Message, Retryable: retryable})
+		retryable := protocol.Code == "WORKFLOW_PROJECTION_FAILED"
+		reply(w, status, nil, &responseError{Code: protocol.Code, Message: protocol.Message, Retryable: retryable, Recovery: controlstore.RecoveryFor(protocol.Code)})
 	case errors.Is(err, workflowstore.ErrNotFound):
 		reply(w, http.StatusNotFound, nil, &responseError{Code: "WORKFLOW_SESSION_NOT_FOUND", Message: "workflow session was not found"})
 	case errors.Is(err, workflowstore.ErrPermissionDenied):
 		reply(w, http.StatusForbidden, nil, &responseError{Code: "PERMISSION_DENIED", Message: "workflow session belongs to another owner"})
 	default:
-		reply(w, http.StatusServiceUnavailable, nil, &responseError{Code: "HOSTED_EXECUTION_FAILED", Message: err.Error(), Retryable: true})
+		reply(w, http.StatusServiceUnavailable, nil, &responseError{Code: "HOSTED_EXECUTION_FAILED", Message: "Workflow execution service is unavailable; read state before retrying"})
 	}
 }
 
@@ -141,21 +136,25 @@ func (h Handler) Publish(w http.ResponseWriter, r *http.Request) {
 	reply(w, 200, map[string]any{"saved": true, "slot": input.Artifact.Slot, "seq": max(input.Artifact.Seq, 1)}, nil)
 }
 
-func (h Handler) Submit(w http.ResponseWriter, r *http.Request) {
+func (h Handler) Renew(w http.ResponseWriter, r *http.Request) {
 	ownerID, ok := owner(w, r)
 	if !ok {
 		return
 	}
-	var submission Submission
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<20)).Decode(&submission); err != nil {
-		reply(w, http.StatusUnprocessableEntity, nil, &responseError{Code: "INVALID_SUBMISSION", Message: "invalid hosted execution submission"})
+	var input struct {
+		ExecutionHandle string `json:"execution_handle"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		reply(w, 422, nil, &responseError{Code: "INVALID_EXECUTION", Message: "execution_handle is required"})
 		return
 	}
 	vars := mux.Vars(r)
-	value, err := h.Service.Submit(r.Context(), ownerID, vars["session_id"], vars["attempt_id"], submission)
+	expires, err := h.Service.Renew(r.Context(), ownerID, vars["session_id"], vars["attempt_id"], input.ExecutionHandle)
 	if err != nil {
 		writeServiceError(w, err)
 		return
 	}
-	reply(w, http.StatusOK, value, nil)
+	reply(w, 200, map[string]any{"execution_id": vars["attempt_id"], "lease_expires_at": expires}, nil)
 }

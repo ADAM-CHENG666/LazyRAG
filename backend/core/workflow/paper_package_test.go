@@ -20,8 +20,13 @@ func TestPaperWorkflowPackagesCompile(t *testing.T) {
 				t.Fatal(err)
 			}
 			result := graphengine.Compile(string(w), string(state), "", graphengine.ProfilePublish)
-			if result.Graph == nil || len(result.Diagnostics) > 0 {
+			if result.Graph == nil || !result.Valid {
 				t.Fatalf("invalid workflow: %+v", result.Diagnostics)
+			}
+			for _, diagnostic := range result.Diagnostics {
+				if diagnostic.Code != "W_EXTERNAL_EXECUTION_REMOVED" || diagnostic.Severity != "warning" {
+					t.Fatalf("unexpected diagnostic: %+v", diagnostic)
+				}
 			}
 		})
 	}

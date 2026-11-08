@@ -35,13 +35,12 @@ type workflowControlSnapshotReply struct {
 	Message string                      `json:"message"`
 	Data    workflowControlSnapshotData `json:"data"`
 }
-type workflowControlError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
-}
+type workflowControlError controlstore.Error
+
 type workflowControlErrorReply struct {
-	OK    bool                 `json:"ok"`
-	Error workflowControlError `json:"error"`
+	Result map[string]any       `json:"result,omitempty"`
+	OK     bool                 `json:"ok"`
+	Error  workflowControlError `json:"error"`
 }
 type workflowCapabilitiesData struct {
 	Protocol    string `json:"protocol"`
@@ -113,7 +112,7 @@ func workflowControlOperations() []openAPIOperation {
 		return &openAPIBody{Required: true, ContentType: "application/json", Schema: schemaSource{Type: v}}
 	}
 	response := func(v any) map[int]openAPIResponse {
-		return map[int]openAPIResponse{200: {Description: "Workflow control result", ContentType: "application/json", Schema: schemaSource{Type: v}}, 409: {Description: "Stale state, invalid admission, or conflicting command", ContentType: "application/json", Schema: schemaSource{Type: workflowControlErrorReply{}}}}
+		return map[int]openAPIResponse{200: {Description: "Workflow control result", ContentType: "application/json", Schema: schemaSource{Type: v}}, 409: {Description: "Stale state, invalid admission, or conflicting command", ContentType: "application/json", Schema: schemaSource{Type: workflowControlErrorReply{}}}, 422: {Description: "Invalid inputs or missing required outputs", ContentType: "application/json", Schema: schemaSource{Type: workflowControlErrorReply{}}}}
 	}
 	operation := func(method, path, summary string, params any, request any, reply any) openAPIOperation {
 		value := openAPIOperation{Method: method, Path: path, Summary: summary, Tags: []string{"workflow-control"}, PathParams: params, Responses: response(reply)}
@@ -135,10 +134,11 @@ func workflowControlOperations() []openAPIOperation {
 		operation("POST", "/workflow-host-actions/{action_id}:settle", "Record host acceptance or reconcile a durable native event", workflowHostActionPath{}, workflow.WorkflowHostReceipt{}, workflowHostReceiptReply{}),
 		operation("POST", "/workflow-sessions/{session_id}/hosted-attempts/{attempt_id}:begin", "Claim an existing queued execution and receive its fenced handle", workflowHostedPath{}, nil, workflowHostedExecutionReply{}),
 		operation("POST", "/workflow-sessions/{session_id}/hosted-attempts/{attempt_id}:resume", "Rotate the existing execution handle for explicit recovery", workflowHostedPath{}, nil, workflowHostedExecutionReply{}),
+		operation("POST", "/workflow-sessions/{session_id}/hosted-attempts/{attempt_id}:renew", "Extend the current unexpired execution lease", workflowHostedPath{}, workflowToolListBody{}, map[string]any{}),
 		operation("POST", "/workflow-sessions/{session_id}/hosted-attempts/{attempt_id}:complete", "Complete an execution using already published artifacts", workflowHostedPath{}, executor.Completion{}, workflowHostedCompletionReply{}),
 		operation("POST", "/workflow-sessions/{session_id}/hosted-attempts/{attempt_id}/artifacts", "Publish one artifact during execution", workflowHostedPath{}, hosted.Publication{}, map[string]any{}),
-		operation("POST", "/workflow-sessions/{session_id}/hosted-attempts/{attempt_id}/tools:list", "Discover tools declared by a pinned external step", workflowHostedPath{}, workflowToolListBody{}, workflowToolListReply{}),
-		operation("POST", "/workflow-sessions/{session_id}/hosted-attempts/{attempt_id}/tools:call", "Invoke a declared tool under the current execution lease", workflowHostedPath{}, workflowtool.CallInput{}, workflowToolCallReply{}),
+		operation("POST", "/workflow-sessions/{session_id}/hosted-attempts/{attempt_id}/tools:list", "Discover registered package and user-authorized global tools", workflowHostedPath{}, workflowToolListBody{}, workflowToolListReply{}),
+		operation("POST", "/workflow-sessions/{session_id}/hosted-attempts/{attempt_id}/tools:call", "Invoke an authorized registered tool under the current execution lease", workflowHostedPath{}, workflowtool.CallInput{}, workflowToolCallReply{}),
 	}
 	result[1].QueryParams = struct {
 		View string `json:"view,omitempty"`
@@ -156,6 +156,6 @@ func workflowControlOperations() []openAPIOperation {
 			Credential string `json:"X-Workflow-Host-Credential"`
 		}{}
 	}
-	result[12].Description = "workflow.control.v1 runs require execution_handle. Repeating the identical completion returns its receipt and current control; conflicting content is rejected."
+	result[13].Description = "workflow.control.v1 runs require execution_handle. Repeating the identical completion returns its receipt and current control; conflicting content is rejected."
 	return result
 }

@@ -46,9 +46,7 @@ def pptx_bytes(order=(2, 1), absolute_targets=False):
 
 def request(files=None, tools=None, **extra):
     tools = tools if tools is not None else ['ppt_inspect_pptx']
-    workflow = {'runtime': {'external_execution': {'version': '1', 'steps': {
-        'inspect': {'prompt': 'Inspect', 'tools': [{'name': name, 'source': 'package'} for name in tools]}}}},
-        'tool_scripts': [{'path': 'scripts/external_tools.py', 'functions': tools}]}
+    workflow = {'tool_scripts': [{'path': 'scripts/external_tools.py', 'functions': tools}]}
     contents = {'workflow.yaml': yaml.safe_dump(workflow).encode(),
                 'scripts/external_tools.py': PPT_BINDING.encode(), **(files or {})}
     tree_hash = package_tree_hash(contents)
@@ -77,7 +75,6 @@ def test_pinned_tool_catalog_and_real_inspection_preserve_slide_order(absolute_t
 @pytest.mark.parametrize('change,code', [
     ({'files': {'scripts/external_tools.py': b'raise RuntimeError("must never execute")'}}, 'TOOL_NOT_ALLOWED'),
     ({'files': {'../secret': b'no'}}, 'INVALID_PACKAGE'),
-    ({'step_id': 'other-step'}, 'INVALID_PACKAGE'),
     ({'tree_hash': '0' * 64}, 'INVALID_PACKAGE'),
 ])
 def test_snapshot_and_adapter_boundary(change, code):
@@ -152,6 +149,12 @@ def test_authenticated_route_uses_same_pinned_validation(monkeypatch):
     response = client.post('/api/workflow/external-tools/call', json=payload, headers=headers)
     assert response.status_code == 400
     assert response.json()['detail']['code'] == 'TOOL_NOT_ALLOWED'
+
+
+def test_registered_catalog_is_not_a_per_step_tool_allowlist():
+    first = list_external_tools(ExternalToolRequest(**request()))
+    second = list_external_tools(ExternalToolRequest(**request(step_id='another-authorized-step')))
+    assert first == second
 
 
 def test_every_builtin_has_complete_external_step_contracts():

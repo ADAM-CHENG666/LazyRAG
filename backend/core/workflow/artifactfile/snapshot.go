@@ -3,7 +3,6 @@ package artifactfile
 import (
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -42,7 +41,7 @@ func Snapshot(sessionID, artifactID, contentType string, raw json.RawMessage) (j
 		return nil, "", err
 	}
 	if !filepath.IsAbs(source) || doc.StaticFileReferenceFromAnyStoragePath(source) == "" {
-		return nil, "", errors.New("artifact file is outside LazyMind storage")
+		return nil, "", invalidInput("artifact file is outside LazyMind storage")
 	}
 	file, err := os.Open(source)
 	if err != nil {
@@ -54,14 +53,14 @@ func Snapshot(sessionID, artifactID, contentType string, raw json.RawMessage) (j
 		return nil, "", err
 	}
 	if !info.Mode().IsRegular() || info.Size() > maxFileBytes {
-		return nil, "", errors.New("artifact must be a regular file of at most 20 MiB")
+		return nil, "", invalidInput("artifact must be a regular file of at most 20 MiB")
 	}
 	content, err := io.ReadAll(io.LimitReader(file, maxFileBytes+1))
 	if err != nil {
 		return nil, "", err
 	}
 	if len(content) > maxFileBytes {
-		return nil, "", errors.New("artifact exceeds 20 MiB")
+		return nil, "", invalidInput("artifact exceeds 20 MiB")
 	}
 	value["storage"] = inlineStorage
 	value["content_base64"] = base64.StdEncoding.EncodeToString(content)

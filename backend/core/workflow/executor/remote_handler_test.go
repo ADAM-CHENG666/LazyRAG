@@ -239,7 +239,7 @@ func TestRemoteHandlerRejectsChangedArtifactInput(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &envelope); err != nil {
 		t.Fatal(err)
 	}
-	if envelope.OK || envelope.Error["code"] != "ATTEMPT_INPUT_CHANGED" || envelope.Data != nil {
+	if envelope.OK || envelope.Error == nil || envelope.Error.Code != "ATTEMPT_INPUT_CHANGED" || envelope.Data != nil {
 		t.Fatalf("changed input response=%#v", envelope)
 	}
 }
@@ -303,7 +303,7 @@ func TestRemoteHandlerExportsEditedMarkdownAsDocument(t *testing.T) {
 					t.Fatal(err)
 				}
 				if status != http.StatusOK {
-					if envelope.OK || envelope.Data != nil || envelope.Error["code"] != "ATTEMPT_INPUT_INVALID" {
+					if envelope.OK || envelope.Data != nil || envelope.Error == nil || envelope.Error.Code != "ATTEMPT_INPUT_INVALID" {
 						t.Fatalf("invalid document response=%#v", envelope)
 					}
 					return
@@ -500,7 +500,7 @@ func TestRemoteHandlerRejectsChangedListArtifactMetadata(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &envelope); err != nil {
 		t.Fatal(err)
 	}
-	if envelope.OK || envelope.Error["code"] != "ATTEMPT_INPUT_CHANGED" || envelope.Data != nil {
+	if envelope.OK || envelope.Error == nil || envelope.Error.Code != "ATTEMPT_INPUT_CHANGED" || envelope.Data != nil {
 		t.Fatalf("changed list response=%#v", envelope)
 	}
 }
