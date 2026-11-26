@@ -1,0 +1,41 @@
+name: Verify PR 1037 DSH reconnect on Windows
+on:
+  push:
+    branches: [codex/verify-pr1037-win42]
+permissions:
+  contents: read
+jobs:
+  verify:
+    name: Run DSH reconnect on Windows
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.11'
+          cache-dependency-path: local/lazymind-cli/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Require a passing event from the DSH reconnect test
+        working-directory: local/lazymind-cli
+        shell: pwsh
+        run: |
+          $name = 'TestDSHStandaloneCLIReconnectsWithSelectedRelease'
+          $log = Join-Path $env:RUNNER_TEMP 'dsh-reconnect.jsonl'
+          go test -count=1 -json -run "^$name$" ./cmd/lazymind | Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $passed = @(Get-Content $log | ForEach-Object { $_ | ConvertFrom-Json } |
+            Where-Object { $_.Test -ceq $name -and $_.Action -ceq 'pass' })
+          if ($passed.Count -ne 1) { throw "Expected one pass event for $name, found $($passed.Count)" }
+          "$name PASS on $env:RUNNER_OS ($($passed[0].Elapsed)s)" >> $env:GITHUB_STEP_SUMMARY
+      - name: Save the Go test events
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-reconnect-windows
+          path: ${{ runner.temp }}/dsh-reconnect.jsonl
+          retention-days: 7
