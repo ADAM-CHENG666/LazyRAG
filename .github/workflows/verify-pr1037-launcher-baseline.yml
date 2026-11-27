@@ -24,12 +24,14 @@ jobs:
           go-version: '1.25.11'
       - name: Execute original launcher test from dc348cba6
         continue-on-error: true
+        shell: bash
         run: node --test --test-name-pattern="Windows PowerShell preserves" desktop/scripts/assistant-bridge-win.test.mjs
       - name: Capture launcher status in the private fake test environment
         shell: python
         run: |
           from pathlib import Path
-          import subprocess
+          import subprocess,sys
+          sys.stdout.reconfigure(encoding="utf-8")
           p=Path('local/scripts/assistant-bridge-win.ps1')
           text=p.read_text(encoding='utf-8')
           text=text.replace('$output = & $Path @Arguments', '''[Console]::Error.WriteLine("QA probe action=$($Arguments -join ' ') pathLength=$($Path.Length) path=$Path exists=$([IO.File]::Exists($Path))")
