@@ -312,6 +312,8 @@ func TestReleaseDoesNotStopUnmanagedLegacyBridge(t *testing.T) {
 
 func TestReleaseDrainsPreviousScopedBridgeWithoutStoppingOtherClient(t *testing.T) {
 	s, b := sharedTestServer(t)
+	var stopped atomic.Bool
+	s.stop = func() { stopped.Store(true) }
 	t.Setenv("LAZYMIND_HOME", b.root)
 	t.Setenv("LAZYMIND_RUNTIME_PROFILE", "")
 	t.Setenv(connectorconfig.EnvironmentKey, "")
@@ -336,17 +338,36 @@ func TestReleaseDrainsPreviousScopedBridgeWithoutStoppingOtherClient(t *testing.
 	if err := connectorconfig.WriteBridgeEndpoint(b.root, connectorconfig.BridgeEndpoint{URL: broker.URL, Broker: broker.URL}); err != nil {
 		t.Fatal(err)
 	}
+	if err := releaseForUpgrade(t.Context(), broker.Client(), strings.TrimPrefix(broker.URL, "http://"), b.token,
+		ClientOptions{ID: "desktop", Home: b.root}, b.root); err == nil {
+		t.Fatal("upgrade should preserve a broker still leased by Compose")
+	}
 	if err := ReleaseClient(t.Context(), ClientOptions{ID: "compose"}); err != nil {
 		t.Fatal(err)
 	}
 	b.mu.Lock()
+	_, desktopRemains := b.clients["desktop"]
+	shared := len(b.clients) == 1 && !b.stopping
+	b.mu.Unlock()
+	if !desktopRemains || !shared {
+		t.Fatal("releasing Compose must keep the Desktop client active")
+	}
+	if err := releaseForUpgrade(t.Context(), broker.Client(), strings.TrimPrefix(broker.URL, "http://"), b.token,
+		ClientOptions{ID: "desktop", Home: b.root}, b.root); err != nil {
+		t.Fatalf("release the sole remaining client for upgrade: %v", err)
+	}
+	b.mu.Lock()
 	defer b.mu.Unlock()
-	if _, ok := b.clients["desktop"]; !ok || len(b.clients) != 1 || b.stopping {
-		t.Fatalf("releasing Compose must keep the Desktop client active: %+v", b.clients)
+	if len(b.clients) != 0 || !b.stopping {
+		t.Fatal("verified broker with no other clients refused shutdown")
 	}
 }
 
-func TestStartPreservesIncompatibleLegacyBridge(t *testing.T) {
+func TestStartPreservesUnverifiedBridge(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, test := range []struct {
 		name    string
 		version string
@@ -362,7 +383,7 @@ func TestStartPreservesIncompatibleLegacyBridge(t *testing.T) {
 			t.Setenv("LAZYMIND_RUNTIME_PROFILE", "")
 			t.Setenv(connectorconfig.EnvironmentKey, "")
 			status := map[string]any{
-				"version": test.version, "platform": runtime.GOOS, "executable": "/legacy/lazymind",
+				"ok": true, "pid": os.Getpid(), "version": test.version, "platform": runtime.GOOS, "executable": self,
 			}
 			if test.scoped {
 				status["service"], status["home"], status["isolated"] = bridgeProduct, root, false
@@ -377,8 +398,8 @@ func TestStartPreservesIncompatibleLegacyBridge(t *testing.T) {
 			defer legacy.Close()
 			address := strings.TrimPrefix(legacy.URL, "http://")
 			_, err := Start(context.Background(), address)
-			if err == nil || !strings.Contains(err.Error(), "incompatible Assistant Bridge is using this environment") {
-				t.Fatalf("expected clear compatibility error, got %v", err)
+			if err == nil || !strings.Contains(err.Error(), "cannot verify ownership for this environment") {
+				t.Fatalf("expected ownership error, got %v", err)
 			}
 			if mutations.Load() != 0 {
 				t.Fatal("modified existing legacy bridge")

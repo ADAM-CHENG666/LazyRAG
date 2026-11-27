@@ -1,0 +1,91 @@
+name: Verify PR 1037 Bridge handoff
+on:
+  push:
+    branches: [codex/verify-pr1037-bridge-1127]
+permissions:
+  contents: read
+jobs:
+  cli:
+    name: Bridge process tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-2025]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.11'
+          cache-dependency-path: local/lazymind-cli/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Verify shared Bridge, cross-version ownership, release and cold start
+        working-directory: local/lazymind-cli
+        shell: bash
+        run: |
+          go test -v -count=1 ./internal/assistantbridge ./cmd/lazymind -run 'Test(Start|Release|SharedBridge|BridgeIdentity|DesktopCompose|BridgeSurvives|AssistantColdStart|.*Upgrade.*|.*LegacyBridge.*)'
+  test-desktop-shell:
+    name: Test desktop shell (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2025]
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: frontend/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Install renderer dependencies for the Desktop upgrade regression
+        run: pnpm --dir frontend install --frozen-lockfile
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.11'
+          cache-dependency-path: local/lazymind-cli/go.sum
+      - name: Check out upstream v9 for Desktop upgrade regression
+        uses: actions/checkout@v4
+        with:
+          ref: 9461b8e74aa9f0b2d10b42d55a97c1d499fb9de5
+          path: .legacy-bridge-source
+          persist-credentials: false
+      - name: Build native Bridge and upstream v9 for lifecycle regression
+        shell: bash
+        run: |
+          suffix=""
+          if [ "$RUNNER_OS" = "Windows" ]; then suffix=".exe"; fi
+          bundled="$RUNNER_TEMP/lazymind$suffix"
+          legacy="$RUNNER_TEMP/lazymind-v9$suffix"
+          go -C local/lazymind-cli build -o "$bundled" ./cmd/lazymind
+          go -C .legacy-bridge-source/local/lazymind-cli build -o "$legacy" ./cmd/lazymind
+          echo "LAZYMIND_TEST_BRIDGE_EXE=$bundled" >> "$GITHUB_ENV"
+          echo "LAZYMIND_TEST_LEGACY_BRIDGE_EXE=$legacy" >> "$GITHUB_ENV"
+      - name: Test the first Desktop DSH connection after a Bridge upgrade
+        working-directory: local/lazymind-cli
+        shell: bash
+        run: |
+          test -f "$LAZYMIND_TEST_BRIDGE_EXE"
+          test -f "$LAZYMIND_TEST_LEGACY_BRIDGE_EXE"
+          go test ./cmd/lazymind -run '^TestDesktopDSHFirstConnectReplacesLegacyBridge$' -count=1 -v
+      - name: Test Desktop shell
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            # Keep PowerShell lifecycle deadlines independent of concurrent
+            # filesystem scans and archive extraction on the shared runner.
+            node --test --test-concurrency=1 desktop/scripts/*.test.mjs desktop/electron/tests/agent-recovery.test.js desktop/electron/tests/agent-discovery-refresh.test.js
+          else
+            node --test desktop/scripts/*.test.mjs desktop/electron/tests/agent-recovery.test.js desktop/electron/tests/agent-discovery-refresh.test.js
+          fi

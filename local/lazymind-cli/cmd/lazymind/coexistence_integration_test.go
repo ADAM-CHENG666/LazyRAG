@@ -29,7 +29,15 @@ import (
 // The subprocess executes the real CLI/HTTP server, including detached launch,
 // environment routing and shutdown. No Docker or user runtime is required.
 func TestMain(m *testing.M) {
-	if strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe") == dshNativeInstallFixture {
+	name := strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe")
+	if name == desktopDSHInstaller || name == "DeepSeek Harness" {
+		if err := runDesktopDSHFixture(name, os.Args[1:]); err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	if name == dshNativeInstallFixture {
 		if err := runDSHNativeInstallFixture(os.Args[1:]); err != nil {
 			_, _ = fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
