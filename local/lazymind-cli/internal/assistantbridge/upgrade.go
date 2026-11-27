@@ -2,6 +2,7 @@ package assistantbridge
 
 import (
 	"context"
+	"debug/buildinfo"
 	"errors"
 	"fmt"
 	"net"
@@ -54,13 +55,15 @@ func replaceBridge(ctx context.Context, address string, status map[string]any, s
 	}
 	if legacy {
 		reported, _ := current["executable"].(string)
-		if !legacyBridge(current) || current["platform"] != runtime.GOOS ||
-			!ownsLegacyBridge(reported, self, client) {
+		if !legacyBridge(current) || current["platform"] != runtime.GOOS {
 			return false, unverifiedBridge()
 		}
 		logPath := filepath.Join(root, "logs", "assistant-bridge.log")
 		if err := verifyBridgePeer(ctx, pid, conn, reported, logPath); err != nil {
 			return false, fmt.Errorf("%w: %v", unverifiedBridge(), err)
+		}
+		if !ownsLegacyBridge(reported, self, client) {
+			return false, unverifiedBridge()
 		}
 		if err := shutdownLegacyBridge(ctx, httpClient, address); err != nil {
 			return false, err
@@ -133,7 +136,26 @@ func ownsLegacyBridge(executable, self string, client ClientOptions) bool {
 	if runtime.GOOS == "windows" {
 		name += ".exe"
 	}
-	return sameBridgePath(executable, filepath.Join(resources, "bin", name))
+	bundled := filepath.Join(resources, "bin", name)
+	if sameBridgePath(executable, bundled) {
+		return true
+	}
+	if runtime.GOOS != "windows" || !sameBridgePath(self, bundled) {
+		return false
+	}
+	// Windows locks the running image, so an updated portable ZIP can run
+	// from a new directory. The verified peer must still be LazyMind's CLI in
+	// the Desktop layout. The legacy Compose launcher uses a different layout.
+	previousRuntime := filepath.Dir(filepath.Dir(executable))
+	volume := filepath.VolumeName(executable)
+	if !filepath.IsAbs(executable) || len(volume) != 2 || volume[1] != ':' ||
+		!strings.EqualFold(filepath.Base(filepath.Dir(previousRuntime)), "resources") ||
+		!strings.EqualFold(filepath.Base(previousRuntime), "runtime") ||
+		!strings.EqualFold(executable, filepath.Join(previousRuntime, "bin", name)) {
+		return false
+	}
+	info, err := buildinfo.ReadFile(executable)
+	return err == nil && info.Path == "lazymind/agentconnector/cmd/lazymind" && info.Main.Path == "lazymind/agentconnector"
 }
 
 func shutdownLegacyBridge(ctx context.Context, client *http.Client, address string) error {

@@ -40,8 +40,12 @@ func TestDesktopDSHFirstConnectReplacesLegacyBridge(t *testing.T) {
 	home, dshHome := filepath.Join(root, "LazyMind home"), filepath.Join(root, "DSH home")
 	profile := filepath.Join(dshHome, "profiles", "desktop")
 	resources := filepath.Join(root, "LazyMind.app", "Contents", "Resources", "runtime")
+	legacyResources := resources
 	if runtime.GOOS == "windows" {
-		resources = filepath.Join(root, "LazyMind", "resources", "runtime")
+		// The Windows portable ZIP can be unpacked into a new directory while
+		// the predecessor's running executable remains locked in place.
+		resources = filepath.Join(root, "LazyMind current", "resources", "runtime")
+		legacyResources = filepath.Join(root, "LazyMind previous", "resources", "runtime")
 	}
 	bin := filepath.Join(resources, "bin")
 	suffix := ""
@@ -49,7 +53,7 @@ func TestDesktopDSHFirstConnectReplacesLegacyBridge(t *testing.T) {
 		suffix = ".exe"
 	}
 	bundled := filepath.Join(bin, "lazymind"+suffix)
-	legacy := bundled
+	legacy := filepath.Join(legacyResources, "bin", "lazymind"+suffix)
 	write := func(path string, contents []byte) {
 		t.Helper()
 		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
@@ -156,7 +160,9 @@ func TestDesktopDSHFirstConnectReplacesLegacyBridge(t *testing.T) {
 			_ = exec.CommandContext(cleanup, legacySource, "assistant", "stop", "--listen", address).Run()
 		}
 	})
-	if out, err := exec.CommandContext(ctx, legacy, "assistant", "start", "--listen", address).CombinedOutput(); err != nil {
+	legacyStart := exec.CommandContext(ctx, legacy, "assistant", "start", "--listen", address)
+	legacyStart.Env = append(os.Environ(), "LAZYMIND_RUNTIME_RESOURCES_ROOT="+legacyResources)
+	if out, err := legacyStart.CombinedOutput(); err != nil {
 		t.Fatalf("start genuine upstream v9: %v\n%s", err, out)
 	}
 	before, err := assistantbridge.Health(ctx, address)
@@ -167,14 +173,11 @@ func TestDesktopDSHFirstConnectReplacesLegacyBridge(t *testing.T) {
 		t.Fatalf("old Bridge unexpectedly left an endpoint record: %v", err)
 	}
 
-	// Use the normal installed Desktop path for both versions. Windows keeps
-	// the running image mapped while it is moved aside by the upgrade.
-	if runtime.GOOS == "windows" {
-		if err := os.Rename(legacy, legacy+".previous"); err != nil {
-			t.Fatalf("stage the new Desktop executable beside its running predecessor: %v", err)
+	if legacy == bundled {
+		// The previous macOS bundle can be replaced at the original path.
+		if err := os.Remove(legacy); err != nil {
+			t.Fatal(err)
 		}
-	} else if err := os.Remove(legacy); err != nil {
-		t.Fatal(err)
 	}
 	copyExe(bundledSource, bundled)
 

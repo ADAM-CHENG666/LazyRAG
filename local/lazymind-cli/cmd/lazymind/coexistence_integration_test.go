@@ -275,14 +275,14 @@ func TestAssistantColdStartWithDamagedConnectorPackage(t *testing.T) {
 				t.Fatal(err)
 			}
 			binary := filepath.Join(distribution, filepath.Base(self))
-			if err := os.Link(self, binary); err != nil {
-				body, err := os.ReadFile(self)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(binary, body, 0700); err != nil {
-					t.Fatal(err)
-				}
+			// Windows cannot remove a hard link to the test image while this
+			// process is still running. Give the distribution its own file.
+			body, err := os.ReadFile(self)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(binary, body, 0700); err != nil {
+				t.Fatal(err)
 			}
 			connectortest.WriteMinimalPackage(t, binary, tc.damaged)
 			healthy := connectortest.WritePackage(t, binary, tc.healthy, "0.2.0", map[string]string{
