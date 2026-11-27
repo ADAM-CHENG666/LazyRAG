@@ -1,0 +1,41 @@
+name: Diagnose the Windows Bridge launcher against the PR baseline
+on:
+  push:
+    branches: [codex/verify-pr1037-win-launcher-1127]
+permissions:
+  contents: read
+jobs:
+  baseline:
+    runs-on: windows-2025
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20','22']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.11'
+      - name: Execute original launcher test from dc348cba6
+        continue-on-error: true
+        run: node --test --test-name-pattern="Windows PowerShell preserves" desktop/scripts/assistant-bridge-win.test.mjs
+      - name: Capture launcher status in the private fake test environment
+        shell: python
+        run: |
+          from pathlib import Path
+          import subprocess
+          p=Path('local/scripts/assistant-bridge-win.ps1')
+          text=p.read_text(encoding='utf-8')
+          text=text.replace('$output = & $Path @Arguments', '''[Console]::Error.WriteLine("QA probe action=$($Arguments -join ' ') pathLength=$($Path.Length) path=$Path exists=$([IO.File]::Exists($Path))")
+              $output = & $Path @Arguments
+              [Console]::Error.WriteLine("QA probe output=[$($output -join '|')] exit=$LASTEXITCODE")''')
+          p.write_text(text,encoding='utf-8')
+          r=subprocess.run(['node','--test','--test-name-pattern=Windows PowerShell preserves','desktop/scripts/assistant-bridge-win.test.mjs'],capture_output=True)
+          print(r.stdout.decode(errors='replace'))
+          print(r.stderr.decode(errors='replace'))
