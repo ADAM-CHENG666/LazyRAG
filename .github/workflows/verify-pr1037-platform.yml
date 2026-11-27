@@ -1,0 +1,88 @@
+name: Verify PR 1037 external Agent platforms
+on:
+  push:
+    branches: [codex/verify-pr1037-platform-1127]
+permissions:
+  contents: read
+jobs:
+  connector:
+    name: Connector paths and processes (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-2025]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '10.0.0'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.11'
+          cache-dependency-path: local/lazymind-cli/go.sum
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify packaged worker on the native runner
+        working-directory: integrations/workbuddy-workflow/connector
+        shell: bash
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+          pnpm exec vitest run tests/process.test.ts --reporter=verbose --reporter=json --outputFile=process-results.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          report = json.loads(Path('process-results.json').read_text(encoding='utf-8'))
+          tests = [case for suite in report['testResults'] for case in suite['assertionResults']]
+          name = 'packaged worker polls independently, excludes a second worker and exits on disconnect'
+          assert [t['status'] for t in tests if t['title'] == name] == ['passed'], tests
+          print('QA confirmed #10: ' + name)
+          PY
+      - name: Verify native paths, installed layouts and LazyMind CLI reconnect
+        working-directory: local/lazymind-cli
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, subprocess, sys
+          names = ['TestInstalledHeartbeatCanUseCanonicalPath','TestDesktopManifestOnMacAndWindowsLayouts','TestDSHStandaloneCLIReconnectsWithSelectedRelease','TestDSHStandaloneCLIRecoversRetainedReleaseWithoutReinstalling']
+          if sys.platform == 'darwin': names.append('TestFindWorkBuddyDesktopBundles')
+          if sys.platform == 'win32': names.append('TestWindowsWorkBuddyDiscoveryUsesKnownExecutables')
+          p = subprocess.run(['go','test','-count=1','-json','-run','^('+'|'.join(names)+')$','./internal/workflowconnector','./internal/workbuddyhost','./internal/agentexec','./cmd/lazymind'], capture_output=True, encoding='utf-8')
+          print(p.stdout, flush=True)
+          print(p.stderr, flush=True)
+          p.check_returncode()
+          events = [json.loads(line) for line in p.stdout.splitlines() if line.startswith('{')]
+          for name in names:
+              actions = [e['Action'] for e in events if e.get('Test') == name]
+              assert actions.count('pass') == 1, (name, actions)
+              print('QA confirmed ' + name)
+          PY
+  desktop:
+    name: Official WorkBuddy desktop (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15-intel, windows-2025]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.11'
+          cache-dependency-path: local/lazymind-cli/go.sum
+      - name: Verify the official installation with production auto-discovery
+        run: python scripts/agent_e2e_hosted.py verify-workbuddy-desktop
