@@ -1,0 +1,77 @@
+name: Verify PR 1037 Bridge protocol
+on:
+  push:
+    branches: [codex/verify-pr1037-bridge-simplify]
+permissions:
+  contents: read
+jobs:
+  bridge:
+    name: Bridge protocol (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-2025]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.11'
+          cache-dependency-path: local/lazymind-cli/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/checkout@v4
+        with:
+          ref: 9461b8e74aa9f0b2d10b42d55a97c1d499fb9de5
+          path: .historical
+          persist-credentials: false
+      - name: Run Bridge and CLI lifecycle regression tests
+        working-directory: local/lazymind-cli
+        shell: bash
+        run: |
+          go test -count=1 -v ./internal/assistantbridge ./cmd/lazymind -run 'Test(.*Bridge.*|Assistant.*|Release.*|Upgrade.*)'
+      - name: Build the historical v9 CLI and the proposed CLI
+        shell: bash
+        run: |
+          suffix=""
+          if [ "$RUNNER_OS" = Windows ]; then suffix=".exe"; fi
+          go -C .historical/local/lazymind-cli build -o "$RUNNER_TEMP/legacy$suffix" ./cmd/lazymind
+          go -C local/lazymind-cli build -o "$RUNNER_TEMP/candidate$suffix" ./cmd/lazymind
+      - name: Replace a real v9 Bridge, reuse the new Bridge, then stop
+        shell: python
+        run: |
+          import json, os, pathlib, socket, subprocess, tempfile, time, urllib.request
+          temp = pathlib.Path(os.environ["RUNNER_TEMP"])
+          suffix = ".exe" if os.name == "nt" else ""
+          with tempfile.TemporaryDirectory(dir=temp) as folder:
+              env = dict(os.environ, LAZYMIND_HOME=folder)
+              with socket.socket() as probe:
+                  probe.bind(("127.0.0.1", 0))
+                  address = "127.0.0.1:" + str(probe.getsockname()[1])
+              def cli(name, action):
+                  result = subprocess.run([str(temp / (name + suffix)), "assistant", action, "--listen", address], env=env, capture_output=True, text=True, timeout=30)
+                  assert result.returncode == 0, result.stderr
+              def health():
+                  with urllib.request.urlopen("http://" + address + "/v1/health",timeout=3) as response:
+                      return json.load(response)
+              try:
+                  cli("legacy", "start")
+                  previous = health()
+                  assert previous["version"] == "v9", previous
+                  cli("candidate", "start")
+                  current = health()
+                  assert current["service"] == "lazymind-assistant-bridge" and current["version"] == "v12" and current["pid"] != previous["pid"], current
+                  cli("candidate", "start")
+                  assert health()["pid"] == current["pid"]
+                  print("Real v9 replaced by", current["version"], "on the same port; same protocol reused its PID")
+              finally:
+                  try:
+                      remaining = health()
+                  except OSError:
+                      remaining = {}
+                  if remaining:
+                      cli("legacy" if remaining["version"] == "v9" else "candidate", "stop")
