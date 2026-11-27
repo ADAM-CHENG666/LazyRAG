@@ -14,10 +14,10 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func verifyBridgePeer(ctx context.Context, pid int, conn net.Conn, executable, logPath string) error {
+func verifyBridgePeer(ctx context.Context, pid int, conn net.Conn, logPath string) (string, error) {
 	dir, err := windows.GetSystemDirectory()
 	if err != nil {
-		return err
+		return "", err
 	}
 	protocol := "tcp"
 	if conn.RemoteAddr().(*net.TCPAddr).IP.To4() == nil {
@@ -27,42 +27,52 @@ func verifyBridgePeer(ctx context.Context, pid int, conn net.Conn, executable, l
 	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
 	output, err := command.Output()
 	if err != nil {
-		return err
+		return "", err
 	}
 	for _, line := range strings.Split(string(output), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 5 && fields[1] == conn.RemoteAddr().String() && fields[2] == conn.LocalAddr().String() && fields[4] == strconv.Itoa(pid) {
-			return verifyBridgePeerFiles(uint32(pid), executable, logPath)
+			return verifyBridgePeerFiles(uint32(pid), logPath)
 		}
 	}
-	return errors.New("previous Bridge does not own the TCP connection")
+	return "", errors.New("previous Bridge does not own the TCP connection")
 }
 
-func verifyBridgePeerFiles(pid uint32, executable, logPath string) error {
+func verifyBridgePeerFiles(pid uint32, logPath string) (string, error) {
 	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer windows.CloseHandle(handle)
 	image := make([]uint16, 32768)
 	size := uint32(len(image))
 	if err := windows.QueryFullProcessImageName(handle, 0, &image[0], &size); err != nil {
-		return err
+		return "", err
 	}
-	if !sameBridgePath(windows.UTF16ToString(image[:size]), executable) {
-		return errors.New("previous Bridge executable could not be verified")
+	executable := strings.TrimPrefix(windows.UTF16ToString(image[:size]), `\\?\`)
+	volume := filepath.VolumeName(executable)
+	if !filepath.IsAbs(executable) || len(volume) != 2 || volume[1] != ':' ||
+		!filepath.IsLocal(strings.TrimLeft(executable[len(volume):], `\/`)) {
+		return "", errors.New("previous Bridge executable could not be verified")
+	}
+	// Drive-letter paths can still name mapped network shares.
+	drive := windows.GetDriveType(windows.StringToUTF16Ptr(volume + `\`))
+	switch drive {
+	case windows.DRIVE_FIXED, windows.DRIVE_REMOVABLE, windows.DRIVE_RAMDISK, windows.DRIVE_CDROM:
+	default:
+		return "", errors.New("previous Bridge executable is not on a local drive")
 	}
 	if logPath == "" {
-		return nil
+		return executable, nil
 	}
 	var created, exited, kernel, user windows.Filetime
 	if err := windows.GetProcessTimes(handle, &created, &exited, &kernel, &user); err != nil {
-		return err
+		return "", err
 	}
 	if !bridgeProcessUsesLog(pid, created, logPath) {
-		return errors.New("previous Bridge does not use this environment's log")
+		return "", errors.New("previous Bridge does not use this environment's log")
 	}
-	return nil
+	return executable, nil
 }
 
 type restartManagerProcess struct {

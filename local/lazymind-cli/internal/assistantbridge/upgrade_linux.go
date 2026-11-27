@@ -12,24 +12,25 @@ import (
 	"strings"
 )
 
-func verifyBridgePeer(_ context.Context, pid int, conn net.Conn, executable, logPath string) error {
+func verifyBridgePeer(_ context.Context, pid int, conn net.Conn, logPath string) (string, error) {
 	dir := filepath.Join("/proc", strconv.Itoa(pid))
 	if !bridgeOwnsLinuxSocket(dir, conn) {
-		return errors.New("previous Bridge does not own the TCP connection")
+		return "", errors.New("previous Bridge does not own the TCP connection")
 	}
 	image, err := os.Readlink(filepath.Join(dir, "exe"))
-	if err != nil || !sameBridgePath(strings.TrimSuffix(image, " (deleted)"), executable) {
-		return errors.New("previous Bridge executable could not be verified")
+	executable := strings.TrimSuffix(image, " (deleted)")
+	if err != nil || !filepath.IsAbs(executable) {
+		return "", errors.New("previous Bridge executable could not be verified")
 	}
 	if logPath == "" {
-		return nil
+		return executable, nil
 	}
 	for _, fd := range []string{"1", "2"} {
 		if path, err := os.Readlink(filepath.Join(dir, "fd", fd)); err == nil && sameBridgePath(path, logPath) {
-			return nil
+			return executable, nil
 		}
 	}
-	return errors.New("previous Bridge does not use this environment's log")
+	return "", errors.New("previous Bridge does not use this environment's log")
 }
 
 func bridgeOwnsLinuxSocket(dir string, conn net.Conn) bool {

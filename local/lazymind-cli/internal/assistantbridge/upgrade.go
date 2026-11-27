@@ -54,15 +54,15 @@ func replaceBridge(ctx context.Context, address string, status map[string]any, s
 		return false, unverifiedBridge()
 	}
 	if legacy {
-		reported, _ := current["executable"].(string)
 		if !legacyBridge(current) || current["platform"] != runtime.GOOS {
 			return false, unverifiedBridge()
 		}
 		logPath := filepath.Join(root, "logs", "assistant-bridge.log")
-		if err := verifyBridgePeer(ctx, pid, conn, reported, logPath); err != nil {
+		executable, err := verifyBridgePeer(ctx, pid, conn, logPath)
+		if err != nil {
 			return false, fmt.Errorf("%w: %v", unverifiedBridge(), err)
 		}
-		if !ownsLegacyBridge(reported, self, client) {
+		if !ownsLegacyBridge(executable, self, client) {
 			return false, unverifiedBridge()
 		}
 		if err := shutdownLegacyBridge(ctx, httpClient, address); err != nil {
@@ -72,13 +72,15 @@ func replaceBridge(ctx context.Context, address string, status map[string]any, s
 		// Scoped releases authenticate with this environment's existing token
 		// and require its registered broker to agree with the health scope.
 		record, err := connectorconfig.ReadBridgeEndpoint(root)
-		reported, _ := current["executable"].(string)
-		if err != nil || record.Broker != "http://"+address || !bridgeMatchesScope(current, root, false) ||
-			!sameBridgePath(filepath.Dir(filepath.Dir(reported)), filepath.Join(root, "bridge", "bin")) {
+		if err != nil || record.Broker != "http://"+address || !bridgeMatchesScope(current, root, false) {
 			return false, unverifiedBridge()
 		}
-		if err := verifyBridgePeer(ctx, pid, conn, reported, ""); err != nil {
+		executable, err := verifyBridgePeer(ctx, pid, conn, "")
+		if err != nil {
 			return false, fmt.Errorf("%w: %v", unverifiedBridge(), err)
+		}
+		if !sameBridgePath(filepath.Dir(filepath.Dir(executable)), filepath.Join(root, "bridge", "bin")) {
+			return false, unverifiedBridge()
 		}
 		if err := releaseForUpgrade(ctx, httpClient, address, token, client, root); err != nil {
 			return false, err
@@ -147,9 +149,7 @@ func ownsLegacyBridge(executable, self string, client ClientOptions) bool {
 	// from a new directory. The verified peer must still be LazyMind's CLI in
 	// the Desktop layout. The legacy Compose launcher uses a different layout.
 	previousRuntime := filepath.Dir(filepath.Dir(executable))
-	volume := filepath.VolumeName(executable)
-	if !filepath.IsAbs(executable) || len(volume) != 2 || volume[1] != ':' ||
-		!strings.EqualFold(filepath.Base(filepath.Dir(previousRuntime)), "resources") ||
+	if !strings.EqualFold(filepath.Base(filepath.Dir(previousRuntime)), "resources") ||
 		!strings.EqualFold(filepath.Base(previousRuntime), "runtime") ||
 		!strings.EqualFold(executable, filepath.Join(previousRuntime, "bin", name)) {
 		return false
